@@ -405,27 +405,46 @@ export class OpenCodeClient {
 
     private extractFilesFromEvent(parsed: any): FileSnapshot[] {
         if (parsed?.type !== 'tool_use') return [];
-        if (parsed?.part?.tool !== 'apply_patch') return [];
         if (parsed?.part?.state?.status !== 'completed') return [];
-        const stateFiles = Array.isArray(parsed?.part?.state?.metadata?.files)
-            ? parsed.part.state.metadata.files
-            : [];
-        const files: FileSnapshot[] = [];
-        for (const file of stateFiles) {
-            if (!file?.filePath) continue;
-            if (file?.type === 'delete') continue;
-            files.push({
-                filePath: file.filePath,
-                relativePath: file.relativePath,
-                type: file.type,
-                diff: file.diff,
-                before: file.before,
-                after: file.after,
-                additions: typeof file.additions === 'number' ? file.additions : undefined,
-                deletions: typeof file.deletions === 'number' ? file.deletions : undefined
-            });
+        const tool = parsed?.part?.tool;
+        if (tool === 'apply_patch') {
+            const stateFiles = Array.isArray(parsed?.part?.state?.metadata?.files)
+                ? parsed.part.state.metadata.files
+                : [];
+            const files: FileSnapshot[] = [];
+            for (const file of stateFiles) {
+                if (!file?.filePath) continue;
+                if (file?.type === 'delete') continue;
+                files.push({
+                    filePath: file.filePath,
+                    relativePath: file.relativePath,
+                    type: file.type,
+                    diff: file.diff,
+                    before: file.before,
+                    after: file.after,
+                    additions: typeof file.additions === 'number' ? file.additions : undefined,
+                    deletions: typeof file.deletions === 'number' ? file.deletions : undefined
+                });
+            }
+            return files;
         }
-        return files;
+        if (tool === 'edit') {
+            const metadata = parsed?.part?.state?.metadata;
+            const filediff = metadata?.filediff;
+            if (!filediff?.file) return [];
+            return [
+                {
+                    filePath: filediff.file,
+                    type: 'update',
+                    diff: typeof metadata?.diff === 'string' ? metadata.diff : undefined,
+                    before: typeof filediff.before === 'string' ? filediff.before : undefined,
+                    after: typeof filediff.after === 'string' ? filediff.after : undefined,
+                    additions: typeof filediff.additions === 'number' ? filediff.additions : undefined,
+                    deletions: typeof filediff.deletions === 'number' ? filediff.deletions : undefined
+                }
+            ];
+        }
+        return [];
     }
 
     private registerMessageId(messageId: string): number {

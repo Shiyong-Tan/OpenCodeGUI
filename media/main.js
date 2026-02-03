@@ -863,6 +863,13 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         variantSelect.disabled = false;
+        const emptyOption = document.createElement('option');
+        emptyOption.value = '';
+        emptyOption.textContent = '';
+        if (!selectedVariant) {
+            emptyOption.selected = true;
+        }
+        variantSelect.appendChild(emptyOption);
         for (const variant of variants) {
             const option = document.createElement('option');
             option.value = variant;
@@ -873,7 +880,7 @@ document.addEventListener('DOMContentLoaded', () => {
             variantSelect.appendChild(option);
         }
         if (!variants.includes(selectedVariant)) {
-            selectedVariant = variants[0];
+            selectedVariant = '';
             variantSelect.value = selectedVariant;
             vscode.postMessage({ type: 'setVariant', value: selectedVariant });
         }
