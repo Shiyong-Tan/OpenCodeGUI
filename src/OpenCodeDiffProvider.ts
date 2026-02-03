@@ -595,6 +595,8 @@ export class OpenCodeDiffProvider implements vscode.TextDocumentContentProvider 
                 return 'cpp';
             case '.py':
                 return 'python';
+            case '.ipynb':
+                return 'python';
             case '.json':
                 return 'json';
             case '.md':
