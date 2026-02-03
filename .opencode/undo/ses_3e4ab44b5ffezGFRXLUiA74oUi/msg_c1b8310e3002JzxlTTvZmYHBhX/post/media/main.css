@@ -1,0 +1,681 @@
+/* =========================
+   Base
+   ========================= */
+body {
+    padding: 0;
+    margin: 0;
+    color: var(--vscode-foreground);
+    font-family: var(--vscode-font-family);
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    background-color: var(--vscode-editor-background);
+    position: relative;
+}
+
+/* --- Session Header --- */
+.session-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--vscode-widget-border);
+    flex-shrink: 0;
+    min-height: 24px;
+}
+
+.session-title {
+    font-size: 0.9em;
+    font-weight: 500;
+    color: var(--vscode-textLink-foreground);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 65%;
+    cursor: pointer;
+}
+
+.session-controls {
+    display: flex;
+    gap: 4px;
+}
+
+/* --- Sessions Panel --- */
+.panel-backdrop {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.25);
+    z-index: 10;
+}
+
+.session-panel {
+    position: absolute;
+    top: 44px;
+    left: 12px;
+    right: 12px;
+    max-height: 60vh;
+    background: var(--vscode-editor-background);
+    border: 1px solid var(--vscode-widget-border);
+    border-radius: 8px;
+    z-index: 11;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.2);
+}
+
+.hidden {
+    display: none;
+}
+
+.session-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--vscode-widget-border);
+    font-size: 0.9em;
+    color: var(--vscode-foreground);
+}
+
+.session-panel-actions {
+    display: flex;
+    gap: 4px;
+}
+
+.session-list {
+    padding: 8px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.session-item {
+    text-align: left;
+    border: 1px solid var(--vscode-widget-border);
+    background: var(--vscode-sideBar-background);
+    color: var(--vscode-foreground);
+    border-radius: 6px;
+    padding: 8px;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.session-item:hover {
+    background: var(--vscode-list-hoverBackground);
+}
+
+.session-item-title {
+    font-size: 0.9em;
+    font-weight: 500;
+}
+
+.session-item-meta {
+    font-size: 0.75em;
+    color: var(--vscode-descriptionForeground);
+}
+
+.session-empty {
+    padding: 12px;
+    text-align: center;
+    font-size: 0.85em;
+    color: var(--vscode-descriptionForeground);
+}
+
+/* --- Chat Area --- */
+.chat-area {
+    flex: 1;
+    padding: 10px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    background: linear-gradient(180deg, rgba(0,0,0,0.04) 0%, rgba(0,0,0,0) 35%);
+}
+
+.message {
+    max-width: 85%;
+    padding: 8px 12px;
+    border-radius: 8px;
+    line-height: 1.4;
+    word-wrap: break-word;
+    white-space: pre-wrap;
+    border: 1px solid transparent;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.12);
+    position: relative;
+}
+
+.message.user {
+    align-self: flex-end;
+    background-color: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    border-color: rgba(0,0,0,0.08);
+}
+
+.message.bot {
+    align-self: flex-start;
+    background-color: var(--vscode-editor-inactiveSelectionBackground);
+    color: var(--vscode-editor-foreground);
+    border-color: var(--vscode-widget-border);
+}
+
+.message.system {
+    align-self: center;
+    background: var(--vscode-editor-background);
+    color: var(--vscode-descriptionForeground);
+    border-color: var(--vscode-widget-border);
+    font-size: 0.85em;
+    max-width: 92%;
+}
+
+.message.diff {
+    align-self: stretch;
+    background: var(--vscode-editor-background);
+    border-color: var(--vscode-widget-border);
+    max-width: 100%;
+    padding: 6px 8px;
+}
+
+.message.diff pre {
+    margin: 0;
+    white-space: pre;
+    overflow-x: auto;
+    font-family: var(--vscode-editor-font-family);
+    font-size: 0.85em;
+    line-height: 1.4;
+    color: var(--vscode-editor-foreground);
+}
+
+/* --- Inline code inside bubbles (kept) --- */
+.message.bot code,
+.message.user code {
+    font-family: var(--vscode-editor-font-family);
+    background: var(--vscode-textCodeBlock-background);
+    padding: 2px 4px;
+    border-radius: 4px;
+}
+
+/* --- Message Actions --- */
+.message-actions {
+    position: absolute;
+    right: 6px;
+    bottom: 4px;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+}
+
+.message.user:hover .message-actions {
+    opacity: 1;
+}
+
+.undo-btn {
+    border: none;
+    background: transparent;
+    color: var(--vscode-descriptionForeground);
+    cursor: pointer;
+    font-size: 0.9em;
+    padding: 2px 4px;
+}
+
+.undo-btn:hover {
+    color: var(--vscode-foreground);
+}
+
+/* --- Bottom Input Container --- */
+.input-container {
+    margin: 10px;
+    border: 1px solid var(--vscode-input-border);
+    border-radius: 6px;
+    background-color: var(--vscode-input-background);
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    overflow: visible;
+}
+
+.input-container:focus-within {
+    border-color: var(--vscode-focusBorder);
+}
+
+textarea {
+    width: 100%;
+    background: transparent;
+    color: var(--vscode-input-foreground);
+    border: none;
+    resize: none;
+    height: 40px;
+    padding: 10px;
+    font-family: inherit;
+    outline: none;
+    box-sizing: border-box;
+}
+
+/* --- Toolbar --- */
+.toolbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    padding: 4px 8px;
+    background-color: transparent;
+    gap: 6px;
+    overflow: visible;
+}
+
+.left-tools {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    min-width: 0;
+    overflow: visible;
+}
+
+.right-tools {
+    display: flex;
+    gap: 6px;
+    justify-self: end;
+    flex-shrink: 0;
+    min-width: 28px;
+}
+
+.icon-btn {
+    background: transparent;
+    border: none;
+    color: var(--vscode-icon-foreground);
+    cursor: pointer;
+    padding: 4px;
+    font-size: 1.2em;
+    border-radius: 4px;
+}
+
+.icon-btn:hover {
+    background-color: var(--vscode-toolbar-hoverBackground);
+}
+
+/* --- Styled Selects --- */
+.select-wrapper {
+    position: relative;
+    min-width: 0;
+    overflow: hidden;
+}
+
+.select-wrapper.model-wrapper {
+    overflow: visible;
+}
+
+.select-wrapper.mode-wrapper,
+.select-wrapper.variant-wrapper {
+    overflow: visible;
+}
+
+select {
+    appearance: none;
+    background: transparent;
+    border: none;
+    color: var(--vscode-descriptionForeground);
+    font-family: inherit;
+    font-size: 0.9em;
+    cursor: pointer;
+    padding: 2px 4px;
+    outline: none;
+    border-radius: 4px;
+    width: 100%;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: block;
+}
+
+select.is-hidden {
+    display: none;
+}
+
+.select-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: transparent;
+    border: none;
+    color: var(--vscode-descriptionForeground);
+    font-family: inherit;
+    font-size: 0.9em;
+    cursor: pointer;
+    padding: 2px 4px;
+    outline: none;
+    border-radius: 4px;
+    width: 100%;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    justify-content: flex-start;
+}
+
+.select-button:hover {
+    background-color: var(--vscode-toolbar-hoverBackground);
+    color: var(--vscode-foreground);
+}
+
+.select-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--vscode-descriptionForeground);
+    flex-shrink: 0;
+}
+
+.select-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+
+
+select:hover {
+    background-color: var(--vscode-toolbar-hoverBackground);
+    color: var(--vscode-foreground);
+}
+
+select option {
+    background-color: var(--vscode-dropdown-background);
+    color: var(--vscode-dropdown-foreground);
+}
+
+/* --- Send Button --- */
+button.send-btn {
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    border: none;
+    border-radius: 4px;
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+}
+
+button.send-btn:hover {
+    background: var(--vscode-button-hoverBackground);
+}
+
+.send-btn.is-busy {
+    background: var(--vscode-button-secondaryBackground);
+    color: #f85149;
+}
+
+.send-btn.is-busy:hover {
+    background: var(--vscode-button-secondaryHoverBackground);
+}
+
+/* --- Attachments --- */
+.attachment-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 6px 8px 0;
+}
+
+.attachment-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    border: 1px solid var(--vscode-widget-border);
+    border-radius: 6px;
+    padding: 4px 6px;
+    background: var(--vscode-editor-background);
+    color: var(--vscode-foreground);
+    font-size: 0.8em;
+}
+
+.attachment-thumb {
+    width: 24px;
+    height: 24px;
+    object-fit: cover;
+    border-radius: 4px;
+    border: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.attachment-remove {
+    border: none;
+    background: transparent;
+    color: var(--vscode-icon-foreground);
+    cursor: pointer;
+    padding: 0 2px;
+    font-size: 0.9em;
+}
+
+/* --- Modes --- */
+.input-container.mode-plan {
+    border-color: #2ea043;
+}
+
+.input-container.mode-build {
+    border-color: #f85149;
+}
+
+.input-container.mode-plan select#mode-select {
+    color: #2ea043;
+}
+
+.input-container.mode-build select#mode-select {
+    color: #f85149;
+}
+
+select#model-select {
+    max-width: 140px;
+    min-width: 72px;
+}
+
+select#variant-select {
+    max-width: 90px;
+    min-width: 48px;
+}
+
+select#mode-select {
+    max-width: 70px;
+    min-width: 48px;
+}
+
+.mode-wrapper { min-width: 48px; }
+.variant-wrapper { min-width: 48px; }
+.model-wrapper { min-width: 56px; }
+
+.model-wrapper {
+    display: flex;
+    align-items: center;
+}
+
+.simple-dropdown {
+    position: relative;
+    width: 100%;
+}
+
+.model-dropdown {
+    position: relative;
+    width: 100%;
+}
+
+.dropdown-panel {
+    position: absolute;
+    bottom: calc(100% + 4px);
+    top: auto;
+    left: 0;
+    right: 0;
+    max-height: 240px;
+    overflow-y: auto;
+    background: var(--vscode-dropdown-background);
+    border: 1px solid var(--vscode-dropdown-border);
+    border-radius: 6px;
+    z-index: 20;
+    padding: 4px;
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.25);
+}
+
+.model-group {
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.model-group + .model-group {
+    margin-top: 4px;
+}
+
+.model-group-header {
+    width: 100%;
+    text-align: left;
+    border: none;
+    background: var(--vscode-list-hoverBackground);
+    color: var(--vscode-foreground);
+    font-size: 0.85em;
+    font-weight: 600;
+    padding: 4px 6px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.model-group-header::before {
+    content: '';
+    width: 8px;
+    height: 8px;
+    display: inline-block;
+    background: currentColor;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.2 5.6L8 10.4l4.8-4.8.9.9-5.7 5.7-5.7-5.7.9-.9z'/%3E%3C/svg%3E") no-repeat center / contain;
+    transform: rotate(0deg);
+    transition: transform 0.15s ease;
+}
+
+.model-group-header.is-collapsed::before {
+    transform: rotate(-90deg);
+}
+
+.model-group-list.is-collapsed {
+    display: none;
+}
+
+.model-option {
+    width: 100%;
+    text-align: left;
+    border: none;
+    background: transparent;
+    color: var(--vscode-dropdown-foreground);
+    padding: 4px 8px;
+    cursor: pointer;
+    font-size: 0.85em;
+}
+
+.model-option:hover,
+.model-option.is-selected {
+    background: var(--vscode-list-activeSelectionBackground);
+    color: var(--vscode-list-activeSelectionForeground);
+}
+
+@media (max-width: 260px) {
+    .left-tools {
+        flex-wrap: wrap;
+        row-gap: 4px;
+    }
+
+    .variant-wrapper {
+        width: 100%;
+    }
+}
+
+/* =========================
+   Chat spacing + Markdown rendering
+   Single source of truth
+   ========================= */
+
+/* Chat layout density */
+.chat-area { gap: 8px; }
+.message { padding: 6px 10px; }
+
+/* Markdown baseline */
+.message .message-content{
+  /* 用 normal：避免 pre-wrap 让 block 看起来“多空一行” */
+  white-space: normal;
+  line-height: 1.35;
+  font-size: 0.95em;
+}
+
+/* ---- Global block spacing (the main knob) ---- */
+.message .message-content :where(
+  p, ul, ol, pre, blockquote, hr, table,
+  h1, h2, h3, h4, h5, h6
+){
+  margin: 0.22em 0;
+}
+
+/* ---- Headings ---- */
+.message .message-content :where(h1,h2,h3,h4,h5,h6){
+  font-weight: 600;
+  line-height: 1.18;
+  margin: 0.38em 0 0.10em;
+}
+.message .message-content h1 { font-size: 1.08em; }
+.message .message-content h2 { font-size: 1.03em; }
+.message .message-content :where(h3,h4,h5,h6) { font-size: 1.00em; }
+
+/* Headings + following block: tighten */
+.message .message-content :where(h1,h2,h3,h4,h5,h6) + :where(p, ul, ol){
+  margin-top: 0.06em;
+}
+
+/* ---- Lists ---- */
+.message .message-content :where(ul, ol){
+  padding-left: 1.2em;
+  list-style-position: outside;
+  margin: 0.12em 0;
+}
+.message .message-content li{
+  margin: 0.10em 0;
+  line-height: 1.28;
+}
+/* markdown-it: li > p is the “empty line” culprit */
+.message .message-content li > p{ margin: 0; }
+/* Nested lists: keep compact */
+.message .message-content li > :where(ul, ol){
+  margin: 0.18em 0 0.08em;
+}
+
+/* ---- Code ---- */
+.message .message-content pre{
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--vscode-textCodeBlock-background);
+  overflow-x: auto;
+  white-space: pre; /* code block 保持 */
+}
+.message .message-content code{
+  font-family: var(--vscode-editor-font-family);
+  background: var(--vscode-textCodeBlock-background);
+  padding: 1px 4px;
+  border-radius: 6px;
+}
+
+/* ---- Blockquote ---- */
+.message .message-content blockquote{
+  margin-left: 0;
+  padding: 6px 10px;
+  border-left: 3px solid var(--vscode-widget-border);
+  color: var(--vscode-descriptionForeground);
+}
+
+/* ---- HR ---- */
+.message .message-content hr{
+  border: none;
+  border-top: 1px solid var(--vscode-widget-border);
+  margin: 0.45em 0;
+  opacity: 0.55;
+}
+
+

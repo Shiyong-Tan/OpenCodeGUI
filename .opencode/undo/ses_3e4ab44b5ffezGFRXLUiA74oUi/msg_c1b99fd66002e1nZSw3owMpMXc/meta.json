@@ -1,0 +1,15 @@
+{
+  "sessionId": "ses_3e4ab44b5ffezGFRXLUiA74oUi",
+  "messageId": "msg_c1b99fd66002e1nZSw3owMpMXc",
+  "idSource": "local",
+  "timestamp": 1769989635624,
+  "files": [
+    {
+      "path": "src/OpenCodeDiffProvider.ts",
+      "preHash": "43a4355149c588d5ee789e61c8b9a2d66a3d8150d62f399841c8d4bb1e546789",
+      "postHash": "a4cf19bae6c8bfd6ba4e9e30a092da60bb4c7159d40792a24b58fda04890c3ee",
+      "preBackupPath": "pre\\src\\OpenCodeDiffProvider.ts",
+      "postBackupPath": "post\\src\\OpenCodeDiffProvider.ts"
+    }
+  ]
+}

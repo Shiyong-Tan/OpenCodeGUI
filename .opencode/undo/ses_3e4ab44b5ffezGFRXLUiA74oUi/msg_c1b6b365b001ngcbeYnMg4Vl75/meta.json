@@ -1,0 +1,22 @@
+{
+  "sessionId": "ses_3e4ab44b5ffezGFRXLUiA74oUi",
+  "messageId": "msg_c1b6b365b001ngcbeYnMg4Vl75",
+  "idSource": "local",
+  "timestamp": 1769986646148,
+  "files": [
+    {
+      "path": "media/main.js",
+      "preHash": "6b5d23f6ac58a4a11c252b95795bcd9d52069a6ea1fcc2a9868bb4933fa2b440",
+      "postHash": "6b5d23f6ac58a4a11c252b95795bcd9d52069a6ea1fcc2a9868bb4933fa2b440",
+      "preBackupPath": "pre\\media\\main.js",
+      "postBackupPath": "post\\media\\main.js"
+    },
+    {
+      "path": "media/main.css",
+      "preHash": "a5e1dd2851722da0db75f0d31eba4341026f1a653e341fec38fbfe802f2cdd24",
+      "postHash": "f79f1d8fa7eb2eb5abce81797f1416297ab53461335ad543695a8965f7682929",
+      "preBackupPath": "pre\\media\\main.css",
+      "postBackupPath": "post\\media\\main.css"
+    }
+  ]
+}

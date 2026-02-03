@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Book Outline: stroke 1.0, expanded scale -->
+  <g stroke-width="1.0">
+    <path d="M12 22l-10-2V4l10 2 10-2v16l-10 2z" />
+    <path d="M12 22v-4" />
+    <path d="M12 8V6" />
+  </g>
+  <!-- Code Symbols: stroke 2.0, slightly larger and better centered in gaps -->
+  <g stroke-width="2">
+    <path d="M8 11l-2.5 2.5 2.5 2.5" />
+    <path d="M16 11l2.5 2.5-2.5 2.5" />
+    <path d="M13.5 10l-3 7" />
+  </g>
+</svg>

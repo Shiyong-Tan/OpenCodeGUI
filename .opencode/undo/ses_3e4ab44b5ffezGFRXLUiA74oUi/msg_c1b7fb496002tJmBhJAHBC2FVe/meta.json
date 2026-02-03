@@ -1,0 +1,29 @@
+{
+  "sessionId": "ses_3e4ab44b5ffezGFRXLUiA74oUi",
+  "messageId": "msg_c1b7fb496002tJmBhJAHBC2FVe",
+  "idSource": "local",
+  "timestamp": 1769987953755,
+  "files": [
+    {
+      "path": "media/main.js",
+      "preHash": "d391cb3eb7dd6edb522eaf99ab0b8c27691f5f3cf629fc75518409fbf4e5b243",
+      "postHash": "d391cb3eb7dd6edb522eaf99ab0b8c27691f5f3cf629fc75518409fbf4e5b243",
+      "preBackupPath": "pre\\media\\main.js",
+      "postBackupPath": "post\\media\\main.js"
+    },
+    {
+      "path": "media/main.css",
+      "preHash": "8b01f86f54f29e33da6cb562e5b5d7c82d3dc2a8f5733cb1f55599c0dd37f8f5",
+      "postHash": "8b01f86f54f29e33da6cb562e5b5d7c82d3dc2a8f5733cb1f55599c0dd37f8f5",
+      "preBackupPath": "pre\\media\\main.css",
+      "postBackupPath": "post\\media\\main.css"
+    },
+    {
+      "path": "src/OpenCodeDiffProvider.ts",
+      "preHash": "0cdec707dcdae99df8812819a1097a1cd0e2daa781271a3e1d3756741e5dfe52",
+      "postHash": "0cdec707dcdae99df8812819a1097a1cd0e2daa781271a3e1d3756741e5dfe52",
+      "preBackupPath": "pre\\src\\OpenCodeDiffProvider.ts",
+      "postBackupPath": "post\\src\\OpenCodeDiffProvider.ts"
+    }
+  ]
+}

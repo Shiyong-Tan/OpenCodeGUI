@@ -1,0 +1,62 @@
+{
+  "name": "opencode-gui",
+  "displayName": "OpenCode GUI",
+  "publisher": "shiyong-tan",
+  "description": "Antigravity extension for OpenCode CLI",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:opencode.checkVersion",
+    "onView:opencode.sidebar",
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "opencode-activitybar",
+          "title": "OpenCode",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "opencode-activitybar": [
+        {
+          "type": "webview",
+          "id": "opencode.sidebar",
+          "name": "Chat"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "opencode.checkVersion",
+        "title": "OpenCode: Check Version"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.80.0",
+    "@types/node": "^18.0.0",
+    "typescript": "^5.0.0",
+    "@types/diff-match-patch": "^1.0.34",
+    "@types/dompurify": "^3.0.4"
+  },
+  "dependencies": {
+    "diff-match-patch": "^1.0.5",
+    "markdown-it": "^14.1.0",
+    "dompurify": "^3.0.8"
+  }
+}

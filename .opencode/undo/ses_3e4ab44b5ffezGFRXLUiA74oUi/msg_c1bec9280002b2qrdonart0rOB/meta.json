@@ -1,0 +1,15 @@
+{
+  "sessionId": "ses_3e4ab44b5ffezGFRXLUiA74oUi",
+  "messageId": "msg_c1bec9280002b2qrdonart0rOB",
+  "idSource": "local",
+  "timestamp": 1769995028946,
+  "files": [
+    {
+      "path": "src/extension.ts",
+      "preHash": "c55343d9084b8d1f77cf8e5fd1da337458d9e0382ac025014e833f29be285326",
+      "postHash": "c55343d9084b8d1f77cf8e5fd1da337458d9e0382ac025014e833f29be285326",
+      "preBackupPath": "pre\\src\\extension.ts",
+      "postBackupPath": "post\\src\\extension.ts"
+    }
+  ]
+}

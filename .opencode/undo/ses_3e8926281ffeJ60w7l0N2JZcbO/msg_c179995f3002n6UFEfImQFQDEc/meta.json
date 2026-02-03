@@ -1,0 +1,22 @@
+{
+  "sessionId": "ses_3e8926281ffeJ60w7l0N2JZcbO",
+  "messageId": "msg_c179995f3002n6UFEfImQFQDEc",
+  "idSource": "local",
+  "timestamp": 1769922477080,
+  "files": [
+    {
+      "path": "src/extension.ts",
+      "preHash": "cad57948410ec8b30b84876f317217b1a98202a5bafb83ad24d932373ab5dd2c",
+      "postHash": "cad57948410ec8b30b84876f317217b1a98202a5bafb83ad24d932373ab5dd2c",
+      "preBackupPath": "pre\\src\\extension.ts",
+      "postBackupPath": "post\\src\\extension.ts"
+    },
+    {
+      "path": "src/SidebarProvider.ts",
+      "preHash": "8081561a75bb12a75a227d720f93d1941fd44f0f08d367ef142afaf56a405560",
+      "postHash": "8081561a75bb12a75a227d720f93d1941fd44f0f08d367ef142afaf56a405560",
+      "preBackupPath": "pre\\src\\SidebarProvider.ts",
+      "postBackupPath": "post\\src\\SidebarProvider.ts"
+    }
+  ]
+}

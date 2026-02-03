@@ -1,0 +1,113 @@
+import * as cp from 'child_process';
+import * as vscode from 'vscode';
+
+export class OpenCodeClient {
+    public static outputChannel = vscode.window.createOutputChannel("OpenCode CLI");
+
+    constructor() {}
+
+    private execute(command: string, onData?: (chunk: string) => void): Promise<string> {
+        return new Promise((resolve, reject) => {
+            const args = this.parseArgs(command);
+            const workspaceFolder = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0 
+                ? vscode.workspace.workspaceFolders[0].uri.fsPath 
+                : undefined;
+            
+            const bin = 'opencode'; 
+
+            OpenCodeClient.outputChannel.appendLine(`[SPAWN] ${bin} ${args.join(' ')} (cwd: ${workspaceFolder || 'current'})`);
+            const startTime = Date.now();
+            
+            const child = cp.spawn(bin, args, { 
+                cwd: workspaceFolder,
+                shell: true, 
+                timeout: 60000 
+            });
+
+            // CRITICAL: Close stdin immediately. 
+            // Many Go-based CLIs wait for stdin EOF before exiting.
+            child.stdin.end();
+
+            let stdout = "";
+            let stderr = "";
+
+            child.stdout.on('data', (data) => {
+                const rawChunk = data.toString();
+                const cleanChunk = this.stripAnsi(rawChunk);
+                stdout += rawChunk;
+                if (onData) onData(cleanChunk);
+                OpenCodeClient.outputChannel.appendLine(`[STDOUT_CHUNK] (dt: ${Date.now() - startTime}ms) ${cleanChunk}`);
+            });
+
+            child.stderr.on('data', (data) => {
+                const rawChunk = data.toString();
+                stderr += rawChunk;
+                OpenCodeClient.outputChannel.appendLine(`[STDERR_CHUNK] ${this.stripAnsi(rawChunk)}`);
+            });
+
+            child.on('close', (code) => {
+                const duration = Date.now() - startTime;
+                OpenCodeClient.outputChannel.appendLine(`[CLOSE] Exit code: ${code}, Duration: ${duration}ms`);
+                
+                if (stdout) {
+                    resolve(this.stripAnsi(stdout.trim()));
+                } else {
+                    reject(this.stripAnsi(stderr.trim()) || `Process finished with no output (Code: ${code})`);
+                }
+            });
+
+            child.on('error', (err) => {
+                OpenCodeClient.outputChannel.appendLine(`[SPAWN_ERR] ${err.message}`);
+                reject(err.message);
+            });
+        });
+    }
+
+    private parseArgs(command: string): string[] {
+        // More robust argument parsing to handle quotes correctly
+        const result: string[] = [];
+        let current = '';
+        let inQuotes = false;
+        
+        for (let i = 0; i < command.length; i++) {
+            const char = command[i];
+            if (char === '"') {
+                inQuotes = !inQuotes;
+            } else if (char === ' ' && !inQuotes) {
+                if (current) result.push(current);
+                current = '';
+            } else {
+                current += char;
+            }
+        }
+        if (current) result.push(current);
+        return result;
+    }
+
+    private stripAnsi(str: string): string {
+        return str.replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '');
+    }
+
+    public async checkVersion(): Promise<string> {
+        return this.execute('--version');
+    }
+
+    public async chat(message: string, onData?: (chunk: string) => void): Promise<string> {
+        const escapedMessage = message.replace(/"/g, '\\"');
+        return this.execute(`run "${escapedMessage}"`, onData);
+    }
+
+    // Mock implementation for config as we don't know the exact CLI syntax yet
+    public async getConfig(): Promise<{ model: string, variant: string }> {
+        // TODO: Parse 'opencode config list'
+        // For now return defaults so UI doesn't break
+        return {
+            model: 'gemini-pro',
+            variant: 'debug'
+        };
+    }
+
+    public async setConfig(key: string, value: string): Promise<string> {
+        return this.execute(`config set ${key} ${value}`);
+    }
+}
