@@ -886,6 +886,43 @@ function canUndo(session, anchorKey) {
     return { allowed: true, reason: 'ok', msgId };
 }
 
+function attemptAssistantUpgrade(sessionId, payload, source) {
+    const currentSession = activeSessionId;
+    const payloadSession = sessionId || payload?.sessionId || payload?.sessionID || null;
+    const tmpKey = payload?.tmpKey;
+    const assistantMsgId = payload?.assistantMsgId;
+
+    vscode.postMessage({
+        type: 'ui-debug',
+        payload: ['[DBG_WV_ID]', `type=${source} sessionPayload=${payloadSession || 'null'} currentSession=${currentSession || 'null'} tmpKey=${tmpKey || 'null'} assistantMsgId=${assistantMsgId || 'null'}`]
+    });
+
+    if (!payloadSession || payloadSession !== currentSession) {
+        vscode.postMessage({ type: 'ui-debug', payload: ['assistant.upgrade', `tmpKey=${tmpKey || 'null'} msgId=${assistantMsgId || 'null'} replaced=false reason=session-mismatch`] });
+        return;
+    }
+    if (typeof tmpKey !== 'string' || typeof assistantMsgId !== 'string') {
+        vscode.postMessage({ type: 'ui-debug', payload: ['assistant.upgrade', `tmpKey=${tmpKey || 'null'} msgId=${assistantMsgId || 'null'} replaced=false reason=missing-fields`] });
+        return;
+    }
+    if (!tmpKey.startsWith('tmp:') || !assistantMsgId.startsWith('msg_')) {
+        vscode.postMessage({ type: 'ui-debug', payload: ['assistant.upgrade', `tmpKey=${tmpKey} msgId=${assistantMsgId} replaced=false reason=bad-prefix`] });
+        return;
+    }
+    const session = getSessionState(payloadSession);
+    if (!session) {
+        vscode.postMessage({ type: 'ui-debug', payload: ['assistant.upgrade', `tmpKey=${tmpKey} msgId=${assistantMsgId} replaced=false reason=no-session`] });
+        return;
+    }
+    const hasTmp = session.messagesById.has(tmpKey) || session.timeline.includes(tmpKey);
+    if (!hasTmp) {
+        vscode.postMessage({ type: 'ui-debug', payload: ['assistant.upgrade', `tmpKey=${tmpKey} msgId=${assistantMsgId} replaced=false reason=already-upgraded`] });
+        return;
+    }
+    replaceKeyEverywhere(payloadSession, tmpKey, assistantMsgId);
+    vscode.postMessage({ type: 'ui-debug', payload: ['assistant.upgrade', `tmpKey=${tmpKey} msgId=${assistantMsgId} replaced=true reason=ok`] });
+}
+
 function handleUndoToMessage(sessionId, targetMessageId) {
     const session = getSessionState(sessionId);
     if (!session) return;
@@ -1894,7 +1931,8 @@ document.addEventListener('DOMContentLoaded', () => {
     function handleAssistantMeta(sessionId, message) {
         const session = getSessionState(sessionId, true);
         const backendId = getEventMessageId(message);
-        if (!backendId && !session.thinkingId) {
+        const msgId = typeof message?.assistantMsgId === 'string' ? message.assistantMsgId : null;
+        if (!msgId && !session.thinkingId) {
             vscode.postMessage({ type: 'ui-debug', payload: ['handleAssistantMeta', 'drop-no-backendId-no-thinking'] });
             return;
         }
@@ -1903,20 +1941,10 @@ document.addEventListener('DOMContentLoaded', () => {
             registerMessageIdMapping(session, message.clientMessageId, backendId, 'assistantMessageMeta');
         }
 
-        const msgId = backendId || null;
-
         let targetId = session.thinkingId;
 
-        if (targetId && msgId && targetId.startsWith('tmp:') && msgId !== targetId) {
-            replaceKeyEverywhere(sessionId, targetId, msgId);
-            session.thinkingId = msgId;
-            vscode.postMessage({ type: 'ui-debug', payload: ['assistant.upgrade', 'tmpKey', targetId, 'msgId', msgId, 'replaced', true] });
-            vscode.postMessage({ type: 'ui-debug', payload: ['[DBG_META]', `upgradeAttempt tmp=${targetId} chosen=${msgId} replaced=true`] });
-            targetId = msgId;
-        } else if (targetId && !msgId) {
-            vscode.postMessage({ type: 'ui-debug', payload: ['assistant.upgrade', 'tmpKey', targetId, 'msgId', 'null', 'replaced', false] });
-            vscode.postMessage({ type: 'ui-debug', payload: ['[DBG_META]', `upgradeAttempt tmp=${targetId} chosen=null replaced=false`] });
-        }
+        attemptAssistantUpgrade(sessionId, message, 'assistantMessageMeta');
+        targetId = session.thinkingId || targetId;
 
         if (!targetId && msgId && session.messagesById.has(msgId)) {
             targetId = msgId;
@@ -1956,20 +1984,12 @@ document.addEventListener('DOMContentLoaded', () => {
         const backendId = getEventMessageId(message);
         const chunkText = getEventChunkText(message);
 
-        const msgId = backendId || null;
+        const msgId = typeof message?.assistantMsgId === 'string' ? message.assistantMsgId : null;
 
         let targetId = session.thinkingId;
 
-        if (targetId && msgId && targetId.startsWith('tmp:') && msgId !== targetId) {
-            replaceKeyEverywhere(sessionId, targetId, msgId);
-            session.thinkingId = msgId;
-            vscode.postMessage({ type: 'ui-debug', payload: ['assistant.upgrade', 'tmpKey', targetId, 'msgId', msgId, 'replaced', true] });
-            vscode.postMessage({ type: 'ui-debug', payload: ['[DBG_META]', `upgradeAttempt tmp=${targetId} chosen=${msgId} replaced=true`] });
-            targetId = msgId;
-        } else if (targetId && !msgId) {
-            vscode.postMessage({ type: 'ui-debug', payload: ['assistant.upgrade', 'tmpKey', targetId, 'msgId', 'null', 'replaced', false] });
-            vscode.postMessage({ type: 'ui-debug', payload: ['[DBG_META]', `upgradeAttempt tmp=${targetId} chosen=null replaced=false`] });
-        }
+        attemptAssistantUpgrade(sessionId, message, 'chatChunk');
+        targetId = session.thinkingId || targetId;
 
         if (!targetId && msgId && session.messagesById.has(msgId)) {
             targetId = msgId;
@@ -2039,13 +2059,17 @@ document.addEventListener('DOMContentLoaded', () => {
                 mode: selectedMode,
                 images: messageImages
             });
+            const session = getSessionState(activeSessionId);
+            const tmpKey = session?.thinkingId || null;
+            vscode.postMessage({ type: 'registerTmpKey', sessionId: activeSessionId, tmpKey });
             window.__oc?.renderFromState?.();
             scrollToBottom();
             logSessionState(activeSessionId, 'UI_SEND_PROMPT');
         }
 
         const attachmentPaths = attachments.map((item) => item.filePath);
-        vscode.postMessage({ type: 'sendMessage', value: messageText, attachments: attachmentPaths, clientMessageId, sessionId: activeSessionId || undefined });
+        const tmpKey = activeSessionId ? getSessionState(activeSessionId)?.thinkingId || null : null;
+        vscode.postMessage({ type: 'sendMessage', value: messageText, attachments: attachmentPaths, clientMessageId, sessionId: activeSessionId || undefined, tmpKey });
         attachments = [];
         renderAttachments();
         input.value = '';
@@ -2492,6 +2516,9 @@ window.addEventListener('message', (event) => {
                     while (pendingUiPrompts.length) {
                         const prompt = pendingUiPrompts.shift();
                         applyPromptToSession(sessionId, prompt);
+                        const session = getSessionState(sessionId);
+                        const tmpKey = session?.thinkingId || null;
+                        vscode.postMessage({ type: 'registerTmpKey', sessionId, tmpKey });
                     }
                     window.__oc?.renderFromState?.();
                     logSessionState(sessionId, 'flushPendingPrompts');

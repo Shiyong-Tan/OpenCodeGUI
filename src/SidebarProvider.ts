@@ -81,6 +81,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private uiDebugChannel!: vscode.OutputChannel;
     private undoSegmentsBySession: Map<string, Map<string, SegmentState>> = new Map();
     private readonly UNDO_SEGMENTS_KEY = 'opencode.undoSegmentsBySession.v1';
+    private pendingAssistantTmpKeyBySession = new Map<string, string>();
 
     constructor(
         private readonly _context: vscode.ExtensionContext,
@@ -194,6 +195,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         const modelText = userText;
                         const clientMessageId = data.clientMessageId || `local-${Date.now()}`;
                         this.pendingClientMessageId = clientMessageId;
+                        if (typeof data.tmpKey === 'string' && data.tmpKey.startsWith('tmp:') && this.currentSessionId) {
+                            this.pendingAssistantTmpKeyBySession.set(this.currentSessionId, data.tmpKey);
+                        }
 
                         const messageIndex = this.client.registerMessage(clientMessageId);
                         const liveWebview = this._view?.webview || activeWebview;
@@ -305,6 +309,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     OpenCodeClient.outputChannel.appendLine(`EXT: ping | ts | ${data.ts}`);
                     const liveWebview = this._view?.webview || webviewView.webview;
                     liveWebview.postMessage({ type: 'pong', ts: data.ts });
+                    break;
+                }
+                case "registerTmpKey": {
+                    if (typeof data.sessionId !== 'string' || typeof data.tmpKey !== 'string') break;
+                    if (!data.tmpKey.startsWith('tmp:')) break;
+                    this.pendingAssistantTmpKeyBySession.set(data.sessionId, data.tmpKey);
                     break;
                 }
                 case "undoSegmentCreated": {
@@ -935,21 +945,27 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             return;
         }
 
-        if (event.type === 'assistantMessageMeta' && event.messageId) {
+        if (event.type === 'assistantMessageMeta' && (event.messageId || event.assistantMsgId)) {
             const liveWebview = this._view?.webview || webview;
+            const sessionId = event.sessionId || this.currentSessionId;
+            const tmpKey = sessionId ? this.pendingAssistantTmpKeyBySession.get(sessionId) : undefined;
             liveWebview.postMessage({
                 type: 'assistantMessageMeta',
                 messageId: event.messageId,
                 messageIndex: event.messageIndex,
                 lastText: event.lastText,
-                sessionId: this.currentSessionId
+                sessionId: this.currentSessionId,
+                assistantMsgId: event.assistantMsgId,
+                tmpKey
             });
             return;
         }
 
         if (event.type === 'text' && event.text) {
             const liveWebview = this._view?.webview || webview;
-            liveWebview.postMessage({ type: 'chatChunk', value: event.text, sessionId: this.currentSessionId });
+            const sessionId = event.sessionId || this.currentSessionId;
+            const tmpKey = sessionId ? this.pendingAssistantTmpKeyBySession.get(sessionId) : undefined;
+            liveWebview.postMessage({ type: 'chatChunk', value: event.text, sessionId: this.currentSessionId, assistantMsgId: event.assistantMsgId, tmpKey });
             return;
         }
 
