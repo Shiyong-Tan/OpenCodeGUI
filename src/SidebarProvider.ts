@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as pathModule from "path";
-import { OpenCodeClient, ChatEvent, ModelInfo, SessionInfo, FileSnapshot } from "./OpenCodeClient";
+import { OpenCodeClient, ChatEvent, ModelInfo, SessionInfo, FileSnapshot, ConflictDetail } from "./OpenCodeClient";
 import { OpenCodeDiffProvider } from "./OpenCodeDiffProvider";
 
 type SessionMessage = {
@@ -23,14 +23,49 @@ type PersistedRevertedSegment = {
         opIds?: string[];
         collapsed: boolean;
         messageIds?: string[];
+        operationId?: string;
+        historySegments?: Array<{
+            isActive: boolean;
+            discarded: boolean;
+            startMessageId?: string;
+            startMessageIndex?: number;
+            endMessageId?: string;
+            endMessageIndex?: number;
+            collapsed: boolean;
+            messageIds?: string[];
+            operationId?: string;
+        }>;
     };
-    conflicts: string[];
+    conflicts: ConflictDetail[];
     discarded?: boolean;
     updatedAt: number;
 };
 
+interface SegmentState {
+    noticeKey: string;
+    createdAt: number;
+    state: 'pending' | 'active';
+    anchorMsgId?: string;
+    anchor: {
+        msgId?: string;
+    };
+    memberKeys?: string[];
+    members: {
+        serverIds: string[];
+        localKeys: string[];
+    };
+    resolved?: {
+        memberKeys: string[];
+        anchorMsgId?: string;
+        anchorOrder?: number;
+        hiddenSet: string[];
+    };
+    updatedAt: number;
+}
+
 export class SidebarProvider implements vscode.WebviewViewProvider {
     private _view?: vscode.WebviewView;
+    private _webviewInstanceId?: string;
     private client: OpenCodeClient;
     private currentSessionId?: string;
     private selectedModel?: string;
@@ -39,8 +74,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private pendingClientMessageId?: string;
     private currentDiffFilePath: string | null = null;
     private diffHashes = new Map<string, { before: string; after: string }>();
-    private revertedSegment?: { conflicts: string[]; discarded?: boolean };
+    private revertedSegment?: { conflicts: ConflictDetail[]; discarded?: boolean };
     private clientMessageIdMap = new Map<string, string>();
+    private revertedSegmentHistory: Array<{ isActive: boolean; discarded: boolean; startMessageId?: string; startMessageIndex?: number; endMessageId?: string; endMessageIndex?: number; collapsed: boolean; messageIds?: string[] }> = [];
+    private pendingConflict?: { kind: 'undo' | 'restore'; startMessageId?: string; operationId?: string };
+    private uiDebugChannel!: vscode.OutputChannel;
+    private undoSegmentsBySession: Map<string, Map<string, SegmentState>> = new Map();
+    private readonly UNDO_SEGMENTS_KEY = 'opencode.undoSegmentsBySession.v1';
 
     constructor(
         private readonly _context: vscode.ExtensionContext,
@@ -48,6 +88,28 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         private readonly diffProvider: OpenCodeDiffProvider
     ) {
         this.client = new OpenCodeClient();
+        this.uiDebugChannel = vscode.window.createOutputChannel('OpenCode UI Debug');
+        this.uiDebugChannel.show(true);
+        this.client.setUiDebugChannel(this.uiDebugChannel);
+
+        try {
+            const raw = this._context.globalState.get<string>(this.UNDO_SEGMENTS_KEY);
+            if (raw) {
+                const parsed = JSON.parse(raw) as Record<string, Record<string, SegmentState>>;
+                for (const [sid, segs] of Object.entries(parsed)) {
+                    const segMap = new Map<string, SegmentState>();
+                    for (const [nk, seg] of Object.entries(segs)) {
+                        segMap.set(nk, seg);
+                    }
+                    this.undoSegmentsBySession.set(sid, segMap);
+                }
+            }
+            const totalSegments = Array.from(this.undoSegmentsBySession.values())
+                .flatMap(m => Array.from(m.values())).length;
+            this.uiDebugChannel.appendLine(`EXT: segments hydrate | sessions | ${this.undoSegmentsBySession.size} | totalSegments | ${totalSegments}`);
+        } catch (error) {
+            this.uiDebugChannel.appendLine(`EXT: segments hydrate error | ${error}`);
+        }
     }
 
     public resolveWebviewView(
@@ -56,6 +118,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         _token: vscode.CancellationToken
     ) {
         this._view = webviewView;
+        OpenCodeClient.outputChannel.appendLine(`EXT: bind-webview | time | ${Date.now()}`);
 
         webviewView.webview.options = {
             enableScripts: true,
@@ -66,14 +129,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         webviewView.webview.onDidReceiveMessage(async (data) => {
             const activeWebview = this._view?.webview || webviewView.webview;
-            OpenCodeClient.outputChannel.appendLine(`[Extension] Received: ${data.type}`);
+            OpenCodeClient.outputChannel.appendLine(`EXT: recv | type | ${data?.type || 'unknown'} | requestId | ${data?.requestId || null} | currentWebviewId | ${this._webviewInstanceId || 'null'}`);
 
             switch (data.type) {
                 case "webviewReady": {
+                    // 更新 this._view 为最新实例
+                    this._view = webviewView;
+                    this._webviewInstanceId = data.webviewInstanceId;
                     const liveWebview = this._view?.webview;
                     if (liveWebview) {
                         await this.sendInit(liveWebview);
+                        liveWebview.postMessage({ type: 'webviewReadyAck', timestamp: Date.now(), webviewInstanceId: this._webviewInstanceId });
                     }
+                    OpenCodeClient.outputChannel.appendLine(`[EXT] webviewReady | id | ${this._webviewInstanceId}`);
                     break;
                 }
                 case "sendMessage": {
@@ -83,6 +151,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         try {
                             const sessionInfo = await this.client.createSession();
                             this.currentSessionId = sessionInfo.id;
+                            this.client.setSessionId(this.currentSessionId);
                             const liveWebview = this._view?.webview || activeWebview;
                             liveWebview.postMessage({
                                 type: 'sessionId',
@@ -102,7 +171,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             this.client.setRevertedSegment(segment);
                             this.revertedSegment = { conflicts: segment.conflicts || [], discarded: true };
                             const liveWebview = this._view?.webview || activeWebview;
-                            liveWebview.postMessage({ type: 'revertedSegmentDiscarded', segment, sessionId: this.currentSessionId });
+                            liveWebview.postMessage({
+                                type: 'revertedSegmentDiscarded',
+                                segment: { ...segment, historySegments: this.revertedSegmentHistory },
+                                sessionId: this.currentSessionId
+                            });
                             if (this.currentSessionId) {
                                 await this.persistRevertedSegment(this.currentSessionId, segment, segment.conflicts || [], true);
                             }
@@ -176,6 +249,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                         OpenCodeClient.outputChannel.appendLine(`[BRIDGE] Chat done`);
                         liveWebview.postMessage({ type: 'chatDone', sessionId: this.currentSessionId });
+                        this.postMessageIndexMap(liveWebview);
+                        if (this.pendingClientMessageId) {
+                            await this.handleAbortedMessage(this.pendingClientMessageId, liveWebview);
+                            this.pendingClientMessageId = undefined;
+                        }
                         if (this.selectedMode === 'build' && this.currentSessionId) {
                             const segment = this.client.getRevertedSegment();
                             if (segment) {
@@ -186,12 +264,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                 await this.persistRevertedSegment(this.currentSessionId, segment, segment.conflicts || [], true);
                             }
                         }
-                        await this.refreshSessions(activeWebview);
                     } catch (error) {
                         OpenCodeClient.outputChannel.appendLine(`[BRIDGE] Error: ${error}`);
                         vscode.window.showErrorMessage(`OpenCode Error: ${error}`);
                         this.postAddResponse(activeWebview, `Error: ${error}`);
                         activeWebview.postMessage({ type: 'chatDone', sessionId: this.currentSessionId });
+                        if (this.pendingClientMessageId) {
+                            await this.handleAbortedMessage(this.pendingClientMessageId, activeWebview);
+                            this.pendingClientMessageId = undefined;
+                        }
                     }
                     break;
                 }
@@ -215,7 +296,108 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 }
                 case "refreshSessions": {
-                    await this.refreshSessions(activeWebview);
+                    OpenCodeClient.outputChannel.appendLine(`[EXT] refreshSessions enter | requestId | ${data.requestId || 'null'}`);
+                    // 使用 webviewView.webview（最新实例），而不是 activeWebview
+                    await this.refreshSessions(webviewView.webview, data.requestId || '');
+                    break;
+                }
+                case "ping": {
+                    OpenCodeClient.outputChannel.appendLine(`EXT: ping | ts | ${data.ts}`);
+                    const liveWebview = this._view?.webview || webviewView.webview;
+                    liveWebview.postMessage({ type: 'pong', ts: data.ts });
+                    break;
+                }
+                case "undoSegmentCreated": {
+                    const sessionId = this.currentSessionId;
+                    if (!sessionId) {
+                        this.uiDebugChannel.appendLine(`EXT: segments persist skip | no currentSessionId`);
+                        break;
+                    }
+                    const incomingMembers = Array.isArray(data.memberKeys) ? data.memberKeys : [];
+                    const anchorMsgId = typeof data.anchorMsgId === 'string'
+                        ? data.anchorMsgId
+                        : undefined;
+
+                    const allMsgIds = incomingMembers.every((id: string) => typeof id === 'string' && id.startsWith('msg_'));
+                    if (!anchorMsgId || !anchorMsgId.startsWith('msg_') || !allMsgIds) {
+                        this.uiDebugChannel.appendLine(`segment.persist blocked | noticeKey | ${data.noticeKey} | reason | invalid-msg-ids | anchorMsgId | ${anchorMsgId || 'null'}`);
+                        break;
+                    }
+
+                    if (incomingMembers.length === 0) {
+                        this.uiDebugChannel.appendLine(`EXT: segments persist blocked | noticeKey | ${data.noticeKey} | reason | empty-memberKeys`);
+                        break;
+                    }
+
+                    let segMap = this.undoSegmentsBySession.get(sessionId);
+                    if (!segMap) {
+                        segMap = new Map<string, SegmentState>();
+                        this.undoSegmentsBySession.set(sessionId, segMap);
+                    }
+
+                    const newState: SegmentState = {
+                        noticeKey: data.noticeKey,
+                        createdAt: Date.now(),
+                        state: 'pending',
+                        anchorMsgId: anchorMsgId,
+                        anchor: {
+                            msgId: anchorMsgId
+                        },
+                        memberKeys: incomingMembers,
+                        members: {
+                            serverIds: [],
+                            localKeys: []
+                        },
+                        resolved: data.anchorOrder !== undefined ? {
+                            memberKeys: [],
+                            anchorMsgId: anchorMsgId,
+                            anchorOrder: data.anchorOrder,
+                            hiddenSet: []
+                        } : undefined,
+                        updatedAt: Date.now()
+                    };
+
+                    segMap.set(data.noticeKey, newState);
+
+                    const toSave: Record<string, Record<string, SegmentState>> = {};
+                    for (const [sid, sMap] of this.undoSegmentsBySession) {
+                        const obj: Record<string, SegmentState> = {};
+                        for (const [nk, seg] of sMap) {
+                            obj[nk] = seg;
+                        }
+                        toSave[sid] = obj;
+                    }
+                    await this._context.globalState.update(this.UNDO_SEGMENTS_KEY, JSON.stringify(toSave));
+
+                    const memberList = incomingMembers.length <= 20
+                        ? `[${incomingMembers.join(', ')}]`
+                        : `[${incomingMembers.slice(0, 10).join(', ')}, ... , ${incomingMembers.slice(-10).join(', ')}]`;
+                    this.uiDebugChannel.appendLine(`[DBG_SEG_PERSIST] session=${sessionId} notice=${data.noticeKey} state=pending memberKeys=${memberList}`);
+                    break;
+                }
+                case "undoSegmentRemoved": {
+                    const sessionId = this.currentSessionId;
+                    if (!sessionId) break;
+                    const noticeKey = data.noticeKey;
+
+                    const segMap = this.undoSegmentsBySession.get(sessionId);
+                    if (segMap) {
+                        const before = segMap.size;
+                        segMap.delete(noticeKey);
+                        this.undoSegmentsBySession.set(sessionId, segMap);
+
+                        const toSave: Record<string, Record<string, SegmentState>> = {};
+                        for (const [sid, sMap] of this.undoSegmentsBySession) {
+                            const obj: Record<string, SegmentState> = {};
+                            for (const [nk, seg] of sMap) {
+                                obj[nk] = seg;
+                            }
+                            toSave[sid] = obj;
+                        }
+                        await this._context.globalState.update(this.UNDO_SEGMENTS_KEY, JSON.stringify(toSave));
+
+                        this.uiDebugChannel.appendLine(`EXT: segments remove | sessionId | ${sessionId} | noticeKey | ${noticeKey} | before | ${before} | after | ${segMap.size}`);
+                    }
                     break;
                 }
                 case "selectSession": {
@@ -223,6 +405,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     try {
                         this.resetUiState();
                         this.currentSessionId = data.sessionId;
+                        this.client.setSessionId(this.currentSessionId);
                         const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
                         if (workspaceFolder) {
                             await this._context.globalState.update(`recentSession.${workspaceFolder}`, data.sessionId);
@@ -230,47 +413,68 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         const exportData = await this.client.exportSession(data.sessionId);
                         const formatted = this.formatSession(exportData);
                         const liveWebview = this._view?.webview || activeWebview;
+                        const persisted = await this.loadPersistedSegment(data.sessionId);
+                        const historySegments = persisted?.segment?.historySegments || [];
+                        if (persisted?.segment?.historySegments) {
+                            this.revertedSegmentHistory = persisted.segment.historySegments;
+                        } else {
+                            this.revertedSegmentHistory = [];
+                        }
+                        if (persisted?.segment) {
+                            this.client.setRevertedSegment({
+                                isActive: Boolean(persisted.segment.isActive),
+                                discarded: Boolean(persisted.discarded),
+                                startMessageId: persisted.segment.startMessageId || data.sessionId,
+                                startMessageIndex: persisted.segment.startMessageIndex ?? 0,
+                                endMessageId: persisted.segment.endMessageId || data.sessionId,
+                                endMessageIndex: persisted.segment.endMessageIndex ?? (persisted.segment.startMessageIndex ?? 0),
+                                opIds: persisted.segment.opIds || [],
+                                collapsed: true,
+                                conflicts: persisted.conflicts || [],
+                                messageIds: persisted.segment.messageIds,
+                                operationId: persisted.segment.operationId
+                            });
+                        }
+                        const segMap = this.undoSegmentsBySession.get(data.sessionId);
+                        const segmentsArray = segMap ? Array.from(segMap.values()) : [];
+                        this.uiDebugChannel.appendLine(`EXT: sessionData send | sessionId | ${data.sessionId} | messages | ${formatted.messages.length} | segments | ${segmentsArray.length}`);
+                        const timelineMsgCount = formatted.messages.filter((m) => typeof m.id === 'string' && m.id.startsWith('msg_')).length;
+                        this.uiDebugChannel.appendLine(`sessionData.send | sessionId | ${data.sessionId} | messagesCount | ${formatted.messages.length} | timelineMsgCount | ${timelineMsgCount} | segmentsCount | ${segmentsArray.length}`);
+
                         liveWebview.postMessage({
                             type: 'sessionData',
                             sessionId: data.sessionId,
                             title: formatted.title,
-                            messages: formatted.messages
-                        });
-                        const persisted = await this.loadPersistedSegment(data.sessionId);
-                    if (persisted?.segment?.isActive) {
-                        this.client.setRevertedSegment({
-                            isActive: true,
-                            discarded: Boolean(persisted.discarded),
-                            startMessageId: persisted.segment.startMessageId || data.sessionId,
-                            startMessageIndex: persisted.segment.startMessageIndex ?? 0,
-                            endMessageId: persisted.segment.endMessageId || data.sessionId,
-                            endMessageIndex: persisted.segment.endMessageIndex ?? (persisted.segment.startMessageIndex ?? 0),
-                            opIds: persisted.segment.opIds || [],
-                            collapsed: true,
-                            conflicts: persisted.conflicts || [],
-                            messageIds: persisted.segment.messageIds
-                        });
-                        liveWebview.postMessage({
-                            type: 'revertedSegment',
-                            conflicts: persisted.conflicts || [],
-                            segment: {
-                                isActive: true,
-                                startMessageId: persisted.segment.startMessageId,
-                                startMessageIndex: persisted.segment.startMessageIndex,
-                                endMessageId: persisted.segment.endMessageId,
-                                endMessageIndex: persisted.segment.endMessageIndex,
-                                collapsed: true,
+                            messages: formatted.messages,
+                            persistedSegments: segmentsArray.map(s => ({
+                                noticeKey: s.noticeKey,
+                                state: s.state,
+                                anchorMsgId: s.anchorMsgId,
+                                anchor: s.anchor,
+                                memberKeys: (s.memberKeys || []).filter((id) => typeof id === 'string' && id.startsWith('msg_')),
+                                members: s.members,
+                                resolved: s.resolved,
+                                createdAt: s.createdAt
+                            })),
+                            revertedSegment: persisted?.segment ? {
+                                isActive: Boolean(persisted.segment.isActive),
                                 discarded: Boolean(persisted.discarded),
-                                messageIds: persisted.segment.messageIds
-                            },
-                            sessionId: data.sessionId
+                                startMessageId: persisted.segment.startMessageId || data.sessionId,
+                                startMessageIndex: persisted.segment.startMessageIndex ?? 0,
+                                endMessageId: persisted.segment.endMessageId || data.sessionId,
+                                endMessageIndex: persisted.segment.endMessageIndex ?? 0,
+                                collapsed: true,
+                                conflicts: persisted.conflicts || [],
+                                messageIds: persisted.segment.messageIds || [],
+                                operationId: persisted.segment.operationId,
+                                historySegments: historySegments
+                            } : null
                         });
-                    }
-                    } catch (error) {
-                        vscode.window.showErrorMessage(`Failed to load session: ${error}`);
-                        this.postAddResponse(activeWebview, `Error: ${error}`);
-                    }
-                    break;
+                        } catch (error) {
+                            vscode.window.showErrorMessage(`Failed to load session: ${error}`);
+                            this.postAddResponse(activeWebview, `Error: ${error}`);
+                        }
+                        break;
                 }
 
                 case "clipboardImage": {
@@ -298,6 +502,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     }
                     this.resetSessionState();
                     this.currentSessionId = undefined;
+                    this.client.setSessionId(this.currentSessionId);
                     const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
                     if (workspaceFolder) {
                         await this._context.globalState.update(`recentSession.${workspaceFolder}`, undefined);
@@ -308,11 +513,57 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 case "undoToMessage": {
                     if (!data.messageId) return;
                     try {
+                        const operationId = typeof data.operationId === 'string' ? data.operationId : undefined;
                         const resolvedMessageId = this.clientMessageIdMap.get(data.messageId) || data.messageId;
+                        const previousSegment = this.client.getRevertedSegment();
                         const result = await this.client.undoFromMessage(resolvedMessageId);
+                        if (!result.applied && result.conflicts.length) {
+                            this.pendingConflict = { kind: 'undo', startMessageId: resolvedMessageId, operationId };
+                            const liveWebview = this._view?.webview || activeWebview;
+                            liveWebview.postMessage({
+                                type: 'conflictCard',
+                                kind: 'undo',
+                                startMessageId: resolvedMessageId,
+                                conflicts: result.conflicts,
+                                sessionId: this.currentSessionId
+                            });
+                            this.postAddResponse(activeWebview, `Undo paused due to ${result.conflicts.length} conflicts.`, { operationId });
+                            break;
+                        }
+                        this.postMessageIndexMap(activeWebview);
+                        if (result.applied && previousSegment) {
+                            const current = this.client.getRevertedSegment();
+                            const currentSet = new Set(current?.messageIds ?? []);
+                            const prevIds = previousSegment.messageIds ?? [];
+                            const trimmedPrevIds = prevIds.filter(id => !currentSet.has(id));
+                            let historyEntry = {
+                                isActive: false,
+                                discarded: true,
+                                startMessageId: previousSegment.startMessageId,
+                                startMessageIndex: previousSegment.startMessageIndex,
+                                endMessageId: previousSegment.endMessageId,
+                                endMessageIndex: previousSegment.endMessageIndex,
+                                collapsed: true,
+                                messageIds: trimmedPrevIds,
+                                operationId: previousSegment.operationId
+                            };
+                            if (trimmedPrevIds.length) {
+                                this.revertedSegmentHistory = [...this.revertedSegmentHistory, historyEntry];
+                            }
+                            this.revertedSegmentHistory = this.revertedSegmentHistory
+                                .map(e => ({
+                                    ...e,
+                                    messageIds: (e.messageIds ?? []).filter(id => !currentSet.has(id))
+                                }))
+                                .filter(e => (e.messageIds ?? []).length > 0);
+                        }
                         const segment = this.client.getRevertedSegment();
                         const liveWebview = this._view?.webview || activeWebview;
                         if (segment) {
+                            if (operationId) {
+                                segment.operationId = operationId;
+                                this.client.setRevertedSegment(segment);
+                            }
                             this.revertedSegment = { conflicts: result.conflicts };
                             liveWebview.postMessage({
                                 type: 'revertedSegment',
@@ -324,7 +575,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                     endMessageId: segment.endMessageId,
                                     endMessageIndex: segment.endMessageIndex,
                                     collapsed: segment.collapsed,
-                                    messageIds: segment.messageIds
+                                    messageIds: segment.messageIds,
+                                    operationId,
+                                    historySegments: this.revertedSegmentHistory
                                 },
                                 sessionId: this.currentSessionId
                             });
@@ -341,11 +594,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             });
                         }
                         if (!result.touchedFiles.length) {
-                            this.postAddResponse(activeWebview, 'Undo applied. No tracked file changes were available to revert. The current model may not support file change tracks. Please consider use OpenAI Codex.');
-                        } else if (result.conflicts.length) {
-                            this.postAddResponse(activeWebview, `Undo applied with ${result.conflicts.length} conflicts.`);
+                            this.postAddResponse(activeWebview, 'Undo applied. No tracked file changes were available to revert. The current model may not support file change tracks. Please consider use OpenAI Codex.', { operationId });
                         } else {
-                            this.postAddResponse(activeWebview, 'Undo applied.');
+                            this.postAddResponse(activeWebview, 'Undo applied.', { operationId });
                         }
                         this.refreshDiffIfTouched(result.touchedFiles);
                     } catch (error) {
@@ -356,28 +607,51 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 case "cancel": {
                     this.client.cancel();
+                    if (this.pendingClientMessageId) {
+                        await this.handleAbortedMessage(this.pendingClientMessageId, activeWebview);
+                        this.pendingClientMessageId = undefined;
+                    }
                     this.postAddResponse(activeWebview, 'Canceled.');
                     activeWebview.postMessage({ type: 'chatDone', sessionId: this.currentSessionId });
                     break;
                 }
                 case "restoreAll": {
                     try {
+                        const operationId = typeof data.operationId === 'string' ? data.operationId : undefined;
                         const result = await this.client.restoreAll();
-                        this.revertedSegment = { conflicts: result.conflicts };
-                    activeWebview.postMessage({
-                        type: 'revertedSegmentCleared',
-                        conflicts: result.conflicts || [],
-                        segment: this.client.getRevertedSegment(),
-                        sessionId: this.currentSessionId
-                    });
-                    if (this.currentSessionId) {
-                        await this.clearPersistedSegment(this.currentSessionId);
-                    }
-                        if (result.conflicts.length) {
-                            this.postAddResponse(activeWebview, `Restore applied with ${result.conflicts.length} conflicts.`);
-                        } else {
-                            this.postAddResponse(activeWebview, 'Restore applied.');
+                        if (!result.applied && result.conflicts.length) {
+                            this.pendingConflict = { kind: 'restore', operationId };
+                            const liveWebview = this._view?.webview || activeWebview;
+                            liveWebview.postMessage({
+                                type: 'conflictCard',
+                                kind: 'restore',
+                                conflicts: result.conflicts,
+                                sessionId: this.currentSessionId
+                            });
+                            this.postAddResponse(activeWebview, `Restore paused due to ${result.conflicts.length} conflicts.`, { operationId });
+                            break;
                         }
+                        this.revertedSegment = { conflicts: [] };
+                        activeWebview.postMessage({
+                            type: 'revertedSegment',
+                            conflicts: [],
+                            segment: {
+                                historySegments: this.revertedSegmentHistory,
+                                messageIds: [],
+                                isActive: false,
+                                discarded: false,
+                                collapsed: true,
+                                startMessageId: '',
+                                startMessageIndex: 0,
+                                endMessageId: '',
+                                endMessageIndex: 0
+                            },
+                            sessionId: this.currentSessionId
+                        });
+                        if (this.currentSessionId) {
+                            await this.clearPersistedSegment(this.currentSessionId);
+                        }
+                        this.postAddResponse(activeWebview, 'Restore applied.', { operationId });
                         this.refreshDiffIfTouched(result.touchedFiles);
                         if (this.currentSessionId) {
                             await this.clearPersistedSegment(this.currentSessionId);
@@ -388,13 +662,109 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     }
                     break;
                 }
+                case "conflictDecision": {
+                    if (!this.pendingConflict || !data.decision) return;
+                    const decision = data.decision as 'continue' | 'cancel';
+                    const conflictContext = this.pendingConflict;
+                    this.pendingConflict = undefined;
+                    if (decision === 'cancel') {
+                        this.postAddResponse(activeWebview, 'Conflict resolution canceled.', { operationId: conflictContext.operationId });
+                        break;
+                    }
+                    try {
+                        if (conflictContext.kind === 'undo' && conflictContext.startMessageId) {
+                            const previousSegment = this.client.getRevertedSegment();
+                            const result = await this.client.undoFromMessage(conflictContext.startMessageId, { force: true });
+                            if (result.applied && previousSegment) {
+                                const historyEntry = {
+                                    isActive: false,
+                                    discarded: true,
+                                    startMessageId: previousSegment.startMessageId,
+                                    startMessageIndex: previousSegment.startMessageIndex,
+                                    endMessageId: previousSegment.endMessageId,
+                                    endMessageIndex: previousSegment.endMessageIndex,
+                                    collapsed: true,
+                                    messageIds: previousSegment.messageIds,
+                                    operationId: previousSegment.operationId
+                                };
+                                this.revertedSegmentHistory = [...this.revertedSegmentHistory, historyEntry];
+                            }
+                            const segment = this.client.getRevertedSegment();
+                            if (segment) {
+                                if (conflictContext.operationId) {
+                                    segment.operationId = conflictContext.operationId;
+                                    this.client.setRevertedSegment(segment);
+                                }
+                                this.revertedSegment = { conflicts: result.conflicts };
+                                activeWebview.postMessage({
+                                    type: 'revertedSegment',
+                                    conflicts: result.conflicts || [],
+                                    segment: {
+                                        isActive: segment.isActive,
+                                        startMessageId: segment.startMessageId,
+                                        startMessageIndex: segment.startMessageIndex,
+                                        endMessageId: segment.endMessageId,
+                                        endMessageIndex: segment.endMessageIndex,
+                                        collapsed: segment.collapsed,
+                                        messageIds: segment.messageIds,
+                                        operationId: conflictContext.operationId,
+                                        historySegments: this.revertedSegmentHistory
+                                    },
+                                    sessionId: this.currentSessionId
+                                });
+                                if (this.currentSessionId) {
+                                    await this.persistRevertedSegment(this.currentSessionId, segment, result.conflicts, false);
+                                }
+                            }
+                            this.postAddResponse(activeWebview, 'Undo applied (force mode).', { operationId: conflictContext.operationId });
+                            this.refreshDiffIfTouched(result.touchedFiles);
+                        }
+                        if (conflictContext.kind === 'restore') {
+                            const result = await this.client.restoreAll({ force: true });
+                            this.revertedSegmentHistory = [];
+                            activeWebview.postMessage({
+                                type: 'revertedSegment',
+                                conflicts: result.conflicts || [],
+                                segment: {
+                                    historySegments: this.revertedSegmentHistory,
+                                    messageIds: [],
+                                    isActive: false,
+                                    discarded: false,
+                                    collapsed: true,
+                                    startMessageId: '',
+                                    startMessageIndex: 0,
+                                    endMessageId: '',
+                                    endMessageIndex: 0
+                                },
+                                sessionId: this.currentSessionId
+                            });
+                            if (this.currentSessionId) {
+                                await this.clearPersistedSegment(this.currentSessionId);
+                            }
+                            this.postAddResponse(activeWebview, 'Restore applied (force mode).', { operationId: conflictContext.operationId });
+                            this.refreshDiffIfTouched(result.touchedFiles);
+                        }
+                    } catch (error) {
+                        vscode.window.showErrorMessage(`Conflict resolution failed: ${error}`);
+                        activeWebview.postMessage({ type: 'addResponse', value: `Conflict resolution failed: ${error}` });
+                    }
+                    break;
+                }
                 case "discardSegment": {
                     this.client.discardRevertedSegment();
                     this.revertedSegment = { conflicts: [], discarded: true };
-                    activeWebview.postMessage({ type: 'revertedSegmentDiscarded', segment: this.client.getRevertedSegment(), sessionId: this.currentSessionId });
+                    const discardedSegment = this.client.getRevertedSegment();
+                    activeWebview.postMessage({
+                        type: 'revertedSegmentDiscarded',
+                        segment: discardedSegment ? { ...discardedSegment, historySegments: this.revertedSegmentHistory } : discardedSegment,
+                        sessionId: this.currentSessionId
+                    });
                     this.postAddResponse(activeWebview, 'Reverted segment discarded.');
                     if (this.currentSessionId) {
-                        await this.clearPersistedSegment(this.currentSessionId);
+                        const segment = this.client.getRevertedSegment();
+                        if (segment) {
+                            await this.persistRevertedSegment(this.currentSessionId, segment, segment.conflicts || [], true);
+                        }
                     }
                     break;
                 }
@@ -403,9 +773,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     this.client.setRevertedSegmentCollapsed(data.collapsed);
                     activeWebview.postMessage({
                         type: 'revertedSegmentState',
-                        segment: this.client.getRevertedSegment(),
+                        segment: this.client.getRevertedSegment()
+                            ? { ...this.client.getRevertedSegment(), historySegments: this.revertedSegmentHistory }
+                            : null,
                         sessionId: this.currentSessionId
                     });
+                    break;
+                }
+                case "ui-debug": {
+                    if (Array.isArray(data.payload)) {
+                        const [tag, ...args] = data.payload;
+                        const message = args.map((arg: unknown) => typeof arg === 'object' ? JSON.stringify(arg) : String(arg)).join(' | ');
+                        this.uiDebugChannel.appendLine(`${tag}: ${message}`);
+                    }
                     break;
                 }
             }
@@ -447,22 +827,30 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         if (workspaceFolder) {
             recentSessionId = this._context.globalState.get<string>(`recentSession.${workspaceFolder}`);
         }
-        if (recentSessionId) {
-            try {
-                const exportData = await this.client.exportSession(recentSessionId);
-                const formatted = this.formatSession(exportData);
-                this.currentSessionId = recentSessionId;
-                const liveWebview = this._view?.webview || webview;
-                liveWebview.postMessage({
-                    type: 'sessionData',
-                    sessionId: recentSessionId,
-                    title: formatted.title,
-                    messages: formatted.messages
-                });
+                if (recentSessionId) {
+                    try {
+                        const exportData = await this.client.exportSession(recentSessionId);
+                        const formatted = this.formatSession(exportData);
+                        this.currentSessionId = recentSessionId;
+                        this.client.setSessionId(this.currentSessionId);
+                        const liveWebview = this._view?.webview || webview;
+                        const timelineMsgCount = formatted.messages.filter((m) => typeof m.id === 'string' && m.id.startsWith('msg_')).length;
+                        this.uiDebugChannel.appendLine(`sessionData.send | sessionId | ${recentSessionId} | messagesCount | ${formatted.messages.length} | timelineMsgCount | ${timelineMsgCount} | segmentsCount | 0`);
+                        liveWebview.postMessage({
+                            type: 'sessionData',
+                            sessionId: recentSessionId,
+                            title: formatted.title,
+                            messages: formatted.messages
+                        });
                 const persisted = await this.loadPersistedSegment(recentSessionId);
-                if (persisted?.segment?.isActive) {
+                if (persisted?.segment?.historySegments) {
+                    this.revertedSegmentHistory = persisted.segment.historySegments;
+                } else {
+                    this.revertedSegmentHistory = [];
+                }
+                if (persisted?.segment) {
                     this.client.setRevertedSegment({
-                        isActive: true,
+                        isActive: Boolean(persisted.segment.isActive),
                         discarded: Boolean(persisted.discarded),
                         startMessageId: persisted.segment.startMessageId || recentSessionId,
                         startMessageIndex: persisted.segment.startMessageIndex ?? 0,
@@ -471,20 +859,23 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         opIds: persisted.segment.opIds || [],
                         collapsed: true,
                         conflicts: persisted.conflicts || [],
-                        messageIds: persisted.segment.messageIds
+                        messageIds: persisted.segment.messageIds,
+                        operationId: persisted.segment.operationId
                     });
                     liveWebview.postMessage({
                         type: 'revertedSegment',
                         conflicts: persisted.conflicts || [],
                         segment: {
-                            isActive: true,
+                            isActive: Boolean(persisted.segment.isActive),
                             startMessageId: persisted.segment.startMessageId,
                             startMessageIndex: persisted.segment.startMessageIndex,
                             endMessageId: persisted.segment.endMessageId,
                             endMessageIndex: persisted.segment.endMessageIndex,
                             collapsed: true,
                             discarded: Boolean(persisted.discarded),
-                            messageIds: persisted.segment.messageIds
+                            messageIds: persisted.segment.messageIds,
+                            operationId: persisted.segment.operationId,
+                            historySegments: this.revertedSegmentHistory
                         },
                         sessionId: recentSessionId
                     });
@@ -538,8 +929,21 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private handleChatEvent(event: ChatEvent, webview: vscode.Webview): void {
         if (event.type === 'session' && event.sessionId) {
             this.currentSessionId = event.sessionId;
+            this.client.setSessionId(this.currentSessionId);
             const liveWebview = this._view?.webview || webview;
             liveWebview.postMessage({ type: 'sessionId', value: event.sessionId, sessionId: event.sessionId });
+            return;
+        }
+
+        if (event.type === 'assistantMessageMeta' && event.messageId) {
+            const liveWebview = this._view?.webview || webview;
+            liveWebview.postMessage({
+                type: 'assistantMessageMeta',
+                messageId: event.messageId,
+                messageIndex: event.messageIndex,
+                lastText: event.lastText,
+                sessionId: this.currentSessionId
+            });
             return;
         }
 
@@ -580,11 +984,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     this.client.aliasMessageId(internalId, event.text);
                 }
                 const internalForPending = this.clientMessageIdMap.get(this.pendingClientMessageId);
-                            if (internalForPending) {
-                                this.client.aliasMessageId(event.text, internalForPending);
-                            }
-                            this.pendingClientMessageId = undefined;
-                        }
+                if (internalForPending) {
+                    this.client.aliasMessageId(event.text, internalForPending);
+                }
+                this.clientMessageIdMap.delete(this.pendingClientMessageId);
+                this.clientMessageIdMap.set(event.text, event.text);
+                this.pendingClientMessageId = undefined;
+            }
             return;
         }
 
@@ -633,10 +1039,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
     }
 
-    private async refreshSessions(webview: vscode.Webview): Promise<void> {
+    private async refreshSessions(webview: vscode.Webview, requestId: string): Promise<void> {
         try {
             const sessions = await this.client.listSessions();
-            webview.postMessage({ type: 'sessions', sessions, sessionId: this.currentSessionId });
+            const topSession = sessions?.[0];
+            OpenCodeClient.outputChannel.appendLine(`EXT: sessionsList | send | requestId | ${requestId} | count | ${sessions?.length || 0} | top | ${topSession?.id || 'none'} | currentWebviewId | ${this._webviewInstanceId || 'null'}`);
+            OpenCodeClient.outputChannel.appendLine(`EXT: usingWebview | id | ${this._webviewInstanceId || 'null'}`);
+            webview.postMessage({ type: 'sessionsList', requestId, sessions });
         } catch (error) {
             this.postAddResponse(webview, `Failed to refresh sessions: ${error}`);
         }
@@ -652,8 +1061,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     private async persistRevertedSegment(
         sessionId: string,
-        segment: { isActive: boolean; startMessageId?: string; startMessageIndex?: number; endMessageId?: string; endMessageIndex?: number; opIds?: string[]; collapsed?: boolean; messageIds?: string[] },
-        conflicts: string[],
+        segment: { isActive: boolean; startMessageId?: string; startMessageIndex?: number; endMessageId?: string; endMessageIndex?: number; opIds?: string[]; collapsed?: boolean; messageIds?: string[]; operationId?: string },
+        conflicts: ConflictDetail[],
         discarded?: boolean
     ): Promise<void> {
         const dir = pathModule.join(this.getRevertedSegmentStorageDir(), 'revertedSegments');
@@ -661,14 +1070,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const payload: PersistedRevertedSegment = {
             sessionId,
             segment: {
-                isActive: true,
+                isActive: segment.isActive,
                 startMessageId: segment.startMessageId,
                 startMessageIndex: segment.startMessageIndex,
                 endMessageId: segment.endMessageId,
                 endMessageIndex: segment.endMessageIndex,
                 opIds: segment.opIds || [],
                 collapsed: true,
-                messageIds: segment.messageIds
+                messageIds: segment.messageIds,
+                operationId: segment.operationId,
+                historySegments: this.revertedSegmentHistory
             },
             conflicts: conflicts || [],
             discarded,
@@ -779,6 +1190,40 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const title = exportData?.info?.title || 'Session';
         const messages: SessionMessage[] = [];
         const rawMessages = Array.isArray(exportData?.messages) ? exportData.messages : [];
+        const sessionId = exportData?.info?.id || exportData?.info?.sessionId || this.currentSessionId || 'unknown';
+        const exportLines: string[] = [];
+        const idRoleMap = new Map<string, Set<string>>();
+        const seenIds = new Set<string>();
+        let duplicateIds = false;
+
+        for (let i = 0; i < rawMessages.length; i++) {
+            const message = rawMessages[i];
+            const role = message?.info?.role === 'user' ? 'user' : 'assistant';
+            const messageId = message?.info?.id || '';
+            const replyTo = message?.info?.replyTo || message?.info?.reply_to || message?.info?.parent || message?.info?.turnId || '';
+            if (messageId) {
+                if (seenIds.has(messageId)) {
+                    duplicateIds = true;
+                }
+                seenIds.add(messageId);
+                if (!idRoleMap.has(messageId)) {
+                    idRoleMap.set(messageId, new Set());
+                }
+                idRoleMap.get(messageId)?.add(role);
+            }
+            const suffix = replyTo ? ` reply_to=${replyTo}` : '';
+            exportLines.push(`  ${i} role=${role} id=${messageId}${suffix}`);
+        }
+
+        const multiRoleIds = Array.from(idRoleMap.entries()).filter(([, roles]) => roles.size > 1).map(([id]) => id);
+        this.uiDebugChannel.appendLine(`[DBG_EXPORT] session=${sessionId} messages:`);
+        for (const line of exportLines) {
+            this.uiDebugChannel.appendLine(`[DBG_EXPORT] ${line}`);
+        }
+        this.uiDebugChannel.appendLine(`[DBG_EXPORT] total=${rawMessages.length} duplicateIds=${duplicateIds} multiRoleIds=${multiRoleIds.length}`);
+        if (multiRoleIds.length) {
+            this.uiDebugChannel.appendLine(`[DBG_EXPORT] multiRoleSample=[${multiRoleIds.slice(0, 5).join(', ')}]`);
+        }
 
         for (const message of rawMessages) {
             const role = message?.info?.role === 'user' ? 'user' : 'assistant';
@@ -788,9 +1233,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const text = parts.map((part: any) => part.text).join('');
             if (!text) continue;
             const messageId = message?.info?.id;
-            const resolvedId = typeof messageId === 'string' && messageId.length
-                ? messageId
-                : this.client.createInternalMessageId(role, this.currentSessionId);
+            const resolvedId = typeof messageId === 'string' ? messageId : '';
+            if (!resolvedId.startsWith('msg_')) {
+                this.uiDebugChannel.appendLine(`sessionData.skipMessage | reason | invalid-msg-id | id | ${resolvedId || 'null'}`);
+                continue;
+            }
             const messageIndex = this.client.registerMessage(resolvedId);
             messages.push({ role, text, id: resolvedId, messageIndex });
         }
@@ -802,6 +1249,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.client.resetSessionState();
         this.clientMessageIdMap.clear();
         this.revertedSegment = undefined;
+        this.revertedSegmentHistory = [];
+        this.pendingConflict = undefined;
         this.pendingClientMessageId = undefined;
         this.currentDiffFilePath = null;
         this.diffHashes.clear();
@@ -814,7 +1263,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
     }
 
-    private postAddResponse(webview: vscode.Webview, value: string): void {
+    private async handleAbortedMessage(messageId: string, webview: vscode.Webview): Promise<void> {
+        await this.client.rollbackMessageSnapshot(messageId);
+        this.client.removeMessageId(messageId);
+        this.clientMessageIdMap.delete(messageId);
+        for (const [key, value] of this.clientMessageIdMap.entries()) {
+            if (value === messageId) {
+                this.clientMessageIdMap.delete(key);
+            }
+        }
+        webview.postMessage({ type: 'removeMessage', messageId, sessionId: this.currentSessionId });
+    }
+
+    private postAddResponse(webview: vscode.Webview, value: string, meta?: { operationId?: string }): void {
         const messageId = this.client.createInternalMessageId('assistant', this.currentSessionId);
         const messageIndex = this.client.registerMessage(messageId);
         const liveWebview = this._view?.webview || webview;
@@ -823,6 +1284,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             value,
             messageId,
             messageIndex,
+            sessionId: this.currentSessionId,
+            meta
+        });
+    }
+
+    private postMessageIndexMap(webview: vscode.Webview): void {
+        const map = this.client.getMessageIndexMap();
+        const liveWebview = this._view?.webview || webview;
+        liveWebview.postMessage({
+            type: 'messageIndexMap',
+            map,
             sessionId: this.currentSessionId
         });
     }
@@ -882,6 +1354,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             <body>
                 <div class="session-header">
                     <span class="session-title" id="session-title">New Session</span>
+                    <span class="pending-indicator hidden" id="pending-indicator"></span>
                     <div class="session-controls">
                         <button class="icon-btn" id="new-session-btn" title="New Session">
                             <svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M14 7v1H8v6H7V8H1V7h6V1h1v6h6z"/></svg>
