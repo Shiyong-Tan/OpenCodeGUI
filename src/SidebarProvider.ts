@@ -148,7 +148,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         _token: vscode.CancellationToken
     ) {
         this._view = webviewView;
-        OpenCodeClient.outputChannel.appendLine(`EXT: bind-webview | time | ${Date.now()}`);
 
         webviewView.webview.options = {
             enableScripts: true,
@@ -159,7 +158,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         webviewView.webview.onDidReceiveMessage(async (data) => {
             const activeWebview = this._view?.webview || webviewView.webview;
-            OpenCodeClient.outputChannel.appendLine(`EXT: recv | type | ${data?.type || 'unknown'} | requestId | ${data?.requestId || null} | currentWebviewId | ${this._webviewInstanceId || 'null'}`);
 
             // Diagnostic logging for undoToMessage
             if (data.type === 'undoToMessage') {
@@ -182,7 +180,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         liveWebview.postMessage({ type: 'webviewReadyAck', timestamp: Date.now(), webviewInstanceId: this._webviewInstanceId });
                         this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_4_ACK] ack sent`);
                     }
-                    OpenCodeClient.outputChannel.appendLine(`[EXT] webviewReady | id | ${this._webviewInstanceId}`);
                     break;
                 }
                 case "sendMessage": {
@@ -337,13 +334,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 }
                 case "refreshSessions": {
-                    OpenCodeClient.outputChannel.appendLine(`[EXT] refreshSessions enter | requestId | ${data.requestId || 'null'}`);
                     // 使用 webviewView.webview（最新实例），而不是 activeWebview
                     await this.refreshSessions(webviewView.webview, data.requestId || '');
                     break;
                 }
                 case "ping": {
-                    OpenCodeClient.outputChannel.appendLine(`EXT: ping | ts | ${data.ts}`);
                     const liveWebview = this._view?.webview || webviewView.webview;
                     liveWebview.postMessage({ type: 'pong', ts: data.ts });
                     break;
@@ -1293,13 +1288,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const result = await this.client.resolveUserMessageUpgrade(sessionId);
         if (result.status === 'ok') {
             // Update user message ID mapping
-            this.clientMessageIdMap.set(result.localKey, result.userMsgId);
-            const ok = this.client.upgradeMessageId(result.localKey, result.userMsgId);
-            this.uiDebugChannel.appendLine(`EXT: user.upgrade.client | localKey | ${result.localKey} | msgId | ${result.userMsgId} | ok | ${ok}`);
+            if (result.localKey && result.userMsgId) {
+                this.clientMessageIdMap.set(result.localKey, result.userMsgId);
+                const ok = this.client.upgradeMessageId(result.localKey, result.userMsgId);
+                this.uiDebugChannel.appendLine(`EXT: user.upgrade.client | localKey | ${result.localKey} | msgId | ${result.userMsgId} | ok | ${ok}`);
+            } else {
+                this.uiDebugChannel.appendLine(`EXT: user.upgrade.client | skip | localKey=${result.localKey || 'null'} userMsgId=${result.userMsgId || 'null'}`);
+            }
             
             // Also update assistant message ID mapping if we have a tmpKey
             const tmpKey = this.pendingAssistantTmpKeyBySession.get(sessionId);
-            if (tmpKey && tmpKey.startsWith('tmp:') && result.assistantMsgId.startsWith('msg_')) {
+            if (tmpKey && tmpKey.startsWith('tmp:') && result.assistantMsgId && result.assistantMsgId.startsWith('msg_')) {
                 this.clientMessageIdMap.set(tmpKey, result.assistantMsgId);
                 const assistantOk = this.client.upgradeMessageId(tmpKey, result.assistantMsgId);
                 this.uiDebugChannel.appendLine(`EXT: assistant.upgrade.client | tmpKey | ${tmpKey} | msgId | ${result.assistantMsgId} | ok | ${assistantOk}`);
@@ -1313,9 +1312,28 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 localKey: result.localKey,
                 userMsgId: result.userMsgId,
                 assistantMsgId: result.assistantMsgId,
+                assistantMsgIdsAll: result.assistantMsgIdsAll,
+                chosenFinish: result.chosenFinish,
+                chosenTimeCompleted: result.chosenTimeCompleted,
+                chosenTimeCreated: result.chosenTimeCreated,
                 tmpKey: tmpKey
             });
+            return;
         }
+
+        const tmpKey = this.pendingAssistantTmpKeyBySession.get(sessionId);
+        const pendingPayload = {
+            type: 'userMessageUpgrade',
+            sessionId,
+            localKey: result.localKey,
+            userMsgId: result.userMsgId,
+            assistantMsgId: null,
+            awaitingAssistantIdFromExport: true,
+            reason: result.reason,
+            tmpKey
+        };
+        this.uiDebugChannel.appendLine(`EXT: user.upgrade.pending | session=${sessionId} reason=${result.reason} localKey=${result.localKey || 'null'} userMsgId=${result.userMsgId || 'null'}`);
+        webview.postMessage(pendingPayload);
     }
 
     private handleChatEvent(event: ChatEvent, webview: vscode.Webview): void {
@@ -1436,8 +1454,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         try {
             const sessions = await this.client.listSessions();
             const topSession = sessions?.[0];
-            OpenCodeClient.outputChannel.appendLine(`EXT: sessionsList | send | requestId | ${requestId} | count | ${sessions?.length || 0} | top | ${topSession?.id || 'none'} | currentWebviewId | ${this._webviewInstanceId || 'null'}`);
-            OpenCodeClient.outputChannel.appendLine(`EXT: usingWebview | id | ${this._webviewInstanceId || 'null'}`);
             webview.postMessage({ type: 'sessionsList', requestId, sessions });
         } catch (error) {
             this.postAddResponse(webview, `Failed to refresh sessions: ${error}`);

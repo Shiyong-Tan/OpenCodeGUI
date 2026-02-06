@@ -85,6 +85,8 @@ type TurnState = {
     assistantMsgId?: string;
     exportInFlight: boolean;
     exportResolved: boolean;
+    resolvedUserMsgId?: string;
+    lastResolvedAssistantMsgId?: string;
 };
 
 type RevertedSegment = {
@@ -152,7 +154,9 @@ export class OpenCodeClient {
             pendingUserLocalKey,
             assistantMsgId: undefined,
             exportInFlight: false,
-            exportResolved: false
+            exportResolved: false,
+            resolvedUserMsgId: undefined,
+            lastResolvedAssistantMsgId: undefined
         });
         this.logUiDebug(`[DBG_TURN_START] session=${sessionId} userLocal=${pendingUserLocalKey || 'null'}`);
     }
@@ -174,39 +178,108 @@ export class OpenCodeClient {
             pendingUserLocalKey: undefined,
             assistantMsgId,
             exportInFlight: false,
-            exportResolved: false
+            exportResolved: false,
+            resolvedUserMsgId: undefined,
+            lastResolvedAssistantMsgId: undefined
         });
     }
 
-    public async resolveUserMessageUpgrade(sessionId: string): Promise<{ status: 'ok'; localKey: string; userMsgId: string; assistantMsgId: string } | { status: 'skip'; reason: string } | { status: 'error'; reason: string }> {
+    private resolveFinalAssistantFromExport(exportJson: any, userMsgId: string): {
+        userMsgId: string;
+        assistantMsgId: string | null;
+        assistantMsgIdsAll: string[];
+        chosenFinish: string | null;
+        chosenTimeCompleted: number | null;
+        chosenTimeCreated: number | null;
+    } {
+        const rawMessages = Array.isArray(exportJson?.messages) ? exportJson.messages : [];
+        const candidates = rawMessages.filter((message: any) =>
+            message?.info?.role === 'assistant' && message?.info?.parentID === userMsgId
+        );
+
+        const getTimeCreated = (message: any): number => {
+            const v = message?.time?.created;
+            return typeof v === 'number' ? v : -Infinity;
+        };
+
+        const getTimeCompleted = (message: any): number => {
+            const v = message?.time?.completed;
+            return typeof v === 'number' ? v : -Infinity;
+        };
+
+        const assistantMsgIdsAll = candidates
+            .slice()
+            .sort((a: any, b: any) => getTimeCreated(a) - getTimeCreated(b))
+            .map((message: any) => message?.info?.id)
+            .filter((id: any) => typeof id === 'string');
+
+        if (!candidates.length) {
+            return {
+                userMsgId,
+                assistantMsgId: null,
+                assistantMsgIdsAll,
+                chosenFinish: null,
+                chosenTimeCompleted: null,
+                chosenTimeCreated: null
+            };
+        }
+
+        const stopCandidates = candidates.filter((message: any) => message?.info?.finish === 'stop');
+        const pickFrom = stopCandidates.length ? stopCandidates : candidates;
+
+        let best = pickFrom[0];
+        let bestScore = Math.max(getTimeCompleted(best), getTimeCreated(best));
+        for (let i = 1; i < pickFrom.length; i++) {
+            const candidate = pickFrom[i];
+            const score = Math.max(getTimeCompleted(candidate), getTimeCreated(candidate));
+            if (score > bestScore) {
+                best = candidate;
+                bestScore = score;
+            }
+        }
+
+        const assistantMsgId = typeof best?.info?.id === 'string' ? best.info.id : null;
+        const chosenFinish = typeof best?.info?.finish === 'string' ? best.info.finish : null;
+        const chosenTimeCompleted = Number.isFinite(getTimeCompleted(best)) ? getTimeCompleted(best) : null;
+        const chosenTimeCreated = Number.isFinite(getTimeCreated(best)) ? getTimeCreated(best) : null;
+
+        return {
+            userMsgId,
+            assistantMsgId,
+            assistantMsgIdsAll,
+            chosenFinish,
+            chosenTimeCompleted,
+            chosenTimeCreated
+        };
+    }
+
+    public async resolveUserMessageUpgrade(sessionId: string): Promise<
+        | { status: 'ok'; localKey: string | null; userMsgId: string | null; assistantMsgId: string | null; assistantMsgIdsAll: string[]; chosenFinish: string | null; chosenTimeCompleted: number | null; chosenTimeCreated: number | null }
+        | { status: 'pending'; localKey: string | null; userMsgId: string | null; awaitingAssistantIdFromExport: true; reason: string }
+        | { status: 'error'; localKey: string | null; userMsgId: string | null; awaitingAssistantIdFromExport: true; reason: string }
+    > {
         if (!sessionId) {
-            return { status: 'skip', reason: 'missing-session' };
+            return { status: 'pending', localKey: null, userMsgId: null, awaitingAssistantIdFromExport: true, reason: 'missing-session' };
         }
         const state = this.turnStateBySession.get(sessionId);
         if (!state) {
-            this.logUiDebug(`[DBG_EXPORT_SKIP] session=${sessionId} reason=no-turn-state`);
-            return { status: 'skip', reason: 'no-turn-state' };
+            this.logUiDebug(`[DBG_EXPORT_PENDING] session=${sessionId} reason=no-turn-state`);
+            return { status: 'pending', localKey: null, userMsgId: null, awaitingAssistantIdFromExport: true, reason: 'no-turn-state' };
         }
         if (state.exportInFlight) {
-            this.logUiDebug(`[DBG_EXPORT_SKIP] session=${sessionId} reason=in-flight`);
-            return { status: 'skip', reason: 'in-flight' };
-        }
-        if (state.exportResolved) {
-            this.logUiDebug(`[DBG_EXPORT_SKIP] session=${sessionId} reason=already-resolved`);
-            return { status: 'skip', reason: 'already-resolved' };
-        }
-        const assistantMsgId = state.assistantMsgId;
-        if (!assistantMsgId || !assistantMsgId.startsWith('msg_')) {
-            this.logUiDebug(`[DBG_EXPORT_SKIP] session=${sessionId} reason=missing-assistantMsgId`);
-            return { status: 'skip', reason: 'missing-assistantMsgId' };
-        }
-        const localKey = state.pendingUserLocalKey;
-        if (!localKey || !localKey.startsWith('local-')) {
-            this.logUiDebug(`[DBG_EXPORT_SKIP] session=${sessionId} reason=missing-user-local`);
-            return { status: 'skip', reason: 'missing-user-local' };
+            this.logUiDebug(`[DBG_EXPORT_PENDING] session=${sessionId} reason=in-flight`);
+            return { status: 'pending', localKey: state.pendingUserLocalKey || null, userMsgId: state.resolvedUserMsgId || null, awaitingAssistantIdFromExport: true, reason: 'in-flight' };
         }
 
-        this.logUiDebug(`[DBG_EXPORT_RESOLVE] session=${sessionId} assistantMsgId=${assistantMsgId} userLocal=${localKey}`);
+        const assistantMsgId = state.assistantMsgId;
+        const localKey = state.pendingUserLocalKey || null;
+
+        if (!assistantMsgId || !assistantMsgId.startsWith('msg_')) {
+            this.logUiDebug(`[DBG_EXPORT_PENDING] session=${sessionId} reason=missing-assistantMsgId`);
+            return { status: 'pending', localKey, userMsgId: state.resolvedUserMsgId || null, awaitingAssistantIdFromExport: true, reason: 'missing-assistantMsgId' };
+        }
+
+        this.logUiDebug(`[DBG_EXPORT_RESOLVE] session=${sessionId} assistantMsgId=${assistantMsgId} userLocal=${localKey || 'null'}`);
         state.exportInFlight = true;
 
         try {
@@ -214,32 +287,73 @@ export class OpenCodeClient {
             const rawMessages = Array.isArray(exportData?.messages) ? exportData.messages : [];
             const assistantMatches = rawMessages.filter((message: any) =>
                 message?.info?.id === assistantMsgId &&
-                message?.info?.role === 'assistant' &&
-                message?.info?.sessionID === sessionId
+                message?.info?.role === 'assistant'
             );
 
             if (assistantMatches.length !== 1) {
-                this.logUiDebug(`[DBG_EXPORT_FOUND] assistantMatches=${assistantMatches.length} parentID=null userExists=false`);
-                return { status: 'skip', reason: 'assistant-match-count' };
+                const tail = rawMessages.slice(-5).map((message: any) => {
+                    const id = message?.info?.id || 'null';
+                    const role = message?.info?.role || 'null';
+                    const parentID = message?.info?.parentID || 'null';
+                    const finish = message?.info?.finish || 'null';
+                    return `{id=${id} role=${role} parentID=${parentID} finish=${finish}}`;
+                });
+                this.logUiDebug(`[DBG_EXPORT_FOUND] assistantMatches=${assistantMatches.length} parentID=null tail=${tail.join(' ')}`);
+                return { status: 'pending', localKey, userMsgId: state.resolvedUserMsgId || null, awaitingAssistantIdFromExport: true, reason: 'assistant-match-count' };
             }
 
             const parentId = assistantMatches[0]?.info?.parentID;
-            const userMsgId = typeof parentId === 'string' ? parentId : '';
-            const userExists = rawMessages.some((message: any) =>
-                message?.info?.id === userMsgId && message?.info?.role === 'user'
-            );
-            this.logUiDebug(`[DBG_EXPORT_FOUND] assistantMatches=1 parentID=${userMsgId || 'null'} userExists=${userExists}`);
+            const userMsgId = typeof parentId === 'string' ? parentId : null;
+            this.logUiDebug(`[DBG_EXPORT_FOUND] assistantMatches=1 parentID=${userMsgId || 'null'}`);
 
-            if (!userMsgId.startsWith('msg_') || !userExists) {
-                return { status: 'skip', reason: 'invalid-user-parent' };
+            if (!userMsgId || !userMsgId.startsWith('msg_')) {
+                return { status: 'pending', localKey, userMsgId: null, awaitingAssistantIdFromExport: true, reason: 'invalid-user-parent' };
+            }
+
+            if (state.resolvedUserMsgId && state.resolvedUserMsgId !== userMsgId) {
+                this.logUiDebug(`[DBG_EXPORT_STALE] session=${sessionId} resolvedUserMsgId=${state.resolvedUserMsgId} newParentID=${userMsgId} assistantMsgId=${assistantMsgId}`);
+                return { status: 'pending', localKey, userMsgId: state.resolvedUserMsgId, awaitingAssistantIdFromExport: true, reason: 'stale-parent-mismatch' };
+            }
+
+            state.resolvedUserMsgId = userMsgId;
+
+            const resolved = this.resolveFinalAssistantFromExport(exportData, userMsgId);
+            this.logUiDebug(`[DBG_EXPORT_FINAL] userMsgId=${resolved.userMsgId} assistantMsgIdsAll=[${resolved.assistantMsgIdsAll.join(', ')}] chosen=${resolved.assistantMsgId || 'null'} finish=${resolved.chosenFinish || 'null'} completed=${resolved.chosenTimeCompleted ?? 'null'} created=${resolved.chosenTimeCreated ?? 'null'}`);
+
+            if (!resolved.assistantMsgIdsAll.length) {
+                const tail = rawMessages.slice(-5).map((message: any) => {
+                    const id = message?.info?.id || 'null';
+                    const role = message?.info?.role || 'null';
+                    const parentID = message?.info?.parentID || 'null';
+                    const finish = message?.info?.finish || 'null';
+                    return `{id=${id} role=${role} parentID=${parentID} finish=${finish}}`;
+                });
+                this.logUiDebug(`[DBG_EXPORT_EMPTY] userMsgId=${userMsgId} tail=${tail.join(' ')}`);
+            }
+
+            if (resolved.assistantMsgId && state.lastResolvedAssistantMsgId && resolved.assistantMsgId !== state.lastResolvedAssistantMsgId) {
+                this.logUiDebug(`[DBG_EXPORT_OVERWRITE] assistantId updated from ${state.lastResolvedAssistantMsgId} -> ${resolved.assistantMsgId}`);
             }
 
             state.exportResolved = true;
-            return { status: 'ok', localKey, userMsgId, assistantMsgId };
+            if (resolved.assistantMsgId) {
+                state.lastResolvedAssistantMsgId = resolved.assistantMsgId;
+            }
+
+            return {
+                status: 'ok',
+                localKey,
+                userMsgId,
+                assistantMsgId: resolved.assistantMsgId,
+                assistantMsgIdsAll: resolved.assistantMsgIdsAll,
+                chosenFinish: resolved.chosenFinish,
+                chosenTimeCompleted: resolved.chosenTimeCompleted,
+                chosenTimeCreated: resolved.chosenTimeCreated
+            };
         } catch (error) {
             const reason = `export-error:${String(error)}`;
-            this.logUiDebug(`[DBG_EXPORT_SKIP] session=${sessionId} reason=${reason}`);
-            return { status: 'error', reason };
+            this.logUiDebug(`[DBG_EXPORT_PENDING] session=${sessionId} reason=${reason}`);
+            return { status: 'error', localKey, userMsgId: state.resolvedUserMsgId || null, awaitingAssistantIdFromExport: true, reason };
         } finally {
             state.exportInFlight = false;
         }
@@ -1346,7 +1460,7 @@ export class OpenCodeClient {
             const sessions = JSON.parse(output);
             
             if (!Array.isArray(sessions)) {
-                OpenCodeClient.outputChannel.appendLine(`EXT: parseSessions error | expected array, got ${typeof sessions}`);
+                console.error(`parseSessions error: expected array, got ${typeof sessions}`);
                 return [];
             }
             
@@ -1380,7 +1494,7 @@ export class OpenCodeClient {
             return parsedSessions;
             
         } catch (error) {
-            OpenCodeClient.outputChannel.appendLine(`EXT: parseSessions error | ${String(error)}`);
+            console.error(`parseSessions error: ${String(error)}`);
             return [];
         }
     }

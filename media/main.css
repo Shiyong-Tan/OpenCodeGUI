@@ -978,4 +978,6 @@ select#mode-select {
     box-shadow: none;
     padding: 0;
     width: 100%;
+    max-width: 100%;
+    align-self: stretch;
 }

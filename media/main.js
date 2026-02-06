@@ -161,10 +161,13 @@ function createSessionState() {
     return {
         messagesById: new Map(),
         timeline: [],
+        messageIndexMap: new Map(),
         segmentsByNoticeKey: new Map(),
         hiddenSet: new Set(),
         thinkingId: null,
+        currentTurnAssistantKey: null,
         currentTurnAssistantMsgId: null,
+        pendingAssistantUpgrade: null,
         nextOrder: 0,
         serverIdToKey: new Map(),
         clientKeyToServerId: new Map(),
@@ -320,6 +323,13 @@ function upsertMessage(session, payload) {
  * Returns all msg_* messages in the range
  */
 function computeMemberMsgIdsFromTimeline(session, anchorMsgId, endMsgId) {
+    const inTimelineAnchor = session.timeline.includes(anchorMsgId);
+    const inTimelineEnd = endMsgId ? session.timeline.includes(endMsgId) : false;
+    vscode.postMessage({
+        type: 'ui-debug',
+        payload: ['MEMBERS_PRECHECK', `anchor=${anchorMsgId || 'null'}`, `end=${endMsgId || 'null'}`,
+            `inTimelineAnchor=${inTimelineAnchor}`, `inTimelineEnd=${inTimelineEnd}`, `timelineLen=${session.timeline.length}`]
+    });
     const anchorIdx = session.timeline.indexOf(anchorMsgId);
     const endIdx = session.timeline.indexOf(endMsgId);
     
@@ -771,6 +781,13 @@ function replaceKeyEverywhere(oldId, newId) {
         session.thinkingId = newId;
     }
 
+    if (session.currentTurnAssistantKey === oldId) {
+        session.currentTurnAssistantKey = newId;
+    }
+    if (typeof newId === 'string' && newId.startsWith('msg_')) {
+        session.currentTurnAssistantMsgId = newId;
+    }
+
     if (session.clientKeyToServerId?.get(oldId) === newId) {
         session.clientKeyToServerId.delete(oldId);
     }
@@ -1103,26 +1120,75 @@ function attemptAssistantUpgrade(sessionId, payload, source) {
         vscode.postMessage({ type: 'ui-debug', payload: ['assistant.upgrade', `tmpKey=${tmpKey || 'null'} msgId=${assistantMsgId || 'null'} replaced=false reason=session-mismatch`] });
         return;
     }
-    if (typeof tmpKey !== 'string' || typeof assistantMsgId !== 'string') {
-        vscode.postMessage({ type: 'ui-debug', payload: ['assistant.upgrade', `tmpKey=${tmpKey || 'null'} msgId=${assistantMsgId || 'null'} replaced=false reason=missing-fields`] });
-        return;
-    }
-    if (!tmpKey.startsWith('tmp:') || !assistantMsgId.startsWith('msg_')) {
-        vscode.postMessage({ type: 'ui-debug', payload: ['assistant.upgrade', `tmpKey=${tmpKey} msgId=${assistantMsgId} replaced=false reason=bad-prefix`] });
+    if (typeof assistantMsgId !== 'string' || !assistantMsgId.startsWith('msg_')) {
+        vscode.postMessage({ type: 'ui-debug', payload: ['assistant.upgrade', `tmpKey=${tmpKey || 'null'} msgId=${assistantMsgId || 'null'} replaced=false reason=missing-or-bad-assistantMsgId`] });
         return;
     }
     const session = getSessionState(payloadSession);
     if (!session) {
-        vscode.postMessage({ type: 'ui-debug', payload: ['assistant.upgrade', `tmpKey=${tmpKey} msgId=${assistantMsgId} replaced=false reason=no-session`] });
+        vscode.postMessage({ type: 'ui-debug', payload: ['assistant.upgrade', `tmpKey=${tmpKey || 'null'} msgId=${assistantMsgId} replaced=false reason=no-session`] });
         return;
     }
-    const hasTmp = session.messagesById.has(tmpKey) || session.timeline.includes(tmpKey);
-    if (!hasTmp) {
-        vscode.postMessage({ type: 'ui-debug', payload: ['assistant.upgrade', `tmpKey=${tmpKey} msgId=${assistantMsgId} replaced=false reason=already-upgraded`] });
-        return;
+
+    const resolveLastAssistantKey = () => {
+        for (let i = session.timeline.length - 1; i >= 0; i--) {
+            const id = session.timeline[i];
+            const msg = session.messagesById.get(id);
+            if (msg?.role === 'assistant') return id;
+        }
+        return null;
+    };
+
+    const currentKey = session.currentTurnAssistantKey || tmpKey || resolveLastAssistantKey();
+    const newKey = assistantMsgId;
+
+    vscode.postMessage({
+        type: 'ui-debug',
+        payload: ['ASSIST_UPGRADE_MAP', `mapExists=${Boolean(session.messageIndexMap)}`, `hasType=${typeof session.messageIndexMap?.has}`, `hasNewKey=${session.messageIndexMap?.has?.(newKey)}`]
+    });
+
+    const getKeyIndex = (key) => {
+        if (typeof key !== 'string' || !key.length) return null;
+        if (session.messageIndexMap?.has(key)) return session.messageIndexMap.get(key);
+        if (key.startsWith('tmp:') || key.startsWith('local-')) return -1;
+        return null;
+    };
+
+    const curIndex = getKeyIndex(currentKey);
+    const newIndex = getKeyIndex(newKey);
+    let replaced = false;
+    let reason = 'no-change';
+
+    if (!currentKey) {
+        session.currentTurnAssistantKey = newKey;
+        session.currentTurnAssistantMsgId = newKey;
+        reason = 'set-current-only';
+    } else if (currentKey === newKey) {
+        reason = 'already-current';
+    } else if (typeof newIndex === 'number' && typeof curIndex !== 'number') {
+        replaceKeyEverywhere(currentKey, newKey);
+        replaced = true;
+        reason = 'new-index-known';
+    } else if (typeof newIndex === 'number' && typeof curIndex === 'number' && newIndex > curIndex) {
+        replaceKeyEverywhere(currentKey, newKey);
+        replaced = true;
+        reason = 'higher-index';
+    } else if ((currentKey.startsWith('tmp:') || currentKey.startsWith('local-')) && typeof newIndex === 'number') {
+        replaceKeyEverywhere(currentKey, newKey);
+        replaced = true;
+        reason = 'tmp-local-upgrade';
+    } else if (typeof newIndex === 'number' && curIndex === -1) {
+        replaceKeyEverywhere(currentKey, newKey);
+        replaced = true;
+        reason = 'tmp-local-index';
     }
-    replaceKeyEverywhere(tmpKey, assistantMsgId);
-    vscode.postMessage({ type: 'ui-debug', payload: ['assistant.upgrade', `tmpKey=${tmpKey} msgId=${assistantMsgId} replaced=true reason=ok`] });
+
+    const tail = formatTail(session.timeline, 2);
+    vscode.postMessage({
+        type: 'ui-debug',
+        payload: ['ASSIST_UPGRADE', `curKey=${currentKey || 'null'}`, `newKey=${newKey}`, `curIndex=${curIndex === null ? 'null' : curIndex}`,
+            `newIndex=${newIndex === null ? 'null' : newIndex}`, `replaced=${replaced}`, `reason=${reason}`, `tail=${tail}`]
+    });
 }
 
 const UNDO_TIMEOUT_MS = 10000;
@@ -2389,6 +2455,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     session.currentTurnAssistantMsgId = null;
+    session.currentTurnAssistantKey = null;
 
         if (!session.thinkingId) {
             const tempId = createTempAssistantId();
@@ -2399,6 +2466,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 meta: { isThinking: true, parentClientMessageId: payload.clientMessageId }
             });
             session.thinkingId = thinkingMsg.id;
+            session.currentTurnAssistantKey = thinkingMsg.id;
         }
 
         assertInvariants(sessionId, 'sendPrompt');
@@ -2420,10 +2488,22 @@ document.addEventListener('DOMContentLoaded', () => {
             registerMessageIdMapping(session, message.clientMessageId, backendId, 'assistantMessageMeta');
         }
 
-        let targetId = session.thinkingId;
+        if ((typeof message?.tmpKey === 'string') && (message.tmpKey.startsWith('tmp:') || message.tmpKey.startsWith('local-')) && (typeof msgId === 'string') && msgId.startsWith('msg_')) {
+            session.pendingAssistantUpgrade = {
+                tmpKey: message.tmpKey,
+                assistantMsgId: msgId,
+                source: 'assistantMessageMeta',
+                ts: Date.now()
+            };
+            vscode.postMessage({
+                type: 'ui-debug',
+                payload: ['[DBG_PENDING_UPGRADE_SET]', 'sessionId', sessionId, 'tmpKey', message.tmpKey, 'assistantMsgId', msgId, 'source', 'assistantMessageMeta']
+            });
+        }
 
         attemptAssistantUpgrade(sessionId, message, 'assistantMessageMeta');
-        targetId = session.thinkingId || targetId;
+
+        let targetId = session.currentTurnAssistantKey || session.thinkingId;
 
         if (!targetId && msgId && session.messagesById.has(msgId)) {
             targetId = msgId;
@@ -2468,10 +2548,24 @@ document.addEventListener('DOMContentLoaded', () => {
         session.currentTurnAssistantMsgId = msgId;
     }
 
-        let targetId = session.thinkingId;
+        if ((typeof message?.tmpKey === 'string') && (message.tmpKey.startsWith('tmp:') || message.tmpKey.startsWith('local-')) && (typeof msgId === 'string') && msgId.startsWith('msg_')) {
+            session.pendingAssistantUpgrade = {
+                tmpKey: message.tmpKey,
+                assistantMsgId: msgId,
+                source: 'chatChunk',
+                ts: Date.now()
+            };
+            vscode.postMessage({
+                type: 'ui-debug',
+                payload: ['[DBG_PENDING_UPGRADE_SET]', 'sessionId', sessionId, 'tmpKey', message.tmpKey, 'assistantMsgId', msgId, 'source', 'chatChunk']
+            });
+        }
 
-        attemptAssistantUpgrade(sessionId, message, 'chatChunk');
-        targetId = session.thinkingId || targetId;
+        if (msgId) {
+            attemptAssistantUpgrade(sessionId, message, 'chatChunk');
+        }
+
+        let targetId = session.currentTurnAssistantKey || session.thinkingId;
 
         if (!targetId && msgId && session.messagesById.has(msgId)) {
             targetId = msgId;
@@ -2496,7 +2590,7 @@ document.addEventListener('DOMContentLoaded', () => {
         assertInvariants(sessionId, 'chatChunk');
     }
 
-    function handleChatDone(sessionId) {
+    function handleChatDone(sessionId, message) {
         const session = getSessionState(sessionId);
         if (!session) return;
     if (session.thinkingId && session.messagesById.has(session.thinkingId)) {
@@ -2508,7 +2602,29 @@ document.addEventListener('DOMContentLoaded', () => {
         session.thinkingId = null;
         console.log('[Thinking] chatDone cleared pending');
     }
+    const resolvedFinal =
+        message?.lastAssistantMsgId ||
+        message?.assistantMsgId ||
+        message?.endMsgId ||
+        message?.endMessageId ||
+        null;
+
+    let replaced = false;
+    if (resolvedFinal && typeof resolvedFinal === 'string') {
+        const beforeKey = session.currentTurnAssistantKey;
+        attemptAssistantUpgrade(sessionId, { assistantMsgId: resolvedFinal }, 'chatDone');
+        replaced = beforeKey !== session.currentTurnAssistantKey && session.currentTurnAssistantKey === resolvedFinal;
+    }
+
+    const match = Boolean(resolvedFinal && session.currentTurnAssistantKey === resolvedFinal);
+    vscode.postMessage({
+        type: 'ui-debug',
+        payload: ['CHATDONE_FINAL', `curKey=${session.currentTurnAssistantKey || 'null'}`, `resolvedFinal=${resolvedFinal || 'null'}`,
+            `match=${match}`, `replaced=${replaced}`]
+    });
+
     session.currentTurnAssistantMsgId = null;
+    session.currentTurnAssistantKey = null;
     assertInvariants(sessionId, 'chatDone');
 }
 
@@ -3040,6 +3156,43 @@ window.addEventListener('message', (event) => {
                 if (!sessionId) break;
                 const session = getSessionState(sessionId);
                 const map = Array.isArray(message.map) ? message.map : [];
+                if (session) {
+                    session.messageIndexMap = new Map();
+                    for (const entry of map) {
+                        if (entry?.messageId && typeof entry.messageIndex === 'number') {
+                            session.messageIndexMap.set(entry.messageId, entry.messageIndex);
+                        }
+                    }
+                    vscode.postMessage({
+                        type: 'ui-debug',
+                        payload: ['[DBG_RECONCILE]', `messageIndexMap type=${typeof session.messageIndexMap}`, `hasType=${typeof session.messageIndexMap?.has}`, `isMap=${session.messageIndexMap instanceof Map}`]
+                    });
+                }
+                const pending = session?.pendingAssistantUpgrade || null;
+                const willTry = Boolean(
+                    session &&
+                    activeSessionId === sessionId &&
+                    pending &&
+                    session.messageIndexMap instanceof Map &&
+                    session.messageIndexMap.size > 0
+                );
+                const mapHasKey = Boolean(pending?.assistantMsgId && session?.messageIndexMap?.has?.(pending.assistantMsgId));
+                vscode.postMessage({
+                    type: 'ui-debug',
+                    payload: ['[DBG_PENDING_UPGRADE_TRY]', 'sessionId', sessionId, 'tmpKey', pending?.tmpKey || 'null', 'assistantMsgId', pending?.assistantMsgId || 'null', 'mapHasKey', mapHasKey, 'willTry', willTry]
+                });
+                if (willTry && pending) {
+                    attemptAssistantUpgrade(sessionId, {
+                        sessionId,
+                        tmpKey: pending.tmpKey,
+                        assistantMsgId: pending.assistantMsgId
+                    }, 'messageIndexMap');
+                    const didReplace = session.currentTurnAssistantKey === pending.assistantMsgId;
+                    if (didReplace) {
+                        session.pendingAssistantUpgrade = null;
+                        vscode.postMessage({ type: 'ui-debug', payload: ['[DBG_PENDING_UPGRADE_CLEAR]', 'sessionId', sessionId] });
+                    }
+                }
                 const sample = map.slice(0, 5).map((entry) => `${entry.messageId}:${entry.messageIndex}`);
                 let hasUser = false;
                 let hasAssistant = false;
@@ -3054,6 +3207,13 @@ window.addEventListener('message', (event) => {
                     type: 'ui-debug',
                     payload: ['[DBG_RECONCILE]', `messageIndexMap size=${map.length} first=[${sample.join(', ')}] hasUser=${hasUser} hasAssistant=${hasAssistant}`]
                 });
+                if (session) {
+                    const storedSample = Array.from(session.messageIndexMap.entries()).slice(0, 3).map(([id, idx]) => `${id}:${idx}`);
+                    vscode.postMessage({
+                        type: 'ui-debug',
+                        payload: ['[DBG_RECONCILE]', `storedMap size=${session.messageIndexMap.size} first=[${storedSample.join(', ')}]`]
+                    });
+                }
                 break;
             }
             case 'retryReconcile': {
@@ -3095,7 +3255,7 @@ window.addEventListener('message', (event) => {
                     const tail = formatTail(session.timeline);
                     vscode.postMessage({ type: 'ui-debug', payload: ['[DBG_CHATDONE]', `timelineTail=${tail}`] });
                 }
-                handleChatDone(sessionId);
+                handleChatDone(sessionId, message);
                 window.__oc?.renderFromState?.();
                 scrollToBottom();
                 setBusy(false);
@@ -3115,25 +3275,72 @@ window.addEventListener('message', (event) => {
                 }
                 const localKey = message?.localKey;
                 const userMsgId = message?.userMsgId;
-                const localMsg = session.messagesById.get(localKey);
-                if (!localMsg || !session.timeline.includes(localKey)) {
-                    vscode.postMessage({ type: 'ui-debug', payload: ['user.upgrade', `user.upgrade: localKey=${localKey || 'null'} msgId=${userMsgId || 'null'} replaced=false reason=missing-local`] });
+                const assistantMsgId = message?.assistantMsgId || null;
+                const assistantMsgIdsAll = Array.isArray(message?.assistantMsgIdsAll) ? message.assistantMsgIdsAll : [];
+                const chosenFinish = message?.chosenFinish || null;
+                const chosenTimeCompleted = message?.chosenTimeCompleted ?? null;
+                const chosenTimeCreated = message?.chosenTimeCreated ?? null;
+                const awaitingAssistantIdFromExport = Boolean(message?.awaitingAssistantIdFromExport);
+
+                let targetKey = null;
+                if (typeof localKey === 'string' && localKey.length) {
+                    targetKey = localKey;
+                } else if (typeof userMsgId === 'string' && userMsgId.length) {
+                    targetKey = userMsgId;
+                }
+
+                if (assistantMsgIdsAll.length || assistantMsgId) {
+                    vscode.postMessage({
+                        type: 'ui-debug',
+                        payload: ['[DBG_EXPORT_BIND]', `userMsgId=${userMsgId || 'null'}`, `assistantMsgIdsAll=[${assistantMsgIdsAll.join(', ')}]`,
+                            `chosen=${assistantMsgId || 'null'}`, `finish=${chosenFinish || 'null'}`, `completed=${chosenTimeCompleted ?? 'null'}`, `created=${chosenTimeCreated ?? 'null'}`]
+                    });
+                }
+
+                if (!targetKey) {
+                    vscode.postMessage({ type: 'ui-debug', payload: ['user.upgrade', 'drop-no-target', `localKey=${localKey || 'null'}`, `userMsgId=${userMsgId || 'null'}`] });
+                    if (awaitingAssistantIdFromExport) {
+                        window.__oc?.renderFromState?.();
+                    }
                     break;
                 }
-                if (localMsg.role !== 'user') {
-                    vscode.postMessage({ type: 'ui-debug', payload: ['user.upgrade', `user.upgrade: localKey=${localKey || 'null'} msgId=${userMsgId || 'null'} replaced=false reason=local-not-user`] });
-                    break;
+
+                const targetMsg = session.messagesById.get(targetKey);
+                if (targetMsg && targetMsg.role === 'user') {
+                    const prevAssistantId = targetMsg.meta?.assistantId || null;
+                    if (assistantMsgId && prevAssistantId && prevAssistantId !== assistantMsgId) {
+                        vscode.postMessage({ type: 'ui-debug', payload: ['assistantId.updated', `from=${prevAssistantId}`, `to=${assistantMsgId}`] });
+                    }
+                    targetMsg.meta = {
+                        ...targetMsg.meta,
+                        assistantId: assistantMsgId || prevAssistantId || null,
+                        awaitingAssistantIdFromExport: awaitingAssistantIdFromExport || !assistantMsgId
+                    };
                 }
-                const existing = session.messagesById.get(userMsgId);
-                if (existing && existing.role !== 'user') {
-                    vscode.postMessage({ type: 'ui-debug', payload: ['user.upgrade', `user.upgrade: localKey=${localKey || 'null'} msgId=${userMsgId || 'null'} replaced=false reason=collision-nonuser`] });
-                    break;
+
+                if (typeof localKey === 'string' && localKey.length) {
+                    const localMsg = session.messagesById.get(localKey);
+                    if (!localMsg || !session.timeline.includes(localKey)) {
+                        vscode.postMessage({ type: 'ui-debug', payload: ['user.upgrade', `user.upgrade: localKey=${localKey || 'null'} msgId=${userMsgId || 'null'} replaced=false reason=missing-local`] });
+                    } else if (localMsg.role !== 'user') {
+                        vscode.postMessage({ type: 'ui-debug', payload: ['user.upgrade', `user.upgrade: localKey=${localKey || 'null'} msgId=${userMsgId || 'null'} replaced=false reason=local-not-user`] });
+                    } else {
+                        const existing = session.messagesById.get(userMsgId);
+                        if (existing && existing.role !== 'user') {
+                            vscode.postMessage({ type: 'ui-debug', payload: ['user.upgrade', `user.upgrade: localKey=${localKey || 'null'} msgId=${userMsgId || 'null'} replaced=false reason=collision-nonuser`] });
+                        } else {
+                            replaceKeyEverywhere(localKey, userMsgId);
+                            vscode.postMessage({ type: 'ui-debug', payload: ['user.upgrade', `user.upgrade: localKey=${localKey || 'null'} msgId=${userMsgId || 'null'} replaced=true reason=ok`] });
+                            logTimelineSnapshot('user.upgrade', session.timeline, 'expectSize=2');
+                            const counts = timelineCounts(session.timeline);
+                            vscode.postMessage({ type: 'ui-debug', payload: ['user.upgrade.accept', `timelineSize=${session.timeline.length} expect=2 counts msg=${counts.msg} tmp=${counts.tmp} local=${counts.local}`] });
+                        }
+                    }
                 }
-                replaceKeyEverywhere(localKey, userMsgId);
-                vscode.postMessage({ type: 'ui-debug', payload: ['user.upgrade', `user.upgrade: localKey=${localKey || 'null'} msgId=${userMsgId || 'null'} replaced=true reason=ok`] });
-                logTimelineSnapshot('user.upgrade', session.timeline, 'expectSize=2');
-                const counts = timelineCounts(session.timeline);
-                vscode.postMessage({ type: 'ui-debug', payload: ['user.upgrade.accept', `timelineSize=${session.timeline.length} expect=2 counts msg=${counts.msg} tmp=${counts.tmp} local=${counts.local}`] });
+
+                if (assistantMsgId && session.pendingAssistantUpgrade?.tmpKey) {
+                    session.pendingAssistantUpgrade.assistantMsgId = assistantMsgId;
+                }
                 
                 // Also upgrade the assistant message if provided
                 attemptAssistantUpgrade(sessionId, message, 'userMessageUpgrade');
@@ -3176,7 +3383,7 @@ window.addEventListener('message', (event) => {
                         });
                     }
                 }
-                handleChatDone(sessionId);
+                handleChatDone(sessionId, message);
                 window.__oc?.renderFromState?.();
                 scrollToBottom();
                 setBusy(false);
