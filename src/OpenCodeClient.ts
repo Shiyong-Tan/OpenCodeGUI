@@ -80,6 +80,13 @@ type PatchOp = {
     files: FileChange[];
 };
 
+type TurnState = {
+    pendingUserLocalKey?: string;
+    assistantMsgId?: string;
+    exportInFlight: boolean;
+    exportResolved: boolean;
+};
+
 type RevertedSegment = {
     isActive: boolean;
     discarded: boolean;
@@ -111,6 +118,7 @@ export class OpenCodeClient {
     private revertedSegment?: RevertedSegment;
     private dmp = new diff_match_patch();
     private uiDebugChannel?: vscode.OutputChannel;
+    private turnStateBySession = new Map<string, TurnState>();
 
     public resetSessionState(): void {
         this.currentSessionId = undefined;
@@ -123,6 +131,7 @@ export class OpenCodeClient {
         this.patchOpsByMessageId.clear();
         this.blobStore.clear();
         this.revertedSegment = undefined;
+        this.turnStateBySession.clear();
     }
 
     constructor() {}
@@ -134,6 +143,105 @@ export class OpenCodeClient {
     private logUiDebug(message: string): void {
         if (this.uiDebugChannel) {
             this.uiDebugChannel.appendLine(message);
+        }
+    }
+
+    public startTurn(sessionId: string, pendingUserLocalKey: string): void {
+        if (!sessionId) return;
+        this.turnStateBySession.set(sessionId, {
+            pendingUserLocalKey,
+            assistantMsgId: undefined,
+            exportInFlight: false,
+            exportResolved: false
+        });
+        this.logUiDebug(`[DBG_TURN_START] session=${sessionId} userLocal=${pendingUserLocalKey || 'null'}`);
+    }
+
+    public finishTurn(sessionId: string): void {
+        if (!sessionId) return;
+        this.turnStateBySession.delete(sessionId);
+        this.logUiDebug(`[DBG_TURN_END] session=${sessionId}`);
+    }
+
+    public recordAssistantMsgId(sessionId: string, assistantMsgId: string): void {
+        if (!sessionId || !assistantMsgId) return;
+        const existing = this.turnStateBySession.get(sessionId);
+        if (existing) {
+            existing.assistantMsgId = assistantMsgId;
+            return;
+        }
+        this.turnStateBySession.set(sessionId, {
+            pendingUserLocalKey: undefined,
+            assistantMsgId,
+            exportInFlight: false,
+            exportResolved: false
+        });
+    }
+
+    public async resolveUserMessageUpgrade(sessionId: string): Promise<{ status: 'ok'; localKey: string; userMsgId: string; assistantMsgId: string } | { status: 'skip'; reason: string } | { status: 'error'; reason: string }> {
+        if (!sessionId) {
+            return { status: 'skip', reason: 'missing-session' };
+        }
+        const state = this.turnStateBySession.get(sessionId);
+        if (!state) {
+            this.logUiDebug(`[DBG_EXPORT_SKIP] session=${sessionId} reason=no-turn-state`);
+            return { status: 'skip', reason: 'no-turn-state' };
+        }
+        if (state.exportInFlight) {
+            this.logUiDebug(`[DBG_EXPORT_SKIP] session=${sessionId} reason=in-flight`);
+            return { status: 'skip', reason: 'in-flight' };
+        }
+        if (state.exportResolved) {
+            this.logUiDebug(`[DBG_EXPORT_SKIP] session=${sessionId} reason=already-resolved`);
+            return { status: 'skip', reason: 'already-resolved' };
+        }
+        const assistantMsgId = state.assistantMsgId;
+        if (!assistantMsgId || !assistantMsgId.startsWith('msg_')) {
+            this.logUiDebug(`[DBG_EXPORT_SKIP] session=${sessionId} reason=missing-assistantMsgId`);
+            return { status: 'skip', reason: 'missing-assistantMsgId' };
+        }
+        const localKey = state.pendingUserLocalKey;
+        if (!localKey || !localKey.startsWith('local-')) {
+            this.logUiDebug(`[DBG_EXPORT_SKIP] session=${sessionId} reason=missing-user-local`);
+            return { status: 'skip', reason: 'missing-user-local' };
+        }
+
+        this.logUiDebug(`[DBG_EXPORT_RESOLVE] session=${sessionId} assistantMsgId=${assistantMsgId} userLocal=${localKey}`);
+        state.exportInFlight = true;
+
+        try {
+            const exportData = await this.exportSession(sessionId);
+            const rawMessages = Array.isArray(exportData?.messages) ? exportData.messages : [];
+            const assistantMatches = rawMessages.filter((message: any) =>
+                message?.info?.id === assistantMsgId &&
+                message?.info?.role === 'assistant' &&
+                message?.info?.sessionID === sessionId
+            );
+
+            if (assistantMatches.length !== 1) {
+                this.logUiDebug(`[DBG_EXPORT_FOUND] assistantMatches=${assistantMatches.length} parentID=null userExists=false`);
+                return { status: 'skip', reason: 'assistant-match-count' };
+            }
+
+            const parentId = assistantMatches[0]?.info?.parentID;
+            const userMsgId = typeof parentId === 'string' ? parentId : '';
+            const userExists = rawMessages.some((message: any) =>
+                message?.info?.id === userMsgId && message?.info?.role === 'user'
+            );
+            this.logUiDebug(`[DBG_EXPORT_FOUND] assistantMatches=1 parentID=${userMsgId || 'null'} userExists=${userExists}`);
+
+            if (!userMsgId.startsWith('msg_') || !userExists) {
+                return { status: 'skip', reason: 'invalid-user-parent' };
+            }
+
+            state.exportResolved = true;
+            return { status: 'ok', localKey, userMsgId, assistantMsgId };
+        } catch (error) {
+            const reason = `export-error:${String(error)}`;
+            this.logUiDebug(`[DBG_EXPORT_SKIP] session=${sessionId} reason=${reason}`);
+            return { status: 'error', reason };
+        } finally {
+            state.exportInFlight = false;
         }
     }
 
@@ -253,6 +361,10 @@ export class OpenCodeClient {
                     const assistantMsgId = typeof parsed.part?.messageID === 'string' ? parsed.part.messageID : undefined;
                     if (assistantMsgId || messageId) {
                         this.logUiDebug(`[DBG_STDOUT_ID] type=${parsed.type || 'unknown'} session=${sessionId || 'null'} tmpKey=null messageID=${assistantMsgId || messageId || 'null'}`);
+                    }
+                    const resolvedSessionId = sessionId || this.currentSessionId;
+                    if (assistantMsgId && resolvedSessionId) {
+                        this.recordAssistantMsgId(resolvedSessionId, assistantMsgId);
                     }
                     if (messageId && onEvent) {
                         onEvent({ type: 'message', text: messageId, sessionId });
@@ -537,7 +649,7 @@ export class OpenCodeClient {
     }
 
     private registerMessageId(messageId: string): number {
-        if (!messageId || !messageId.startsWith('msg_')) {
+        if (!messageId || (!messageId.startsWith('msg_') && !messageId.startsWith('local-'))) {
             return this.messageIndexById.get(messageId) ?? -1;
         }
         const existing = this.messageIndexById.get(messageId);
@@ -588,6 +700,27 @@ export class OpenCodeClient {
             this.patchOpsByMessageId.delete(existingId);
         }
         this.messageIndexById.delete(existingId);
+    }
+
+    public upgradeMessageId(localKey: string, serverMsgId: string): boolean {
+        const existingIndex = this.messageIndexById.get(localKey);
+        if (existingIndex === undefined) return false;
+        if (this.messageIndexById.has(serverMsgId)) return false;
+
+        this.messageIndexById.set(serverMsgId, existingIndex);
+        const orderIndex = this.messageOrder.indexOf(localKey);
+        if (orderIndex !== -1) {
+            this.messageOrder[orderIndex] = serverMsgId;
+        }
+        if (this.patchOpsByMessageId.has(localKey) && !this.patchOpsByMessageId.has(serverMsgId)) {
+            const list = this.patchOpsByMessageId.get(localKey);
+            if (list) {
+                this.patchOpsByMessageId.set(serverMsgId, list);
+            }
+            this.patchOpsByMessageId.delete(localKey);
+        }
+        this.messageIndexById.delete(localKey);
+        return true;
     }
 
     private hashText(text: string): string {
@@ -851,8 +984,10 @@ export class OpenCodeClient {
         const force = options?.force === true;
         const startIndex = this.messageIndexById.get(startMessageId);
         if (startIndex === undefined) {
+            this.logUiDebug(`EXT: undo.anchor.missing | startMessageId | ${startMessageId || 'null'} | startsWithMsg | ${String(startMessageId?.startsWith('msg_'))}`);
             throw new Error('Unknown message for undo.');
         }
+        this.logUiDebug(`EXT: undo.anchor.ok | startMessageId | ${startMessageId} | startIndex | ${startIndex}`);
         const endIndex = this.messageOrder.length ? this.messageOrder.length - 1 : startIndex;
         OpenCodeClient.outputChannel.appendLine(`[UNDO] startId=${startMessageId} startIndex=${startIndex} endIndex=${endIndex}`);
         const sessionId = this.currentSessionId;
@@ -989,6 +1124,66 @@ export class OpenCodeClient {
         segment.isActive = false;
         segment.collapsed = false;
         this.revertedSegment = segment;
+
+        return { conflicts, touchedFiles, applied: true };
+    }
+
+    public async restoreFromMessage(startMessageId: string, endMessageId?: string): Promise<{ conflicts: ConflictDetail[]; touchedFiles: string[]; applied: boolean }> {
+        const startIndex = this.messageIndexById.get(startMessageId);
+        if (startIndex === undefined) {
+            throw new Error('Unknown message for restore.');
+        }
+        const endIndex = endMessageId ? this.messageIndexById.get(endMessageId) ?? (this.messageOrder.length ? this.messageOrder.length - 1 : startIndex) : (this.messageOrder.length ? this.messageOrder.length - 1 : startIndex);
+        const sessionId = this.currentSessionId;
+        const touchedFiles: string[] = [];
+        if (!sessionId) {
+            return { conflicts: [], touchedFiles, applied: false };
+        }
+
+        const messageIds = this.getMessageIdsInRange(startIndex, endIndex);
+        const snapshots = [] as Array<{ messageId: string; messageIndex: number; files: Array<{ absPath: string; relPath: string; existsBefore: boolean; existsAfter: boolean; beforeText: string; afterText: string; }> }>;
+        for (const id of messageIds) {
+            const snapshot = await this.loadMessageSnapshot(sessionId, id);
+            if (snapshot) snapshots.push(snapshot);
+        }
+
+        const conflicts: ConflictDetail[] = [];
+        const expected = new Map<string, { exists: boolean; text: string }>();
+        const orderedSnapshots = snapshots.slice().sort((a, b) => a.messageIndex - b.messageIndex);
+        for (const snapshot of orderedSnapshots) {
+            for (const file of snapshot.files) {
+                if (!expected.has(file.absPath)) {
+                    expected.set(file.absPath, {
+                        exists: file.existsBefore,
+                        text: file.existsBefore ? file.beforeText : ''
+                    });
+                }
+            }
+        }
+        for (const [filePath, expectation] of expected.entries()) {
+            const current = await this.readCurrentFileState(filePath);
+            const existsMismatch = current.exists !== expectation.exists;
+            const contentMismatch = expectation.exists && current.exists && current.text !== expectation.text;
+            if (existsMismatch || contentMismatch) {
+                const diffText = this.buildConflictDiff(expectation.text, current.text);
+                conflicts.push({
+                    path: filePath,
+                    expectedExists: expectation.exists,
+                    currentExists: current.exists,
+                    diffText
+                });
+            }
+        }
+        if (conflicts.length) {
+            return { conflicts, touchedFiles, applied: false };
+        }
+
+        for (const snapshot of orderedSnapshots) {
+            for (const file of snapshot.files) {
+                await this.applyFileState(file.absPath, file.existsAfter, file.afterText);
+                touchedFiles.push(file.absPath);
+            }
+        }
 
         return { conflicts, touchedFiles, applied: true };
     }

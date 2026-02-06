@@ -41,25 +41,19 @@ type PersistedRevertedSegment = {
     updatedAt: number;
 };
 
+/**
+ * Simplified SegmentState interface (V2)
+ * Only tracks essential data, no state/anchor/resolved complexity
+ */
 interface SegmentState {
-    noticeKey: string;
+    noticeKey: string;       // Primary key: "system:undo:msg_xxx"
+    anchorMsgId: string;     // Must start with msg_
+    endMsgId: string;        // Must start with msg_
+    memberMsgIds: string[];  // All msg_* in [anchor, end] interval
+    applied?: boolean;
+    restoreAllowed?: boolean;
+    collapsed?: boolean;
     createdAt: number;
-    state: 'pending' | 'active';
-    anchorMsgId?: string;
-    anchor: {
-        msgId?: string;
-    };
-    memberKeys?: string[];
-    members: {
-        serverIds: string[];
-        localKeys: string[];
-    };
-    resolved?: {
-        memberKeys: string[];
-        anchorMsgId?: string;
-        anchorOrder?: number;
-        hiddenSet: string[];
-    };
     updatedAt: number;
 }
 
@@ -82,6 +76,41 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private undoSegmentsBySession: Map<string, Map<string, SegmentState>> = new Map();
     private readonly UNDO_SEGMENTS_KEY = 'opencode.undoSegmentsBySession.v1';
     private pendingAssistantTmpKeyBySession = new Map<string, string>();
+
+    private async ensureDir(dir: string): Promise<void> {
+        await fs.promises.mkdir(dir, { recursive: true });
+    }
+
+    private getSnapshotDir(): string {
+        return pathModule.join(this._context.globalStorageUri.fsPath, 'sessionSnapshots');
+    }
+
+    private getSnapshotFile(sessionId: string): string {
+        return pathModule.join(this.getSnapshotDir(), `${sessionId}.json`);
+    }
+
+    private async writeSnapshotAtomic(sessionId: string, payloadObj: unknown): Promise<number> {
+        const dir = this.getSnapshotDir();
+        await this.ensureDir(dir);
+        const filePath = this.getSnapshotFile(sessionId);
+        const tmpPath = `${filePath}.tmp`;
+        const text = JSON.stringify(payloadObj, null, 2);
+        await fs.promises.writeFile(tmpPath, text, 'utf-8');
+        await fs.promises.rename(tmpPath, filePath);
+        return Buffer.byteLength(text, 'utf-8');
+    }
+
+    private async readSnapshot(sessionId: string): Promise<{ obj: any; bytes: number } | null> {
+        const filePath = this.getSnapshotFile(sessionId);
+        if (!fs.existsSync(filePath)) return null;
+        const text = await fs.promises.readFile(filePath, 'utf-8');
+        return { obj: JSON.parse(text), bytes: Buffer.byteLength(text, 'utf-8') };
+    }
+
+    private extractLastLine(text: string): string {
+        const lines = String(text || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+        return lines.length ? lines[lines.length - 1] : '';
+    }
 
     constructor(
         private readonly _context: vscode.ExtensionContext,
@@ -132,27 +161,48 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const activeWebview = this._view?.webview || webviewView.webview;
             OpenCodeClient.outputChannel.appendLine(`EXT: recv | type | ${data?.type || 'unknown'} | requestId | ${data?.requestId || null} | currentWebviewId | ${this._webviewInstanceId || 'null'}`);
 
+            // Diagnostic logging for undoToMessage
+            if (data.type === 'undoToMessage') {
+                this.uiDebugChannel.appendLine(`[EXT][UNDO_ENTRY] type=${data.type} messageId=${data.messageId || 'NULL'} sessionId=${data.sessionId || 'NULL'} operationId=${data.operationId || 'NULL'} hasMessageId=${!!data.messageId}`);
+            }
+
             switch (data.type) {
                 case "webviewReady": {
                     // 更新 this._view 为最新实例
                     this._view = webviewView;
                     this._webviewInstanceId = data.webviewInstanceId;
+                    this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_1_RX] webviewReady | wvId=${this._webviewInstanceId}`);
+                    
                     const liveWebview = this._view?.webview;
                     if (liveWebview) {
+                        this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_2_START] calling sendInit()`);
                         await this.sendInit(liveWebview);
+                        this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_3_DONE] sendInit() complete, sending ack`);
+                        
                         liveWebview.postMessage({ type: 'webviewReadyAck', timestamp: Date.now(), webviewInstanceId: this._webviewInstanceId });
+                        this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_4_ACK] ack sent`);
                     }
                     OpenCodeClient.outputChannel.appendLine(`[EXT] webviewReady | id | ${this._webviewInstanceId}`);
                     break;
                 }
                 case "sendMessage": {
-                    if (!data.value) return;
+                    this.uiDebugChannel.appendLine(
+                        `[EXT][SEND_RX] sessionId=${this.currentSessionId || 'NULL'} ` +
+                        `hasValue=${Boolean(data.value)} valueLen=${data.value?.length || 0}`
+                    );
+                    
+                    if (!data.value) {
+                        this.uiDebugChannel.appendLine(`[EXT][SEND_DROP] reason=empty-value`);
+                        return;
+                    }
 
                     if (!this.currentSessionId) {
+                        this.uiDebugChannel.appendLine(`[EXT][SEND_CREATE_SESSION] reason=no-current`);
                         try {
                             const sessionInfo = await this.client.createSession();
                             this.currentSessionId = sessionInfo.id;
                             this.client.setSessionId(this.currentSessionId);
+                            this.uiDebugChannel.appendLine(`[EXT][SEND_SESSION_CREATED] id=${this.currentSessionId}`);
                             const liveWebview = this._view?.webview || activeWebview;
                             liveWebview.postMessage({
                                 type: 'sessionId',
@@ -160,26 +210,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                 sessionId: this.currentSessionId
                             });
                         } catch (error) {
-                        }
-                    }
-
-                    if (this.selectedMode === 'build' && this.client.getRevertedSegment()) {
-                        const segment = this.client.getRevertedSegment();
-                        if (segment) {
-                            segment.discarded = true;
-                            segment.isActive = true;
-                            segment.collapsed = true;
-                            this.client.setRevertedSegment(segment);
-                            this.revertedSegment = { conflicts: segment.conflicts || [], discarded: true };
-                            const liveWebview = this._view?.webview || activeWebview;
-                            liveWebview.postMessage({
-                                type: 'revertedSegmentDiscarded',
-                                segment: { ...segment, historySegments: this.revertedSegmentHistory },
-                                sessionId: this.currentSessionId
-                            });
-                            if (this.currentSessionId) {
-                                await this.persistRevertedSegment(this.currentSessionId, segment, segment.conflicts || [], true);
-                            }
+                            this.uiDebugChannel.appendLine(`[EXT][SEND_SESSION_CREATE_FAILED] err=${String(error)}`);
                         }
                     }
 
@@ -189,25 +220,23 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         return;
                     }
 
+                    this.uiDebugChannel.appendLine(`[EXT][SEND_START] sessionId=${this.currentSessionId} attachments=${data.attachments?.length || 0}`);
+
                     try {
                         const attachments = Array.isArray(data.attachments) ? data.attachments : [];
                         const userText = data.value as string;
                         const modelText = userText;
                         const clientMessageId = data.clientMessageId || `local-${Date.now()}`;
                         this.pendingClientMessageId = clientMessageId;
+                        if (this.currentSessionId) {
+                            this.client.startTurn(this.currentSessionId, clientMessageId);
+                        }
                         if (typeof data.tmpKey === 'string' && data.tmpKey.startsWith('tmp:') && this.currentSessionId) {
                             this.pendingAssistantTmpKeyBySession.set(this.currentSessionId, data.tmpKey);
                         }
 
                         const messageIndex = this.client.registerMessage(clientMessageId);
                         const liveWebview = this._view?.webview || activeWebview;
-                        liveWebview.postMessage({
-                            type: 'messageIdMap',
-                            clientMessageId,
-                            messageId: clientMessageId,
-                            messageIndex,
-                            sessionId: this.currentSessionId
-                        });
                         this.clientMessageIdMap.set(clientMessageId, clientMessageId);
 
                         const attachmentNames = attachments.map((item: string) => pathModule.basename(item));
@@ -253,6 +282,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                         OpenCodeClient.outputChannel.appendLine(`[BRIDGE] Chat done`);
                         liveWebview.postMessage({ type: 'chatDone', sessionId: this.currentSessionId });
+                        await this.resolvePendingUserUpgrade(this.currentSessionId, liveWebview);
+                        if (this.currentSessionId) {
+                            this.client.finishTurn(this.currentSessionId);
+                        }
                         this.postMessageIndexMap(liveWebview);
                         if (this.pendingClientMessageId) {
                             await this.handleAbortedMessage(this.pendingClientMessageId, liveWebview);
@@ -273,6 +306,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         vscode.window.showErrorMessage(`OpenCode Error: ${error}`);
                         this.postAddResponse(activeWebview, `Error: ${error}`);
                         activeWebview.postMessage({ type: 'chatDone', sessionId: this.currentSessionId });
+                        await this.resolvePendingUserUpgrade(this.currentSessionId, activeWebview);
+                        if (this.currentSessionId) {
+                            this.client.finishTurn(this.currentSessionId);
+                        }
                         if (this.pendingClientMessageId) {
                             await this.handleAbortedMessage(this.pendingClientMessageId, activeWebview);
                             this.pendingClientMessageId = undefined;
@@ -317,85 +354,101 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     this.pendingAssistantTmpKeyBySession.set(data.sessionId, data.tmpKey);
                     break;
                 }
-                case "undoSegmentCreated": {
-                    const sessionId = this.currentSessionId;
+                case "registerPendingUserLocal": {
+                    if (typeof data.sessionId !== 'string' || typeof data.localKey !== 'string') break;
+                    if (!data.localKey.startsWith('local-')) break;
+                    this.client.startTurn(data.sessionId, data.localKey);
+                    break;
+                }
+                case "undoSegmentUpsert": {
+                    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : this.currentSessionId;
                     if (!sessionId) {
-                        this.uiDebugChannel.appendLine(`EXT: segments persist skip | no currentSessionId`);
+                        this.uiDebugChannel.appendLine(`[EXT][SEG_UPSERT_SKIP] reason=missing-sessionId noticeKey=${typeof data.segment?.noticeKey === 'string' ? data.segment.noticeKey : 'null'}`);
                         break;
                     }
-                    const incomingMembers = Array.isArray(data.memberKeys) ? data.memberKeys : [];
-                    const anchorMsgId = typeof data.anchorMsgId === 'string'
-                        ? data.anchorMsgId
-                        : undefined;
-
-                    const allMsgIds = incomingMembers.every((id: string) => typeof id === 'string' && id.startsWith('msg_'));
-                    if (!anchorMsgId || !anchorMsgId.startsWith('msg_') || !allMsgIds) {
-                        this.uiDebugChannel.appendLine(`segment.persist blocked | noticeKey | ${data.noticeKey} | reason | invalid-msg-ids | anchorMsgId | ${anchorMsgId || 'null'}`);
+                    
+                    const seg = data.segment;
+                    if (!seg || typeof seg.noticeKey !== 'string') {
+                        this.uiDebugChannel.appendLine(`[EXT][SEG_UPSERT_SKIP] reason=invalid-segment noticeKey=${typeof seg?.noticeKey === 'string' ? seg.noticeKey : 'null'}`);
                         break;
                     }
-
-                    if (incomingMembers.length === 0) {
-                        this.uiDebugChannel.appendLine(`EXT: segments persist blocked | noticeKey | ${data.noticeKey} | reason | empty-memberKeys`);
+                    
+                    // Validate anchorMsgId
+                    if (!seg.anchorMsgId || !seg.anchorMsgId.startsWith('msg_')) {
+                        this.uiDebugChannel.appendLine(`[EXT][SEG_UPSERT_SKIP] reason=invalid-anchor anchorMsgId=${seg.anchorMsgId || 'null'} noticeKey=${seg.noticeKey}`);
                         break;
                     }
-
+                    
+                    // Filter memberMsgIds to only msg_*
+                    const memberMsgIds = Array.isArray(seg.memberMsgIds)
+                        ? seg.memberMsgIds.filter((id: string) => typeof id === 'string' && id.startsWith('msg_'))
+                        : [];
+                    
+                    // Get or create segment map for this session
                     let segMap = this.undoSegmentsBySession.get(sessionId);
                     if (!segMap) {
                         segMap = new Map<string, SegmentState>();
                         this.undoSegmentsBySession.set(sessionId, segMap);
                     }
+                    
+                    const beforeCount = segMap.size;
+                    this.uiDebugChannel.appendLine(
+                        `[EXT][SEG_UPSERT_RX] sessionId=${sessionId} noticeKey=${seg.noticeKey} ` +
+                        `anchor=${seg.anchorMsgId} end=${seg.endMsgId || seg.anchorMsgId} members=${memberMsgIds.length}`
+                    );
 
-                    const newState: SegmentState = {
-                        noticeKey: data.noticeKey,
-                        createdAt: Date.now(),
-                        state: 'pending',
-                        anchorMsgId: anchorMsgId,
-                        anchor: {
-                            msgId: anchorMsgId
-                        },
-                        memberKeys: incomingMembers,
-                        members: {
-                            serverIds: [],
-                            localKeys: []
-                        },
-                        resolved: data.anchorOrder !== undefined ? {
-                            memberKeys: [],
-                            anchorMsgId: anchorMsgId,
-                            anchorOrder: data.anchorOrder,
-                            hiddenSet: []
-                        } : undefined,
+                    // Create/update segment
+                    const segmentState: SegmentState = {
+                        noticeKey: seg.noticeKey,
+                        anchorMsgId: seg.anchorMsgId,
+                        endMsgId: seg.endMsgId || seg.anchorMsgId,
+                        memberMsgIds: memberMsgIds,
+                        applied: typeof seg.applied === 'boolean' ? seg.applied : undefined,
+                        restoreAllowed: typeof seg.restoreAllowed === 'boolean' ? seg.restoreAllowed : undefined,
+                        collapsed: typeof seg.collapsed === 'boolean' ? seg.collapsed : undefined,
+                        createdAt: segMap.get(seg.noticeKey)?.createdAt || Date.now(),
                         updatedAt: Date.now()
                     };
-
-                    segMap.set(data.noticeKey, newState);
-
+                    
+                    segMap.set(seg.noticeKey, segmentState);
+                    
+                    // Save to globalState
                     const toSave: Record<string, Record<string, SegmentState>> = {};
                     for (const [sid, sMap] of this.undoSegmentsBySession) {
                         const obj: Record<string, SegmentState> = {};
-                        for (const [nk, seg] of sMap) {
-                            obj[nk] = seg;
+                        for (const [nk, s] of sMap) {
+                            obj[nk] = s;
                         }
                         toSave[sid] = obj;
                     }
                     await this._context.globalState.update(this.UNDO_SEGMENTS_KEY, JSON.stringify(toSave));
-
-                    const memberList = incomingMembers.length <= 20
-                        ? `[${incomingMembers.join(', ')}]`
-                        : `[${incomingMembers.slice(0, 10).join(', ')}, ... , ${incomingMembers.slice(-10).join(', ')}]`;
-                    this.uiDebugChannel.appendLine(`[DBG_SEG_PERSIST] session=${sessionId} notice=${data.noticeKey} state=pending memberKeys=${memberList}`);
+                    
+                    this.uiDebugChannel.appendLine(
+                        `[EXT][SEG_UPSERT_SAVE] sessionId=${sessionId} before=${beforeCount} after=${segMap.size}`
+                    );
+                    this.uiDebugChannel.appendLine(
+                        `[EXT][SEG_SAVE] noticeKey=${seg.noticeKey} restoreAllowed=${segmentState.restoreAllowed === true}`
+                    );
                     break;
                 }
-                case "undoSegmentRemoved": {
-                    const sessionId = this.currentSessionId;
-                    if (!sessionId) break;
-                    const noticeKey = data.noticeKey;
-
+                case "undoSegmentRemove": {
+                    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : this.currentSessionId;
+                    const noticeKey = typeof data.noticeKey === 'string' ? data.noticeKey : '';
+                    
+                    if (!sessionId || !noticeKey) {
+                        this.uiDebugChannel.appendLine(
+                            `[EXT][SEG_REMOVE_DROP] sessionId=${sessionId || 'null'} noticeKey=${noticeKey || 'null'}`
+                        );
+                        break;
+                    }
+                    
                     const segMap = this.undoSegmentsBySession.get(sessionId);
-                    if (segMap) {
-                        const before = segMap.size;
-                        segMap.delete(noticeKey);
-                        this.undoSegmentsBySession.set(sessionId, segMap);
-
+                    const before = segMap?.size ?? 0;
+                    const deleted = segMap?.delete(noticeKey) ?? false;
+                    const after = segMap?.size ?? 0;
+                    
+                    if (deleted) {
+                        // Save to globalState
                         const toSave: Record<string, Record<string, SegmentState>> = {};
                         for (const [sid, sMap] of this.undoSegmentsBySession) {
                             const obj: Record<string, SegmentState> = {};
@@ -405,9 +458,48 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             toSave[sid] = obj;
                         }
                         await this._context.globalState.update(this.UNDO_SEGMENTS_KEY, JSON.stringify(toSave));
-
-                        this.uiDebugChannel.appendLine(`EXT: segments remove | sessionId | ${sessionId} | noticeKey | ${noticeKey} | before | ${before} | after | ${segMap.size}`);
                     }
+                    
+                    this.uiDebugChannel.appendLine(
+                        `[EXT][SEG_REMOVE_SAVE] sessionId=${sessionId} noticeKey=${noticeKey} ` +
+                        `deleted=${deleted} before=${before} after=${after}`
+                    );
+                    break;
+                }
+                case "undoSegmentDelete": {
+                    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : this.currentSessionId;
+                    const noticeKey = typeof data.noticeKey === 'string' ? data.noticeKey : '';
+                    if (!sessionId || !noticeKey) {
+                        this.uiDebugChannel.appendLine(
+                            `[EXT][SEG_DELETE_RX] sessionId=${sessionId || 'null'} noticeKey=${noticeKey || 'null'}`
+                        );
+                        break;
+                    }
+
+                    this.uiDebugChannel.appendLine(
+                        `[EXT][SEG_DELETE_RX] sessionId=${sessionId} noticeKey=${noticeKey}`
+                    );
+
+                    const segMap = this.undoSegmentsBySession.get(sessionId);
+                    const before = segMap?.size ?? 0;
+                    const deleted = segMap?.delete(noticeKey) ?? false;
+                    const after = segMap?.size ?? 0;
+
+                    if (deleted) {
+                        const toSave: Record<string, Record<string, SegmentState>> = {};
+                        for (const [sid, sMap] of this.undoSegmentsBySession) {
+                            const obj: Record<string, SegmentState> = {};
+                            for (const [nk, seg] of sMap) {
+                                obj[nk] = seg;
+                            }
+                            toSave[sid] = obj;
+                        }
+                        await this._context.globalState.update(this.UNDO_SEGMENTS_KEY, JSON.stringify(toSave));
+                    }
+
+                    this.uiDebugChannel.appendLine(
+                        `[EXT][SEG_DELETE_SAVE] sessionId=${sessionId} before=${before} after=${after}`
+                    );
                     break;
                 }
                 case "selectSession": {
@@ -420,7 +512,58 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         if (workspaceFolder) {
                             await this._context.globalState.update(`recentSession.${workspaceFolder}`, data.sessionId);
                         }
-                        const exportData = await this.client.exportSession(data.sessionId);
+                        const cwd = workspaceFolder || process.cwd();
+                        this.uiDebugChannel.appendLine(`[EXT][EXPORT_TRY] sessionId=${data.sessionId} cwd=${cwd} cmd="opencode export ${data.sessionId}"`);
+                        let exportResult: any = null;
+                        let normalized = { ok: false, data: null as any, stderrLastLine: '' };
+                        try {
+                            exportResult = await this.client.exportSession(data.sessionId);
+                            if (exportResult && typeof exportResult.code === 'number') {
+                                normalized.ok = exportResult.code === 0;
+                                normalized.stderrLastLine = this.extractLastLine(exportResult.stderr);
+                                normalized.data = exportResult.data ?? exportResult;
+                            } else {
+                                normalized.ok = true;
+                                normalized.data = exportResult;
+                            }
+                        } catch (err) {
+                            normalized.ok = false;
+                            normalized.stderrLastLine = this.extractLastLine(String(err));
+                        }
+
+                        if (!normalized.ok) {
+                            this.uiDebugChannel.appendLine(`[EXT][EXPORT_FAIL] sessionId=${data.sessionId} stderrLastLine=${normalized.stderrLastLine || 'null'}`);
+                            try {
+                                const snap = await this.readSnapshot(data.sessionId);
+                                if (snap?.obj?.sessionData) {
+                                    const payload = snap.obj.sessionData;
+                                    payload.meta = {
+                                        source: 'snapshot',
+                                        reason: 'export_failed',
+                                        stderrLastLine: normalized.stderrLastLine || ''
+                                    };
+                                    const liveWebview = this._view?.webview || activeWebview;
+                                    liveWebview.postMessage(payload);
+                                    this.uiDebugChannel.appendLine(`[EXT][SNAP_LOAD_OK] sessionId=${data.sessionId} file=${this.getSnapshotFile(data.sessionId)} bytes=${snap.bytes}`);
+                                    return;
+                                }
+                                this.uiDebugChannel.appendLine(`[EXT][SNAP_LOAD_MISS] sessionId=${data.sessionId} file=${this.getSnapshotFile(data.sessionId)}`);
+                            } catch (err) {
+                                this.uiDebugChannel.appendLine(`[EXT][SNAP_LOAD_FAIL] sessionId=${data.sessionId} err=${String(err)}`);
+                            }
+                            const liveWebview = this._view?.webview || activeWebview;
+                            liveWebview.postMessage({
+                                type: 'sessionLoadFailed',
+                                payload: {
+                                    sessionId: data.sessionId,
+                                    reason: 'export_failed_no_snapshot',
+                                    stderrLastLine: normalized.stderrLastLine || ''
+                                }
+                            });
+                            return;
+                        }
+
+                        const exportData = normalized.data;
                         const formatted = this.formatSession(exportData);
                         const liveWebview = this._view?.webview || activeWebview;
                         const persisted = await this.loadPersistedSegment(data.sessionId);
@@ -446,40 +589,42 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             });
                         }
                         const segMap = this.undoSegmentsBySession.get(data.sessionId);
-                        const segmentsArray = segMap ? Array.from(segMap.values()) : [];
-                        this.uiDebugChannel.appendLine(`EXT: sessionData send | sessionId | ${data.sessionId} | messages | ${formatted.messages.length} | segments | ${segmentsArray.length}`);
-                        const timelineMsgCount = formatted.messages.filter((m) => typeof m.id === 'string' && m.id.startsWith('msg_')).length;
-                        this.uiDebugChannel.appendLine(`sessionData.send | sessionId | ${data.sessionId} | messagesCount | ${formatted.messages.length} | timelineMsgCount | ${timelineMsgCount} | segmentsCount | ${segmentsArray.length}`);
+                        const segments = segMap ? Array.from(segMap.values()) : [];
 
-                        liveWebview.postMessage({
+                        this.uiDebugChannel.appendLine(
+                            `[EXT][SEG_HYDRATE_LOAD] sessionId=${data.sessionId} found=${segments.length} ` +
+                            `keys=[${(segMap ? Array.from(segMap.keys()) : []).join(', ')}]`
+                        );
+                        
+                        this.uiDebugChannel.appendLine(
+                            `[EXT][SEG_HYDRATE_SEND] sessionId=${data.sessionId} count=${segments.length} reason=selectSession`
+                        );
+                        
+                        const timelineMsgCount = formatted.messages.filter((m) => typeof m.id === 'string' && m.id.startsWith('msg_')).length;
+                        this.uiDebugChannel.appendLine(
+                            `sessionData.send | sessionId | ${data.sessionId} | messagesCount | ${formatted.messages.length} | ` +
+                            `timelineMsgCount | ${timelineMsgCount} | segmentsCount | ${segments.length}`
+                        );
+
+                        const sessionPayload = {
                             type: 'sessionData',
                             sessionId: data.sessionId,
                             title: formatted.title,
                             messages: formatted.messages,
-                            persistedSegments: segmentsArray.map(s => ({
-                                noticeKey: s.noticeKey,
-                                state: s.state,
-                                anchorMsgId: s.anchorMsgId,
-                                anchor: s.anchor,
-                                memberKeys: (s.memberKeys || []).filter((id) => typeof id === 'string' && id.startsWith('msg_')),
-                                members: s.members,
-                                resolved: s.resolved,
-                                createdAt: s.createdAt
-                            })),
-                            revertedSegment: persisted?.segment ? {
-                                isActive: Boolean(persisted.segment.isActive),
-                                discarded: Boolean(persisted.discarded),
-                                startMessageId: persisted.segment.startMessageId || data.sessionId,
-                                startMessageIndex: persisted.segment.startMessageIndex ?? 0,
-                                endMessageId: persisted.segment.endMessageId || data.sessionId,
-                                endMessageIndex: persisted.segment.endMessageIndex ?? 0,
-                                collapsed: true,
-                                conflicts: persisted.conflicts || [],
-                                messageIds: persisted.segment.messageIds || [],
-                                operationId: persisted.segment.operationId,
-                                historySegments: historySegments
-                            } : null
-                        });
+                            segments: segments  // Simplified segment array
+                        };
+                        liveWebview.postMessage(sessionPayload);
+                        try {
+                            const snapshotObj = {
+                                sessionId: data.sessionId,
+                                exportedAt: Date.now(),
+                                sessionData: sessionPayload
+                            };
+                            const bytes = await this.writeSnapshotAtomic(data.sessionId, snapshotObj);
+                            this.uiDebugChannel.appendLine(`[EXT][SNAP_SAVE] sessionId=${data.sessionId} file=${this.getSnapshotFile(data.sessionId)} bytes=${bytes}`);
+                        } catch (err) {
+                            this.uiDebugChannel.appendLine(`[EXT][SNAP_SAVE_FAIL] sessionId=${data.sessionId} err=${String(err)}`);
+                        }
                         } catch (error) {
                             vscode.window.showErrorMessage(`Failed to load session: ${error}`);
                             this.postAddResponse(activeWebview, `Error: ${error}`);
@@ -521,21 +666,32 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 }
                 case "undoToMessage": {
-                    if (!data.messageId) return;
+                    this.uiDebugChannel.appendLine(`[EXT][UNDO_CASE] messageId=${data.messageId || 'NULL'} checkFailed=${!data.messageId}`);
+                    if (!data.messageId) {
+                        this.uiDebugChannel.appendLine(`[EXT][UNDO_DROP] reason=no-messageId fullData=${JSON.stringify(data)}`);
+                        return;
+                    }
                     try {
+                        const sessionId = this.currentSessionId;
                         const operationId = typeof data.operationId === 'string' ? data.operationId : undefined;
                         const resolvedMessageId = this.clientMessageIdMap.get(data.messageId) || data.messageId;
+                        const noticeKey = `system:undo:${resolvedMessageId}`;
+                        this.uiDebugChannel.appendLine(`[EXT][UNDO_RX] anchorMsgId=${data.messageId} resolvedMsgId=${resolvedMessageId} sessionId=${sessionId || 'null'} opId=${operationId || 'null'}`);
                         const previousSegment = this.client.getRevertedSegment();
                         const result = await this.client.undoFromMessage(resolvedMessageId);
+                        this.uiDebugChannel.appendLine(`[EXT][UNDO_DONE] applied=${result.applied} conflicts=${result.conflicts.length} sessionId=${sessionId || 'null'}`);
                         if (!result.applied && result.conflicts.length) {
                             this.pendingConflict = { kind: 'undo', startMessageId: resolvedMessageId, operationId };
                             const liveWebview = this._view?.webview || activeWebview;
+                            this.uiDebugChannel.appendLine(`EXT: undo.postToWebview | type=conflictCard | sessionId | ${sessionId || 'null'} | opId | ${operationId || 'null'}`);
                             liveWebview.postMessage({
                                 type: 'conflictCard',
                                 kind: 'undo',
                                 startMessageId: resolvedMessageId,
                                 conflicts: result.conflicts,
-                                sessionId: this.currentSessionId
+                                sessionId: sessionId,
+                                operationId,
+                                noticeKey
                             });
                             this.postAddResponse(activeWebview, `Undo paused due to ${result.conflicts.length} conflicts.`, { operationId });
                             break;
@@ -575,6 +731,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                 this.client.setRevertedSegment(segment);
                             }
                             this.revertedSegment = { conflicts: result.conflicts };
+                            const finalSessionId = sessionId || this.currentSessionId;
+                            this.uiDebugChannel.appendLine(`[EXT][UNDO_TX] type=revertedSegment sessionId=${finalSessionId || 'null'} anchorMsgId=${segment.startMessageId} endMsgId=${segment.endMessageId} applied=true opId=${operationId || 'null'}`);
                             liveWebview.postMessage({
                                 type: 'revertedSegment',
                                 conflicts: result.conflicts || [],
@@ -589,18 +747,24 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                     operationId,
                                     historySegments: this.revertedSegmentHistory
                                 },
-                                sessionId: this.currentSessionId
+                                sessionId: finalSessionId,
+                                operationId,
+                                noticeKey
                             });
                             if (this.currentSessionId) {
                                 await this.persistRevertedSegment(this.currentSessionId, segment, result.conflicts, false);
                             }
                         } else {
                             this.revertedSegment = { conflicts: result.conflicts };
+                            const finalSessionId = sessionId || this.currentSessionId;
+                            this.uiDebugChannel.appendLine(`[EXT][UNDO_TX] type=revertedSegment sessionId=${finalSessionId || 'null'} anchorMsgId=null endMsgId=null applied=true opId=${operationId || 'null'}`);
                             liveWebview.postMessage({
                                 type: 'revertedSegment',
                                 conflicts: result.conflicts || [],
                                 segment: null,
-                                sessionId: this.currentSessionId
+                                sessionId: finalSessionId,
+                                operationId,
+                                noticeKey
                             });
                         }
                         if (!result.touchedFiles.length) {
@@ -623,9 +787,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     }
                     this.postAddResponse(activeWebview, 'Canceled.');
                     activeWebview.postMessage({ type: 'chatDone', sessionId: this.currentSessionId });
+                    await this.resolvePendingUserUpgrade(this.currentSessionId, activeWebview);
+                    if (this.currentSessionId) {
+                        this.client.finishTurn(this.currentSessionId);
+                    }
                     break;
                 }
                 case "restoreAll": {
+                    this.uiDebugChannel.appendLine(`[EXT][RESTORE_RX] type=restoreAll sessionId=${this.currentSessionId || 'null'} noticeKey=${typeof data.noticeKey === 'string' ? data.noticeKey : 'null'}`);
                     try {
                         const operationId = typeof data.operationId === 'string' ? data.operationId : undefined;
                         const result = await this.client.restoreAll();
@@ -643,21 +812,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         }
                         this.revertedSegment = { conflicts: [] };
                         activeWebview.postMessage({
-                            type: 'revertedSegment',
-                            conflicts: [],
-                            segment: {
-                                historySegments: this.revertedSegmentHistory,
-                                messageIds: [],
-                                isActive: false,
-                                discarded: false,
-                                collapsed: true,
-                                startMessageId: '',
-                                startMessageIndex: 0,
-                                endMessageId: '',
-                                endMessageIndex: 0
-                            },
+                            type: 'restoredSegment',
+                            noticeKey: typeof data.noticeKey === 'string' ? data.noticeKey : '',
+                            applied: result.applied,
+                            conflicts: result.conflicts,
                             sessionId: this.currentSessionId
                         });
+                        this.uiDebugChannel.appendLine(`[EXT][RESTORE_TX] type=restoredSegment sessionId=${this.currentSessionId || 'null'} noticeKey=${typeof data.noticeKey === 'string' ? data.noticeKey : 'null'} applied=${result.applied}`);
                         if (this.currentSessionId) {
                             await this.clearPersistedSegment(this.currentSessionId);
                         }
@@ -665,6 +826,46 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         this.refreshDiffIfTouched(result.touchedFiles);
                         if (this.currentSessionId) {
                             await this.clearPersistedSegment(this.currentSessionId);
+                        }
+                    } catch (error) {
+                        vscode.window.showErrorMessage(`Restore failed: ${error}`);
+                        activeWebview.postMessage({ type: 'addResponse', value: `Restore failed: ${error}` });
+                    }
+                    break;
+                }
+                case "restoreSegment": {
+                    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : this.currentSessionId;
+                    const anchorMsgId = typeof data.anchorMsgId === 'string' ? data.anchorMsgId : '';
+                    const noticeKey = typeof data.noticeKey === 'string' ? data.noticeKey : '';
+                    const endMsgId = typeof data.endMsgId === 'string' ? data.endMsgId : undefined;
+                    this.uiDebugChannel.appendLine(`[EXT][RESTORE_RX] type=restoreSegment sessionId=${sessionId || 'null'} noticeKey=${noticeKey || 'null'} anchorMsgId=${anchorMsgId || 'null'}`);
+                    if (!sessionId || !anchorMsgId) {
+                        this.uiDebugChannel.appendLine(`[EXT][RESTORE_DROP] sessionId=${sessionId || 'null'} anchorMsgId=${anchorMsgId || 'null'}`);
+                        break;
+                    }
+                    try {
+                        const result = await this.client.restoreFromMessage(anchorMsgId, endMsgId);
+                        const liveWebview = this._view?.webview || activeWebview;
+                        liveWebview.postMessage({
+                            type: 'restoredSegment',
+                            noticeKey,
+                            anchorMsgId,
+                            applied: result.applied,
+                            conflicts: result.conflicts,
+                            sessionId: sessionId
+                        });
+                        this.uiDebugChannel.appendLine(`[EXT][RESTORE_TX] type=restoredSegment sessionId=${sessionId || 'null'} noticeKey=${noticeKey || 'null'} applied=${result.applied}`);
+                        if (result.applied) {
+                            this.postAddResponse(activeWebview, 'Restore applied.', { operationId: undefined });
+                            this.refreshDiffIfTouched(result.touchedFiles);
+                        } else if (result.conflicts.length) {
+                            liveWebview.postMessage({
+                                type: 'conflictCard',
+                                kind: 'restore',
+                                conflicts: result.conflicts,
+                                sessionId: sessionId
+                            });
+                            this.postAddResponse(activeWebview, `Restore paused due to ${result.conflicts.length} conflicts.`);
                         }
                     } catch (error) {
                         vscode.window.showErrorMessage(`Restore failed: ${error}`);
@@ -761,6 +962,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 }
                 case "discardSegment": {
+                    this.uiDebugChannel.appendLine(`[EXT][DISCARD_SEND] reason=explicit_user_action sessionId=${this.currentSessionId || 'null'}`);
                     this.client.discardRevertedSegment();
                     this.revertedSegment = { conflicts: [], discarded: true };
                     const discardedSegment = this.client.getRevertedSegment();
@@ -839,63 +1041,213 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
                 if (recentSessionId) {
                     try {
-                        const exportData = await this.client.exportSession(recentSessionId);
+                        const cwd = workspaceFolder || process.cwd();
+                        this.uiDebugChannel.appendLine(`[EXT][EXPORT_TRY] sessionId=${recentSessionId} cwd=${cwd} cmd="opencode export ${recentSessionId}"`);
+                        let exportResult: any = null;
+                        let normalized = { ok: false, data: null as any, stderrLastLine: '' };
+                        try {
+                            exportResult = await this.client.exportSession(recentSessionId);
+                            if (exportResult && typeof exportResult.code === 'number') {
+                                normalized.ok = exportResult.code === 0;
+                                normalized.stderrLastLine = this.extractLastLine(exportResult.stderr);
+                                normalized.data = exportResult.data ?? exportResult;
+                            } else {
+                                normalized.ok = true;
+                                normalized.data = exportResult;
+                            }
+                        } catch (err) {
+                            normalized.ok = false;
+                            normalized.stderrLastLine = this.extractLastLine(String(err));
+                        }
+
+                        if (!normalized.ok) {
+                            this.uiDebugChannel.appendLine(`[EXT][EXPORT_FAIL] sessionId=${recentSessionId} stderrLastLine=${normalized.stderrLastLine || 'null'}`);
+                            try {
+                                const snap = await this.readSnapshot(recentSessionId);
+                                if (snap?.obj?.sessionData) {
+                                    const payload = snap.obj.sessionData;
+                                    payload.meta = {
+                                        source: 'snapshot',
+                                        reason: 'export_failed',
+                                        stderrLastLine: normalized.stderrLastLine || ''
+                                    };
+                                    const liveWebview = this._view?.webview || webview;
+                                    liveWebview.postMessage(payload);
+                                    this.uiDebugChannel.appendLine(`[EXT][SNAP_LOAD_OK] sessionId=${recentSessionId} file=${this.getSnapshotFile(recentSessionId)} bytes=${snap.bytes}`);
+                                    this.currentSessionId = recentSessionId;
+                                    this.client.setSessionId(this.currentSessionId);
+                                    return;
+                                }
+                                this.uiDebugChannel.appendLine(`[EXT][SNAP_LOAD_MISS] sessionId=${recentSessionId} file=${this.getSnapshotFile(recentSessionId)}`);
+                            } catch (err) {
+                                this.uiDebugChannel.appendLine(`[EXT][SNAP_LOAD_FAIL] sessionId=${recentSessionId} err=${String(err)}`);
+                            }
+                            const liveWebview = this._view?.webview || webview;
+                            liveWebview.postMessage({
+                                type: 'sessionLoadFailed',
+                                payload: {
+                                    sessionId: recentSessionId,
+                                    reason: 'export_failed_no_snapshot',
+                                    stderrLastLine: normalized.stderrLastLine || ''
+                                }
+                            });
+                            return;
+                        }
+
+                        const exportData = normalized.data;
                         const formatted = this.formatSession(exportData);
                         this.currentSessionId = recentSessionId;
                         this.client.setSessionId(this.currentSessionId);
                         const liveWebview = this._view?.webview || webview;
+                        const persisted = await this.loadPersistedSegment(recentSessionId);
+                        const historySegments = persisted?.segment?.historySegments || [];
+                        if (persisted?.segment?.historySegments) {
+                            this.revertedSegmentHistory = persisted.segment.historySegments;
+                        } else {
+                            this.revertedSegmentHistory = [];
+                        }
+                        if (persisted?.segment) {
+                            this.client.setRevertedSegment({
+                                isActive: Boolean(persisted.segment.isActive),
+                                discarded: Boolean(persisted.discarded),
+                                startMessageId: persisted.segment.startMessageId || recentSessionId,
+                                startMessageIndex: persisted.segment.startMessageIndex ?? 0,
+                                endMessageId: persisted.segment.endMessageId || recentSessionId,
+                                endMessageIndex: persisted.segment.endMessageIndex ?? (persisted.segment.startMessageIndex ?? 0),
+                                opIds: persisted.segment.opIds || [],
+                                collapsed: true,
+                                conflicts: persisted.conflicts || [],
+                                messageIds: persisted.segment.messageIds,
+                                operationId: persisted.segment.operationId
+                            });
+                        }
+                        const segMap = this.undoSegmentsBySession.get(recentSessionId);
+                        const segments = segMap ? Array.from(segMap.values()) : [];
+
+                        this.uiDebugChannel.appendLine(
+                            `[EXT][SEG_HYDRATE_LOAD] sessionId=${recentSessionId} found=${segments.length} ` +
+                            `keys=[${(segMap ? Array.from(segMap.keys()) : []).join(', ')}]`
+                        );
+                        
+                        this.uiDebugChannel.appendLine(
+                            `[EXT][SEG_HYDRATE_SEND] sessionId=${recentSessionId} count=${segments.length} reason=sendInit`
+                        );
+                        
                         const timelineMsgCount = formatted.messages.filter((m) => typeof m.id === 'string' && m.id.startsWith('msg_')).length;
-                        this.uiDebugChannel.appendLine(`sessionData.send | sessionId | ${recentSessionId} | messagesCount | ${formatted.messages.length} | timelineMsgCount | ${timelineMsgCount} | segmentsCount | 0`);
-                        liveWebview.postMessage({
+                        this.uiDebugChannel.appendLine(
+                            `sessionData.send | sessionId | ${recentSessionId} | messagesCount | ${formatted.messages.length} | ` +
+                            `timelineMsgCount | ${timelineMsgCount} | segmentsCount | ${segments.length}`
+                        );
+                        
+                        const sessionPayload = {
                             type: 'sessionData',
                             sessionId: recentSessionId,
                             title: formatted.title,
-                            messages: formatted.messages
-                        });
-                const persisted = await this.loadPersistedSegment(recentSessionId);
-                if (persisted?.segment?.historySegments) {
-                    this.revertedSegmentHistory = persisted.segment.historySegments;
-                } else {
-                    this.revertedSegmentHistory = [];
+                            messages: formatted.messages,
+                            segments: segments  // Simplified segment array (no complex mapping)
+                        };
+                        
+                        liveWebview.postMessage(sessionPayload);
+                        try {
+                            const snapshotObj = {
+                                sessionId: recentSessionId,
+                                exportedAt: Date.now(),
+                                sessionData: sessionPayload
+                            };
+                            const bytes = await this.writeSnapshotAtomic(recentSessionId, snapshotObj);
+                            this.uiDebugChannel.appendLine(`[EXT][SNAP_SAVE] sessionId=${recentSessionId} file=${this.getSnapshotFile(recentSessionId)} bytes=${bytes}`);
+                        } catch (err) {
+                            this.uiDebugChannel.appendLine(`[EXT][SNAP_SAVE_FAIL] sessionId=${recentSessionId} err=${String(err)}`);
+                        }
+                } catch (err) {
+                    this.uiDebugChannel.appendLine(`[EXT][EXPORT_FAILED] sessionId=${recentSessionId} err=${String(err)}`);
+                    this.currentSessionId = undefined;
                 }
-                if (persisted?.segment) {
-                    this.client.setRevertedSegment({
-                        isActive: Boolean(persisted.segment.isActive),
-                        discarded: Boolean(persisted.discarded),
-                        startMessageId: persisted.segment.startMessageId || recentSessionId,
-                        startMessageIndex: persisted.segment.startMessageIndex ?? 0,
-                        endMessageId: persisted.segment.endMessageId || recentSessionId,
-                        endMessageIndex: persisted.segment.endMessageIndex ?? (persisted.segment.startMessageIndex ?? 0),
-                        opIds: persisted.segment.opIds || [],
-                        collapsed: true,
-                        conflicts: persisted.conflicts || [],
-                        messageIds: persisted.segment.messageIds,
-                        operationId: persisted.segment.operationId
-                    });
+            }
+
+        // CRITICAL: Ensure we ALWAYS have a session selected
+        if (!this.currentSessionId) {
+            this.uiDebugChannel.appendLine(`[EXT][NO_SESSION] checking sessions.length=${sessions.length}`);
+            
+            if (sessions.length > 0) {
+                // Auto-select most recent session
+                const mostRecent = sessions[0];  // Already sorted by updatedAt desc
+                this.currentSessionId = mostRecent.id;
+                this.client.setSessionId(this.currentSessionId);
+                this.uiDebugChannel.appendLine(`[EXT][AUTO_SELECT] sessionId=${this.currentSessionId} reason=no-current-session`);
+                
+                // Save as recent session for this workspace
+                if (workspaceFolder) {
+                    await this._context.globalState.update(`recentSession.${workspaceFolder}`, this.currentSessionId);
+                }
+                
+                // Try to load this session's data
+                try {
+                    const exportResult = await this.client.exportSession(this.currentSessionId);
+                    const formatted = this.formatSession(exportResult);
+                    const segMap = this.undoSegmentsBySession.get(this.currentSessionId);
+                    const segments = segMap ? Array.from(segMap.values()) : [];
+                    
+                    const liveWebview = this._view?.webview || webview;
                     liveWebview.postMessage({
-                        type: 'revertedSegment',
-                        conflicts: persisted.conflicts || [],
-                        segment: {
-                            isActive: Boolean(persisted.segment.isActive),
-                            startMessageId: persisted.segment.startMessageId,
-                            startMessageIndex: persisted.segment.startMessageIndex,
-                            endMessageId: persisted.segment.endMessageId,
-                            endMessageIndex: persisted.segment.endMessageIndex,
-                            collapsed: true,
-                            discarded: Boolean(persisted.discarded),
-                            messageIds: persisted.segment.messageIds,
-                            operationId: persisted.segment.operationId,
-                            historySegments: this.revertedSegmentHistory
-                        },
-                        sessionId: recentSessionId
+                        type: 'sessionData',
+                        sessionId: this.currentSessionId,
+                        title: formatted.title,
+                        messages: formatted.messages,
+                        segments: segments
                     });
+                    this.uiDebugChannel.appendLine(`[EXT][AUTO_SELECT_LOADED] sessionId=${this.currentSessionId} messages=${formatted.messages.length}`);
+                } catch (err) {
+                    this.uiDebugChannel.appendLine(`[EXT][AUTO_SELECT_LOAD_FAILED] sessionId=${this.currentSessionId} err=${String(err)}`);
+                    // Try snapshot as fallback
+                    try {
+                        const snap = await this.readSnapshot(this.currentSessionId);
+                        if (snap?.obj?.sessionData) {
+                            const liveWebview = this._view?.webview || webview;
+                            liveWebview.postMessage(snap.obj.sessionData);
+                            this.uiDebugChannel.appendLine(`[EXT][AUTO_SELECT_SNAP_OK] sessionId=${this.currentSessionId}`);
+                        }
+                    } catch (snapErr) {
+                        this.uiDebugChannel.appendLine(`[EXT][AUTO_SELECT_SNAP_FAILED] sessionId=${this.currentSessionId}`);
+                    }
                 }
-            } catch {
-                this.currentSessionId = undefined;
+            } else {
+                // No sessions exist - create new one
+                this.uiDebugChannel.appendLine(`[EXT][CREATE_NEW_SESSION] reason=no-sessions-exist`);
+                try {
+                    const newSession = await this.client.createSession();
+                    this.currentSessionId = newSession.id;
+                    this.client.setSessionId(this.currentSessionId);
+                    this.uiDebugChannel.appendLine(`[EXT][SESSION_CREATED] sessionId=${this.currentSessionId}`);
+                    
+                    // Save as recent session
+                    if (workspaceFolder) {
+                        await this._context.globalState.update(`recentSession.${workspaceFolder}`, this.currentSessionId);
+                    }
+                    
+                    const liveWebview = this._view?.webview || webview;
+                    liveWebview.postMessage({
+                        type: 'sessionData',
+                        sessionId: this.currentSessionId,
+                        title: 'New Chat',
+                        messages: [],
+                        segments: []
+                    });
+                } catch (err) {
+                    this.uiDebugChannel.appendLine(`[EXT][SESSION_CREATE_FAILED] err=${String(err)}`);
+                    // Last resort: set a placeholder to avoid undefined
+                    this.currentSessionId = `fallback-${Date.now()}`;
+                }
             }
         }
 
+        // Now send init with GUARANTEED non-null currentSessionId
         const liveWebview = this._view?.webview || webview;
+        this.uiDebugChannel.appendLine(
+            `[EXT][INIT_SEND] models=${models.length} sessions=${sessions.length} ` +
+            `currentSessionId=${this.currentSessionId} selectedModel=${defaultModel || 'NULL'}`
+        );
+
         liveWebview.postMessage({
             type: 'init',
             models,
@@ -936,6 +1288,36 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return { id, name, filePath };
     }
 
+    private async resolvePendingUserUpgrade(sessionId: string | undefined, webview: vscode.Webview): Promise<void> {
+        if (!sessionId) return;
+        const result = await this.client.resolveUserMessageUpgrade(sessionId);
+        if (result.status === 'ok') {
+            // Update user message ID mapping
+            this.clientMessageIdMap.set(result.localKey, result.userMsgId);
+            const ok = this.client.upgradeMessageId(result.localKey, result.userMsgId);
+            this.uiDebugChannel.appendLine(`EXT: user.upgrade.client | localKey | ${result.localKey} | msgId | ${result.userMsgId} | ok | ${ok}`);
+            
+            // Also update assistant message ID mapping if we have a tmpKey
+            const tmpKey = this.pendingAssistantTmpKeyBySession.get(sessionId);
+            if (tmpKey && tmpKey.startsWith('tmp:') && result.assistantMsgId.startsWith('msg_')) {
+                this.clientMessageIdMap.set(tmpKey, result.assistantMsgId);
+                const assistantOk = this.client.upgradeMessageId(tmpKey, result.assistantMsgId);
+                this.uiDebugChannel.appendLine(`EXT: assistant.upgrade.client | tmpKey | ${tmpKey} | msgId | ${result.assistantMsgId} | ok | ${assistantOk}`);
+                // Clear the pending tmpKey since we've resolved it
+                this.pendingAssistantTmpKeyBySession.delete(sessionId);
+            }
+            
+            webview.postMessage({
+                type: 'userMessageUpgrade',
+                sessionId,
+                localKey: result.localKey,
+                userMsgId: result.userMsgId,
+                assistantMsgId: result.assistantMsgId,
+                tmpKey: tmpKey
+            });
+        }
+    }
+
     private handleChatEvent(event: ChatEvent, webview: vscode.Webview): void {
         if (event.type === 'session' && event.sessionId) {
             this.currentSessionId = event.sessionId;
@@ -949,6 +1331,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const liveWebview = this._view?.webview || webview;
             const sessionId = event.sessionId || this.currentSessionId;
             const tmpKey = sessionId ? this.pendingAssistantTmpKeyBySession.get(sessionId) : undefined;
+            if (event.assistantMsgId && sessionId) {
+                this.uiDebugChannel.appendLine(`[DBG_ASSIST_ID] session=${sessionId} assistantMsgId=${event.assistantMsgId} tmpKey=${tmpKey || 'null'}`);
+            }
             liveWebview.postMessage({
                 type: 'assistantMessageMeta',
                 messageId: event.messageId,
@@ -987,14 +1372,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 const mappedMessageIndex = this.client.getMessageIndex(this.pendingClientMessageId)
                     ?? this.client.registerMessage(this.pendingClientMessageId);
                 this.client.aliasMessageId(this.pendingClientMessageId, event.text);
-                const liveWebview = this._view?.webview || webview;
-                liveWebview.postMessage({
-                    type: 'messageIdMap',
-                    clientMessageId: this.pendingClientMessageId,
-                    messageId: event.text,
-                    messageIndex: mappedMessageIndex,
-                    sessionId: this.currentSessionId
-                });
                 const internalId = this.clientMessageIdMap.get(this.pendingClientMessageId);
                 if (internalId && internalId !== event.text) {
                     this.client.aliasMessageId(internalId, event.text);
