@@ -1,9 +1,6 @@
 out
 node_modules
 .vscode-test
-*.vsix
-nul
-opencode-gui@*
 stderr.txt
 1.txt
 .opencode/undo/
