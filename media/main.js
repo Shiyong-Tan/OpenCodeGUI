@@ -1394,7 +1394,7 @@ function handleToggleSegment(sessionId, segmentId) {
 }
 
 function renderMarkdownInto(element, text) {
-    const normalized = normalizeInlineMath(text || '');
+    const normalized = normalizeInlineMath(normalizeBlockMath(text || ''));
     const raw = md.render(normalized);
     element.innerHTML = purify.sanitize(raw, {
         ALLOWED_TAGS: [
@@ -1416,6 +1416,25 @@ function renderMarkdownInto(element, text) {
         }
     }
     wrapTables(element);
+}
+
+function isCopilotProvider(providerId) {
+    if (!providerId || typeof providerId !== 'string') return false;
+    return providerId.toLowerCase().includes('copilot');
+}
+
+function parseSpeedMultiplier(value) {
+    if (!value || typeof value !== 'string') return Number.POSITIVE_INFINITY;
+    const normalized = value.trim().toLowerCase().replace(/x$/, '');
+    const parsed = Number.parseFloat(normalized);
+    return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
+}
+
+function normalizeBlockMath(text) {
+    if (!text || typeof text !== 'string') return text;
+    return text.replace(/\\\[(.*?)\\\]/gs, (match, inner) => {
+        return `\n\n\\[${inner}\\]\n\n`;
+    });
 }
 
 function normalizeInlineMath(text) {
@@ -2170,6 +2189,21 @@ function renderMessageElement(message, renderedSet) {
             grouped.get(provider).push(model);
         }
 
+        for (const provider of providerOrder) {
+            if (!isCopilotProvider(provider)) continue;
+            const items = grouped.get(provider) || [];
+            items.sort((a, b) => {
+                const aSpeed = parseSpeedMultiplier(a.speedMultiplier);
+                const bSpeed = parseSpeedMultiplier(b.speedMultiplier);
+                if (aSpeed !== bSpeed) return aSpeed - bSpeed;
+                const aName = String(a.name || a.fullId || '').toLowerCase();
+                const bName = String(b.name || b.fullId || '').toLowerCase();
+                if (aName < bName) return -1;
+                if (aName > bName) return 1;
+                return 0;
+            });
+        }
+
         if (collapsedProviders.size === 0) {
             for (const provider of providerOrder) {
                 collapsedProviders.add(provider);
@@ -2206,7 +2240,17 @@ function renderMessageElement(message, renderedSet) {
                 const option = document.createElement('button');
                 option.type = 'button';
                 option.className = 'model-option';
-                option.textContent = model.name || model.fullId;
+                const optionLabel = document.createElement('span');
+                optionLabel.className = 'model-option-label';
+                optionLabel.textContent = model.name || model.fullId;
+                option.appendChild(optionLabel);
+                const speed = model.speedMultiplier;
+                if (isCopilotProvider(provider) && typeof speed === 'string' && speed.length) {
+                    const speedLabel = document.createElement('span');
+                    speedLabel.className = 'model-option-speed';
+                    speedLabel.textContent = speed;
+                    option.appendChild(speedLabel);
+                }
                 option.dataset.value = model.fullId;
                 if (model.fullId === selectedModel) {
                     option.classList.add('is-selected');

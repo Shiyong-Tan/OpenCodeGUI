@@ -11,12 +11,17 @@ OpenCode GUI is a powerful Visual Studio Code extension that brings the capabili
 - **Model Selection**: Switch between different AI models and variants supported by OpenCode.
 - **File Attachments**: Attach files or images from your clipboard to provide context for your requests.
 - **Undo/Redo Support**: Revert or restore changes made during a session with ease.
+  + **Undo**: Revert AI-generated changes back to any previous state using Git-powered tracking
+  + **Restore**: Restore previously undone changes within the same session
+  + **Visual Conflict Resolution**: Review and resolve conflicts when undoing changes
+  + **Session History**: Full history of all changes tracked per session
 
 ## Installation
 
 ### Prerequisites
 
 - [OpenCode CLI](https://github.com/Shiyong-Tan/OpenCodeCLI) must be installed and available in your `PATH`.
+- **Git 2.30.0 or higher** must be installed and available in your `PATH`. The extension uses Git to track and manage code changes.
 - VS Code version 1.80.0 or higher.
 
 ### From VSIX
@@ -32,6 +37,17 @@ OpenCode GUI is a powerful Visual Studio Code extension that brings the capabili
 2. Use the chat interface to ask questions, request code changes, or explore your project.
 3. Review changes in the diff view that automatically opens when OpenCode proposes modifications.
 4. Manage your sessions and settings (model, variant, mode) directly in the sidebar.
+
+## How Undo/Restore Works
+
+OpenCode GUI uses Git to track and manage code changes:
+
+1. **Baseline Tracking**: When a session starts, a baseline Git commit is created
+2. **Change Recording**: Each AI response is tracked with its own Git commit
+3. **Undo**: Reverts workspace files to the baseline commit state
+4. **Restore**: Re-applies previously undone changes from history
+
+> **Note**: All changes are stored locally in `.opencode/` directory. No data is sent to external servers for undo functionality.
 
 ## Commands
 

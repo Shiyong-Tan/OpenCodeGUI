@@ -12,6 +12,7 @@ export type ModelInfo = {
     name: string;
     fullId: string;
     variants: string[];
+    speedMultiplier?: string;
 };
 
 export type SessionInfo = {
@@ -1292,7 +1293,9 @@ export class OpenCodeClient {
 
     public async listModels(): Promise<ModelInfo[]> {
         const output = await this.execute(['models', '--verbose']);
-        return this.parseModels(output);
+        const models = this.parseModels(output);
+        this.applyCopilotSpeedMultipliers(models);
+        return models;
     }
 
     public async listSessions(): Promise<SessionInfo[]> {
@@ -1379,6 +1382,49 @@ export class OpenCodeClient {
         }
 
         return models;
+    }
+
+    private applyCopilotSpeedMultipliers(models: ModelInfo[]): void {
+        const hasCopilot = models.some((model) => {
+            const provider = (model.providerId || '').toLowerCase();
+            const fullId = (model.fullId || '').toLowerCase();
+            return provider.includes('copilot') || fullId.includes('copilot');
+        });
+        if (!hasCopilot) return;
+
+        const speedMap = new Map<string, string>([
+            ['GPT-4.1', '0x'],
+            ['GPT-4o', '0x'],
+            ['Grok Code Fast 1', '0x'],
+            ['Raptor mini (Preview)', '0x'],
+            ['Claude Haiku 4.5', '0.33x'],
+            ['Claude Opus 4.1', '1x'],
+            ['Claude Opus 4.5', '3x'],
+            ['Claude Opus 4.6', '3x'],
+            ['Claude Sonnet 4', '1x'],
+            ['Claude Sonnet 4.5', '1x'],
+            ['Gemini 2.5 Pro', '1x'],
+            ['Gemini 3 Flash', '0.33x'],
+            ['Gemini 3 Pro Preview', '1x'],
+            ['GPT-5', '1x'],
+            ['GPT-5-Codex (Preview)', '1x'],
+            ['GPT-5.1', '1x'],
+            ['GPT-5.1-Codex', '1x'],
+            ['GPT-5.1-Codex-max', '1x'],
+            ['GPT-5.1-Codex-mini', '0.33x'],
+            ['GPT-5.2', '1x'],
+            ['GPT-5.2-Codex', '1x']
+        ]);
+
+        for (const model of models) {
+            const speed =
+                speedMap.get(model.name) ||
+                speedMap.get(model.fullId) ||
+                speedMap.get(model.id);
+            if (speed) {
+                model.speedMultiplier = speed;
+            }
+        }
     }
 
     private parseSessions(output: string): SessionInfo[] {

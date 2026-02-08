@@ -2406,9 +2406,15 @@ ${attachmentLines.join('\n')}`
             vscode.Uri.joinPath(this._extensionUri, "media", "highlight-github-dark.css")
         );
 
-        const katexCssUri = 'https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css';
-        const katexScriptUri = 'https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js';
-        const texmathScriptUri = 'https://cdn.jsdelivr.net/npm/markdown-it-texmath@1.0.0/texmath.min.js';
+        const katexCssUri = webview.asWebviewUri(
+            vscode.Uri.joinPath(this._extensionUri, "media", "katex.min.css")
+        );
+        const katexScriptUri = webview.asWebviewUri(
+            vscode.Uri.joinPath(this._extensionUri, "media", "katex.min.js")
+        );
+        const texmathScriptUri = webview.asWebviewUri(
+            vscode.Uri.joinPath(this._extensionUri, "media", "texmath.min.js")
+        );
 
         return `<!DOCTYPE html>
             <html lang="en">

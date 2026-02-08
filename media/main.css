@@ -524,6 +524,7 @@ textarea {
     min-height: calc(1.4em * 3 + 8px);
     line-height: 1.4;
     padding: 10px;
+    font-size: 0.95em;
     font-family: inherit;
     outline: none;
     box-sizing: border-box;
@@ -975,6 +976,35 @@ select#mode-select {
     cursor: pointer;
     font-size: 0.85em;
     padding-left: calc(8px + var(--model-group-icon-size, 8px) + var(--model-group-icon-gap, 6px));
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.model-option-label {
+    flex: 1 1 auto;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.model-option-speed {
+    flex: 0 0 auto;
+    margin-left: auto;
+    text-align: right;
+    font-size: 0.8em;
+    font-weight: 600;
+    color: var(--vscode-descriptionForeground);
+}
+
+.model-option-speed {
+    flex: 0 0 auto;
+    margin-left: auto;
+    text-align: right;
+    font-size: 0.8em;
+    font-weight: 600;
+    color: var(--vscode-descriptionForeground);
 }
 
 .model-option:hover,
