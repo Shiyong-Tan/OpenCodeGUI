@@ -11,6 +11,7 @@ body {
     height: 100vh;
     background-color: var(--vscode-editor-background);
     position: relative;
+    --card-header-size: 0.9em;
 }
 
 /* --- Session Header --- */
@@ -31,7 +32,9 @@ body {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    max-width: 78%;
+    max-width: 68%;
+    min-width: 0;
+    flex: 1 1 auto;
     cursor: pointer;
 }
 
@@ -44,6 +47,13 @@ body {
 
 .pending-indicator:hover {
     text-decoration: underline;
+}
+
+.undo-status {
+    font-size: 0.8em;
+    color: var(--vscode-editorWarning-foreground, #cca700);
+    margin-left: 8px;
+    white-space: nowrap;
 }
 
 .pending-indicator.hidden {
@@ -238,13 +248,28 @@ body {
 .message-actions {
     position: absolute;
     right: 6px;
-    bottom: 4px;
+    top: 50%;
+    bottom: auto;
+    transform: translateY(-50%);
     opacity: 0;
     transition: opacity 0.15s ease;
+    display: flex;
+    align-items: center;
 }
 
 .message.user:hover .message-actions {
     opacity: 1;
+}
+
+.message.user:hover .message-content {
+    opacity: 0.7;
+}
+
+.message.user .undo-btn {
+    color: #F6FF00;
+    font-weight: 700;
+    font-size: 1.3em;
+    line-height: 1;
 }
 
 .undo-btn {
@@ -264,7 +289,7 @@ body {
 .input-container {
     margin: 10px;
     border: 1px solid var(--vscode-input-border);
-    border-radius: 6px;
+    border-radius: 15px;
     background-color: var(--vscode-input-background);
     display: flex;
     flex-direction: column;
@@ -292,7 +317,7 @@ body {
 
 .reverted-segment-title {
     font-weight: 600;
-    font-size: 1em;
+    font-size: 1.2em;
 }
 
 .reverted-segment-badge {
@@ -336,9 +361,9 @@ body {
 
 .reverted-segment-btn {
     border: none;
-    border-radius: 999px;
+    border-radius: 6px;
     padding: 2px 10px;
-    font-size: 0.8em;
+    font-size: 1em;
     height: 22px;
     line-height: 16px;
     cursor: pointer;
@@ -352,8 +377,8 @@ body {
 }
 
 .reverted-segment-btn.secondary {
-    background: transparent;
-    color: var(--vscode-descriptionForeground);
+    background: var(--vscode-button-secondaryBackground);
+    color: var(--vscode-button-secondaryForeground);
     padding: 4px 8px;
 }
 
@@ -405,15 +430,29 @@ body {
     border-radius: 8px;
     padding: 10px;
     margin-top: 10px;
+    margin-right: 8px;
     background: var(--vscode-editor-background);
     color: var(--vscode-foreground);
     box-shadow: 0 1px 2px rgba(0,0,0,0.12);
 }
 
+.change-list-card {
+    width: 100%;
+    box-sizing: border-box;
+    margin-right: 0;
+}
+
 .conflict-card-header {
     font-weight: 600;
-    font-size: 0.9em;
+    font-size: var(--card-header-size);
     margin-bottom: 8px;
+}
+
+.change-list-reverted {
+    margin: -2px 0 8px 0;
+    font-size: 0.85em;
+    color: var(--vscode-errorForeground);
+    font-weight: 600;
 }
 
 .conflict-card-list {
@@ -482,7 +521,8 @@ textarea {
     color: var(--vscode-input-foreground);
     border: none;
     resize: none;
-    height: 40px;
+    min-height: calc(1.4em * 3 + 8px);
+    line-height: 1.4;
     padding: 10px;
     font-family: inherit;
     outline: none;
@@ -502,7 +542,7 @@ textarea {
 
 .left-tools {
     display: flex;
-    gap: 6px;
+    gap: 5px;
     align-items: center;
     min-width: 0;
     overflow: visible;
@@ -526,8 +566,44 @@ textarea {
     border-radius: 4px;
 }
 
+#attachment-btn {
+    font-size: 0.95em;
+    width: 28px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+    color: var(--vscode-descriptionForeground);
+    font-weight: 400;
+    border-radius: 999px;
+    transform: translateY(1px);
+}
+
 .icon-btn:hover {
     background-color: var(--vscode-toolbar-hoverBackground);
+}
+
+#attachment-btn {
+    position: relative;
+}
+
+#attachment-btn::before {
+    content: '';
+    position: absolute;
+    width: 21px;
+    height: 21px;
+    border-radius: 999px;
+    background: var(--vscode-toolbar-hoverBackground);
+    opacity: 0;
+    transition: opacity 0.12s ease;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+}
+
+#attachment-btn:hover::before {
+    opacity: 1;
 }
 
 /* --- Styled Selects --- */
@@ -627,13 +703,14 @@ button.send-btn {
     background: var(--vscode-button-background);
     color: var(--vscode-button-foreground);
     border: none;
-    border-radius: 4px;
+    border-radius: 50%;
     width: 28px;
     height: 28px;
     display: flex;
     align-items: center;
     justify-content: center;
     cursor: pointer;
+    position: relative;
 }
 
 button.send-btn:hover {
@@ -645,6 +722,16 @@ button.send-btn:hover {
     color: #f85149;
 }
 
+.send-btn.is-busy::after {
+    content: '';
+    position: absolute;
+    width: 80%;
+    height: 80%;
+    border-radius: 50%;
+    border: 1px solid #f85149;
+    pointer-events: none;
+}
+
 .send-btn.is-busy:hover {
     background: var(--vscode-button-secondaryHoverBackground);
 }
@@ -654,7 +741,7 @@ button.send-btn:hover {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
-    padding: 6px 8px 0;
+    padding: 6px 8px 2px;
 }
 
 .attachment-item {
@@ -667,6 +754,73 @@ button.send-btn:hover {
     background: var(--vscode-editor-background);
     color: var(--vscode-foreground);
     font-size: 0.8em;
+}
+
+.attachment-image-item {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 18px 3px 5px;
+    border: 1px solid var(--vscode-widget-border);
+    border-radius: 999px;
+    background: var(--vscode-editor-background);
+    color: var(--vscode-foreground);
+    font-size: 0.8em;
+}
+
+.attachment-image-thumb {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    background: var(--vscode-editorWidget-background);
+}
+
+.attachment-file-item {
+    padding-left: 8px;
+}
+
+.attachment-file-icon {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--vscode-editorWidget-background);
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    font-size: 1.2em;
+}
+
+.attachment-image-label {
+    white-space: nowrap;
+}
+
+.attachment-image-remove {
+    position: absolute;
+    right: 6px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 16px;
+    height: 16px;
+    border-radius: 999px;
+    border: none;
+    background: var(--vscode-badge-background);
+    color: var(--vscode-badge-foreground);
+    font-size: 12px;
+    line-height: 16px;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.12s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.attachment-image-item:hover .attachment-image-remove {
+    opacity: 1;
 }
 
 .attachment-thumb {
@@ -855,6 +1009,10 @@ select#mode-select {
   white-space: normal;
   line-height: 1.35;
   font-size: 0.95em;
+}
+
+.message.user .message-content {
+  white-space: pre-wrap;
 }
 
 /* ---- Global block spacing (the main knob) ---- */

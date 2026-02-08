@@ -4,12 +4,26 @@ import * as fs from "fs";
 import * as pathModule from "path";
 import { OpenCodeClient, ChatEvent, ModelInfo, SessionInfo, FileSnapshot, ConflictDetail } from "./OpenCodeClient";
 import { OpenCodeDiffProvider } from "./OpenCodeDiffProvider";
+import { GitRepoManager } from './undo/GitRepoManager';
+import { runGit } from './undo/GitRunner';
+import { GitRepoRef } from './undo/types';
 
 type SessionMessage = {
-    role: 'user' | 'assistant';
+    role: 'user' | 'assistant' | 'system';
     text: string;
     id?: string;
     messageIndex?: number;
+    meta?: Record<string, unknown>;
+};
+
+type ChangeListRecord = {
+    id: string;
+    commitHead: string;
+    commitBase: string;
+    files: string[];
+    anchorMessageId: string;
+    createdAt: number;
+    reverted?: boolean;
 };
 
 type PersistedRevertedSegment = {
@@ -76,6 +90,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private undoSegmentsBySession: Map<string, Map<string, SegmentState>> = new Map();
     private readonly UNDO_SEGMENTS_KEY = 'opencode.undoSegmentsBySession.v1';
     private pendingAssistantTmpKeyBySession = new Map<string, string>();
+    private gitUndoEnabled = false;
+    private gitUndoReason?: string;
+    private pendingBaselineTurnKey?: string;
+    private baselineReady = true;
+    private pendingBaselineFailed = false;
+    private readonly repoManager: GitRepoManager;
 
     private async ensureDir(dir: string): Promise<void> {
         await fs.promises.mkdir(dir, { recursive: true });
@@ -107,9 +127,340 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return { obj: JSON.parse(text), bytes: Buffer.byteLength(text, 'utf-8') };
     }
 
+    private getChangeListDir(): string {
+        return pathModule.join(this._context.globalStorageUri.fsPath, 'sessionChangeLists');
+    }
+
+    private getChangeListPath(sessionId: string): string {
+        return pathModule.join(this.getChangeListDir(), `${sessionId}.json`);
+    }
+
+    private async readChangeLists(sessionId: string): Promise<ChangeListRecord[]> {
+        const filePath = this.getChangeListPath(sessionId);
+        if (!fs.existsSync(filePath)) return [];
+        try {
+            const text = await fs.promises.readFile(filePath, 'utf-8');
+            const parsed = JSON.parse(text);
+            return Array.isArray(parsed) ? parsed : [];
+        } catch {
+            return [];
+        }
+    }
+
+    private async writeChangeLists(sessionId: string, records: ChangeListRecord[]): Promise<void> {
+        const dir = this.getChangeListDir();
+        await this.ensureDir(dir);
+        const filePath = this.getChangeListPath(sessionId);
+        const tmpPath = `${filePath}.tmp`;
+        const text = JSON.stringify(records, null, 2);
+        await fs.promises.writeFile(tmpPath, text, 'utf-8');
+        await fs.promises.rename(tmpPath, filePath);
+    }
+
+    private async upsertChangeList(sessionId: string, record: ChangeListRecord): Promise<void> {
+        const records = await this.readChangeLists(sessionId);
+        const idx = records.findIndex((item) => item.id === record.id);
+        if (idx === -1) {
+            records.push(record);
+        } else {
+            records[idx] = { ...records[idx], ...record };
+        }
+        await this.writeChangeLists(sessionId, records);
+    }
+
+    private async setChangeListReverted(sessionId: string, commitHead: string, reverted: boolean, webview: vscode.Webview): Promise<void> {
+        if (!sessionId || !commitHead) return;
+        const records = await this.readChangeLists(sessionId);
+        let updated = false;
+        for (const record of records) {
+            if (record.commitHead === commitHead) {
+                if (record.reverted !== reverted) {
+                    record.reverted = reverted;
+                    updated = true;
+                }
+            }
+        }
+        if (updated) {
+            await this.writeChangeLists(sessionId, records);
+        }
+        webview.postMessage({ type: 'changeListUpdate', sessionId, commitHead, reverted });
+    }
+
+    private async injectChangeLists(sessionId: string, formatted: { title: string; messages: SessionMessage[] }): Promise<{ title: string; messages: SessionMessage[] }> {
+        if (!sessionId) return formatted;
+        const records = await this.readChangeLists(sessionId);
+        if (!records.length) return formatted;
+
+        const messages = formatted.messages || [];
+        const idSet = new Set(messages.map((m) => m.id).filter((id): id is string => typeof id === 'string'));
+        const byAnchor = new Map<string, ChangeListRecord[]>();
+        for (const record of records) {
+            if (!record.anchorMessageId || !idSet.has(record.anchorMessageId)) {
+                continue;
+            }
+            if (!byAnchor.has(record.anchorMessageId)) {
+                byAnchor.set(record.anchorMessageId, []);
+            }
+            byAnchor.get(record.anchorMessageId)?.push(record);
+        }
+        if (!byAnchor.size) return formatted;
+
+        for (const list of byAnchor.values()) {
+            list.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+        }
+
+        const merged: SessionMessage[] = [];
+        const seenIds = new Set<string>();
+        for (const message of messages) {
+            if (message.id && seenIds.has(message.id)) {
+                continue;
+            }
+            if (message.id) {
+                seenIds.add(message.id);
+            }
+            merged.push(message);
+            if (!message.id) continue;
+            const list = byAnchor.get(message.id);
+            if (!list || !list.length) continue;
+            for (const record of list) {
+                if (seenIds.has(record.id)) continue;
+                merged.push({
+                    role: 'system',
+                    id: record.id,
+                    text: '',
+                    meta: {
+                        kind: 'changeList',
+                        files: record.files,
+                        source: 'git',
+                        scope: 'turn',
+                        commitHead: record.commitHead,
+                        commitBase: record.commitBase,
+                        reverted: record.reverted === true
+                    }
+                });
+                seenIds.add(record.id);
+            }
+        }
+
+        return { ...formatted, messages: merged };
+    }
+
     private extractLastLine(text: string): string {
         const lines = String(text || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
         return lines.length ? lines[lines.length - 1] : '';
+    }
+
+    private async ensureGitignoreIgnoresOpencode(): Promise<void> {
+        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!workspaceRoot) return;
+        const gitDir = pathModule.join(workspaceRoot, '.git');
+        if (!fs.existsSync(gitDir)) return;
+        const gitignorePath = pathModule.join(workspaceRoot, '.gitignore');
+        let content = '';
+        let exists = false;
+        try {
+            if (fs.existsSync(gitignorePath)) {
+                content = await fs.promises.readFile(gitignorePath, 'utf-8');
+                exists = true;
+            }
+        } catch {
+            // ignore
+        }
+        if (/^\s*\.opencode\s*$/m.test(content)) return;
+        const newline = content.includes('\r\n') ? '\r\n' : '\n';
+        const needsNewline = content.length > 0 && !content.endsWith('\n') && !content.endsWith('\r\n');
+        const next = `${content}${needsNewline ? newline : ''}.opencode${newline}`;
+        try {
+            await fs.promises.writeFile(gitignorePath, next, 'utf-8');
+        } catch {
+            if (!exists) {
+                return;
+            }
+        }
+    }
+
+    private postUndoStatus(webview: vscode.Webview, sessionId: string | undefined, enabled: boolean): void {
+        if (!sessionId) return;
+        webview.postMessage({ type: 'undoStatus', sessionId, enabled });
+    }
+
+    private setSessionUndoEnabled(sessionId: string | undefined, enabled: boolean, webview: vscode.Webview): void {
+        if (!sessionId) return;
+        this.client.setSessionUndoEnabled(sessionId, enabled);
+        this.postUndoStatus(webview, sessionId, enabled);
+    }
+
+    private async ensureSessionUndoReady(sessionId: string, webview: vscode.Webview): Promise<void> {
+        if (!this.gitUndoEnabled) {
+            this.baselineReady = false;
+            this.setSessionUndoEnabled(sessionId, false, webview);
+            return;
+        }
+        const result = await this.client.ensureBaselineReady(sessionId, sessionId);
+        this.baselineReady = result.ok;
+        if (!result.ok) {
+            webview.postMessage({ type: 'baselineStatus', ready: false, message: 'Git baseline failed. Undo unavailable.' });
+            this.setSessionUndoEnabled(sessionId, false, webview);
+            return;
+        }
+        webview.postMessage({ type: 'baselineStatus', ready: true });
+        this.setSessionUndoEnabled(sessionId, true, webview);
+    }
+
+    private getWorkspaceRootPath(): string {
+        return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
+    }
+
+    private async resolveInternalRepo(sessionId: string): Promise<GitRepoRef | null> {
+        if (!sessionId) return null;
+        try {
+            return await this.repoManager.resolveRepo(sessionId, sessionId);
+        } catch (error) {
+            this.uiDebugChannel.appendLine(`[EXT][INTERNAL_REPO] resolve failed sessionId=${sessionId} err=${String(error)}`);
+            return null;
+        }
+    }
+
+    private async getInternalHeadCommit(repo: GitRepoRef): Promise<string | null> {
+        const head = await runGit(repo, ['rev-parse', 'HEAD']);
+        if (head.code !== 0) return null;
+        const value = head.stdout.trim();
+        return value || null;
+    }
+
+    private async getInternalParentCommit(repo: GitRepoRef, headCommit: string): Promise<string | null> {
+        if (!headCommit) return null;
+        const parent = await runGit(repo, ['rev-parse', `${headCommit}^`]);
+        if (parent.code !== 0) return null;
+        const value = parent.stdout.trim();
+        return value || null;
+    }
+
+    private async waitMs(durationMs: number): Promise<void> {
+        await new Promise((resolve) => setTimeout(resolve, durationMs));
+    }
+
+    private async getInternalDiffFileSet(repo: GitRepoRef, baseCommit: string, headCommit: string): Promise<Set<string>> {
+        if (!baseCommit || !headCommit) return new Set();
+        const diffResult = await runGit(repo, ['diff', '--name-only', `${baseCommit}..${headCommit}`]);
+        if (diffResult.code !== 0) {
+            this.uiDebugChannel.appendLine(`[EXT][INTERNAL_DIFF] failed base=${baseCommit} head=${headCommit}`);
+            return new Set();
+        }
+        const files = diffResult.stdout
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .filter(Boolean);
+        return new Set(files);
+    }
+
+    private async emitDiffFileList(sessionId: string, webview: vscode.Webview): Promise<void> {
+        if (!this.gitUndoEnabled || !sessionId) return;
+        const repo = await this.resolveInternalRepo(sessionId);
+        if (!repo) return;
+        let headCommit: string | null = null;
+        let baseCommit: string | null = null;
+        for (let attempt = 0; attempt < 5; attempt++) {
+            headCommit = await this.getInternalHeadCommit(repo);
+            if (headCommit) {
+                baseCommit = await this.getInternalParentCommit(repo, headCommit);
+            }
+            if (headCommit && baseCommit) break;
+            await this.waitMs(100);
+        }
+        if (!headCommit || !baseCommit) {
+            this.postAddResponse(webview, 'No baseline available to show changes.');
+            return;
+        }
+        const currentSet = await this.getInternalDiffFileSet(repo, baseCommit, headCommit);
+        const files = Array.from(currentSet);
+        if (!files.length) return;
+        files.sort();
+        const anchorMessageId = this.client.getTurnAssistantMsgId(sessionId);
+        const changeListId = headCommit ? `system:changeList:${headCommit}` : `changes:${Date.now()}`;
+        webview.postMessage({
+            type: 'diffFileList',
+            sessionId,
+            files,
+            source: 'git',
+            scope: 'turn',
+            commitHead: headCommit,
+            commitBase: baseCommit,
+            anchorMessageId,
+            changeListId
+        });
+        if (anchorMessageId && headCommit && baseCommit) {
+            await this.upsertChangeList(sessionId, {
+                id: changeListId,
+                commitHead: headCommit,
+                commitBase: baseCommit,
+                files,
+                anchorMessageId,
+                createdAt: Date.now()
+            });
+        }
+        this.uiDebugChannel.appendLine(`[EXT][DIFF_LIST] sessionId=${sessionId} count=${files.length} anchor=${anchorMessageId || 'null'}`);
+    }
+
+    private async getFileTextAtCommit(repo: GitRepoRef, commit: string, relativePath: string): Promise<string | null> {
+        const normalized = relativePath.replace(/\\/g, '/');
+        const exists = await runGit(repo, ['cat-file', '-e', `${commit}:${normalized}`]);
+        if (exists.code !== 0) return null;
+        const result = await runGit(repo, ['show', `${commit}:${normalized}`]);
+        if (result.code !== 0) return null;
+        return result.stdout ?? '';
+    }
+
+    private async getDiffTextForPath(repo: GitRepoRef, baseCommit: string, relativePath: string): Promise<string> {
+        const normalized = relativePath.replace(/\\/g, '/');
+        const result = await runGit(repo, ['diff', baseCommit, '--', normalized]);
+        if (result.code !== 0) return '';
+        return result.stdout ?? '';
+    }
+
+    private async getDiffTextBetweenCommits(repo: GitRepoRef, baseCommit: string, headCommit: string, relativePath: string): Promise<string> {
+        const normalized = relativePath.replace(/\\/g, '/');
+        const result = await runGit(repo, ['diff', baseCommit, headCommit, '--', normalized]);
+        if (result.code !== 0) return '';
+        return result.stdout ?? '';
+    }
+
+    private async openGitDiffForFile(
+        sessionId: string,
+        filePath: string,
+        webview: vscode.Webview,
+        commitHead?: string,
+        commitBase?: string
+    ): Promise<void> {
+        if (!filePath || !sessionId) return;
+        const repo = await this.resolveInternalRepo(sessionId);
+        if (!repo) return;
+        let headCommit = commitHead || await this.getInternalHeadCommit(repo);
+        let baseCommit = commitBase || (headCommit ? await this.getInternalParentCommit(repo, headCommit) : null);
+        if (!headCommit || !baseCommit) {
+            this.postAddResponse(webview, 'No baseline available to open diff.');
+            return;
+        }
+        const workspaceRoot = this.getWorkspaceRootPath();
+        const absPath = pathModule.isAbsolute(filePath)
+            ? filePath
+            : pathModule.join(workspaceRoot, filePath);
+        const relPath = pathModule.relative(workspaceRoot, absPath).replace(/\\/g, '/');
+        const beforeText = (await this.getFileTextAtCommit(repo, baseCommit, relPath)) ?? '';
+        let afterText = '';
+        let diffText = '';
+        if (commitHead) {
+            afterText = (await this.getFileTextAtCommit(repo, headCommit, relPath)) ?? '';
+            diffText = await this.getDiffTextBetweenCommits(repo, baseCommit, headCommit, relPath);
+        } else {
+            try {
+                afterText = await fs.promises.readFile(absPath, 'utf-8');
+            } catch {
+                afterText = '';
+            }
+            diffText = await this.getDiffTextForPath(repo, baseCommit, relPath);
+        }
+        await this.diffProvider.updateFromSnapshot(relPath, beforeText, afterText, diffText || undefined);
     }
 
     constructor(
@@ -121,6 +472,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.uiDebugChannel = vscode.window.createOutputChannel('OpenCode UI Debug');
         this.uiDebugChannel.show(true);
         this.client.setUiDebugChannel(this.uiDebugChannel);
+        const workspaceRoot = this.getWorkspaceRootPath();
+        this.repoManager = new GitRepoManager(workspaceRoot, (message) => this.uiDebugChannel.appendLine(message));
+        void this.initGitUndo();
+        void this.ensureGitignoreIgnoresOpencode();
 
         try {
             const raw = this._context.globalState.get<string>(this.UNDO_SEGMENTS_KEY);
@@ -139,6 +494,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             this.uiDebugChannel.appendLine(`EXT: segments hydrate | sessions | ${this.undoSegmentsBySession.size} | totalSegments | ${totalSegments}`);
         } catch (error) {
             this.uiDebugChannel.appendLine(`EXT: segments hydrate error | ${error}`);
+        }
+    }
+
+    private async initGitUndo(): Promise<void> {
+        const capabilities = await this.client.initGitUndo();
+        this.gitUndoEnabled = Boolean(capabilities.gitAvailable);
+        this.gitUndoReason = capabilities.reason || undefined;
+        this.uiDebugChannel.appendLine(`detectGit: ok=${String(this.gitUndoEnabled)} version=${capabilities.version || 'null'} reason=${capabilities.reason || 'null'}`);
+        const liveWebview = this._view?.webview;
+        if (liveWebview) {
+            liveWebview.postMessage({ type: 'gitUndoAvailability', enabled: this.gitUndoEnabled, reason: this.gitUndoReason });
         }
     }
 
@@ -169,37 +535,37 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     // 更新 this._view 为最新实例
                     this._view = webviewView;
                     this._webviewInstanceId = data.webviewInstanceId;
-                    this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_1_RX] webviewReady | wvId=${this._webviewInstanceId}`);
+                    // this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_1_RX] webviewReady | wvId=${this._webviewInstanceId}`);
                     
                     const liveWebview = this._view?.webview;
-                    if (liveWebview) {
-                        this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_2_START] calling sendInit()`);
-                        await this.sendInit(liveWebview);
-                        this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_3_DONE] sendInit() complete, sending ack`);
+                        if (liveWebview) {
+                            // this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_2_START] calling sendInit()`);
+                            await this.sendInit(liveWebview);
+                            // this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_3_DONE] sendInit() complete, sending ack`);
                         
                         liveWebview.postMessage({ type: 'webviewReadyAck', timestamp: Date.now(), webviewInstanceId: this._webviewInstanceId });
-                        this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_4_ACK] ack sent`);
+                        // this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_4_ACK] ack sent`);
                     }
                     break;
                 }
                 case "sendMessage": {
-                    this.uiDebugChannel.appendLine(
-                        `[EXT][SEND_RX] sessionId=${this.currentSessionId || 'NULL'} ` +
-                        `hasValue=${Boolean(data.value)} valueLen=${data.value?.length || 0}`
-                    );
+                    // this.uiDebugChannel.appendLine(
+                    //     `[EXT][SEND_RX] sessionId=${this.currentSessionId || 'NULL'} ` +
+                    //     `hasValue=${Boolean(data.value)} valueLen=${data.value?.length || 0}`
+                    // );
                     
                     if (!data.value) {
-                        this.uiDebugChannel.appendLine(`[EXT][SEND_DROP] reason=empty-value`);
+                        // this.uiDebugChannel.appendLine(`[EXT][SEND_DROP] reason=empty-value`);
                         return;
                     }
 
                     if (!this.currentSessionId) {
-                        this.uiDebugChannel.appendLine(`[EXT][SEND_CREATE_SESSION] reason=no-current`);
+                        // this.uiDebugChannel.appendLine(`[EXT][SEND_CREATE_SESSION] reason=no-current`);
                         try {
                             const sessionInfo = await this.client.createSession();
                             this.currentSessionId = sessionInfo.id;
                             this.client.setSessionId(this.currentSessionId);
-                            this.uiDebugChannel.appendLine(`[EXT][SEND_SESSION_CREATED] id=${this.currentSessionId}`);
+                            // this.uiDebugChannel.appendLine(`[EXT][SEND_SESSION_CREATED] id=${this.currentSessionId}`);
                             const liveWebview = this._view?.webview || activeWebview;
                             liveWebview.postMessage({
                                 type: 'sessionId',
@@ -212,12 +578,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     }
 
                     if (data.value.toLowerCase() === 'ping') {
-                        OpenCodeClient.outputChannel.appendLine(`[BRIDGE] Manual PONG sent`);
+                        // OpenCodeClient.outputChannel.appendLine(`[BRIDGE] Manual PONG sent`);
                         this.postAddResponse(activeWebview, 'PONG - Bridge is working!');
                         return;
                     }
 
-                    this.uiDebugChannel.appendLine(`[EXT][SEND_START] sessionId=${this.currentSessionId} attachments=${data.attachments?.length || 0}`);
+                    // this.uiDebugChannel.appendLine(`[EXT][SEND_START] sessionId=${this.currentSessionId} attachments=${data.attachments?.length || 0}`);
 
                     try {
                         const attachments = Array.isArray(data.attachments) ? data.attachments : [];
@@ -230,6 +596,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         }
                         if (typeof data.tmpKey === 'string' && data.tmpKey.startsWith('tmp:') && this.currentSessionId) {
                             this.pendingAssistantTmpKeyBySession.set(this.currentSessionId, data.tmpKey);
+                            this.client.setPendingAssistantTmpKey(this.currentSessionId, data.tmpKey);
                         }
 
                         const messageIndex = this.client.registerMessage(clientMessageId);
@@ -237,10 +604,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         this.clientMessageIdMap.set(clientMessageId, clientMessageId);
 
                         const attachmentNames = attachments.map((item: string) => pathModule.basename(item));
-                        const displayText = attachmentNames.length
-                            ? `${userText}
+                        const fileNames = attachmentNames.filter((name: string) => !this.isImageFileName(name));
+                        const attachmentLines = fileNames.map((name: string) => `📄 ${name}`);
+                        const displayText = attachmentLines.length
+                            ? (userText
+                                ? `${userText}
 
-[Attached: ${attachmentNames.join(', ')}]`
+${attachmentLines.join('\n')}`
+                                : attachmentLines.join('\n'))
                             : userText;
                         const pendingUserMessage: SessionMessage = {
                             role: 'user',
@@ -279,7 +650,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                         OpenCodeClient.outputChannel.appendLine(`[BRIDGE] Chat done`);
                         liveWebview.postMessage({ type: 'chatDone', sessionId: this.currentSessionId });
+                        if (this.currentSessionId) {
+                            await this.client.commitPendingTurnChanges(this.currentSessionId);
+                        }
                         await this.resolvePendingUserUpgrade(this.currentSessionId, liveWebview);
+                        if (this.currentSessionId) {
+                            await this.emitDiffFileList(this.currentSessionId, liveWebview);
+                        }
                         if (this.currentSessionId) {
                             this.client.finishTurn(this.currentSessionId);
                         }
@@ -303,6 +680,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         vscode.window.showErrorMessage(`OpenCode Error: ${error}`);
                         this.postAddResponse(activeWebview, `Error: ${error}`);
                         activeWebview.postMessage({ type: 'chatDone', sessionId: this.currentSessionId });
+                        if (this.currentSessionId) {
+                            await this.client.commitPendingTurnChanges(this.currentSessionId);
+                        }
                         await this.resolvePendingUserUpgrade(this.currentSessionId, activeWebview);
                         if (this.currentSessionId) {
                             this.client.finishTurn(this.currentSessionId);
@@ -347,6 +727,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     if (typeof data.sessionId !== 'string' || typeof data.tmpKey !== 'string') break;
                     if (!data.tmpKey.startsWith('tmp:')) break;
                     this.pendingAssistantTmpKeyBySession.set(data.sessionId, data.tmpKey);
+                    this.client.setPendingAssistantTmpKey(data.sessionId, data.tmpKey);
                     break;
                 }
                 case "registerPendingUserLocal": {
@@ -507,8 +888,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         if (workspaceFolder) {
                             await this._context.globalState.update(`recentSession.${workspaceFolder}`, data.sessionId);
                         }
+                        await this.ensureSessionUndoReady(data.sessionId, activeWebview);
                         const cwd = workspaceFolder || process.cwd();
-                        this.uiDebugChannel.appendLine(`[EXT][EXPORT_TRY] sessionId=${data.sessionId} cwd=${cwd} cmd="opencode export ${data.sessionId}"`);
+                        // this.uiDebugChannel.appendLine(`[EXT][EXPORT_TRY] sessionId=${data.sessionId} cwd=${cwd} cmd="opencode export ${data.sessionId}"`);
                         let exportResult: any = null;
                         let normalized = { ok: false, data: null as any, stderrLastLine: '' };
                         try {
@@ -539,10 +921,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                     };
                                     const liveWebview = this._view?.webview || activeWebview;
                                     liveWebview.postMessage(payload);
-                                    this.uiDebugChannel.appendLine(`[EXT][SNAP_LOAD_OK] sessionId=${data.sessionId} file=${this.getSnapshotFile(data.sessionId)} bytes=${snap.bytes}`);
+                                    // this.uiDebugChannel.appendLine(`[EXT][SNAP_LOAD_OK] sessionId=${data.sessionId} file=${this.getSnapshotFile(data.sessionId)} bytes=${snap.bytes}`);
                                     return;
                                 }
-                                this.uiDebugChannel.appendLine(`[EXT][SNAP_LOAD_MISS] sessionId=${data.sessionId} file=${this.getSnapshotFile(data.sessionId)}`);
+                                // this.uiDebugChannel.appendLine(`[EXT][SNAP_LOAD_MISS] sessionId=${data.sessionId} file=${this.getSnapshotFile(data.sessionId)}`);
                             } catch (err) {
                                 this.uiDebugChannel.appendLine(`[EXT][SNAP_LOAD_FAIL] sessionId=${data.sessionId} err=${String(err)}`);
                             }
@@ -559,7 +941,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         }
 
                         const exportData = normalized.data;
-                        const formatted = this.formatSession(exportData);
+                        const formattedRaw = this.formatSession(exportData);
+                        const formatted = await this.injectChangeLists(data.sessionId, formattedRaw);
                         const liveWebview = this._view?.webview || activeWebview;
                         const persisted = await this.loadPersistedSegment(data.sessionId);
                         const historySegments = persisted?.segment?.historySegments || [];
@@ -586,20 +969,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         const segMap = this.undoSegmentsBySession.get(data.sessionId);
                         const segments = segMap ? Array.from(segMap.values()) : [];
 
-                        this.uiDebugChannel.appendLine(
-                            `[EXT][SEG_HYDRATE_LOAD] sessionId=${data.sessionId} found=${segments.length} ` +
-                            `keys=[${(segMap ? Array.from(segMap.keys()) : []).join(', ')}]`
-                        );
-                        
-                        this.uiDebugChannel.appendLine(
-                            `[EXT][SEG_HYDRATE_SEND] sessionId=${data.sessionId} count=${segments.length} reason=selectSession`
-                        );
-                        
-                        const timelineMsgCount = formatted.messages.filter((m) => typeof m.id === 'string' && m.id.startsWith('msg_')).length;
-                        this.uiDebugChannel.appendLine(
-                            `sessionData.send | sessionId | ${data.sessionId} | messagesCount | ${formatted.messages.length} | ` +
-                            `timelineMsgCount | ${timelineMsgCount} | segmentsCount | ${segments.length}`
-                        );
+                        // this.uiDebugChannel.appendLine(
+                        //     `[EXT][SEG_HYDRATE_LOAD] sessionId=${data.sessionId} found=${segments.length} ` +
+                        //     `keys=[${(segMap ? Array.from(segMap.keys()) : []).join(', ')}]`
+                        // );
+                        // 
+                        // this.uiDebugChannel.appendLine(
+                        //     `[EXT][SEG_HYDRATE_SEND] sessionId=${data.sessionId} count=${segments.length} reason=selectSession`
+                        // );
+                        // 
+                        // const timelineMsgCount = formatted.messages.filter((m) => typeof m.id === 'string' && m.id.startsWith('msg_')).length;
+                        // this.uiDebugChannel.appendLine(
+                        //     `sessionData.send | sessionId | ${data.sessionId} | messagesCount | ${formatted.messages.length} | ` +
+                        //     `timelineMsgCount | ${timelineMsgCount} | segmentsCount | ${segments.length}`
+                        // );
 
                         const sessionPayload = {
                             type: 'sessionData',
@@ -616,7 +999,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                 sessionData: sessionPayload
                             };
                             const bytes = await this.writeSnapshotAtomic(data.sessionId, snapshotObj);
-                            this.uiDebugChannel.appendLine(`[EXT][SNAP_SAVE] sessionId=${data.sessionId} file=${this.getSnapshotFile(data.sessionId)} bytes=${bytes}`);
+                            // this.uiDebugChannel.appendLine(`[EXT][SNAP_SAVE] sessionId=${data.sessionId} file=${this.getSnapshotFile(data.sessionId)} bytes=${bytes}`);
                         } catch (err) {
                             this.uiDebugChannel.appendLine(`[EXT][SNAP_SAVE_FAIL] sessionId=${data.sessionId} err=${String(err)}`);
                         }
@@ -646,6 +1029,45 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     }
                     break;
                 }
+                case "selectAttachments": {
+                    try {
+                        const picks = await vscode.window.showOpenDialog({
+                            canSelectMany: true,
+                            canSelectFiles: true,
+                            canSelectFolders: false,
+                            openLabel: 'Add attachments'
+                        });
+                        if (!picks || !picks.length) break;
+                        for (const uri of picks) {
+                            const filePath = uri.fsPath;
+                            const name = pathModule.basename(filePath);
+                            const mime = this.getImageMimeFromName(name) || 'application/octet-stream';
+                            let dataUrl: string | undefined;
+                            if (this.isImageFileName(name)) {
+                                try {
+                                    const buffer = await fs.promises.readFile(filePath);
+                                    dataUrl = `data:${mime};base64,${buffer.toString('base64')}`;
+                                } catch (error) {
+                                    this.uiDebugChannel.appendLine(`[EXT][ATTACH_READ_FAIL] file=${name} err=${String(error)}`);
+                                }
+                            }
+                            const id = `file-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+                            activeWebview.postMessage({
+                                type: 'attachmentAdded',
+                                id,
+                                name,
+                                filePath,
+                                dataUrl,
+                                mime,
+                                sessionId: this.currentSessionId
+                            });
+                        }
+                    } catch (error) {
+                        vscode.window.showErrorMessage(`Failed to add attachments: ${error}`);
+                        activeWebview.postMessage({ type: 'attachmentError', value: `Failed to add attachments: ${error}`, sessionId: this.currentSessionId });
+                    }
+                    break;
+                }
                 case "newSession": {
                     if (this.currentSessionId) {
                         await this.clearPersistedSegment(this.currentSessionId);
@@ -658,6 +1080,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         await this._context.globalState.update(`recentSession.${workspaceFolder}`, undefined);
                     }
                     activeWebview.postMessage({ type: 'newSession', sessionId: this.currentSessionId });
+                    if (this.gitUndoEnabled) {
+                        this.pendingBaselineTurnKey = `baseline-${Date.now()}`;
+                        this.pendingBaselineFailed = false;
+                        activeWebview.postMessage({ type: 'baselineStatus', ready: false, message: 'Initializing Git baseline...' });
+                        const baselineResult = await this.client.ensureBaselineForTurn(this.pendingBaselineTurnKey);
+                        this.baselineReady = baselineResult.ok;
+                        if (!baselineResult.ok) {
+                            this.pendingBaselineFailed = true;
+                            activeWebview.postMessage({ type: 'baselineStatus', ready: false, message: 'Git baseline failed. Undo unavailable.' });
+                        } else {
+                            activeWebview.postMessage({ type: 'baselineStatus', ready: true });
+                        }
+                    }
                     break;
                 }
                 case "undoToMessage": {
@@ -666,14 +1101,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         this.uiDebugChannel.appendLine(`[EXT][UNDO_DROP] reason=no-messageId fullData=${JSON.stringify(data)}`);
                         return;
                     }
+                    if (!this.gitUndoEnabled) {
+                        this.postAddResponse(activeWebview, 'Undo unavailable: Git not installed or version too old. Please install/upgrade Git and restart VS Code.');
+                        return;
+                    }
+                    if (!this.baselineReady) {
+                        this.postAddResponse(activeWebview, 'Undo unavailable: Git baseline not ready.');
+                        return;
+                    }
                     try {
                         const sessionId = this.currentSessionId;
                         const operationId = typeof data.operationId === 'string' ? data.operationId : undefined;
                         const resolvedMessageId = this.clientMessageIdMap.get(data.messageId) || data.messageId;
                         const noticeKey = `system:undo:${resolvedMessageId}`;
+                        this.uiDebugChannel.appendLine(`[EXT][UNDO_CALL] anchorMsgId=${resolvedMessageId} sessionId=${sessionId || 'null'} opId=${operationId || 'null'}`);
                         this.uiDebugChannel.appendLine(`[EXT][UNDO_RX] anchorMsgId=${data.messageId} resolvedMsgId=${resolvedMessageId} sessionId=${sessionId || 'null'} opId=${operationId || 'null'}`);
                         const previousSegment = this.client.getRevertedSegment();
                         const result = await this.client.undoFromMessage(resolvedMessageId);
+                        const currentSegment = this.client.getRevertedSegment();
+                        this.uiDebugChannel.appendLine(`[EXT][UNDO_RESULT] applied=${result.applied} conflicts=${result.conflicts.length} touched=${result.touchedFiles.length} segmentStart=${currentSegment?.startMessageId || 'null'} segmentEnd=${currentSegment?.endMessageId || 'null'}`);
                         this.uiDebugChannel.appendLine(`[EXT][UNDO_DONE] applied=${result.applied} conflicts=${result.conflicts.length} sessionId=${sessionId || 'null'}`);
                         if (!result.applied && result.conflicts.length) {
                             this.pendingConflict = { kind: 'undo', startMessageId: resolvedMessageId, operationId };
@@ -689,6 +1135,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                 noticeKey
                             });
                             this.postAddResponse(activeWebview, `Undo paused due to ${result.conflicts.length} conflicts.`, { operationId });
+                            break;
+                        }
+                        if (!result.applied && !result.conflicts.length) {
+                            this.postAddResponse(activeWebview, 'Undo applied. No tracked file changes were available to revert.', { operationId });
                             break;
                         }
                         this.postMessageIndexMap(activeWebview);
@@ -746,6 +1196,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                 operationId,
                                 noticeKey
                             });
+                            const commitsToMark = Array.isArray(segment.startCommits) && segment.startCommits.length
+                                ? segment.startCommits
+                                : (segment.startCommit ? [segment.startCommit] : []);
+                            if (finalSessionId && commitsToMark.length) {
+                                for (const commitHash of commitsToMark) {
+                                    await this.setChangeListReverted(finalSessionId, commitHash, true, liveWebview);
+                                }
+                            }
                             if (this.currentSessionId) {
                                 await this.persistRevertedSegment(this.currentSessionId, segment, result.conflicts, false);
                             }
@@ -782,6 +1240,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     }
                     this.postAddResponse(activeWebview, 'Canceled.');
                     activeWebview.postMessage({ type: 'chatDone', sessionId: this.currentSessionId });
+                    if (this.currentSessionId) {
+                        await this.client.commitPendingTurnChanges(this.currentSessionId);
+                    }
                     await this.resolvePendingUserUpgrade(this.currentSessionId, activeWebview);
                     if (this.currentSessionId) {
                         this.client.finishTurn(this.currentSessionId);
@@ -791,7 +1252,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 case "restoreAll": {
                     this.uiDebugChannel.appendLine(`[EXT][RESTORE_RX] type=restoreAll sessionId=${this.currentSessionId || 'null'} noticeKey=${typeof data.noticeKey === 'string' ? data.noticeKey : 'null'}`);
                     try {
+                        if (!this.gitUndoEnabled) {
+                            this.postAddResponse(activeWebview, 'Restore unavailable: Git not installed or version too old. Please install/upgrade Git and restart VS Code.');
+                            break;
+                        }
                         const operationId = typeof data.operationId === 'string' ? data.operationId : undefined;
+                        const currentSegment = this.client.getRevertedSegment();
+                        const commitsToClear = Array.isArray(currentSegment?.startCommits) && currentSegment?.startCommits?.length
+                            ? currentSegment.startCommits
+                            : (currentSegment?.startCommit ? [currentSegment.startCommit] : []);
                         const result = await this.client.restoreAll();
                         if (!result.applied && result.conflicts.length) {
                             this.pendingConflict = { kind: 'restore', operationId };
@@ -814,8 +1283,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             sessionId: this.currentSessionId
                         });
                         this.uiDebugChannel.appendLine(`[EXT][RESTORE_TX] type=restoredSegment sessionId=${this.currentSessionId || 'null'} noticeKey=${typeof data.noticeKey === 'string' ? data.noticeKey : 'null'} applied=${result.applied}`);
+                        this.client.discardRevertedSegment();
+                        const discardedSegment = this.client.getRevertedSegment();
+                        activeWebview.postMessage({
+                            type: 'revertedSegmentDiscarded',
+                            segment: discardedSegment ? { ...discardedSegment, historySegments: this.revertedSegmentHistory } : discardedSegment,
+                            sessionId: this.currentSessionId
+                        });
                         if (this.currentSessionId) {
                             await this.clearPersistedSegment(this.currentSessionId);
+                        }
+                        if (this.currentSessionId && commitsToClear.length) {
+                            for (const commitHash of commitsToClear) {
+                                await this.setChangeListReverted(this.currentSessionId, commitHash, false, activeWebview);
+                            }
                         }
                         this.postAddResponse(activeWebview, 'Restore applied.', { operationId });
                         this.refreshDiffIfTouched(result.touchedFiles);
@@ -839,6 +1320,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         break;
                     }
                     try {
+                        const currentSegment = this.client.getRevertedSegment();
+                        const commitsToClear = Array.isArray(currentSegment?.startCommits) && currentSegment?.startCommits?.length
+                            ? currentSegment.startCommits
+                            : (currentSegment?.startCommit ? [currentSegment.startCommit] : []);
                         const result = await this.client.restoreFromMessage(anchorMsgId, endMsgId);
                         const liveWebview = this._view?.webview || activeWebview;
                         liveWebview.postMessage({
@@ -850,7 +1335,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             sessionId: sessionId
                         });
                         this.uiDebugChannel.appendLine(`[EXT][RESTORE_TX] type=restoredSegment sessionId=${sessionId || 'null'} noticeKey=${noticeKey || 'null'} applied=${result.applied}`);
+                        if (result.applied && sessionId && commitsToClear.length) {
+                            for (const commitHash of commitsToClear) {
+                                await this.setChangeListReverted(sessionId, commitHash, false, liveWebview);
+                            }
+                        }
                         if (result.applied) {
+                            this.client.discardRevertedSegment();
+                            const discardedSegment = this.client.getRevertedSegment();
+                            liveWebview.postMessage({
+                                type: 'revertedSegmentDiscarded',
+                                segment: discardedSegment ? { ...discardedSegment, historySegments: this.revertedSegmentHistory } : discardedSegment,
+                                sessionId: this.currentSessionId
+                            });
                             this.postAddResponse(activeWebview, 'Restore applied.', { operationId: undefined });
                             this.refreshDiffIfTouched(result.touchedFiles);
                         } else if (result.conflicts.length) {
@@ -865,6 +1362,27 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     } catch (error) {
                         vscode.window.showErrorMessage(`Restore failed: ${error}`);
                         activeWebview.postMessage({ type: 'addResponse', value: `Restore failed: ${error}` });
+                    }
+                    break;
+                }
+                case "openGitDiff": {
+                    if (!data.filePath || typeof data.filePath !== 'string') break;
+                    if (!this.gitUndoEnabled) {
+                        this.postAddResponse(activeWebview, 'Git diff unavailable: Git not installed or version too old.');
+                        break;
+                    }
+                    try {
+                        const sessionId = typeof data.sessionId === 'string' ? data.sessionId : this.currentSessionId;
+                        if (!sessionId) {
+                            this.postAddResponse(activeWebview, 'No session available to open diff.');
+                            break;
+                        }
+                        const commitHead = typeof data.commitHead === 'string' ? data.commitHead : undefined;
+                        const commitBase = typeof data.commitBase === 'string' ? data.commitBase : undefined;
+                        await this.openGitDiffForFile(sessionId, data.filePath, activeWebview, commitHead, commitBase);
+                    } catch (error) {
+                        vscode.window.showErrorMessage(`Open diff failed: ${error}`);
+                        this.postAddResponse(activeWebview, `Open diff failed: ${error}`);
                     }
                     break;
                 }
@@ -942,6 +1460,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                     endMessageId: '',
                                     endMessageIndex: 0
                                 },
+                                sessionId: this.currentSessionId
+                            });
+                            this.client.discardRevertedSegment();
+                            const discardedSegment = this.client.getRevertedSegment();
+                            activeWebview.postMessage({
+                                type: 'revertedSegmentDiscarded',
+                                segment: discardedSegment ? { ...discardedSegment, historySegments: this.revertedSegmentHistory } : discardedSegment,
                                 sessionId: this.currentSessionId
                             });
                             if (this.currentSessionId) {
@@ -1037,7 +1562,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 if (recentSessionId) {
                     try {
                         const cwd = workspaceFolder || process.cwd();
-                        this.uiDebugChannel.appendLine(`[EXT][EXPORT_TRY] sessionId=${recentSessionId} cwd=${cwd} cmd="opencode export ${recentSessionId}"`);
+                        // this.uiDebugChannel.appendLine(`[EXT][EXPORT_TRY] sessionId=${recentSessionId} cwd=${cwd} cmd="opencode export ${recentSessionId}"`);
                         let exportResult: any = null;
                         let normalized = { ok: false, data: null as any, stderrLastLine: '' };
                         try {
@@ -1067,8 +1592,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                         stderrLastLine: normalized.stderrLastLine || ''
                                     };
                                     const liveWebview = this._view?.webview || webview;
+                                    await this.ensureSessionUndoReady(recentSessionId, liveWebview);
                                     liveWebview.postMessage(payload);
-                                    this.uiDebugChannel.appendLine(`[EXT][SNAP_LOAD_OK] sessionId=${recentSessionId} file=${this.getSnapshotFile(recentSessionId)} bytes=${snap.bytes}`);
+                                    // this.uiDebugChannel.appendLine(`[EXT][SNAP_LOAD_OK] sessionId=${recentSessionId} file=${this.getSnapshotFile(recentSessionId)} bytes=${snap.bytes}`);
                                     this.currentSessionId = recentSessionId;
                                     this.client.setSessionId(this.currentSessionId);
                                     return;
@@ -1090,10 +1616,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         }
 
                         const exportData = normalized.data;
-                        const formatted = this.formatSession(exportData);
+                        const formattedRaw = this.formatSession(exportData);
+                        const formatted = await this.injectChangeLists(recentSessionId, formattedRaw);
                         this.currentSessionId = recentSessionId;
                         this.client.setSessionId(this.currentSessionId);
                         const liveWebview = this._view?.webview || webview;
+                        await this.ensureSessionUndoReady(recentSessionId, liveWebview);
                         const persisted = await this.loadPersistedSegment(recentSessionId);
                         const historySegments = persisted?.segment?.historySegments || [];
                         if (persisted?.segment?.historySegments) {
@@ -1119,14 +1647,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         const segMap = this.undoSegmentsBySession.get(recentSessionId);
                         const segments = segMap ? Array.from(segMap.values()) : [];
 
-                        this.uiDebugChannel.appendLine(
-                            `[EXT][SEG_HYDRATE_LOAD] sessionId=${recentSessionId} found=${segments.length} ` +
-                            `keys=[${(segMap ? Array.from(segMap.keys()) : []).join(', ')}]`
-                        );
+                        // this.uiDebugChannel.appendLine(
+                        //     `[EXT][SEG_HYDRATE_LOAD] sessionId=${recentSessionId} found=${segments.length} ` +
+                        //     `keys=[${(segMap ? Array.from(segMap.keys()) : []).join(', ')}]`
+                        // );
                         
-                        this.uiDebugChannel.appendLine(
-                            `[EXT][SEG_HYDRATE_SEND] sessionId=${recentSessionId} count=${segments.length} reason=sendInit`
-                        );
+                        // this.uiDebugChannel.appendLine(
+                        //     `[EXT][SEG_HYDRATE_SEND] sessionId=${recentSessionId} count=${segments.length} reason=sendInit`
+                        // );
                         
                         const timelineMsgCount = formatted.messages.filter((m) => typeof m.id === 'string' && m.id.startsWith('msg_')).length;
                         this.uiDebugChannel.appendLine(
@@ -1179,7 +1707,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 // Try to load this session's data
                 try {
                     const exportResult = await this.client.exportSession(this.currentSessionId);
-                    const formatted = this.formatSession(exportResult);
+                    const formattedRaw = this.formatSession(exportResult);
+                    const formatted = await this.injectChangeLists(this.currentSessionId, formattedRaw);
                     const segMap = this.undoSegmentsBySession.get(this.currentSessionId);
                     const segments = segMap ? Array.from(segMap.values()) : [];
                     
@@ -1254,6 +1783,35 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             sessionId: this.currentSessionId
         });
 
+        liveWebview.postMessage({
+            type: 'gitUndoAvailability',
+            enabled: this.gitUndoEnabled,
+            reason: this.gitUndoReason
+        });
+
+        const shouldInitBaseline = Boolean(
+            this.gitUndoEnabled &&
+            !recentSessionId &&
+            sessions.length === 0 &&
+            this.currentSessionId
+        );
+        if (shouldInitBaseline) {
+            this.pendingBaselineTurnKey = `baseline-${Date.now()}`;
+            this.pendingBaselineFailed = false;
+            liveWebview.postMessage({ type: 'baselineStatus', ready: false, message: 'Initializing Git baseline...' });
+            const baselineResult = await this.client.ensureBaselineForTurn(this.pendingBaselineTurnKey);
+            this.baselineReady = baselineResult.ok;
+            if (!baselineResult.ok) {
+                this.pendingBaselineFailed = true;
+                liveWebview.postMessage({ type: 'baselineStatus', ready: false, message: 'Git baseline failed. Undo unavailable.' });
+            } else {
+                liveWebview.postMessage({ type: 'baselineStatus', ready: true });
+            }
+            if (this.currentSessionId) {
+                this.setSessionUndoEnabled(this.currentSessionId, baselineResult.ok, liveWebview);
+            }
+        }
+
 }
 
 
@@ -1281,6 +1839,43 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const buffer = Buffer.from(base64, 'base64');
         await fs.promises.writeFile(filePath, buffer);
         return { id, name, filePath };
+    }
+
+    private isImageFileName(name: string): boolean {
+        const lower = String(name || '').toLowerCase();
+        if (!lower) return false;
+        const ext = pathModule.extname(lower);
+        return ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg', '.tif', '.tiff', '.ico', '.heic'].includes(ext)
+            || lower.startsWith('img-')
+            || lower.startsWith('image-');
+    }
+
+    private getImageMimeFromName(name: string): string | undefined {
+        const ext = pathModule.extname(String(name || '')).toLowerCase();
+        switch (ext) {
+            case '.png':
+                return 'image/png';
+            case '.jpg':
+            case '.jpeg':
+                return 'image/jpeg';
+            case '.gif':
+                return 'image/gif';
+            case '.webp':
+                return 'image/webp';
+            case '.bmp':
+                return 'image/bmp';
+            case '.svg':
+                return 'image/svg+xml';
+            case '.tif':
+            case '.tiff':
+                return 'image/tiff';
+            case '.ico':
+                return 'image/x-icon';
+            case '.heic':
+                return 'image/heic';
+            default:
+                return undefined;
+        }
     }
 
     private async resolvePendingUserUpgrade(sessionId: string | undefined, webview: vscode.Webview): Promise<void> {
@@ -1342,6 +1937,27 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             this.client.setSessionId(this.currentSessionId);
             const liveWebview = this._view?.webview || webview;
             liveWebview.postMessage({ type: 'sessionId', value: event.sessionId, sessionId: event.sessionId });
+            if (this.pendingBaselineTurnKey) {
+                const turnKey = this.pendingBaselineTurnKey;
+                this.pendingBaselineTurnKey = undefined;
+                if (this.pendingBaselineFailed) {
+                    this.pendingBaselineFailed = false;
+                    this.baselineReady = false;
+                    liveWebview.postMessage({ type: 'baselineStatus', ready: false, message: 'Git baseline failed. Undo unavailable.' });
+                    this.setSessionUndoEnabled(event.sessionId, false, liveWebview);
+                } else {
+                    this.client.ensureBaselineReady(event.sessionId, turnKey).then((result) => {
+                        this.baselineReady = result.ok;
+                        if (!result.ok) {
+                            liveWebview.postMessage({ type: 'baselineStatus', ready: false, message: 'Git baseline failed. Undo unavailable.' });
+                            this.setSessionUndoEnabled(event.sessionId, false, liveWebview);
+                        } else {
+                            liveWebview.postMessage({ type: 'baselineStatus', ready: true });
+                            this.setSessionUndoEnabled(event.sessionId, true, liveWebview);
+                        }
+                    });
+                }
+            }
             return;
         }
 
@@ -1405,7 +2021,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             return;
         }
 
-        if ((event.type === 'diff' || event.type === 'toolPatch') && event.text) {
+        if (event.type === 'diff' && event.text) {
             const liveWebview = this._view?.webview || webview;
             liveWebview.postMessage({ type: 'diffChunk', value: event.text, sessionId: this.currentSessionId });
             return;
@@ -1605,6 +2221,59 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const seenIds = new Set<string>();
         let duplicateIds = false;
 
+        const assistantByParent = new Map<string, any[]>();
+        const userIds: string[] = [];
+        for (const msg of rawMessages) {
+            const role = msg?.info?.role;
+            const id = msg?.info?.id;
+            if (role === 'user' && typeof id === 'string') {
+                userIds.push(id);
+            }
+            if (role === 'assistant') {
+                const parentId = msg?.info?.parentID;
+                if (typeof parentId === 'string') {
+                    const list = assistantByParent.get(parentId) || [];
+                    list.push(msg);
+                    assistantByParent.set(parentId, list);
+                }
+            }
+        }
+
+        const getTimeCreated = (message: any): number => {
+            const v = message?.time?.created;
+            return typeof v === 'number' ? v : -Infinity;
+        };
+
+        const getTimeCompleted = (message: any): number => {
+            const v = message?.time?.completed;
+            return typeof v === 'number' ? v : -Infinity;
+        };
+
+        const pickFinalAssistantId = (candidates: any[]): string | null => {
+            if (!Array.isArray(candidates) || !candidates.length) return null;
+            const stopCandidates = candidates.filter((message) => message?.info?.finish === 'stop');
+            const pickFrom = stopCandidates.length ? stopCandidates : candidates;
+            let best = pickFrom[0];
+            let bestScore = Math.max(getTimeCompleted(best), getTimeCreated(best));
+            for (let i = 1; i < pickFrom.length; i++) {
+                const candidate = pickFrom[i];
+                const score = Math.max(getTimeCompleted(candidate), getTimeCreated(candidate));
+                if (score > bestScore) {
+                    best = candidate;
+                    bestScore = score;
+                }
+            }
+            const id = best?.info?.id;
+            return typeof id === 'string' ? id : null;
+        };
+
+        const finalAssistantIds = new Set<string>();
+        for (const userId of userIds) {
+            const candidates = assistantByParent.get(userId) || [];
+            const picked = pickFinalAssistantId(candidates);
+            if (picked) finalAssistantIds.add(picked);
+        }
+
         for (let i = 0; i < rawMessages.length; i++) {
             const message = rawMessages[i];
             const role = message?.info?.role === 'user' ? 'user' : 'assistant';
@@ -1647,6 +2316,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 this.uiDebugChannel.appendLine(`sessionData.skipMessage | reason | invalid-msg-id | id | ${resolvedId || 'null'}`);
                 continue;
             }
+            if (role === 'assistant' && !finalAssistantIds.has(resolvedId)) {
+                continue;
+            }
             const messageIndex = this.client.registerMessage(resolvedId);
             messages.push({ role, text, id: resolvedId, messageIndex });
         }
@@ -1673,7 +2345,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private async handleAbortedMessage(messageId: string, webview: vscode.Webview): Promise<void> {
-        await this.client.rollbackMessageSnapshot(messageId);
         this.client.removeMessageId(messageId);
         this.clientMessageIdMap.delete(messageId);
         for (const [key, value] of this.clientMessageIdMap.entries()) {
@@ -1735,6 +2406,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             vscode.Uri.joinPath(this._extensionUri, "media", "highlight-github-dark.css")
         );
 
+        const katexCssUri = 'https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css';
+        const katexScriptUri = 'https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js';
+        const texmathScriptUri = 'https://cdn.jsdelivr.net/npm/markdown-it-texmath@1.0.0/texmath.min.js';
+
         return `<!DOCTYPE html>
             <html lang="en">
             <head>
@@ -1742,8 +2417,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 <meta name="viewport" content="width=device-width, initial-scale=1.0">
                 <link href="${styleMainUri}" rel="stylesheet">
                 <link href="${highlightStyleUri}" rel="stylesheet">
+                <link href="${katexCssUri}" rel="stylesheet">
                 <script src="${markdownItUri}"></script>
                 <script>window.markdownit = window.markdownit || markdownit;</script>
+                <script src="${katexScriptUri}"></script>
+                <script src="${texmathScriptUri}"></script>
                 <script src="${domPurifyUri}"></script>
                 <script src="${highlightScriptUri}"></script>
                 <style>
@@ -1764,6 +2442,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 <div class="session-header">
                     <span class="session-title" id="session-title">New Session</span>
                     <span class="pending-indicator hidden" id="pending-indicator"></span>
+                    <span class="undo-status hidden" id="undo-status">Undo not available</span>
                     <div class="session-controls">
                         <button class="icon-btn" id="new-session-btn" title="New Session">
                             <svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M14 7v1H8v6H7V8H1V7h6V1h1v6h6z"/></svg>
@@ -1795,11 +2474,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 </div>
 
                 <div class="input-container">
-                    <textarea id="chat-input" placeholder="Ask anything..."></textarea>
                     <div class="attachment-list" id="attachment-list"></div>
+                    <textarea id="chat-input" placeholder="Ask anything..."></textarea>
 
                     <div class="toolbar">
                         <div class="left-tools">
+                            <button class="icon-btn" id="attachment-btn" title="Add attachment" aria-label="Add attachment">＋</button>
                             <div class="select-wrapper mode-wrapper">
                                 <select id="mode-select" title="Mode">
                                     <option value="build">build</option>

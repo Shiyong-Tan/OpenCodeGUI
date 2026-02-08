@@ -6,6 +6,15 @@ const md = window.markdownit({
     html: false
 });
 
+if (window.texmath && window.katex) {
+    md.use(window.texmath, {
+        engine: window.katex,
+        delimiters: ['dollars', 'brackets'],
+        outerSpace: true,
+        katexOptions: { throwOnError: false }
+    });
+}
+
 md.renderer.rules.table_open = function (tokens, idx, options, env, self) {
     return '<div class="md-table-wrap"><table' + self.renderAttrs(tokens[idx]) + '>';
 };
@@ -36,6 +45,12 @@ let hydratedSessions = new Set();
 let allowedDiscardKeys = new Set();
 
 const sessionsById = new Map();
+let gitUndoEnabled = false;
+let gitUndoReason = null;
+let baselineReady = true;
+let baselineMessage = null;
+let sendButtonEl = null;
+let inputEl = null;
 const pendingUiPrompts = [];
 
 function formatList(values, max = 20) {
@@ -92,14 +107,14 @@ function logTimelineSnapshot(action, timeline, details) {
     const counts = timelineCounts(timeline);
     const tail = formatTail(timeline);
     const detailText = details ? ` ${details}` : '';
-    vscode.postMessage({
-        type: 'ui-debug',
-        payload: ['[DBG_TIMELINE]', `action=${action}${detailText} size=${timeline.length} tail=${tail}`]
-    });
-    vscode.postMessage({
-        type: 'ui-debug',
-        payload: ['[DBG_TIMELINE]', `counts msg=${counts.msg} tmp=${counts.tmp} local=${counts.local}`]
-    });
+    // vscode.postMessage({
+    //     type: 'ui-debug',
+    //     payload: ['[DBG_TIMELINE]', `action=${action}${detailText} size=${timeline.length} tail=${tail}`]
+    // });
+    // vscode.postMessage({
+    //     type: 'ui-debug',
+    //     payload: ['[DBG_TIMELINE]', `counts msg=${counts.msg} tmp=${counts.tmp} local=${counts.local}`]
+    // });
 }
 
 function ensureNoticeAtAnchor(timeline, noticeKey, anchorMsgId) {
@@ -176,7 +191,8 @@ function createSessionState() {
         pendingUndoByNoticeKey: new Map(),
         seenUndoAckOpIds: new Set(),
         pendingUndo: null,
-        lastUndoNoticeKey: null
+        lastUndoNoticeKey: null,
+        undoAvailable: true
     };
 }
 
@@ -1094,6 +1110,9 @@ function canUndo(session, anchorKey) {
     if (!msgId) {
         return { allowed: false, reason: 'unresolved', msgId: null };
     }
+    if (!gitUndoEnabled) {
+        return { allowed: false, reason: gitUndoReason || 'git-disabled', msgId };
+    }
     if (session?.thinkingId) {
         return { allowed: false, reason: 'streaming', msgId };
     }
@@ -1103,6 +1122,14 @@ function canUndo(session, anchorKey) {
         }
     }
     return { allowed: true, reason: 'ok', msgId };
+}
+
+function setSendEnabled(enabled) {
+    if (inputEl) {
+        if (!enabled && baselineMessage) {
+            inputEl.placeholder = baselineMessage;
+        }
+    }
 }
 
 function attemptAssistantUpgrade(sessionId, payload, source) {
@@ -1288,7 +1315,7 @@ function handleUndoTimeout(sessionId, clientOpId) {
     upsertMessage(session, {
         id: timeoutKey,
         role: 'system',
-        text: 'Undo request timed out (no ack from extension).',
+        text: 'Undo request timed out (code state losts.).',
         meta: { kind: 'undoTimeout', opId, anchorKey }
     });
     if (!session.timeline.includes(timeoutKey)) {
@@ -1367,14 +1394,17 @@ function handleToggleSegment(sessionId, segmentId) {
 }
 
 function renderMarkdownInto(element, text) {
-    const raw = md.render(text);
+    const normalized = normalizeInlineMath(text || '');
+    const raw = md.render(normalized);
     element.innerHTML = purify.sanitize(raw, {
         ALLOWED_TAGS: [
             'a', 'p', 'br', 'strong', 'em', 'code', 'pre', 'ul', 'ol', 'li',
             'blockquote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hr',
-            'table', 'thead', 'tbody', 'tr', 'th', 'td'
+            'table', 'thead', 'tbody', 'tr', 'th', 'td', 'span', 'section', 'eq', 'eqn',
+            'math', 'mrow', 'mi', 'mo', 'mn', 'msup', 'msub', 'mfrac', 'msqrt', 'mroot',
+            'mtable', 'mtr', 'mtd', 'mtext', 'mstyle', 'annotation', 'semantics'
         ],
-        ALLOWED_ATTR: ['href', 'title', 'target', 'rel']
+        ALLOWED_ATTR: ['href', 'title', 'target', 'rel', 'class', 'role', 'aria-hidden', 'style', 'mathvariant', 'display', 'xmlns', 'encoding']
     });
     for (const link of element.querySelectorAll('a')) {
         link.setAttribute('target', '_blank');
@@ -1386,6 +1416,16 @@ function renderMarkdownInto(element, text) {
         }
     }
     wrapTables(element);
+}
+
+function normalizeInlineMath(text) {
+    if (!text || typeof text !== 'string') return text;
+    return text.replace(/\$([^$\n]*?)\$/g, (match, inner) => {
+        const hasLatex = /\\[a-zA-Z]+|\^|_/.test(inner);
+        if (!hasLatex) return match;
+        const trimmed = inner.trim();
+        return `$${trimmed}$`;
+    });
 }
 
 function wrapTables(root) {
@@ -1405,8 +1445,9 @@ function wrapTables(root) {
 document.addEventListener('DOMContentLoaded', () => {
     const sendBtn = document.getElementById('send-btn');
     const sendIcon = `
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" fill="currentColor"/>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="5" y1="12" x2="19" y2="12" />
+            <polyline points="13 6 19 12 13 18" />
         </svg>
     `;
     const stopIcon = `
@@ -1419,7 +1460,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const modelSelect = document.getElementById('model-select');
     const modeSelect = document.getElementById('mode-select');
     const variantSelect = document.getElementById('variant-select');
+    const attachmentBtn = document.getElementById('attachment-btn');
     const sessionTitle = document.getElementById('session-title');
+    const undoStatusEl = document.getElementById('undo-status');
     const historyBtn = document.getElementById('history-btn');
     const newSessionBtn = document.getElementById('new-session-btn');
     const sessionPanel = document.getElementById('session-panel');
@@ -1455,6 +1498,25 @@ document.addEventListener('DOMContentLoaded', () => {
         chatContainer.appendChild(div);
     }
 
+    function updateUndoStatusDisplay(sessionId) {
+        if (!undoStatusEl) return;
+        const session = getSessionState(sessionId, false);
+        const enabled = session?.undoAvailable !== false;
+        if (enabled) {
+            undoStatusEl.classList.add('hidden');
+        } else {
+            undoStatusEl.classList.remove('hidden');
+        }
+    }
+
+    function isImageAttachment(item) {
+        const mime = typeof item?.mime === 'string' ? item.mime : '';
+        if (mime.startsWith('image/')) return true;
+        const name = typeof item?.name === 'string' ? item.name : '';
+        const lower = name.toLowerCase();
+        return /\.(png|jpe?g|gif|webp|bmp|svg|tiff?|ico|heic)$/.test(lower);
+    }
+
     function renderNestedMessageElement(message) {
         const messageType = message.role === 'assistant'
             ? 'bot'
@@ -1482,7 +1544,9 @@ document.addEventListener('DOMContentLoaded', () => {
         } else if (message.role === 'assistant') {
             renderMarkdownInto(content, message.text || '');
         } else {
-            content.textContent = message.text || '';
+            const rawText = message.text || '';
+            const trimmedText = isUser ? rawText.replace(/^(\r?\n)+/, '') : rawText;
+            content.textContent = trimmedText;
         }
         div.appendChild(content);
 
@@ -1503,12 +1567,71 @@ document.addEventListener('DOMContentLoaded', () => {
         return div;
     }
 
-    function renderMessageElement(message, renderedSet) {
-        if (renderedSet.has(message.id)) {
-            console.warn('[Render] duplicate message skipped', message.id);
-            return;
+function renderMessageElement(message, renderedSet) {
+    if (renderedSet.has(message.id)) {
+        console.warn('[Render] duplicate message skipped', message.id);
+        return;
+    }
+    renderedSet.add(message.id);
+
+    if (message.meta?.kind === 'changeList') {
+        const files = Array.isArray(message.meta?.files) ? message.meta.files : [];
+        if (!files.length) return;
+        const commitHead = typeof message.meta?.commitHead === 'string' ? message.meta.commitHead : undefined;
+        const commitBase = typeof message.meta?.commitBase === 'string' ? message.meta.commitBase : undefined;
+
+        const container = document.createElement('div');
+        container.className = 'conflict-card change-list-card';
+        container.style.textAlign = 'left';
+        container.dataset.messageId = message.id;
+
+        const header = document.createElement('div');
+        header.className = 'conflict-card-header';
+        header.textContent = `Changed files (${files.length})`;
+        container.appendChild(header);
+
+        if (message.meta?.reverted === true) {
+            const revertedNotice = document.createElement('div');
+            revertedNotice.className = 'change-list-reverted';
+            revertedNotice.textContent = 'Changes reverted by Undo.';
+            container.appendChild(revertedNotice);
         }
-        renderedSet.add(message.id);
+
+        const list = document.createElement('div');
+        list.className = 'conflict-card-list';
+
+        for (const rawPath of files) {
+            if (typeof rawPath !== 'string' || !rawPath.length) continue;
+            const normalized = rawPath.replace(/\\/g, '/');
+            const parts = normalized.split('/');
+            const base = parts.pop() || normalized;
+            const dir = parts.length ? `${parts.join('/')}/` : '';
+
+            const details = document.createElement('details');
+            details.className = 'conflict-card-item';
+
+            const summary = document.createElement('summary');
+            summary.style.textAlign = 'left';
+            summary.addEventListener('click', () => postOpenGitDiff(normalized, activeSessionId, commitHead, commitBase));
+
+            const dirSpan = document.createElement('span');
+            dirSpan.className = 'conflict-card-path';
+            dirSpan.textContent = dir;
+
+            const baseSpan = document.createElement('span');
+            baseSpan.className = 'conflict-card-file';
+            baseSpan.textContent = base;
+
+            summary.appendChild(dirSpan);
+            summary.appendChild(baseSpan);
+            details.appendChild(summary);
+            list.appendChild(details);
+        }
+
+        container.appendChild(list);
+        chatContainer.appendChild(container);
+        return;
+    }
 
         if (message.meta?.kind === 'undoSegmentPlaceholder' || message.id.startsWith('system:undo-seg:')) {
             const session = getSessionOrNull(activeSessionId);
@@ -1556,7 +1679,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const restoreBtn = document.createElement('button');
             restoreBtn.type = 'button';
             restoreBtn.className = 'reverted-segment-btn primary';
-            restoreBtn.textContent = 'Restore all';
+            restoreBtn.textContent = 'Restore';
             restoreBtn.disabled = !restoreAllowed;
             restoreBtn.addEventListener('click', () => {
                 if (!restoreAllowed) {
@@ -1671,11 +1794,16 @@ document.addEventListener('DOMContentLoaded', () => {
         if (message.role === 'user') {
             const actions = document.createElement('div');
             actions.className = 'message-actions';
+            if (!gitUndoEnabled) {
+                div.appendChild(actions);
+                chatContainer.appendChild(div);
+                return;
+            }
             const undoBtn = document.createElement('button');
             undoBtn.className = 'undo-btn';
             undoBtn.type = 'button';
             undoBtn.title = 'Undo to this message';
-            undoBtn.textContent = '⟲';
+            undoBtn.textContent = '↺';
             undoBtn.addEventListener('click', () => {
                 if (isBusy) return;
                 const sessionId = activeSessionId;
@@ -1820,7 +1948,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (msg.role === 'assistant') {
                     renderMarkdownInto(content, msg.text || '');
                 } else {
-                    content.textContent = msg.text || '';
+                    const rawText = msg.text || '';
+                    const trimmedText = isUser ? rawText.replace(/^(\r?\n)+/, '') : rawText;
+                    content.textContent = trimmedText;
                 }
                 entry.appendChild(content);
                 body.appendChild(entry);
@@ -1891,7 +2021,7 @@ document.addEventListener('DOMContentLoaded', () => {
             renderKeys.push(id);
         }
 
-        if (lastConflictPayload) {
+        if (lastConflictPayload && lastConflictPayload.sessionId === activeSessionId) {
             renderConflictCard(lastConflictPayload);
         }
 
@@ -1925,18 +2055,18 @@ document.addEventListener('DOMContentLoaded', () => {
         const domFirst10 = formatList(domKeys.slice(0, 10));
         const domLast10 = formatList(domKeys.slice(-10));
 
-        vscode.postMessage({
-            type: 'ui-debug',
-            payload: ['[WV][ORDER_TIMELINE]', `size=${timelineKeys.length}`, `first10=${timelineFirst10}`, `last10=${timelineLast10}`]
-        });
-        vscode.postMessage({
-            type: 'ui-debug',
-            payload: ['[WV][ORDER_ROOTS]', `size=${renderKeys.length}`, `first10=${rootsFirst10}`, `last10=${rootsLast10}`]
-        });
-        vscode.postMessage({
-            type: 'ui-debug',
-            payload: ['[WV][ORDER_DOM]', `size=${domKeys.length}`, `first10=${domFirst10}`, `last10=${domLast10}`]
-        });
+        // vscode.postMessage({
+        //     type: 'ui-debug',
+        //     payload: ['[WV][ORDER_TIMELINE]', `size=${timelineKeys.length}`, `first10=${timelineFirst10}`, `last10=${timelineLast10}`]
+        // });
+        // vscode.postMessage({
+        //     type: 'ui-debug',
+        //     payload: ['[WV][ORDER_ROOTS]', `size=${renderKeys.length}`, `first10=${rootsFirst10}`, `last10=${rootsLast10}`]
+        // });
+        // vscode.postMessage({
+        //     type: 'ui-debug',
+        //     payload: ['[WV][ORDER_DOM]', `size=${domKeys.length}`, `first10=${domFirst10}`, `last10=${domLast10}`]
+        // });
         if (noticeKey) {
             const idxTimeline = timelineKeys.indexOf(noticeKey);
             const idxRoots = renderKeys.indexOf(noticeKey);
@@ -2315,13 +2445,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         variantSelect.disabled = false;
-        const emptyOption = document.createElement('option');
-        emptyOption.value = '';
-        emptyOption.textContent = '';
-        if (!selectedVariant) {
-            emptyOption.selected = true;
+        if (!variantsData.includes(selectedVariant)) {
+            selectedVariant = variantsData[0] || '';
+            vscode.postMessage({ type: 'setVariant', value: selectedVariant });
         }
-        variantSelect.appendChild(emptyOption);
 
         for (const variant of variantsData) {
             const option = document.createElement('option');
@@ -2331,12 +2458,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 option.selected = true;
             }
             variantSelect.appendChild(option);
-        }
-
-        if (!variantsData.includes(selectedVariant)) {
-            selectedVariant = '';
-            variantSelect.value = selectedVariant;
-            vscode.postMessage({ type: 'setVariant', value: selectedVariant });
         }
         renderVariantSelect();
     }
@@ -2391,10 +2512,85 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function renderAttachments() {
         attachmentList.innerHTML = '';
+        const imageItems = attachments.filter((item) => {
+            const name = typeof item?.name === 'string' ? item.name : '';
+            const mime = typeof item?.mime === 'string' ? item.mime : '';
+            return mime.startsWith('image/') || name.startsWith('img-');
+        });
+        const totalImages = imageItems.length;
+        let imageIndex = 0;
+
         for (const item of attachments) {
+            const name = typeof item?.name === 'string' ? item.name : '';
+            const mime = typeof item?.mime === 'string' ? item.mime : '';
+            const isImage = mime.startsWith('image/') || name.startsWith('img-');
+
+            if (isImage) {
+                imageIndex += 1;
+                const label = totalImages > 1 ? `image${imageIndex}` : 'image';
+                const entry = document.createElement('div');
+                entry.className = 'attachment-image-item';
+
+                const thumb = document.createElement('img');
+                thumb.className = 'attachment-image-thumb';
+                thumb.alt = label;
+                if (typeof item?.dataUrl === 'string' && item.dataUrl) {
+                    thumb.src = item.dataUrl;
+                }
+
+                const text = document.createElement('span');
+                text.className = 'attachment-image-label';
+                text.textContent = label;
+
+                const removeBtn = document.createElement('button');
+                removeBtn.type = 'button';
+                removeBtn.className = 'attachment-image-remove';
+                removeBtn.textContent = '×';
+                removeBtn.addEventListener('click', (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const idx = attachments.findIndex((entryItem) => entryItem.id === item.id);
+                    if (idx >= 0) {
+                        attachments.splice(idx, 1);
+                        renderAttachments();
+                    }
+                });
+
+                entry.appendChild(thumb);
+                entry.appendChild(text);
+                entry.appendChild(removeBtn);
+                attachmentList.appendChild(entry);
+                continue;
+            }
+
             const entry = document.createElement('div');
-            entry.className = 'attachment-item';
-            entry.textContent = item.name || 'Attachment';
+            entry.className = 'attachment-image-item attachment-file-item';
+
+            const icon = document.createElement('span');
+            icon.className = 'attachment-file-icon';
+            icon.textContent = '📄';
+
+            const text = document.createElement('span');
+            text.className = 'attachment-image-label';
+            text.textContent = name || 'Attachment';
+
+            const removeBtn = document.createElement('button');
+            removeBtn.type = 'button';
+            removeBtn.className = 'attachment-image-remove';
+            removeBtn.textContent = '×';
+            removeBtn.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                const idx = attachments.findIndex((entryItem) => entryItem.id === item.id);
+                if (idx >= 0) {
+                    attachments.splice(idx, 1);
+                    renderAttachments();
+                }
+            });
+
+            entry.appendChild(icon);
+            entry.appendChild(text);
+            entry.appendChild(removeBtn);
             attachmentList.appendChild(entry);
         }
     }
@@ -2628,6 +2824,16 @@ document.addEventListener('DOMContentLoaded', () => {
     assertInvariants(sessionId, 'chatDone');
 }
 
+    sendButtonEl = sendBtn;
+    inputEl = input;
+    setSendEnabled(!gitUndoEnabled || baselineReady);
+
+    if (attachmentBtn) {
+        attachmentBtn.addEventListener('click', () => {
+            vscode.postMessage({ type: 'selectAttachments', sessionId: activeSessionId || undefined });
+        });
+    }
+
     sendBtn.addEventListener('click', () => {
         if (isBusy) {
             vscode.postMessage({ type: 'cancel' });
@@ -2649,7 +2855,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const text = input.value.trim();
         if ((!text && !attachments.length) || isBusy) return;
 
-        const messageText = text || 'Image attached.';
+        const hasNonImage = attachments.some((item) => !isImageAttachment(item));
+        const fallbackText = hasNonImage ? 'Attachment added.' : 'Image attached.';
+        const messageText = text || fallbackText;
         const clientMessageId = `local-${Date.now()}-${messageCounter++}`;
         const messageImages = attachments
             .map((item) => item.dataUrl)
@@ -2798,6 +3006,26 @@ window.addEventListener('message', (event) => {
         });
 
         switch (message.type) {
+            case 'gitUndoAvailability': {
+                gitUndoEnabled = Boolean(message.enabled);
+                gitUndoReason = typeof message.reason === 'string' ? message.reason : null;
+                vscode.postMessage({
+                    type: 'ui-debug',
+                    payload: ['gitUndoAvailability', 'enabled', String(gitUndoEnabled), 'reason', gitUndoReason || 'null']
+                });
+                window.__oc?.renderFromState?.();
+                break;
+            }
+            case 'baselineStatus': {
+                baselineReady = Boolean(message.ready);
+                baselineMessage = typeof message.message === 'string' ? message.message : null;
+                setSendEnabled(true);
+                vscode.postMessage({
+                    type: 'ui-debug',
+                    payload: ['baselineStatus', 'ready', String(baselineReady), 'message', baselineMessage || 'null']
+                });
+                break;
+            }
             case 'init': {
                 const incomingSessionId = message.currentSessionId || '';
                 const hydrated = Boolean(activeSessionId && incomingSessionId && activeSessionId === incomingSessionId && hydratedSessions.has(activeSessionId));
@@ -2935,6 +3163,7 @@ window.addEventListener('message', (event) => {
                 try {
                     activeSessionId = sessionId;
                     sessionTitle.textContent = message.title || 'OpenCode: Chat';
+                    updateUndoStatusDisplay(sessionId);
                     
                     const session = getSessionState(sessionId, true);
                     
@@ -2972,10 +3201,14 @@ window.addEventListener('message', (event) => {
                             }
                         }
                         
+                        const rawText = item.text || '';
+                        const cleanedText = role === 'user'
+                            ? rawText.replace(/^(\r?\n)+/, '')
+                            : rawText;
                         upsertMessage(session, {
                             id: key,
                             role: role,
-                            text: item.text || '',
+                            text: cleanedText,
                             meta: item.meta || {},
                             order: session.nextOrder++
                         });
@@ -3441,6 +3674,55 @@ window.addEventListener('message', (event) => {
                 scrollToBottom();
                 break;
             }
+            case 'diffFileList': {
+                const sessionId = getEventSessionId(message, 'diffFileList');
+                if (!sessionId) break;
+                const files = Array.isArray(message.files)
+                    ? message.files.filter((item) => typeof item === 'string' && item.length)
+                    : [];
+                if (!files.length) break;
+                const commitHead = typeof message.commitHead === 'string' ? message.commitHead : '';
+                const commitBase = typeof message.commitBase === 'string' ? message.commitBase : '';
+                const changeListId = typeof message.changeListId === 'string' && message.changeListId.length
+                    ? message.changeListId
+                    : (commitHead ? `system:changeList:${commitHead}` : `changes:${Date.now()}`);
+                const session = getSessionState(sessionId, true);
+                upsertMessage(session, {
+                    id: changeListId,
+                    role: 'system',
+                    text: '',
+                    meta: {
+                        kind: 'changeList',
+                        files,
+                        source: message.source || 'git',
+                        scope: message.scope || 'turn',
+                        commitHead: commitHead || undefined,
+                        commitBase: commitBase || undefined,
+                        reverted: message.reverted === true
+                    }
+                });
+                window.__oc?.renderFromState?.();
+                scrollToBottom();
+                break;
+            }
+            case 'changeListUpdate': {
+                const sessionId = getEventSessionId(message, 'changeListUpdate');
+                if (!sessionId) break;
+                const commitHead = typeof message.commitHead === 'string' ? message.commitHead : '';
+                if (!commitHead) break;
+                const session = getSessionState(sessionId, true);
+                let updated = false;
+                for (const msg of session.messagesById.values()) {
+                    if (msg?.meta?.kind === 'changeList' && msg.meta.commitHead === commitHead) {
+                        msg.meta.reverted = message.reverted === true;
+                        updated = true;
+                    }
+                }
+                if (updated) {
+                    window.__oc?.renderFromState?.();
+                }
+                break;
+            }
             case 'messageAppend': {
                 const sessionId = getEventSessionId(message, 'messageAppend');
                 if (!sessionId) break;
@@ -3541,15 +3823,8 @@ window.addEventListener('message', (event) => {
                                 `membersLen=${typeof membersLen === 'number' ? membersLen : 'null'}`]
                         });
                     };
-                    // Special handling: fallback to activeSessionId for control messages
                     let sessionId = message?.sessionId || message?.sessionID || '';
-                    if (!sessionId && activeSessionId) {
-                        sessionId = activeSessionId;
-                        vscode.postMessage({
-                            type: 'ui-debug',
-                            payload: ['[WV][REVERTED_RX]', 'fallback-to-active', `activeSessionId=${activeSessionId}`]
-                        });
-                    } else if (!sessionId) {
+                    if (!sessionId) {
                         vscode.postMessage({
                             type: 'ui-debug',
                             payload: ['[WV][REVERTED_DROP]', 'no-sessionId', 'activeSessionId=null']
@@ -3697,12 +3972,19 @@ window.addEventListener('message', (event) => {
                     let finalMemberMsgIds = memberMsgIds;
                     let mergeApplied = false;
                     const noticeKeyNew = upsertNoticeKey;
-                    const anchorIdx = anchorForUpsert
-                        ? (session.messageIndexMap?.get(anchorForUpsert) ?? session.timeline.indexOf(anchorForUpsert))
-                        : -1;
-                    const newEndIdx = endForUpsert
-                        ? (session.messageIndexMap?.get(endForUpsert) ?? session.timeline.indexOf(endForUpsert))
-                        : -1;
+                    const msgTimelineIndex = new Map();
+                    for (let idx = 0; idx < session.timeline.length; idx++) {
+                        const id = session.timeline[idx];
+                        if (typeof id === 'string' && id.startsWith('msg_') && !msgTimelineIndex.has(id)) {
+                            msgTimelineIndex.set(id, idx);
+                        }
+                    }
+                    const getMsgTimelineIndex = (id) => {
+                        if (!id || typeof id !== 'string') return -1;
+                        return msgTimelineIndex.get(id) ?? -1;
+                    };
+                    const anchorIdx = anchorForUpsert ? getMsgTimelineIndex(anchorForUpsert) : -1;
+                    const newEndIdx = endForUpsert ? getMsgTimelineIndex(endForUpsert) : -1;
 
                     vscode.postMessage({
                         type: 'ui-debug',
@@ -3731,7 +4013,7 @@ window.addEventListener('message', (event) => {
                                     continue;
                                 }
                                 const oldEndIdx = oldSeg.endMsgId
-                                    ? (session.messageIndexMap?.get(oldSeg.endMsgId) ?? session.timeline.indexOf(oldSeg.endMsgId))
+                                    ? getMsgTimelineIndex(oldSeg.endMsgId)
                                     : -1;
                                 noticeKeysToDelete.push(oldNoticeKey);
                                 placeholderIdxToDelete.push(i);
@@ -4168,8 +4450,19 @@ window.addEventListener('message', (event) => {
                 activeSessionId = message.sessionId || '';
                 sessionTitle.textContent = 'OpenCode: Chat';
                 isSwitchingSession = true;
+                updateUndoStatusDisplay(activeSessionId);
                 window.__oc?.renderFromState?.();
                 scrollToBottom();
+                break;
+            }
+            case 'undoStatus': {
+                const sessionId = getEventSessionId(message, 'undoStatus');
+                if (!sessionId) break;
+                const session = getSessionState(sessionId, true);
+                session.undoAvailable = message.enabled === true;
+                if (sessionId === activeSessionId) {
+                    updateUndoStatusDisplay(sessionId);
+                }
                 break;
             }
             case 'error': {
@@ -4213,6 +4506,17 @@ window.addEventListener('message', (event) => {
     });
 });
 
+function postOpenGitDiff(filePath, sessionId, commitHead, commitBase) {
+    if (!filePath) return;
+    vscode.postMessage({
+        type: 'openGitDiff',
+        filePath,
+        sessionId: sessionId || activeSessionId || '',
+        commitHead: commitHead || undefined,
+        commitBase: commitBase || undefined
+    });
+}
+
 function renderConflictCard(payload) {
     const chatContainer = document.getElementById('chat');
     if (!payload || !Array.isArray(payload.conflicts) || !chatContainer) return;
@@ -4236,6 +4540,12 @@ function renderConflictCard(payload) {
 
         const summary = document.createElement('summary');
         summary.textContent = item.path || 'unknown';
+        summary.addEventListener('click', () => {
+            if (item.path) {
+                const sessionId = payload.sessionId || activeSessionId;
+                postOpenGitDiff(item.path, sessionId);
+            }
+        });
         details.appendChild(summary);
 
         const meta = document.createElement('div');
@@ -4245,11 +4555,19 @@ function renderConflictCard(payload) {
         meta.textContent = `Expected: ${expected}, Current: ${current}`;
         details.appendChild(meta);
 
-        const pre = document.createElement('pre');
-        const code = document.createElement('code');
-        code.textContent = item.diffText || '(no diff)';
-        pre.appendChild(code);
-        details.appendChild(pre);
+        const diffText = item.diffText || '';
+        if (diffText) {
+            const diffBlock = document.createElement('div');
+            diffBlock.className = 'conflict-card-diff';
+            renderMarkdownInto(diffBlock, `\n\`\`\`diff\n${diffText}\n\`\`\`\n`);
+            details.appendChild(diffBlock);
+        } else {
+            const pre = document.createElement('pre');
+            const code = document.createElement('code');
+            code.textContent = '(no diff)';
+            pre.appendChild(code);
+            details.appendChild(pre);
+        }
 
         list.appendChild(details);
     }

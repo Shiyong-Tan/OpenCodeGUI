@@ -221,7 +221,7 @@ export class OpenCodeDiffProvider implements vscode.TextDocumentContentProvider 
             const slice = afterText.slice(0, Math.max(0, lastChangeOffset));
             const line = slice.split('\n').length - 1;
             const lastLineIndex = Math.max(0, slice.lastIndexOf('\n'));
-            const col = lastChangeOffset - (lastLineIndex === -1 ? 0 : lastLineIndex + 1);
+            const col = Math.max(0, lastChangeOffset - (lastLineIndex === -1 ? 0 : lastLineIndex + 1));
             return new vscode.Range(new vscode.Position(line, col), new vscode.Position(line, col));
         }
 
@@ -301,7 +301,7 @@ export class OpenCodeDiffProvider implements vscode.TextDocumentContentProvider 
             const slice = afterText.slice(0, Math.max(0, startOffset));
             const line = slice.split('\n').length - 1;
             const lastLineIndex = Math.max(0, slice.lastIndexOf('\n'));
-            const col = startOffset - (lastLineIndex === -1 ? 0 : lastLineIndex + 1);
+            const col = Math.max(0, startOffset - (lastLineIndex === -1 ? 0 : lastLineIndex + 1));
             const pos = new vscode.Position(line, col);
             ranges.push(new vscode.Range(pos, pos));
         }

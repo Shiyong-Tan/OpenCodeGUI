@@ -3,7 +3,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import * as vscode from 'vscode';
-import { diff_match_patch } from 'diff-match-patch';
+import { GitUndoEngine } from './undo/GitUndoEngine';
+import { GitCapabilities, FileChangeSpec } from './undo/types';
 
 export type ModelInfo = {
     id: string;
@@ -44,26 +45,6 @@ export type FileSnapshot = {
     deletions?: number;
 };
 
-type FileChange = {
-    path: string;
-    beforeBlobId: string;
-    afterBlobId: string;
-};
-
-type SnapshotFileMeta = {
-    path: string;
-    existsBefore: boolean;
-    existsAfter: boolean;
-    preHash?: string;
-    postHash?: string;
-};
-
-type MessageSnapshotMeta = {
-    messageId: string;
-    messageIndex: number;
-    timestamp: number;
-    files: SnapshotFileMeta[];
-};
 
 export type ConflictDetail = {
     path: string;
@@ -72,21 +53,23 @@ export type ConflictDetail = {
     diffText: string;
 };
 
-type PatchOp = {
-    opId: string;
-    messageId: string;
-    messageIndex: number;
-    seq: number;
-    files: FileChange[];
-};
 
 type TurnState = {
     pendingUserLocalKey?: string;
+    pendingAssistantTmpKey?: string;
     assistantMsgId?: string;
     exportInFlight: boolean;
     exportResolved: boolean;
     resolvedUserMsgId?: string;
     lastResolvedAssistantMsgId?: string;
+    turnMessageIds?: Set<string>;
+};
+
+type PendingTurnChanges = {
+    turnKey: string;
+    tmpKey?: string;
+    changes: FileChangeSpec[];
+    lastAssistantMsgId?: string;
 };
 
 type RevertedSegment = {
@@ -101,6 +84,11 @@ type RevertedSegment = {
     conflicts: ConflictDetail[];
     messageIds?: string[];
     operationId?: string;
+    startCommit?: string;
+    startCommits?: string[];
+    restoreCommit?: string;
+    undoTargetCommit?: string;
+    fileSet?: string[];
 };
 
 export class OpenCodeClient {
@@ -114,13 +102,13 @@ export class OpenCodeClient {
     private nextMessageIndex = 0;
     private internalMessageSeq = 0;
     private seqCounter = 0;
-    private patchOps: PatchOp[] = [];
-    private patchOpsByMessageId = new Map<string, string[]>();
-    private blobStore = new Map<string, string>();
     private revertedSegment?: RevertedSegment;
-    private dmp = new diff_match_patch();
     private uiDebugChannel?: vscode.OutputChannel;
     private turnStateBySession = new Map<string, TurnState>();
+    private pendingTurnChangesBySession = new Map<string, PendingTurnChanges>();
+    private gitUndo?: GitUndoEngine;
+    private gitUndoAvailable = false;
+    private sessionUndoEnabled = new Map<string, boolean>();
 
     public resetSessionState(): void {
         this.currentSessionId = undefined;
@@ -129,17 +117,77 @@ export class OpenCodeClient {
         this.nextMessageIndex = 0;
         this.internalMessageSeq = 0;
         this.seqCounter = 0;
-        this.patchOps = [];
-        this.patchOpsByMessageId.clear();
-        this.blobStore.clear();
         this.revertedSegment = undefined;
         this.turnStateBySession.clear();
+        this.pendingTurnChangesBySession.clear();
+        this.sessionUndoEnabled.clear();
     }
 
-    constructor() {}
+    constructor() {
+        const workspaceRoot = this.getWorkspaceRoot();
+        this.gitUndo = new GitUndoEngine(workspaceRoot, (message) => this.logUiDebug(message));
+    }
 
     public setUiDebugChannel(channel: vscode.OutputChannel): void {
         this.uiDebugChannel = channel;
+    }
+
+    public async initGitUndo(): Promise<GitCapabilities> {
+        if (!this.gitUndo) {
+            return { gitAvailable: false, reason: 'missing-engine' };
+        }
+        const capabilities = await this.gitUndo.detectGitCapabilities();
+        this.gitUndoAvailable = Boolean(capabilities.gitAvailable);
+        return capabilities;
+    }
+
+    public async ensureBaselineReady(sessionId: string, turnKey?: string): Promise<{ ok: boolean; reason?: string }> {
+        if (!this.gitUndoAvailable || !this.gitUndo) {
+            return { ok: false, reason: 'git-unavailable' };
+        }
+        return this.gitUndo.ensureBaselineReady(sessionId, turnKey);
+    }
+
+    public async ensureBaselineForTurn(turnKey: string): Promise<{ ok: boolean; reason?: string }> {
+        if (!this.gitUndoAvailable || !this.gitUndo) {
+            return { ok: false, reason: 'git-unavailable' };
+        }
+        return this.gitUndo.ensureBaselineForTurn(turnKey);
+    }
+
+    public isGitUndoEnabled(): boolean {
+        return this.gitUndoAvailable;
+    }
+
+    public setSessionUndoEnabled(sessionId: string, enabled: boolean): void {
+        if (!sessionId) return;
+        this.sessionUndoEnabled.set(sessionId, enabled);
+    }
+
+    public isSessionUndoEnabled(sessionId: string | undefined): boolean {
+        if (!sessionId) return false;
+        if (!this.gitUndoAvailable) return false;
+        if (!this.sessionUndoEnabled.has(sessionId)) return true;
+        return this.sessionUndoEnabled.get(sessionId) !== false;
+    }
+
+    public setPendingAssistantTmpKey(sessionId: string, tmpKey: string): void {
+        if (!sessionId || !tmpKey) return;
+        const existing = this.turnStateBySession.get(sessionId);
+        if (existing) {
+            existing.pendingAssistantTmpKey = tmpKey;
+            return;
+        }
+        this.turnStateBySession.set(sessionId, {
+            pendingUserLocalKey: undefined,
+            pendingAssistantTmpKey: tmpKey,
+            assistantMsgId: undefined,
+            exportInFlight: false,
+            exportResolved: false,
+            resolvedUserMsgId: undefined,
+            lastResolvedAssistantMsgId: undefined,
+            turnMessageIds: new Set()
+        });
     }
 
     private logUiDebug(message: string): void {
@@ -150,21 +198,30 @@ export class OpenCodeClient {
 
     public startTurn(sessionId: string, pendingUserLocalKey: string): void {
         if (!sessionId) return;
+        const pending = this.pendingTurnChangesBySession.get(sessionId);
+        if (pending?.changes?.length) {
+            // this.logUiDebug(`[DBG_TURN_START] session=${sessionId} pendingChanges=${pending.changes.length} cleared=true`);
+            this.pendingTurnChangesBySession.delete(sessionId);
+        }
+        const existing = this.turnStateBySession.get(sessionId);
         this.turnStateBySession.set(sessionId, {
             pendingUserLocalKey,
-            assistantMsgId: undefined,
+            pendingAssistantTmpKey: existing?.pendingAssistantTmpKey,
+            assistantMsgId: existing?.assistantMsgId,
             exportInFlight: false,
             exportResolved: false,
             resolvedUserMsgId: undefined,
-            lastResolvedAssistantMsgId: undefined
+            lastResolvedAssistantMsgId: undefined,
+            turnMessageIds: existing?.turnMessageIds ?? new Set()
         });
-        this.logUiDebug(`[DBG_TURN_START] session=${sessionId} userLocal=${pendingUserLocalKey || 'null'}`);
+        // this.logUiDebug(`[DBG_TURN_START] session=${sessionId} userLocal=${pendingUserLocalKey || 'null'}`);
     }
 
     public finishTurn(sessionId: string): void {
         if (!sessionId) return;
         this.turnStateBySession.delete(sessionId);
-        this.logUiDebug(`[DBG_TURN_END] session=${sessionId}`);
+        this.pendingTurnChangesBySession.delete(sessionId);
+        // this.logUiDebug(`[DBG_TURN_END] session=${sessionId}`);
     }
 
     public recordAssistantMsgId(sessionId: string, assistantMsgId: string): void {
@@ -176,13 +233,26 @@ export class OpenCodeClient {
         }
         this.turnStateBySession.set(sessionId, {
             pendingUserLocalKey: undefined,
+            pendingAssistantTmpKey: undefined,
             assistantMsgId,
             exportInFlight: false,
             exportResolved: false,
             resolvedUserMsgId: undefined,
-            lastResolvedAssistantMsgId: undefined
+            lastResolvedAssistantMsgId: undefined,
+            turnMessageIds: new Set()
         });
     }
+
+    private trackTurnMessageId(sessionId: string, messageId: string): void {
+        if (!sessionId || !messageId || !messageId.startsWith('msg_')) return;
+        const state = this.turnStateBySession.get(sessionId);
+        if (!state) return;
+        if (!state.turnMessageIds) {
+            state.turnMessageIds = new Set();
+        }
+        state.turnMessageIds.add(messageId);
+    }
+
 
     private resolveFinalAssistantFromExport(exportJson: any, userMsgId: string): {
         userMsgId: string;
@@ -263,11 +333,11 @@ export class OpenCodeClient {
         }
         const state = this.turnStateBySession.get(sessionId);
         if (!state) {
-            this.logUiDebug(`[DBG_EXPORT_PENDING] session=${sessionId} reason=no-turn-state`);
+            // this.logUiDebug(`[DBG_EXPORT_PENDING] session=${sessionId} reason=no-turn-state`);
             return { status: 'pending', localKey: null, userMsgId: null, awaitingAssistantIdFromExport: true, reason: 'no-turn-state' };
         }
         if (state.exportInFlight) {
-            this.logUiDebug(`[DBG_EXPORT_PENDING] session=${sessionId} reason=in-flight`);
+            // this.logUiDebug(`[DBG_EXPORT_PENDING] session=${sessionId} reason=in-flight`);
             return { status: 'pending', localKey: state.pendingUserLocalKey || null, userMsgId: state.resolvedUserMsgId || null, awaitingAssistantIdFromExport: true, reason: 'in-flight' };
         }
 
@@ -275,11 +345,11 @@ export class OpenCodeClient {
         const localKey = state.pendingUserLocalKey || null;
 
         if (!assistantMsgId || !assistantMsgId.startsWith('msg_')) {
-            this.logUiDebug(`[DBG_EXPORT_PENDING] session=${sessionId} reason=missing-assistantMsgId`);
+            // this.logUiDebug(`[DBG_EXPORT_PENDING] session=${sessionId} reason=missing-assistantMsgId`);
             return { status: 'pending', localKey, userMsgId: state.resolvedUserMsgId || null, awaitingAssistantIdFromExport: true, reason: 'missing-assistantMsgId' };
         }
 
-        this.logUiDebug(`[DBG_EXPORT_RESOLVE] session=${sessionId} assistantMsgId=${assistantMsgId} userLocal=${localKey || 'null'}`);
+        // this.logUiDebug(`[DBG_EXPORT_RESOLVE] session=${sessionId} assistantMsgId=${assistantMsgId} userLocal=${localKey || 'null'}`);
         state.exportInFlight = true;
 
         try {
@@ -298,27 +368,27 @@ export class OpenCodeClient {
                     const finish = message?.info?.finish || 'null';
                     return `{id=${id} role=${role} parentID=${parentID} finish=${finish}}`;
                 });
-                this.logUiDebug(`[DBG_EXPORT_FOUND] assistantMatches=${assistantMatches.length} parentID=null tail=${tail.join(' ')}`);
+                // this.logUiDebug(`[DBG_EXPORT_FOUND] assistantMatches=${assistantMatches.length} parentID=null tail=${tail.join(' ')}`);
                 return { status: 'pending', localKey, userMsgId: state.resolvedUserMsgId || null, awaitingAssistantIdFromExport: true, reason: 'assistant-match-count' };
             }
 
             const parentId = assistantMatches[0]?.info?.parentID;
             const userMsgId = typeof parentId === 'string' ? parentId : null;
-            this.logUiDebug(`[DBG_EXPORT_FOUND] assistantMatches=1 parentID=${userMsgId || 'null'}`);
+            // this.logUiDebug(`[DBG_EXPORT_FOUND] assistantMatches=1 parentID=${userMsgId || 'null'}`);
 
             if (!userMsgId || !userMsgId.startsWith('msg_')) {
                 return { status: 'pending', localKey, userMsgId: null, awaitingAssistantIdFromExport: true, reason: 'invalid-user-parent' };
             }
 
             if (state.resolvedUserMsgId && state.resolvedUserMsgId !== userMsgId) {
-                this.logUiDebug(`[DBG_EXPORT_STALE] session=${sessionId} resolvedUserMsgId=${state.resolvedUserMsgId} newParentID=${userMsgId} assistantMsgId=${assistantMsgId}`);
+                // this.logUiDebug(`[DBG_EXPORT_STALE] session=${sessionId} resolvedUserMsgId=${state.resolvedUserMsgId} newParentID=${userMsgId} assistantMsgId=${assistantMsgId}`);
                 return { status: 'pending', localKey, userMsgId: state.resolvedUserMsgId, awaitingAssistantIdFromExport: true, reason: 'stale-parent-mismatch' };
             }
 
             state.resolvedUserMsgId = userMsgId;
 
             const resolved = this.resolveFinalAssistantFromExport(exportData, userMsgId);
-            this.logUiDebug(`[DBG_EXPORT_FINAL] userMsgId=${resolved.userMsgId} assistantMsgIdsAll=[${resolved.assistantMsgIdsAll.join(', ')}] chosen=${resolved.assistantMsgId || 'null'} finish=${resolved.chosenFinish || 'null'} completed=${resolved.chosenTimeCompleted ?? 'null'} created=${resolved.chosenTimeCreated ?? 'null'}`);
+            // this.logUiDebug(`[DBG_EXPORT_FINAL] userMsgId=${resolved.userMsgId} assistantMsgIdsAll=[${resolved.assistantMsgIdsAll.join(', ')}] chosen=${resolved.assistantMsgId || 'null'} finish=${resolved.chosenFinish || 'null'} completed=${resolved.chosenTimeCompleted ?? 'null'} created=${resolved.chosenTimeCreated ?? 'null'}`);
 
             if (!resolved.assistantMsgIdsAll.length) {
                 const tail = rawMessages.slice(-5).map((message: any) => {
@@ -328,16 +398,27 @@ export class OpenCodeClient {
                     const finish = message?.info?.finish || 'null';
                     return `{id=${id} role=${role} parentID=${parentID} finish=${finish}}`;
                 });
-                this.logUiDebug(`[DBG_EXPORT_EMPTY] userMsgId=${userMsgId} tail=${tail.join(' ')}`);
+                // this.logUiDebug(`[DBG_EXPORT_EMPTY] userMsgId=${userMsgId} tail=${tail.join(' ')}`);
             }
 
             if (resolved.assistantMsgId && state.lastResolvedAssistantMsgId && resolved.assistantMsgId !== state.lastResolvedAssistantMsgId) {
-                this.logUiDebug(`[DBG_EXPORT_OVERWRITE] assistantId updated from ${state.lastResolvedAssistantMsgId} -> ${resolved.assistantMsgId}`);
+                // this.logUiDebug(`[DBG_EXPORT_OVERWRITE] assistantId updated from ${state.lastResolvedAssistantMsgId} -> ${resolved.assistantMsgId}`);
             }
 
             state.exportResolved = true;
             if (resolved.assistantMsgId) {
                 state.lastResolvedAssistantMsgId = resolved.assistantMsgId;
+            }
+
+            if (resolved.assistantMsgId) {
+                if (this.gitUndoAvailable) {
+                    await this.gitUndo?.finalizeBinding(
+                        sessionId,
+                        state.pendingAssistantTmpKey,
+                        resolved.assistantMsgId,
+                        userMsgId || undefined
+                    );
+                }
             }
 
             return {
@@ -352,7 +433,7 @@ export class OpenCodeClient {
             };
         } catch (error) {
             const reason = `export-error:${String(error)}`;
-            this.logUiDebug(`[DBG_EXPORT_PENDING] session=${sessionId} reason=${reason}`);
+            // this.logUiDebug(`[DBG_EXPORT_PENDING] session=${sessionId} reason=${reason}`);
             return { status: 'error', localKey, userMsgId: state.resolvedUserMsgId || null, awaitingAssistantIdFromExport: true, reason };
         } finally {
             state.exportInFlight = false;
@@ -367,6 +448,14 @@ export class OpenCodeClient {
         return this.currentSessionId;
     }
 
+    public getTurnAssistantMsgId(sessionId: string): string | undefined {
+        if (!sessionId) return undefined;
+        const state = this.turnStateBySession.get(sessionId);
+        const candidate = state?.lastResolvedAssistantMsgId || state?.assistantMsgId;
+        if (typeof candidate !== 'string') return undefined;
+        return candidate.startsWith('msg_') ? candidate : undefined;
+    }
+
     private execute(args: string[]): Promise<string> {
         return new Promise((resolve, reject) => {
             const workspaceFolder = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0
@@ -375,7 +464,7 @@ export class OpenCodeClient {
 
             this.resolveBin()
                 .then((bin) => {
-                    OpenCodeClient.outputChannel.appendLine(`[SPAWN] ${bin} ${args.join(' ')} (cwd: ${workspaceFolder})`);
+                    // OpenCodeClient.outputChannel.appendLine(`[SPAWN] ${bin} ${args.join(' ')} (cwd: ${workspaceFolder})`);
                     const startTime = Date.now();
 
                     const spawnSpec = this.buildSpawn(bin, args);
@@ -473,9 +562,9 @@ export class OpenCodeClient {
                     }
                     const messageId = parsed.part?.messageID || parsed.part?.messageId || parsed.messageID || parsed.messageId;
                     const assistantMsgId = typeof parsed.part?.messageID === 'string' ? parsed.part.messageID : undefined;
-                    if (assistantMsgId || messageId) {
-                        this.logUiDebug(`[DBG_STDOUT_ID] type=${parsed.type || 'unknown'} session=${sessionId || 'null'} tmpKey=null messageID=${assistantMsgId || messageId || 'null'}`);
-                    }
+                    // if (assistantMsgId || messageId) {
+                    //     this.logUiDebug(`[DBG_STDOUT_ID] type=${parsed.type || 'unknown'} session=${sessionId || 'null'} tmpKey=null messageID=${assistantMsgId || messageId || 'null'}`);
+                    // }
                     const resolvedSessionId = sessionId || this.currentSessionId;
                     if (assistantMsgId && resolvedSessionId) {
                         this.recordAssistantMsgId(resolvedSessionId, assistantMsgId);
@@ -483,6 +572,9 @@ export class OpenCodeClient {
                     if (messageId && onEvent) {
                         onEvent({ type: 'message', text: messageId, sessionId });
                         this.registerMessageId(messageId);
+                        if (resolvedSessionId && typeof messageId === 'string') {
+                            this.trackTurnMessageId(resolvedSessionId, messageId);
+                        }
                     }
                     if (assistantMsgId && onEvent) {
                         onEvent({ type: 'assistantMessageMeta', sessionId, assistantMsgId });
@@ -502,8 +594,13 @@ export class OpenCodeClient {
                     }
                     const files = this.extractFilesFromEvent(parsed);
                     if (files.length && onEvent) {
-                        if (messageId) {
-                            this.createPatchOp(messageId, files);
+                        if (this.gitUndoAvailable && this.isSessionUndoEnabled(resolvedSessionId) && resolvedSessionId) {
+                            const turnState = this.turnStateBySession.get(resolvedSessionId);
+                            const turnKey = turnState?.pendingUserLocalKey || resolvedSessionId;
+                            const tmpKey = turnState?.pendingAssistantTmpKey;
+                            const assistantId = typeof messageId === 'string' && messageId.startsWith('msg_') ? messageId : undefined;
+                            const changeSpecs = this.buildChangeSpecs(files);
+                            this.queueTurnChanges(resolvedSessionId, turnKey, tmpKey, assistantId, changeSpecs);
                         }
                         onEvent({ type: 'files', files, sessionId });
                     }
@@ -540,7 +637,7 @@ export class OpenCodeClient {
                         const rawChunk = data.toString('utf8');
                         const cleanChunk = this.stripAnsi(rawChunk);
                         stdout += rawChunk;
-                        OpenCodeClient.outputChannel.appendLine(`[STDOUT_CHUNK] (dt: ${Date.now() - startTime}ms) ${cleanChunk}`);
+                        // OpenCodeClient.outputChannel.appendLine(`[STDOUT_CHUNK] (dt: ${Date.now() - startTime}ms) ${cleanChunk}`);
 
                         buffer += cleanChunk;
                         const lines = buffer.split(/\r?\n/);
@@ -553,12 +650,12 @@ export class OpenCodeClient {
                     child.stderr.on('data', (data) => {
                         const rawChunk = data.toString('utf8');
                         stderr += rawChunk;
-                        OpenCodeClient.outputChannel.appendLine(`[STDERR_CHUNK] ${this.stripAnsi(rawChunk)}`);
+                        // OpenCodeClient.outputChannel.appendLine(`[STDERR_CHUNK] ${this.stripAnsi(rawChunk)}`);
                     });
 
                     child.on('close', (code) => {
                         const duration = Date.now() - startTime;
-                        OpenCodeClient.outputChannel.appendLine(`[CLOSE] Exit code: ${code}, Duration: ${duration}ms`);
+                        // OpenCodeClient.outputChannel.appendLine(`[CLOSE] Exit code: ${code}, Duration: ${duration}ms`);
                         this.currentChild = undefined;
 
                         if (buffer.trim()) {
@@ -746,7 +843,10 @@ export class OpenCodeClient {
         if (tool === 'write') {
             const input = parsed?.part?.state?.input;
             const metadata = parsed?.part?.state?.metadata;
-            if (!input?.filePath) return [];
+            if (!input?.filePath) {
+                this.logUiDebug(`write.skip | reason=missing-filePath`);
+                return [];
+            }
             const existsBefore = typeof metadata?.exists === 'boolean' ? metadata.exists : false;
             return [
                 {
@@ -760,6 +860,118 @@ export class OpenCodeClient {
             ];
         }
         return [];
+    }
+
+    private buildChangeSpecs(files: FileSnapshot[]): FileChangeSpec[] {
+        const changes: FileChangeSpec[] = [];
+        for (const file of files) {
+            const existsBefore = typeof file.existsBefore === 'boolean'
+                ? file.existsBefore
+                : (file.type === 'create' ? false : file.type === 'delete' ? true : true);
+            const existsAfter = typeof file.existsAfter === 'boolean'
+                ? file.existsAfter
+                : (file.type === 'create' ? true : file.type === 'delete' ? false : true);
+            if (!existsAfter) {
+                changes.push({ type: 'delete', path: file.filePath });
+            } else if (!existsBefore && existsAfter) {
+                changes.push({ type: 'create', path: file.filePath });
+            } else {
+                changes.push({ type: 'update', path: file.filePath });
+            }
+        }
+        return changes;
+    }
+
+    private mergeChangeSpecs(changes: FileChangeSpec[]): FileChangeSpec[] {
+        if (!changes.length) return [];
+        const merged: FileChangeSpec[] = [];
+        const indexByKey = new Map<string, number>();
+        const pushOrReplace = (change: FileChangeSpec, key: string) => {
+            const existingIndex = indexByKey.get(key);
+            if (existingIndex !== undefined) {
+                merged[existingIndex] = change;
+                return;
+            }
+            indexByKey.set(key, merged.length);
+            merged.push(change);
+        };
+        const flatten = (items: FileChangeSpec[]) => {
+            for (const item of items) {
+                if (item.type === 'multi') {
+                    flatten(item.items);
+                    continue;
+                }
+                if (item.type === 'rename') {
+                    const key = `rename:${item.oldPath}->${item.newPath}`;
+                    pushOrReplace(item, key);
+                    continue;
+                }
+                const key = `path:${item.path}`;
+                pushOrReplace(item, key);
+            }
+        };
+        flatten(changes);
+        return merged;
+    }
+
+    private queueTurnChanges(
+        sessionId: string,
+        turnKey: string,
+        tmpKey: string | undefined,
+        assistantMsgId: string | undefined,
+        changeSpecs: FileChangeSpec[]
+    ): void {
+        if (!sessionId || !turnKey || !changeSpecs.length) return;
+        const existing = this.pendingTurnChangesBySession.get(sessionId);
+        if (existing && existing.turnKey !== turnKey) {
+            // this.logUiDebug(`[DBG_TURN_QUEUE] session=${sessionId} staleTurn=${existing.turnKey} newTurn=${turnKey} cleared=true`);
+            this.pendingTurnChangesBySession.delete(sessionId);
+        }
+        const next = this.pendingTurnChangesBySession.get(sessionId) || {
+            turnKey,
+            tmpKey,
+            changes: [],
+            lastAssistantMsgId: assistantMsgId
+        };
+        next.turnKey = turnKey;
+        if (tmpKey) {
+            next.tmpKey = tmpKey;
+        }
+        if (assistantMsgId) {
+            next.lastAssistantMsgId = assistantMsgId;
+        }
+        next.changes.push(...changeSpecs);
+        this.pendingTurnChangesBySession.set(sessionId, next);
+        // this.logUiDebug(`[DBG_TURN_QUEUE] session=${sessionId} turnKey=${turnKey} added=${changeSpecs.length} total=${next.changes.length}`);
+    }
+
+    public async commitPendingTurnChanges(sessionId: string): Promise<void> {
+        if (!sessionId) return;
+        if (!this.gitUndoAvailable || !this.gitUndo) return;
+        if (!this.isSessionUndoEnabled(sessionId)) return;
+        const pending = this.pendingTurnChangesBySession.get(sessionId);
+        if (!pending?.changes?.length) return;
+        const state = this.turnStateBySession.get(sessionId);
+        const turnKey = pending.turnKey || state?.pendingUserLocalKey || sessionId;
+        const tmpKey = state?.pendingAssistantTmpKey || pending.tmpKey;
+        const assistantMsgId = state?.assistantMsgId || state?.lastResolvedAssistantMsgId || pending.lastAssistantMsgId;
+        const messageIndex = assistantMsgId ? this.messageIndexById.get(assistantMsgId) : undefined;
+        const merged = this.mergeChangeSpecs(pending.changes);
+        // this.logUiDebug(`[DBG_TURN_COMMIT] session=${sessionId} turnKey=${turnKey} changes=${merged.length} assistantMsgId=${assistantMsgId || 'null'}`);
+        try {
+            await this.gitUndo.commitFileChanges(
+                sessionId,
+                turnKey,
+                tmpKey,
+                assistantMsgId,
+                merged,
+                messageIndex
+            );
+        } catch (error) {
+            this.logUiDebug(`commit.fail | sessionId=${sessionId} err=${String(error)}`);
+        } finally {
+            this.pendingTurnChangesBySession.delete(sessionId);
+        }
     }
 
     private registerMessageId(messageId: string): number {
@@ -806,13 +1018,6 @@ export class OpenCodeClient {
         if (orderIndex !== -1) {
             this.messageOrder[orderIndex] = newId;
         }
-        if (this.patchOpsByMessageId.has(existingId) && !this.patchOpsByMessageId.has(newId)) {
-            const list = this.patchOpsByMessageId.get(existingId);
-            if (list) {
-                this.patchOpsByMessageId.set(newId, list);
-            }
-            this.patchOpsByMessageId.delete(existingId);
-        }
         this.messageIndexById.delete(existingId);
     }
 
@@ -826,13 +1031,6 @@ export class OpenCodeClient {
         if (orderIndex !== -1) {
             this.messageOrder[orderIndex] = serverMsgId;
         }
-        if (this.patchOpsByMessageId.has(localKey) && !this.patchOpsByMessageId.has(serverMsgId)) {
-            const list = this.patchOpsByMessageId.get(localKey);
-            if (list) {
-                this.patchOpsByMessageId.set(serverMsgId, list);
-            }
-            this.patchOpsByMessageId.delete(localKey);
-        }
         this.messageIndexById.delete(localKey);
         return true;
     }
@@ -845,67 +1043,6 @@ export class OpenCodeClient {
         return text.replace(/\r\n/g, '\n');
     }
 
-    private createPatchOp(messageId: string, files: FileSnapshot[]): PatchOp | undefined {
-        if (!messageId || !messageId.startsWith('msg_')) {
-            return undefined;
-        }
-        const messageIndex = this.registerMessageId(messageId);
-        this.persistMessageCheckpoint(messageId, messageIndex, files).catch((error: unknown) => {
-            OpenCodeClient.outputChannel.appendLine(`[UNDO] Failed to persist checkpoint: ${String(error)}`);
-        });
-        const fileChanges: FileChange[] = [];
-        for (const file of files) {
-            const existsBefore = typeof file.existsBefore === 'boolean'
-                ? file.existsBefore
-                : (file.type === 'create' ? false : file.type === 'delete' ? true : true);
-            const existsAfter = typeof file.existsAfter === 'boolean'
-                ? file.existsAfter
-                : (file.type === 'create' ? true : file.type === 'delete' ? false : true);
-            const beforeRaw = typeof file.before === 'string'
-                ? file.before
-                : (existsBefore ? undefined : '');
-            const afterRaw = typeof file.after === 'string'
-                ? file.after
-                : (existsAfter ? undefined : '');
-            if (existsBefore && beforeRaw === undefined) continue;
-            if (existsAfter && afterRaw === undefined) continue;
-            const beforeText = this.normalizeText(beforeRaw || '');
-            const afterText = this.normalizeText(afterRaw || '');
-            const beforeBlobId = this.hashText(beforeText);
-            const afterBlobId = this.hashText(afterText);
-            if (!this.blobStore.has(beforeBlobId)) {
-                this.blobStore.set(beforeBlobId, beforeText);
-            }
-            if (!this.blobStore.has(afterBlobId)) {
-                this.blobStore.set(afterBlobId, afterText);
-            }
-            fileChanges.push({
-                path: file.filePath,
-                beforeBlobId,
-                afterBlobId
-            });
-        }
-        if (!fileChanges.length) return undefined;
-        const opId = `op_${Date.now()}_${this.seqCounter}`;
-        const op: PatchOp = {
-            opId,
-            messageId,
-            messageIndex,
-            seq: this.seqCounter++,
-            files: fileChanges
-        };
-        this.patchOps.push(op);
-        const list = this.patchOpsByMessageId.get(messageId) || [];
-        list.push(opId);
-        this.patchOpsByMessageId.set(messageId, list);
-        const hasBeforeAfter = files.some((file) => typeof file.before === 'string' || typeof file.after === 'string');
-        this.logUiDebug(`snapshot.bind | msgId | ${messageId} | filesCount | ${files.length} | hasBeforeAfter | ${hasBeforeAfter}`);
-        return op;
-    }
-
-    private getPatchOpsFromIndex(startIndex: number): PatchOp[] {
-        return this.patchOps.filter((op) => op.messageIndex >= startIndex);
-    }
 
     private getWorkspaceRoot(): string {
         const workspaceFolder = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0
@@ -914,173 +1051,10 @@ export class OpenCodeClient {
         return workspaceFolder;
     }
 
-    private getUndoRoot(sessionId: string): string {
-        return path.join(this.getWorkspaceRoot(), '.opencode', 'undo', sessionId);
-    }
-
-    private getMessageSnapshotDir(sessionId: string, messageId: string): string {
-        return path.join(this.getUndoRoot(sessionId), messageId);
-    }
-
-    private getMessageMetaPath(sessionId: string, messageId: string): string {
-        return path.join(this.getMessageSnapshotDir(sessionId, messageId), 'meta.json');
-    }
-
-    private async removeMessageSnapshot(sessionId: string, messageId: string): Promise<void> {
-        const dirPath = this.getMessageSnapshotDir(sessionId, messageId);
-        if (!fs.existsSync(dirPath)) return;
-        await fs.promises.rm(dirPath, { recursive: true, force: true });
-    }
-
-    private normalizeRelPath(relPath: string): string {
-        return relPath.replace(/\\/g, '/');
-    }
-
-    private resolveSnapshotRelPath(filePath: string, workspaceRoot: string): string {
-        const rawRel = path.isAbsolute(filePath)
-            ? path.relative(workspaceRoot, filePath)
-            : filePath;
-        if (!rawRel || rawRel.startsWith('..') || path.isAbsolute(rawRel)) {
-            const safeBase = path.basename(filePath);
-            return this.normalizeRelPath(path.join('_external', safeBase));
-        }
-        return this.normalizeRelPath(rawRel);
-    }
-
-    private async persistMessageCheckpoint(messageId: string, messageIndex: number, files: FileSnapshot[]): Promise<void> {
-        const sessionId = this.currentSessionId;
-        if (!sessionId) return;
-        const workspaceRoot = this.getWorkspaceRoot();
-        const messageDir = this.getMessageSnapshotDir(sessionId, messageId);
-        const preDir = path.join(messageDir, 'pre');
-        const postDir = path.join(messageDir, 'post');
-        const meta: MessageSnapshotMeta = {
-            messageId,
-            messageIndex,
-            timestamp: Date.now(),
-            files: []
-        };
-
-        await fs.promises.mkdir(preDir, { recursive: true });
-        await fs.promises.mkdir(postDir, { recursive: true });
-
-        for (const file of files) {
-            const relPath = this.resolveSnapshotRelPath(file.filePath, workspaceRoot);
-            const existsBefore = typeof file.existsBefore === 'boolean'
-                ? file.existsBefore
-                : (file.type === 'create' ? false : file.type === 'delete' ? true : true);
-            const existsAfter = typeof file.existsAfter === 'boolean'
-                ? file.existsAfter
-                : (file.type === 'create' ? true : file.type === 'delete' ? false : true);
-
-            let beforeText = typeof file.before === 'string' ? file.before : undefined;
-            let afterText = typeof file.after === 'string' ? file.after : undefined;
-            if (existsBefore && beforeText === undefined) {
-                beforeText = await fs.promises.readFile(file.filePath, 'utf-8').catch(() => '');
-            }
-            if (existsAfter && afterText === undefined) {
-                afterText = await fs.promises.readFile(file.filePath, 'utf-8').catch(() => '');
-            }
-            const normalizedBefore = typeof beforeText === 'string' ? this.normalizeText(beforeText) : '';
-            const normalizedAfter = typeof afterText === 'string' ? this.normalizeText(afterText) : '';
-            const preHash = existsBefore ? this.hashText(normalizedBefore) : undefined;
-            const postHash = existsAfter ? this.hashText(normalizedAfter) : undefined;
-            meta.files.push({
-                path: relPath,
-                existsBefore,
-                existsAfter,
-                preHash,
-                postHash
-            });
-
-            if (existsBefore) {
-                const targetPath = path.join(preDir, relPath);
-                await fs.promises.mkdir(path.dirname(targetPath), { recursive: true });
-                await fs.promises.writeFile(targetPath, normalizedBefore, 'utf-8');
-            }
-            if (existsAfter) {
-                const targetPath = path.join(postDir, relPath);
-                await fs.promises.mkdir(path.dirname(targetPath), { recursive: true });
-                await fs.promises.writeFile(targetPath, normalizedAfter, 'utf-8');
-            }
-        }
-
-        await fs.promises.writeFile(this.getMessageMetaPath(sessionId, messageId), JSON.stringify(meta, null, 2), 'utf-8');
-    }
-
-    private async readMessageMeta(sessionId: string, messageId: string): Promise<MessageSnapshotMeta | undefined> {
-        const metaPath = this.getMessageMetaPath(sessionId, messageId);
-        if (!fs.existsSync(metaPath)) return undefined;
-        try {
-            const raw = await fs.promises.readFile(metaPath, 'utf-8');
-            return JSON.parse(raw) as MessageSnapshotMeta;
-        } catch {
-            return undefined;
-        }
-    }
-
-    private async loadMessageSnapshot(sessionId: string, messageId: string): Promise<{ messageId: string; messageIndex: number; files: Array<{ absPath: string; relPath: string; existsBefore: boolean; existsAfter: boolean; beforeText: string; afterText: string; }> } | undefined> {
-        const meta = await this.readMessageMeta(sessionId, messageId);
-        if (!meta) return undefined;
-        const workspaceRoot = this.getWorkspaceRoot();
-        const baseDir = this.getMessageSnapshotDir(sessionId, messageId);
-        const preDir = path.join(baseDir, 'pre');
-        const postDir = path.join(baseDir, 'post');
-        const files = [] as Array<{ absPath: string; relPath: string; existsBefore: boolean; existsAfter: boolean; beforeText: string; afterText: string; }>;
-        for (const file of meta.files) {
-            const relPath = file.path;
-            const absPath = path.join(workspaceRoot, relPath);
-            const beforeText = file.existsBefore
-                ? await fs.promises.readFile(path.join(preDir, relPath), 'utf-8').catch(() => '')
-                : '';
-            const afterText = file.existsAfter
-                ? await fs.promises.readFile(path.join(postDir, relPath), 'utf-8').catch(() => '')
-                : '';
-            files.push({
-                absPath,
-                relPath,
-                existsBefore: file.existsBefore,
-                existsAfter: file.existsAfter,
-                beforeText: this.normalizeText(beforeText),
-                afterText: this.normalizeText(afterText)
-            });
-        }
-        return { messageId: meta.messageId, messageIndex: meta.messageIndex, files };
-    }
-
-    private buildConflictDiff(expectedText: string, currentText: string): string {
-        const patches = this.dmp.patch_make(expectedText, currentText);
-        const patchText = this.dmp.patch_toText(patches);
-        const header = `--- expected\n+++ current\n`;
-        return `${header}${patchText}`.trim();
-    }
-
-    private async readCurrentFileState(filePath: string): Promise<{ exists: boolean; text: string }>{
-        try {
-            const stat = await fs.promises.stat(filePath);
-            if (!stat.isFile()) {
-                return { exists: false, text: '' };
-            }
-            const text = await fs.promises.readFile(filePath, 'utf-8');
-            return { exists: true, text: this.normalizeText(text) };
-        } catch {
-            return { exists: false, text: '' };
-        }
-    }
-
-    private async applyFileState(filePath: string, shouldExist: boolean, content: string): Promise<void> {
-        if (!shouldExist) {
-            if (fs.existsSync(filePath)) {
-                await fs.promises.unlink(filePath).catch(() => undefined);
-            }
-            return;
-        }
-        await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
-        await fs.promises.writeFile(filePath, content, 'utf-8');
-    }
 
     private getMessageIdsInRange(startIndex: number, endIndex: number): string[] {
         return this.messageOrder.filter((id) => {
+            if (typeof id !== 'string' || !id.startsWith('msg_')) return false;
             const index = this.messageIndexById.get(id);
             return typeof index === 'number' && index >= startIndex && index <= endIndex;
         });
@@ -1097,80 +1071,113 @@ export class OpenCodeClient {
     public async undoFromMessage(startMessageId: string, options?: { force?: boolean }): Promise<{ conflicts: ConflictDetail[]; touchedFiles: string[]; applied: boolean }> {
         const force = options?.force === true;
         const startIndex = this.messageIndexById.get(startMessageId);
+        this.logUiDebug(`EXT: undo.enter | startMessageId | ${startMessageId || 'null'} | force | ${String(force)} | hasSession | ${String(Boolean(this.currentSessionId))} | messageOrderLen | ${this.messageOrder.length}`);
         if (startIndex === undefined) {
             this.logUiDebug(`EXT: undo.anchor.missing | startMessageId | ${startMessageId || 'null'} | startsWithMsg | ${String(startMessageId?.startsWith('msg_'))}`);
             throw new Error('Unknown message for undo.');
         }
         this.logUiDebug(`EXT: undo.anchor.ok | startMessageId | ${startMessageId} | startIndex | ${startIndex}`);
-        const endIndex = this.messageOrder.length ? this.messageOrder.length - 1 : startIndex;
-        OpenCodeClient.outputChannel.appendLine(`[UNDO] startId=${startMessageId} startIndex=${startIndex} endIndex=${endIndex}`);
+        const tailIndex = this.messageOrder.length ? this.messageOrder.length - 1 : startIndex;
+        let effectiveEndIndex = tailIndex;
+        const prevSeg = this.revertedSegment;
+        const hasActivePrev = Boolean(prevSeg && prevSeg.isActive && !prevSeg.discarded);
+        let prevStartIndex: number | undefined;
+        let prevEndIndex: number | undefined;
+        if (hasActivePrev && prevSeg) {
+            prevStartIndex = typeof prevSeg.startMessageIndex === 'number'
+                ? prevSeg.startMessageIndex
+                : this.messageIndexById.get(prevSeg.startMessageId);
+            prevEndIndex = typeof prevSeg.endMessageIndex === 'number'
+                ? prevSeg.endMessageIndex
+                : this.messageIndexById.get(prevSeg.endMessageId);
+            if (typeof prevStartIndex === 'number') {
+                effectiveEndIndex = Math.min(effectiveEndIndex, prevStartIndex - 1);
+            }
+        }
+        // this.logUiDebug(`EXT: undo.segment.state | hasActivePrev | ${String(hasActivePrev)} | prevStartIndex | ${typeof prevStartIndex === 'number' ? prevStartIndex : 'null'} | prevEndIndex | ${typeof prevEndIndex === 'number' ? prevEndIndex : 'null'} | prevStartId | ${prevSeg?.startMessageId || 'null'} | prevEndId | ${prevSeg?.endMessageId || 'null'}`);
+        // this.logUiDebug(`EXT: undo.range | tailIndex | ${tailIndex} | effectiveEndIndex | ${effectiveEndIndex} | startIndex | ${startIndex} | selectedEndIndex | ${effectiveEndIndex}`);
+        // OpenCodeClient.outputChannel.appendLine(`[UNDO] startId=${startMessageId} startIndex=${startIndex} endIndex=${effectiveEndIndex}`);
         const sessionId = this.currentSessionId;
         const touchedFiles: string[] = [];
         if (!sessionId) {
             return { conflicts: [], touchedFiles, applied: false };
         }
-
-        const messageIds = this.getMessageIdsInRange(startIndex, endIndex);
-        OpenCodeClient.outputChannel.appendLine(`[UNDO] messageIdsInRange=${messageIds.length}`);
-        const snapshots = [] as Array<{ messageId: string; messageIndex: number; files: Array<{ absPath: string; relPath: string; existsBefore: boolean; existsAfter: boolean; beforeText: string; afterText: string; }> }>;
-        for (const id of messageIds) {
-            const snapshot = await this.loadMessageSnapshot(sessionId, id);
-            if (snapshot) snapshots.push(snapshot);
+        if (!this.gitUndoAvailable) {
+            this.logUiDebug(`EXT: undo.disabled | reason=git-unavailable`);
+            return { conflicts: [], touchedFiles, applied: false };
         }
 
-        const conflicts: ConflictDetail[] = [];
-        if (!force) {
-            const expected = new Map<string, { exists: boolean; text: string }>();
-            const orderedSnapshots = snapshots.slice().sort((a, b) => a.messageIndex - b.messageIndex);
-            for (const snapshot of orderedSnapshots) {
-                for (const file of snapshot.files) {
-                    expected.set(file.absPath, {
-                        exists: file.existsAfter,
-                        text: file.existsAfter ? file.afterText : ''
-                    });
-                }
-            }
-            for (const [filePath, expectation] of expected.entries()) {
-                const current = await this.readCurrentFileState(filePath);
-                const existsMismatch = current.exists !== expectation.exists;
-                const contentMismatch = expectation.exists && current.exists && current.text !== expectation.text;
-                if (existsMismatch || contentMismatch) {
-                    const diffText = this.buildConflictDiff(expectation.text, current.text);
-                    conflicts.push({
-                        path: filePath,
-                        expectedExists: expectation.exists,
-                        currentExists: current.exists,
-                        diffText
-                    });
-                }
-            }
-            if (conflicts.length) {
+        if (effectiveEndIndex < startIndex) {
+            this.logUiDebug(`EXT: undo.noop | reason | effectiveEndIndex<startIndex | startIndex | ${startIndex} | effectiveEndIndex | ${effectiveEndIndex}`);
+            return { conflicts: [], touchedFiles: [], applied: true };
+        }
+
+        const messageIds = this.getMessageIdsInRange(startIndex, effectiveEndIndex);
+        const firstMsgId = messageIds[0] || 'null';
+        const lastMsgId = messageIds.length ? messageIds[messageIds.length - 1] : 'null';
+        // this.logUiDebug(`EXT: undo.messageIds | count | ${messageIds.length} | first | ${firstMsgId} | last | ${lastMsgId}`);
+        // this.logUiDebug(`EXT: undo.messageIds.full | ids | ${JSON.stringify(messageIds)}`);
+        // OpenCodeClient.outputChannel.appendLine(`[UNDO] messageIdsInRange=${messageIds.length}`);
+
+        if (this.gitUndoAvailable && this.gitUndo) {
+            const result = await this.gitUndo.undoFromMessage(sessionId, startMessageId, force);
+            if (result.conflicts.length) {
+                const conflicts = result.conflicts.map((conflict) => ({
+                    path: conflict.path,
+                    expectedExists: true,
+                    currentExists: true,
+                    diffText: conflict.diffText || ''
+                }));
                 return { conflicts, touchedFiles, applied: false };
             }
-        }
 
-        const orderedSnapshots = snapshots.slice().sort((a, b) => b.messageIndex - a.messageIndex);
-        for (const snapshot of orderedSnapshots) {
-            for (const file of snapshot.files) {
-                await this.applyFileState(file.absPath, file.existsBefore, file.beforeText);
-                touchedFiles.push(file.absPath);
+            let mergedEndIndex = effectiveEndIndex;
+            let mergedEndId = messageIds.length ? messageIds[messageIds.length - 1] : startMessageId;
+            let mergedStartCommits = result.startCommits || (result.startCommit ? [result.startCommit] : []);
+            if (hasActivePrev && prevSeg) {
+                if (typeof prevEndIndex === 'number') {
+                    mergedEndIndex = prevEndIndex;
+                }
+                if (typeof prevSeg.endMessageId === 'string' && prevSeg.endMessageId.startsWith('msg_')) {
+                    mergedEndId = prevSeg.endMessageId;
+                }
+                if (Array.isArray(prevSeg.startCommits) && prevSeg.startCommits.length) {
+                    mergedStartCommits = [...mergedStartCommits, ...prevSeg.startCommits];
+                } else if (prevSeg.startCommit) {
+                    mergedStartCommits.push(prevSeg.startCommit);
+                }
             }
+            if (mergedStartCommits.length > 1) {
+                mergedStartCommits = Array.from(new Set(mergedStartCommits));
+            }
+            const mergedMessageIds = hasActivePrev && typeof prevEndIndex === 'number'
+                ? this.getMessageIdsInRange(startIndex, prevEndIndex)
+                : messageIds;
+            if (mergedMessageIds.length) {
+                mergedEndId = mergedMessageIds[mergedMessageIds.length - 1];
+            }
+
+            this.revertedSegment = {
+                isActive: true,
+                discarded: false,
+                startMessageId,
+                startMessageIndex: startIndex,
+                endMessageId: mergedEndId || startMessageId,
+                endMessageIndex: mergedEndIndex,
+                opIds: [],
+                collapsed: true,
+                conflicts: [],
+                messageIds: mergedMessageIds,
+                startCommit: result.startCommit,
+                startCommits: mergedStartCommits,
+                restoreCommit: result.restoreCommit,
+                undoTargetCommit: result.undoTargetCommit,
+                fileSet: result.fileSet
+            };
+            this.logUiDebug(`EXT: undo.segment.merged | startIndex | ${startIndex} | endIndex | ${mergedEndIndex} | startId | ${startMessageId} | endId | ${mergedEndId} | messageIds | ${mergedMessageIds.length}`);
+            return { conflicts: [], touchedFiles: result.touchedFiles, applied: result.applied };
         }
-
-        this.revertedSegment = {
-            isActive: true,
-            discarded: false,
-            startMessageId,
-            startMessageIndex: startIndex,
-            endMessageId: this.messageOrder[endIndex] || startMessageId,
-            endMessageIndex: endIndex,
-            opIds: [],
-            collapsed: true,
-            conflicts: [],
-            messageIds: messageIds
-        };
-
-        return { conflicts, touchedFiles, applied: true };
+        return { conflicts: [], touchedFiles, applied: false };
     }
 
     public async restoreAll(options?: { force?: boolean }): Promise<{ conflicts: ConflictDetail[]; touchedFiles: string[]; applied: boolean }> {
@@ -1182,124 +1189,57 @@ export class OpenCodeClient {
         if (!sessionId) {
             return { conflicts: [], touchedFiles: [], applied: false };
         }
-        const force = options?.force === true;
-        const touchedFiles: string[] = [];
-        const messageIds = Array.isArray(segment.messageIds)
-            ? segment.messageIds
-            : this.getMessageIdsInRange(segment.startMessageIndex, segment.endMessageIndex);
-        const snapshots = [] as Array<{ messageId: string; messageIndex: number; files: Array<{ absPath: string; relPath: string; existsBefore: boolean; existsAfter: boolean; beforeText: string; afterText: string; }> }>;
-        for (const id of messageIds) {
-            const snapshot = await this.loadMessageSnapshot(sessionId, id);
-            if (snapshot) snapshots.push(snapshot);
+        if (!this.gitUndoAvailable) {
+            this.logUiDebug(`EXT: restore.disabled | reason=git-unavailable`);
+            return { conflicts: [], touchedFiles: [], applied: false };
         }
-
-        const conflicts: ConflictDetail[] = [];
-        if (!force) {
-            const expected = new Map<string, { exists: boolean; text: string }>();
-            const orderedSnapshots = snapshots.slice().sort((a, b) => a.messageIndex - b.messageIndex);
-            for (const snapshot of orderedSnapshots) {
-                for (const file of snapshot.files) {
-                    if (!expected.has(file.absPath)) {
-                        expected.set(file.absPath, {
-                            exists: file.existsBefore,
-                            text: file.existsBefore ? file.beforeText : ''
-                        });
-                    }
-                }
+        if (this.gitUndoAvailable && this.gitUndo) {
+            const endMsgId = typeof segment.endMessageId === 'string' ? segment.endMessageId : '';
+            if (!endMsgId.startsWith('msg_')) {
+                return { conflicts: [], touchedFiles: [], applied: false };
             }
-            for (const [filePath, expectation] of expected.entries()) {
-                const current = await this.readCurrentFileState(filePath);
-                const existsMismatch = current.exists !== expectation.exists;
-                const contentMismatch = expectation.exists && current.exists && current.text !== expectation.text;
-                if (existsMismatch || contentMismatch) {
-                    const diffText = this.buildConflictDiff(expectation.text, current.text);
-                    conflicts.push({
-                        path: filePath,
-                        expectedExists: expectation.exists,
-                        currentExists: current.exists,
-                        diffText
-                    });
-                }
+            const messageIds = Array.isArray(segment.messageIds)
+                ? segment.messageIds.filter((id) => typeof id === 'string' && id.startsWith('msg_'))
+                : [];
+            const result = await this.gitUndo.restoreToMessage(sessionId, endMsgId, messageIds, options?.force === true);
+            if (result.conflicts.length) {
+                const conflicts = result.conflicts.map((conflict) => ({
+                    path: conflict.path,
+                    expectedExists: true,
+                    currentExists: true,
+                    diffText: conflict.diffText || ''
+                }));
+                return { conflicts, touchedFiles: [], applied: false };
             }
-            if (conflicts.length) {
-                return { conflicts, touchedFiles, applied: false };
-            }
+            return { conflicts: [], touchedFiles: result.touchedFiles, applied: result.applied };
         }
-
-        const orderedSnapshots = snapshots.slice().sort((a, b) => a.messageIndex - b.messageIndex);
-        for (const snapshot of orderedSnapshots) {
-            for (const file of snapshot.files) {
-                await this.applyFileState(file.absPath, file.existsAfter, file.afterText);
-                touchedFiles.push(file.absPath);
-            }
-        }
-
-        segment.conflicts = [];
-        segment.isActive = false;
-        segment.collapsed = false;
-        this.revertedSegment = segment;
-
-        return { conflicts, touchedFiles, applied: true };
+        return { conflicts: [], touchedFiles: [], applied: false };
     }
 
-    public async restoreFromMessage(startMessageId: string, endMessageId?: string): Promise<{ conflicts: ConflictDetail[]; touchedFiles: string[]; applied: boolean }> {
-        const startIndex = this.messageIndexById.get(startMessageId);
-        if (startIndex === undefined) {
-            throw new Error('Unknown message for restore.');
-        }
-        const endIndex = endMessageId ? this.messageIndexById.get(endMessageId) ?? (this.messageOrder.length ? this.messageOrder.length - 1 : startIndex) : (this.messageOrder.length ? this.messageOrder.length - 1 : startIndex);
+    public async restoreFromMessage(startMessageId: string, endMessageId?: string, options?: { force?: boolean }): Promise<{ conflicts: ConflictDetail[]; touchedFiles: string[]; applied: boolean }> {
         const sessionId = this.currentSessionId;
         const touchedFiles: string[] = [];
         if (!sessionId) {
             return { conflicts: [], touchedFiles, applied: false };
         }
-
-        const messageIds = this.getMessageIdsInRange(startIndex, endIndex);
-        const snapshots = [] as Array<{ messageId: string; messageIndex: number; files: Array<{ absPath: string; relPath: string; existsBefore: boolean; existsAfter: boolean; beforeText: string; afterText: string; }> }>;
-        for (const id of messageIds) {
-            const snapshot = await this.loadMessageSnapshot(sessionId, id);
-            if (snapshot) snapshots.push(snapshot);
+        if (!this.gitUndoAvailable || !this.gitUndo) {
+            this.logUiDebug(`EXT: restore.disabled | reason=git-unavailable`);
+            return { conflicts: [], touchedFiles, applied: false };
         }
-
-        const conflicts: ConflictDetail[] = [];
-        const expected = new Map<string, { exists: boolean; text: string }>();
-        const orderedSnapshots = snapshots.slice().sort((a, b) => a.messageIndex - b.messageIndex);
-        for (const snapshot of orderedSnapshots) {
-            for (const file of snapshot.files) {
-                if (!expected.has(file.absPath)) {
-                    expected.set(file.absPath, {
-                        exists: file.existsBefore,
-                        text: file.existsBefore ? file.beforeText : ''
-                    });
-                }
-            }
-        }
-        for (const [filePath, expectation] of expected.entries()) {
-            const current = await this.readCurrentFileState(filePath);
-            const existsMismatch = current.exists !== expectation.exists;
-            const contentMismatch = expectation.exists && current.exists && current.text !== expectation.text;
-            if (existsMismatch || contentMismatch) {
-                const diffText = this.buildConflictDiff(expectation.text, current.text);
-                conflicts.push({
-                    path: filePath,
-                    expectedExists: expectation.exists,
-                    currentExists: current.exists,
-                    diffText
-                });
-            }
-        }
-        if (conflicts.length) {
+        const targetMsgId = typeof endMessageId === 'string' && endMessageId.startsWith('msg_')
+            ? endMessageId
+            : startMessageId;
+        const result = await this.gitUndo.restoreToMessage(sessionId, targetMsgId, [], options?.force === true);
+        if (result.conflicts.length) {
+            const conflicts = result.conflicts.map((conflict) => ({
+                path: conflict.path,
+                expectedExists: true,
+                currentExists: true,
+                diffText: conflict.diffText || ''
+            }));
             return { conflicts, touchedFiles, applied: false };
         }
-
-        for (const snapshot of orderedSnapshots) {
-            for (const file of snapshot.files) {
-                await this.applyFileState(file.absPath, file.existsAfter, file.afterText);
-                touchedFiles.push(file.absPath);
-            }
-        }
-
-        return { conflicts, touchedFiles, applied: true };
+        return { conflicts: [], touchedFiles: result.touchedFiles, applied: result.applied };
     }
 
     public discardRevertedSegment(): void {
@@ -1317,22 +1257,8 @@ export class OpenCodeClient {
     public removeMessageId(messageId: string): void {
         this.messageIndexById.delete(messageId);
         this.messageOrder = this.messageOrder.filter((id) => id !== messageId);
-        this.patchOpsByMessageId.delete(messageId);
     }
 
-    public async rollbackMessageSnapshot(messageId: string): Promise<string[]> {
-        const sessionId = this.currentSessionId;
-        const touchedFiles: string[] = [];
-        if (!sessionId) return touchedFiles;
-        const snapshot = await this.loadMessageSnapshot(sessionId, messageId);
-        if (!snapshot) return touchedFiles;
-        for (const file of snapshot.files) {
-            await this.applyFileState(file.absPath, file.existsBefore, file.beforeText);
-            touchedFiles.push(file.absPath);
-        }
-        await this.removeMessageSnapshot(sessionId, messageId);
-        return touchedFiles;
-    }
 
     private stripAnsi(str: string): string {
         return str.replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '');
