@@ -10,7 +10,7 @@ export function activate(context: vscode.ExtensionContext) {
     const workspaceRoot = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders[0]?.uri.fsPath;
     const diffProvider = new OpenCodeDiffProvider(workspaceRoot);
 
-    const sidebarProvider = new SidebarProvider(context, context.extensionUri, diffProvider);
+	const sidebarProvider = new SidebarProvider(context, context.extensionUri, diffProvider);
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(
             "opencode.sidebar",
@@ -65,6 +65,20 @@ export function activate(context: vscode.ExtensionContext) {
 	});
 
 	context.subscriptions.push(disposable);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('opencode.clearAttachmentsCache', () => {
+			sidebarProvider.requestAttachmentCleanup('manual');
+		})
+	);
+
+	context.subscriptions.push(
+		new vscode.Disposable(() => {
+			void sidebarProvider.shutdownServer();
+		})
+	);
 }
 
-export function deactivate() {}
+export function deactivate() {
+    // Best-effort cleanup handled via Disposable and process handlers.
+}

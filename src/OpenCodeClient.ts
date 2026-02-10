@@ -1,9 +1,11 @@
 import * as cp from 'child_process';
 import * as fs from 'fs';
+import * as net from 'net';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import * as vscode from 'vscode';
 import { GitUndoEngine } from './undo/GitUndoEngine';
+import { normalizeTouchedFiles } from './undo/GitPathUtils';
 import { GitCapabilities, FileChangeSpec } from './undo/types';
 
 export type ModelInfo = {
@@ -95,6 +97,19 @@ type RevertedSegment = {
 export class OpenCodeClient {
     public static outputChannel = vscode.window.createOutputChannel("OpenCode CLI");
     private currentChild?: cp.ChildProcess;
+    private serverProcess?: cp.ChildProcess;
+    private serverBaseUrl?: string;
+    private serverPort?: number;
+    private serverStartPromise?: Promise<void>;
+    private readonly workspaceRoot: string;
+    private storage?: vscode.Memento;
+    private serverPid?: number;
+    private eventStreamAbort?: AbortController;
+    private eventStreamActive = false;
+    private eventStreamBackoffMs = 1000;
+    private readonly eventListeners = new Set<(event: ChatEvent) => void>();
+    private readonly sessionIdleWaiters = new Map<string, Array<() => void>>();
+    private readonly serverStateKey = 'opencode.serverStateByWorkspace.v1';
     private resolvedBin?: string;
     private useCmdWrapper = false;
     private currentSessionId?: string;
@@ -110,6 +125,15 @@ export class OpenCodeClient {
     private gitUndo?: GitUndoEngine;
     private gitUndoAvailable = false;
     private sessionUndoEnabled = new Map<string, boolean>();
+    private assistantTextLengths = new Map<string, number>();
+    private assistantHasDelta = new Set<string>();
+    private assistantStatusCleared = new Set<string>();
+    private messageRoleById = new Map<string, string>();
+    private lastCwdBySession = new Map<string, string>();
+    private canceledActiveTurnBySession = new Map<string, boolean>();
+    private activeTurnOpIdBySession = new Map<string, string>();
+    private pendingUserMsgIdBySession = new Map<string, string>();
+    private pendingAssistantMsgIdBySession = new Map<string, string>();
 
     public resetSessionState(): void {
         this.currentSessionId = undefined;
@@ -122,11 +146,37 @@ export class OpenCodeClient {
         this.turnStateBySession.clear();
         this.pendingTurnChangesBySession.clear();
         this.sessionUndoEnabled.clear();
+        this.assistantTextLengths.clear();
+        this.assistantHasDelta.clear();
+        this.assistantStatusCleared.clear();
+        this.messageRoleById.clear();
+        this.lastCwdBySession.clear();
+        this.canceledActiveTurnBySession.clear();
+        this.activeTurnOpIdBySession.clear();
+        this.pendingUserMsgIdBySession.clear();
+        this.pendingAssistantMsgIdBySession.clear();
     }
 
     constructor() {
-        const workspaceRoot = this.getWorkspaceRoot();
-        this.gitUndo = new GitUndoEngine(workspaceRoot, (message) => this.logUiDebug(message));
+        this.workspaceRoot = this.getWorkspaceRoot();
+        this.gitUndo = new GitUndoEngine(this.workspaceRoot, (message) => this.logUiDebug(message));
+    }
+
+    public setStorage(storage: vscode.Memento): void {
+        this.storage = storage;
+    }
+
+    public async ensureServer(): Promise<void> {
+        if (this.serverBaseUrl) {
+            return;
+        }
+        if (!this.serverStartPromise) {
+            this.serverStartPromise = this.startServer();
+        }
+        await this.serverStartPromise;
+        if (!this.eventStreamActive) {
+            this.connectEventStream();
+        }
     }
 
     public setUiDebugChannel(channel: vscode.OutputChannel): void {
@@ -199,6 +249,7 @@ export class OpenCodeClient {
 
     public startTurn(sessionId: string, pendingUserLocalKey: string): void {
         if (!sessionId) return;
+        this.canceledActiveTurnBySession.set(sessionId, false);
         const pending = this.pendingTurnChangesBySession.get(sessionId);
         if (pending?.changes?.length) {
             // this.logUiDebug(`[DBG_TURN_START] session=${sessionId} pendingChanges=${pending.changes.length} cleared=true`);
@@ -218,11 +269,40 @@ export class OpenCodeClient {
         // this.logUiDebug(`[DBG_TURN_START] session=${sessionId} userLocal=${pendingUserLocalKey || 'null'}`);
     }
 
+    public startTurnWithOp(sessionId: string, pendingUserLocalKey: string, opId?: string): void {
+        if (!sessionId) return;
+        this.startTurn(sessionId, pendingUserLocalKey);
+        this.pendingUserMsgIdBySession.delete(sessionId);
+        this.pendingAssistantMsgIdBySession.delete(sessionId);
+        if (opId && typeof opId === 'string') {
+            this.activeTurnOpIdBySession.set(sessionId, opId);
+        }
+    }
+
+    public cancelTurn(sessionId: string, opId?: string): void {
+        if (!sessionId) return;
+        this.canceledActiveTurnBySession.set(sessionId, true);
+        if (opId && typeof opId === 'string') {
+            this.activeTurnOpIdBySession.set(sessionId, opId);
+        }
+    }
+
     public finishTurn(sessionId: string): void {
         if (!sessionId) return;
         this.turnStateBySession.delete(sessionId);
         this.pendingTurnChangesBySession.delete(sessionId);
+        this.activeTurnOpIdBySession.delete(sessionId);
+        this.canceledActiveTurnBySession.delete(sessionId);
+        this.pendingUserMsgIdBySession.delete(sessionId);
+        this.pendingAssistantMsgIdBySession.delete(sessionId);
         // this.logUiDebug(`[DBG_TURN_END] session=${sessionId}`);
+    }
+
+    public getPendingTurnMessageIds(sessionId: string): { userMsgId?: string; assistantMsgId?: string } {
+        return {
+            userMsgId: this.pendingUserMsgIdBySession.get(sessionId),
+            assistantMsgId: this.pendingAssistantMsgIdBySession.get(sessionId)
+        };
     }
 
     public recordAssistantMsgId(sessionId: string, assistantMsgId: string): void {
@@ -578,7 +658,12 @@ export class OpenCodeClient {
                         }
                     }
                     if (assistantMsgId && onEvent) {
-                        onEvent({ type: 'assistantMessageMeta', sessionId, assistantMsgId });
+                        onEvent({
+                            type: 'assistantMessageMeta',
+                            sessionId,
+                            assistantMsgId,
+                            tmpKey: this.getPendingAssistantTmpKey(sessionId)
+                        });
                     }
                     if (parsed.type === 'error') {
                         const errMsg = parsed.error?.data?.message || parsed.error?.message || 'Unknown CLI error';
@@ -589,6 +674,22 @@ export class OpenCodeClient {
                     }
                     if (parsed.type === 'tool_use' && parsed.part && parsed.part.tool === 'apply_patch') {
                         const patchText = parsed.part?.state?.input?.patchText || parsed.part?.state?.input?.patch;
+                        const metadata = parsed.part?.state?.metadata;
+                        const stateFiles = Array.isArray(metadata?.files) ? metadata.files : [];
+                        const firstFile = stateFiles.length ? stateFiles[0] : null;
+                        const metadataKeys = metadata && typeof metadata === 'object'
+                            ? Object.keys(metadata).slice(0, 8).join(',')
+                            : '';
+                        const firstFileKeys = firstFile && typeof firstFile === 'object'
+                            ? Object.keys(firstFile).slice(0, 10).join(',')
+                            : '';
+                        OpenCodeClient.outputChannel.appendLine(
+                            `[DBG_APPLY_PATCH] status=${parsed.part?.state?.status || 'unknown'} ` +
+                            `hasMetadata=${Boolean(metadata)} keys=[${metadataKeys}] files=${stateFiles.length} ` +
+                            `firstKeys=[${firstFileKeys}] hasBefore=${Boolean(firstFile?.before)} ` +
+                            `hasAfter=${Boolean(firstFile?.after)} hasDiff=${Boolean(firstFile?.diff)} ` +
+                            `patchLen=${typeof patchText === 'string' ? patchText.length : 0}`
+                        );
                         if (patchText && onEvent) {
                             onEvent({ type: 'toolPatch', text: patchText, sessionId });
                         }
@@ -849,18 +950,140 @@ export class OpenCodeClient {
                 return [];
             }
             const existsBefore = typeof metadata?.exists === 'boolean' ? metadata.exists : false;
+            const filediff = metadata?.filediff;
+            const beforeText = typeof metadata?.before === 'string'
+                ? metadata.before
+                : (typeof filediff?.before === 'string' ? filediff.before : undefined);
+            const diffText = typeof metadata?.diff === 'string'
+                ? metadata.diff
+                : (typeof filediff?.diff === 'string' ? filediff.diff : undefined);
+            const additions = typeof filediff?.additions === 'number' ? filediff.additions : undefined;
+            const deletions = typeof filediff?.deletions === 'number' ? filediff.deletions : undefined;
             return [
                 {
                     filePath: input.filePath,
                     type: existsBefore ? 'update' : 'create',
-                    before: existsBefore ? undefined : '',
+                    before: existsBefore ? beforeText : '',
                     after: typeof input.content === 'string' ? input.content : '',
                     existsBefore,
-                    existsAfter: true
+                    existsAfter: true,
+                    diff: diffText,
+                    additions,
+                    deletions
                 }
             ];
         }
         return [];
+    }
+
+    private extractFilesFromToolPart(part: any): FileSnapshot[] {
+        const tool = part?.tool;
+        if (!tool || part?.state?.status !== 'completed') return [];
+        if (tool === 'apply_patch') {
+            const stateFiles = Array.isArray(part?.state?.metadata?.files)
+                ? part.state.metadata.files
+                : [];
+            const files: FileSnapshot[] = [];
+            for (const file of stateFiles) {
+                if (!file?.filePath) continue;
+                const type = file?.type as 'update' | 'create' | 'delete' | undefined;
+                const existsBefore = typeof file?.existsBefore === 'boolean'
+                    ? file.existsBefore
+                    : (type === 'create' ? false : type === 'delete' ? true : true);
+                const existsAfter = typeof file?.existsAfter === 'boolean'
+                    ? file.existsAfter
+                    : (type === 'create' ? true : type === 'delete' ? false : true);
+                files.push({
+                    filePath: file.filePath,
+                    relativePath: file.relativePath,
+                    type,
+                    diff: file.diff,
+                    before: file.before,
+                    after: file.after,
+                    existsBefore,
+                    existsAfter,
+                    additions: typeof file.additions === 'number' ? file.additions : undefined,
+                    deletions: typeof file.deletions === 'number' ? file.deletions : undefined
+                });
+            }
+            return files;
+        }
+        if (tool === 'edit') {
+            const metadata = part?.state?.metadata;
+            const filediff = metadata?.filediff;
+            if (!filediff?.file) return [];
+            return [
+                {
+                    filePath: filediff.file,
+                    type: 'update',
+                    diff: typeof metadata?.diff === 'string' ? metadata.diff : undefined,
+                    before: typeof filediff.before === 'string' ? filediff.before : undefined,
+                    after: typeof filediff.after === 'string' ? filediff.after : undefined,
+                    existsBefore: true,
+                    existsAfter: true,
+                    additions: typeof filediff.additions === 'number' ? filediff.additions : undefined,
+                    deletions: typeof filediff.deletions === 'number' ? filediff.deletions : undefined
+                }
+            ];
+        }
+        if (tool === 'write') {
+            const input = part?.state?.input;
+            const metadata = part?.state?.metadata;
+            if (!input?.filePath) {
+                this.logUiDebug(`write.skip | reason=missing-filePath`);
+                return [];
+            }
+            const existsBefore = typeof metadata?.exists === 'boolean' ? metadata.exists : false;
+            const filediff = metadata?.filediff;
+            const beforeText = typeof metadata?.before === 'string'
+                ? metadata.before
+                : (typeof filediff?.before === 'string' ? filediff.before : undefined);
+            const diffText = typeof metadata?.diff === 'string'
+                ? metadata.diff
+                : (typeof filediff?.diff === 'string' ? filediff.diff : undefined);
+            const additions = typeof filediff?.additions === 'number' ? filediff.additions : undefined;
+            const deletions = typeof filediff?.deletions === 'number' ? filediff.deletions : undefined;
+            return [
+                {
+                    filePath: input.filePath,
+                    type: existsBefore ? 'update' : 'create',
+                    before: existsBefore ? beforeText : '',
+                    after: typeof input.content === 'string' ? input.content : '',
+                    existsBefore,
+                    existsAfter: true,
+                    diff: diffText,
+                    additions,
+                    deletions
+                }
+            ];
+        }
+        return [];
+    }
+
+    private extractDeletedPathsFromCommand(command: unknown, cwd: string | undefined): string[] {
+        if (typeof command !== 'string' || !command.trim()) return [];
+        const normalized = command.trim();
+        const lower = normalized.toLowerCase();
+        let rawPath = '';
+
+        if (lower.startsWith('rm ')) {
+            rawPath = normalized.slice(3).trim();
+        } else if (lower.startsWith('del ')) {
+            rawPath = normalized.slice(4).trim();
+        } else if (lower.startsWith('erase ')) {
+            rawPath = normalized.slice(6).trim();
+        } else if (lower.startsWith('remove-item ')) {
+            rawPath = normalized.slice(12).trim();
+        }
+
+        if (!rawPath) return [];
+        rawPath = rawPath.replace(/^['"]|['"]$/g, '').trim();
+        if (!rawPath) return [];
+
+        const abs = path.isAbsolute(rawPath)
+            ? rawPath
+            : (cwd ? path.join(cwd, rawPath) : rawPath);
+        return [abs];
     }
 
     private buildChangeSpecs(files: FileSnapshot[]): FileChangeSpec[] {
@@ -975,6 +1198,30 @@ export class OpenCodeClient {
         }
     }
 
+    public async revertPendingTurnChangesToCurrentBase(sessionId: string): Promise<void> {
+        if (!sessionId) return;
+        if (!this.gitUndoAvailable || !this.gitUndo) return;
+        if (!this.isSessionUndoEnabled(sessionId)) return;
+        const pending = this.pendingTurnChangesBySession.get(sessionId);
+        if (!pending?.changes?.length) return;
+        const workspaceRoot = this.workspaceRoot;
+        const rawPaths: string[] = [];
+        for (const change of this.mergeChangeSpecs(pending.changes)) {
+            if (change.type === 'rename') {
+                rawPaths.push(change.oldPath, change.newPath);
+            } else if ('path' in change) {
+                rawPaths.push(change.path);
+            }
+        }
+        const fileSet = normalizeTouchedFiles(workspaceRoot, rawPaths);
+        if (!fileSet.length) return;
+        const repo = await this.gitUndo['repoManager'].resolveRepo(sessionId, pending.turnKey || sessionId);
+        const map = await this.gitUndo['mapStore'].loadSessionMap(sessionId, repo.repoId);
+        const restoreCommit = map.currentBaseCommit;
+        if (!restoreCommit) return;
+        await this.gitUndo.forceRestore(sessionId, restoreCommit, fileSet);
+    }
+
     private registerMessageId(messageId: string): number {
         if (!messageId || (!messageId.startsWith('msg_') && !messageId.startsWith('local-'))) {
             return this.messageIndexById.get(messageId) ?? -1;
@@ -989,6 +1236,18 @@ export class OpenCodeClient {
 
     public registerMessage(messageId: string): number {
         return this.registerMessageId(messageId);
+    }
+
+    public async getCommitHashesForMessageIds(sessionId: string, messageIds: string[]): Promise<string[]> {
+        if (!sessionId || !this.gitUndoAvailable || !this.gitUndo) return [];
+        const ids = Array.isArray(messageIds)
+            ? messageIds.filter((id) => typeof id === 'string' && id.startsWith('msg_'))
+            : [];
+        if (!ids.length) return [];
+        const repo = await this.gitUndo['repoManager'].resolveRepo(sessionId, sessionId);
+        const map = await this.gitUndo['mapStore'].loadSessionMap(sessionId, repo.repoId);
+        const commits = ids.map((id) => map.msgToCommit[id]).filter((commit): commit is string => Boolean(commit));
+        return Array.from(new Set(commits));
     }
 
     public getMessageIndex(messageId: string): number | undefined {
@@ -1125,8 +1384,8 @@ export class OpenCodeClient {
             if (result.conflicts.length) {
                 const conflicts = result.conflicts.map((conflict) => ({
                     path: conflict.path,
-                    expectedExists: true,
-                    currentExists: true,
+                    expectedExists: conflict.expectedExists !== undefined ? conflict.expectedExists : true,
+                    currentExists: conflict.currentExists !== undefined ? conflict.currentExists : true,
                     diffText: conflict.diffText || ''
                 }));
                 return { conflicts, touchedFiles, applied: false };
@@ -1206,8 +1465,8 @@ export class OpenCodeClient {
             if (result.conflicts.length) {
                 const conflicts = result.conflicts.map((conflict) => ({
                     path: conflict.path,
-                    expectedExists: true,
-                    currentExists: true,
+                    expectedExists: conflict.expectedExists !== undefined ? conflict.expectedExists : true,
+                    currentExists: conflict.currentExists !== undefined ? conflict.currentExists : true,
                     diffText: conflict.diffText || ''
                 }));
                 return { conflicts, touchedFiles: [], applied: false };
@@ -1217,7 +1476,11 @@ export class OpenCodeClient {
         return { conflicts: [], touchedFiles: [], applied: false };
     }
 
-    public async restoreFromMessage(startMessageId: string, endMessageId?: string, options?: { force?: boolean }): Promise<{ conflicts: ConflictDetail[]; touchedFiles: string[]; applied: boolean }> {
+    public async restoreFromMessage(
+        startMessageId: string,
+        endMessageId?: string,
+        options?: { force?: boolean; messageIds?: string[] }
+    ): Promise<{ conflicts: ConflictDetail[]; touchedFiles: string[]; applied: boolean }> {
         const sessionId = this.currentSessionId;
         const touchedFiles: string[] = [];
         if (!sessionId) {
@@ -1230,12 +1493,15 @@ export class OpenCodeClient {
         const targetMsgId = typeof endMessageId === 'string' && endMessageId.startsWith('msg_')
             ? endMessageId
             : startMessageId;
-        const result = await this.gitUndo.restoreToMessage(sessionId, targetMsgId, [], options?.force === true);
+        const messageIds = Array.isArray(options?.messageIds)
+            ? options.messageIds.filter((id) => typeof id === 'string' && id.startsWith('msg_'))
+            : [];
+        const result = await this.gitUndo.restoreToMessage(sessionId, targetMsgId, messageIds, options?.force === true);
         if (result.conflicts.length) {
             const conflicts = result.conflicts.map((conflict) => ({
                 path: conflict.path,
-                expectedExists: true,
-                currentExists: true,
+                expectedExists: conflict.expectedExists !== undefined ? conflict.expectedExists : true,
+                currentExists: conflict.currentExists !== undefined ? conflict.currentExists : true,
                 diffText: conflict.diffText || ''
             }));
             return { conflicts, touchedFiles, applied: false };
@@ -1265,8 +1531,526 @@ export class OpenCodeClient {
         return str.replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '');
     }
 
+    private getServerBaseUrl(): string {
+        if (!this.serverBaseUrl) {
+            throw new Error('OpenCode server is not initialized.');
+        }
+        return this.serverBaseUrl;
+    }
+
+    private async startServer(): Promise<void> {
+        await this.attachOrCreateServer();
+        if (this.serverBaseUrl) {
+            return;
+        }
+        const port = await this.findAvailablePort(4096, 4125);
+        const spawnSpec = await this.buildServeSpawn(['serve', '--port', String(port)]);
+        this.serverProcess = cp.spawn(spawnSpec.command, spawnSpec.args, {
+            cwd: this.workspaceRoot,
+            shell: false,
+            env: { ...process.env, PYTHONIOENCODING: 'utf-8' }
+        });
+        this.serverPort = port;
+        this.serverPid = this.serverProcess.pid;
+        this.serverBaseUrl = `http://127.0.0.1:${port}`;
+        await this.waitForServerHealthy();
+        this.persistServerState();
+    }
+
+    private persistServerState(): void {
+        if (!this.storage || !this.serverProcess || !this.serverPort) return;
+        const state = this.storage.get<Record<string, any>>(this.serverStateKey) || {};
+        state[this.workspaceRoot] = {
+            pid: this.serverProcess.pid,
+            port: this.serverPort,
+            workspacePath: this.workspaceRoot,
+            startedAt: Date.now()
+        };
+        void this.storage.update(this.serverStateKey, state);
+    }
+
+    private async attachOrCreateServer(): Promise<void> {
+        if (!this.storage) return;
+        const state = this.storage.get<Record<string, any>>(this.serverStateKey) || {};
+        const record = state[this.workspaceRoot];
+        if (!record?.port) return;
+        const baseUrl = `http://127.0.0.1:${record.port}`;
+        try {
+            const response = await fetch(`${baseUrl}/global/health`);
+            if (!response.ok) return;
+        } catch {
+            return;
+        }
+        this.serverPort = record.port;
+        this.serverPid = record.pid;
+        this.serverBaseUrl = baseUrl;
+    }
+
+    private async killProcessTree(pid: number): Promise<void> {
+        if (process.platform === 'win32') {
+            await new Promise<void>((resolve) => {
+                const attemptKill = () => {
+                    cp.exec(`taskkill /PID ${pid} /T /F`, (err, stdout) => {
+                        const output = String(stdout || '');
+                        if (output.includes('SUCCESS')) {
+                            resolve();
+                            return;
+                        }
+                        if (err) {
+                            // retry until success, no timeout
+                        }
+                        setTimeout(attemptKill, 500);
+                    });
+                };
+                attemptKill();
+            });
+            return;
+        }
+        try {
+            process.kill(pid, 'SIGTERM');
+        } catch {
+            // ignore
+        }
+    }
+
+    public async shutdownServer(): Promise<void> {
+        const pid = this.serverProcess?.pid || this.serverPid;
+        if (pid) {
+            await this.killProcessTree(pid);
+        }
+        if (this.storage) {
+            const state = this.storage.get<Record<string, any>>(this.serverStateKey) || {};
+            if (state[this.workspaceRoot]) {
+                delete state[this.workspaceRoot];
+                await this.storage.update(this.serverStateKey, state);
+            }
+        }
+        this.serverProcess = undefined;
+        this.serverBaseUrl = undefined;
+        this.serverPort = undefined;
+        this.serverStartPromise = undefined;
+        this.eventStreamAbort?.abort();
+        this.eventStreamActive = false;
+    }
+
+    private async buildServeSpawn(args: string[]): Promise<{ command: string; args: string[] }> {
+        const bin = await this.resolveBin();
+        return this.buildSpawn(bin, args);
+    }
+
+    private async waitForServerHealthy(): Promise<void> {
+        const deadline = Date.now() + 15000;
+        while (Date.now() < deadline) {
+            try {
+                const health = await this.requestJson<{ healthy: boolean }>('GET', '/global/health');
+                if (health?.healthy) return;
+            } catch {
+                // ignore until timeout
+            }
+            await new Promise((resolve) => setTimeout(resolve, 300));
+        }
+        throw new Error('OpenCode server failed to start.');
+    }
+
+    private async findAvailablePort(start: number, end: number): Promise<number> {
+        for (let port = start; port <= end; port++) {
+            if (await this.isPortAvailable(port)) {
+                return port;
+            }
+        }
+        throw new Error(`No available port found between ${start} and ${end}.`);
+    }
+
+    private async isPortAvailable(port: number): Promise<boolean> {
+        return new Promise((resolve) => {
+            const server = net.createServer();
+            server.once('error', () => resolve(false));
+            server.once('listening', () => {
+                server.close(() => resolve(true));
+            });
+            server.listen(port, '127.0.0.1');
+        });
+    }
+
+    private async requestJson<T>(method: string, path: string, body?: any): Promise<T> {
+        const url = new URL(path, this.getServerBaseUrl());
+        const options: any = { method, headers: { 'Content-Type': 'application/json' } };
+        if (body !== undefined && method !== 'GET') {
+            options.body = JSON.stringify(body);
+        }
+        const response = await fetch(url, options as any);
+        if (!response.ok) {
+            const text = await response.text();
+            throw new Error(`Server ${method} ${path} failed: ${response.status} ${text}`);
+        }
+        if (response.status === 204) {
+            return {} as T;
+        }
+        return (await response.json()) as T;
+    }
+
+    private parseModelRef(model?: string): { providerID: string; modelID: string } | undefined {
+        if (!model) return undefined;
+        const parts = model.split('/');
+        if (parts.length < 2) return undefined;
+        return { providerID: parts[0], modelID: parts.slice(1).join('/') };
+    }
+
+    private connectEventStream(): void {
+        if (this.eventStreamActive) return;
+        this.eventStreamActive = true;
+        this.eventStreamAbort?.abort();
+        this.eventStreamAbort = new AbortController();
+        const url = new URL('/event', this.getServerBaseUrl());
+        const signal = this.eventStreamAbort.signal;
+
+        const start = async () => {
+            try {
+                const response = await fetch(url, { method: 'GET', signal } as any);
+                if (!response.ok || !response.body) {
+                    throw new Error(`Event stream failed: ${response.status}`);
+                }
+                this.eventStreamBackoffMs = 1000;
+                const reader = response.body.getReader();
+                let buffer = '';
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    buffer += new TextDecoder('utf-8').decode(value, { stream: true });
+                    const lines = buffer.split(/\r?\n/);
+                    buffer = lines.pop() || '';
+                    for (const line of lines) {
+                        if (!line.startsWith('data:')) continue;
+                        const payload = line.slice(5).trim();
+                        if (!payload) continue;
+                        this.handleServerEvent(payload);
+                    }
+                }
+            } catch (error) {
+                if ((error as Error).name === 'AbortError') return;
+            }
+
+            this.eventStreamActive = false;
+            await this.scheduleEventStreamReconnect();
+        };
+
+        void start();
+    }
+
+    private async scheduleEventStreamReconnect(): Promise<void> {
+        const delay = this.eventStreamBackoffMs;
+        this.eventStreamBackoffMs = Math.min(this.eventStreamBackoffMs * 2, 30000);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        if (!this.eventStreamActive) {
+            this.connectEventStream();
+        }
+    }
+
+    private handleServerEvent(payload: string): void {
+        let parsed: any;
+        try {
+            parsed = JSON.parse(payload);
+        } catch {
+            return;
+        }
+        const type = parsed?.type as string;
+        const props = parsed?.properties || {};
+        if (this.shouldLogAssistantSse(type, props)) {
+            OpenCodeClient.outputChannel.appendLine(`[SSE_ASSIST] ${payload}`);
+        }
+        if (type === 'session.status' && props?.sessionID && props?.status?.type === 'idle') {
+            const waiters = this.sessionIdleWaiters.get(props.sessionID);
+            if (waiters && waiters.length) {
+                waiters.splice(0).forEach((resolve) => resolve());
+            }
+        }
+        const events = this.mapServerEventToChatEvents(type, props);
+        if (!events.length) return;
+        for (const event of events) {
+            for (const listener of this.eventListeners) {
+                listener(event);
+            }
+        }
+    }
+
+    private formatToolStatus(part: any): string | null {
+        const tool = part?.tool;
+        const input = part?.state?.input || {};
+        const rawPath = input.filePath || input.path || input.file || '';
+        const fileName = typeof rawPath === 'string' && rawPath
+            ? path.basename(rawPath)
+            : '';
+        if (!tool) return null;
+        switch (tool) {
+            case 'write':
+                return fileName ? `Writing: ${fileName}` : 'Writing file...';
+            case 'edit':
+                return fileName ? `Editing: ${fileName}` : 'Editing file...';
+            case 'read':
+                return fileName ? `Reading: ${fileName}` : 'Reading file...';
+            case 'apply_patch':
+                return fileName ? `Applying patch: ${fileName}` : 'Applying patch...';
+            default:
+                return null;
+        }
+    }
+
+    private shouldLogAssistantSse(type: string, props: any): boolean {
+        if (type === 'message.part.updated') {
+            const part = props?.part || {};
+            if (part?.type === 'text' || part?.type === 'tool' || part?.type === 'diff' || part?.type === 'patch') {
+                return true;
+            }
+            return false;
+        }
+        if (type === 'message.updated') {
+            return props?.info?.role === 'assistant';
+        }
+        return false;
+    }
+
+    private mapServerEventToChatEvents(type: string, props: any): ChatEvent[] {
+        const events: ChatEvent[] = [];
+        if (type === 'session.created' || type === 'session.updated') {
+            if (props?.info?.id) {
+                events.push({ type: 'session', sessionId: props.info.id });
+            }
+            return events;
+        }
+        if (type === 'message.updated') {
+            const info = props?.info || {};
+            const messageId = info?.id;
+            const sessionId = info?.sessionID;
+            const role = info?.role;
+            if (sessionId && this.canceledActiveTurnBySession.get(sessionId) === true) {
+                return events;
+            }
+            if (sessionId && role === 'assistant' && typeof messageId === 'string') {
+                this.pendingAssistantMsgIdBySession.set(sessionId, messageId);
+                if (typeof info?.parentID === 'string' && info.parentID.length) {
+                    this.pendingUserMsgIdBySession.set(sessionId, info.parentID);
+                }
+            }
+            const cwd = info?.path?.cwd;
+            if (sessionId && typeof cwd === 'string' && cwd) {
+                this.lastCwdBySession.set(sessionId, cwd);
+            }
+            if (messageId) {
+                this.trackTurnMessageId(sessionId, messageId);
+                if (typeof role === 'string') {
+                    this.messageRoleById.set(messageId, role);
+                }
+            }
+            if (role === 'user' && messageId) {
+                events.push({ type: 'message', text: messageId, sessionId });
+            }
+            if (role === 'assistant' && messageId) {
+                const completedAt = info?.time?.completed;
+                const isFinal = Boolean(info?.finish) || typeof completedAt === 'number';
+                if (isFinal) {
+                    const messageIndex = this.registerMessage(messageId);
+                    this.recordAssistantMsgId(sessionId, messageId);
+                    events.push({
+                        type: 'assistantMessageMeta',
+                        sessionId,
+                        assistantMsgId: messageId,
+                        messageId,
+                        messageIndex,
+                        tmpKey: this.getPendingAssistantTmpKey(sessionId)
+                    });
+                }
+            }
+            return events;
+        }
+        if (type === 'message.part.updated') {
+            const part = props?.part || {};
+            const sessionId = part?.sessionID;
+            if (sessionId && this.canceledActiveTurnBySession.get(sessionId) === true) {
+                return events;
+            }
+            if (part?.type === 'text') {
+                const msgId = typeof part?.messageID === 'string' ? part.messageID : '';
+                if (sessionId && msgId) {
+                    const assistantId = this.pendingAssistantMsgIdBySession.get(sessionId);
+                    if (!assistantId || assistantId !== msgId) {
+                        this.pendingUserMsgIdBySession.set(sessionId, msgId);
+                    }
+                }
+                if (msgId) {
+                    const role = this.messageRoleById.get(msgId);
+                    if (role && role !== 'assistant') {
+                        return events;
+                    }
+                }
+                let chunk = '';
+                if (typeof part?.delta === 'string' && part.delta.length) {
+                    chunk = part.delta;
+                    if (msgId) {
+                        this.assistantHasDelta.add(msgId);
+                    }
+                } else if (typeof part?.text === 'string') {
+                    if (msgId && this.assistantHasDelta.has(msgId)) {
+                        chunk = '';
+                    } else {
+                        const prevLen = msgId ? (this.assistantTextLengths.get(msgId) || 0) : 0;
+                        const nextLen = part.text.length;
+                        if (nextLen > prevLen) {
+                            chunk = part.text.slice(prevLen);
+                        }
+                        if (msgId) {
+                            this.assistantTextLengths.set(msgId, nextLen);
+                        }
+                    }
+                }
+                if (!chunk) return events;
+                if (msgId && !this.assistantStatusCleared.has(msgId)) {
+                    events.push({
+                        type: 'assistantMessageMeta',
+                        sessionId,
+                        assistantMsgId: part?.messageID,
+                        lastText: 'Finalizing the response...',
+                        tmpKey: this.getPendingAssistantTmpKey(sessionId)
+                    });
+                    this.assistantStatusCleared.add(msgId);
+                }
+                events.push({ type: 'text', text: chunk, sessionId, assistantMsgId: part?.messageID, tmpKey: this.getPendingAssistantTmpKey(sessionId) });
+            }
+            if (part?.type === 'tool') {
+                const statusText = this.formatToolStatus(part);
+                if (statusText) {
+                    const resolvedId = this.getTurnAssistantMsgId(sessionId);
+                    const assistantMsgId = resolvedId || part?.messageID;
+                    events.push({ type: 'assistantMessageMeta', sessionId, assistantMsgId, lastText: statusText, tmpKey: this.getPendingAssistantTmpKey(sessionId) });
+                }
+                if (part?.state?.status === 'completed') {
+                    const files = this.extractFilesFromToolPart(part);
+                    if (files.length) {
+                        if (this.gitUndoAvailable && this.isSessionUndoEnabled(sessionId) && sessionId) {
+                            const turnState = this.turnStateBySession.get(sessionId);
+                            const turnKey = turnState?.pendingUserLocalKey || sessionId;
+                            const tmpKey = turnState?.pendingAssistantTmpKey;
+                            const assistantId = turnState?.assistantMsgId || turnState?.lastResolvedAssistantMsgId;
+                            const changeSpecs = this.buildChangeSpecs(files);
+                            this.queueTurnChanges(sessionId, turnKey, tmpKey, assistantId, changeSpecs);
+                        }
+                        events.push({ type: 'files', files, sessionId });
+                    } else if (part?.tool === 'bash' && sessionId) {
+                        const command = part?.state?.input?.command;
+                        const cwd = this.lastCwdBySession.get(sessionId);
+                        const deletePaths = this.extractDeletedPathsFromCommand(command, cwd);
+                        if (deletePaths.length) {
+                            const turnState = this.turnStateBySession.get(sessionId);
+                            const turnKey = turnState?.pendingUserLocalKey || sessionId;
+                            const tmpKey = turnState?.pendingAssistantTmpKey;
+                            const assistantId = turnState?.assistantMsgId || turnState?.lastResolvedAssistantMsgId;
+                            const changeSpecs = deletePaths.map((filePath: string) => ({ type: 'delete', path: filePath } as FileChangeSpec));
+                            this.queueTurnChanges(sessionId, turnKey, tmpKey, assistantId, changeSpecs);
+                        }
+                    }
+                }
+            }
+            if (part?.type === 'tool' && part?.tool === 'apply_patch') {
+                const patchText = part?.state?.input?.patchText || part?.state?.input?.patch;
+                if (patchText) {
+                    events.push({ type: 'toolPatch', text: patchText, sessionId });
+                }
+            }
+            if ((part?.type === 'diff' || part?.type === 'patch') && typeof part?.text === 'string') {
+                events.push({ type: 'diff', text: part.text, sessionId });
+            }
+            return events;
+        }
+        if (type === 'session.diff' && Array.isArray(props?.diff)) {
+            if (props?.sessionID && this.canceledActiveTurnBySession.get(props.sessionID) === true) {
+                return events;
+            }
+            const files = props.diff.map((entry: any) => ({
+                filePath: entry.file,
+                before: entry.before,
+                after: entry.after,
+                additions: entry.additions,
+                deletions: entry.deletions
+            })) as FileSnapshot[];
+            if (files.length) {
+                if (this.gitUndoAvailable && this.isSessionUndoEnabled(props?.sessionID) && props?.sessionID) {
+                    const sessionId = props.sessionID as string;
+                    const turnState = this.turnStateBySession.get(sessionId);
+                    const turnKey = turnState?.pendingUserLocalKey || sessionId;
+                    const tmpKey = turnState?.pendingAssistantTmpKey;
+                    const assistantId = turnState?.assistantMsgId || turnState?.lastResolvedAssistantMsgId;
+                    const changeSpecs = this.buildChangeSpecs(files);
+                    this.queueTurnChanges(sessionId, turnKey, tmpKey, assistantId, changeSpecs);
+                }
+                events.push({ type: 'files', files, sessionId: props?.sessionID });
+            }
+            return events;
+        }
+        if (type === 'session.status' && props?.sessionID && props?.status?.type === 'idle') {
+            if (this.canceledActiveTurnBySession.get(props.sessionID) === true) {
+                return events;
+            }
+            this.scheduleSessionResync(props.sessionID);
+        }
+        if (type === 'session.error') {
+            const errorName = props?.error?.name || props?.error?.data?.name;
+            const message = props?.error?.data?.message || props?.error?.message;
+            if (errorName === 'MessageAbortedError') {
+                return events;
+            }
+            if (message) {
+                events.push({ type: 'error', text: message, sessionId: props?.sessionID });
+            }
+            return events;
+        }
+        return events;
+    }
+
+    private waitForSessionIdle(sessionId: string): Promise<void> {
+        return new Promise((resolve) => {
+            const list = this.sessionIdleWaiters.get(sessionId) || [];
+            list.push(resolve);
+            this.sessionIdleWaiters.set(sessionId, list);
+            void this.requestJson('GET', `/session/${sessionId}`)
+                .then((info: any) => {
+                    const status = info?.status?.type;
+                    if (status === 'idle') {
+                        const waiters = this.sessionIdleWaiters.get(sessionId);
+                        if (waiters && waiters.length) {
+                            waiters.splice(0).forEach((fn) => fn());
+                        }
+                    }
+                })
+                .catch(() => undefined);
+        });
+    }
+
+    private getPendingAssistantTmpKey(sessionId: string | undefined): string | undefined {
+        if (!sessionId) return undefined;
+        return this.turnStateBySession.get(sessionId)?.pendingAssistantTmpKey;
+    }
+
+    private scheduleSessionResync(sessionId: string): void {
+        void this.requestJson<any[]>( 'GET', `/session/${sessionId}/message`)
+            .then((messages) => {
+                if (!Array.isArray(messages)) return;
+                for (const item of messages) {
+                    const info = item?.info || {};
+                    const messageId = info?.id;
+                    if (!messageId) continue;
+                    this.handleServerEvent(JSON.stringify({ type: 'message.updated', properties: { info } }));
+                }
+            })
+            .catch(() => undefined);
+    }
+
     public async checkVersion(): Promise<string> {
-        return this.execute(['--version']);
+        try {
+            await this.ensureServer();
+            const health = await this.requestJson<{ healthy: boolean; version?: string }>('GET', '/global/health');
+            return typeof health?.version === 'string' ? health.version : 'unknown';
+        } catch {
+            return this.execute(['--version']);
+        }
     }
 
     public async chat(
@@ -1274,62 +2058,115 @@ export class OpenCodeClient {
         options: { model?: string; variant?: string; sessionId?: string; continueSession?: boolean; files?: string[]; mode?: string },
         onEvent?: (event: ChatEvent) => void
     ): Promise<void> {
-        const args: string[] = ['run', '--format', 'json'];
-
-        if (options.model) args.push('--model', options.model);
-        if (options.variant) args.push('--variant', options.variant);
-        if (options.mode) args.push('--agent', options.mode);
-        if (options.sessionId) args.push('--session', options.sessionId);
-        if (options.continueSession) args.push('--continue');
-        if (options.files && options.files.length) {
-            for (const file of options.files) {
-                args.push('--file', file);
-            }
+        await this.ensureServer();
+        const sessionId = options.sessionId || this.currentSessionId;
+        if (!sessionId) {
+            throw new Error('Missing session ID for chat request.');
+        }
+        const listener = onEvent ? (event: ChatEvent) => onEvent(event) : undefined;
+        if (listener) {
+            this.eventListeners.add(listener);
         }
 
-        if (message) args.push('--');
-        await this.executeStreaming(args, onEvent, message);
+        const payload: any = {
+            parts: [{ type: 'text', text: message }]
+        };
+        const modelRef = this.parseModelRef(options.model);
+        if (modelRef) {
+            payload.model = modelRef;
+        }
+        payload.agent = options.mode || 'plan';
+        if (options.files && options.files.length) {
+            payload.parts.push(...options.files.map((file) => ({ type: 'file', path: file })));
+        }
+
+        await this.requestJson('POST', `/session/${sessionId}/prompt_async`, payload);
+        await this.waitForSessionIdle(sessionId);
+        if (listener) {
+            const resolvedAssistant = this.getTurnAssistantMsgId(sessionId);
+            if (!resolvedAssistant) {
+                await new Promise((resolve) => setTimeout(resolve, 1000));
+            }
+            this.eventListeners.delete(listener);
+        }
     }
 
     public async listModels(): Promise<ModelInfo[]> {
-        const output = await this.execute(['models', '--verbose']);
-        const models = this.parseModels(output);
+        await this.ensureServer();
+        let attempts = 0;
+        let models: ModelInfo[] = [];
+        while (attempts < 2) {
+            const payload = await this.requestJson<any>('GET', '/config/providers');
+            const providers = Array.isArray(payload?.providers) ? payload.providers : [];
+            models = [];
+            for (const provider of providers) {
+                const providerId = typeof provider?.id === 'string' ? provider.id : '';
+                const modelMap = provider?.models || {};
+                for (const modelId of Object.keys(modelMap)) {
+                    const model = modelMap[modelId] || {};
+                    const id = typeof model?.id === 'string' ? model.id : modelId;
+                    const name = typeof model?.name === 'string' ? model.name : `${providerId}/${id}`;
+                    const variants = model?.variants ? Object.keys(model.variants) : [];
+                    const fullId = providerId ? `${providerId}/${id}` : id;
+                    models.push({ id, providerId, name, fullId, variants });
+                }
+            }
+            if (models.length) {
+                break;
+            }
+            attempts += 1;
+            await new Promise((resolve) => setTimeout(resolve, 300));
+        }
         this.applyCopilotSpeedMultipliers(models);
         return models;
     }
 
     public async listSessions(): Promise<SessionInfo[]> {
-        const output = await this.execute(['session', 'list', '--format', 'json']);
-        return this.parseSessions(output);
+        await this.ensureServer();
+        const sessions = await this.requestJson<any[]>('GET', '/session');
+        if (!Array.isArray(sessions)) {
+            return [];
+        }
+        const mapped = sessions.map((session) => ({
+            id: session.id,
+            title: session.title || 'Untitled Session',
+            updated: session?.time?.updated ? new Date(session.time.updated).toLocaleString() : '',
+            updatedMs: typeof session?.time?.updated === 'number' ? session.time.updated : 0
+        }));
+        mapped.sort((a, b) => b.updatedMs - a.updatedMs);
+        return mapped.map(({ updatedMs, ...rest }) => rest);
     }
 
     public async createSession(): Promise<{ id: string }> {
-        const output = await this.execute(['session', 'new']);
-        const lines = output.split(/\r?\n/);
-        for (const line of lines) {
-            const match = line.match(/Created new session with ID:\s*(.+)/);
-            if (match && match[1]) {
-                return { id: match[1].trim() };
-            }
+        await this.ensureServer();
+        const session = await this.requestJson<any>('POST', '/session', {});
+        if (session?.id) {
+            return { id: session.id };
         }
-        throw new Error('Failed to parse session creation output.');
+        throw new Error('Failed to create session.');
     }
 
     public async exportSession(sessionId: string): Promise<any> {
-        const output = await this.execute(['export', sessionId]);
-        const jsonStart = output.indexOf('{');
-        if (jsonStart === -1) {
-            throw new Error('Failed to parse session export output.');
-        }
-        return JSON.parse(output.slice(jsonStart));
+        await this.ensureServer();
+        const messages = await this.requestJson<any[]>( 'GET', `/session/${sessionId}/message`);
+        const info = await this.requestJson<any>('GET', `/session/${sessionId}`);
+        return { session: info, messages };
+    }
+
+    public async listSessionMessages(sessionId: string): Promise<any[]> {
+        await this.ensureServer();
+        const messages = await this.requestJson<any[]>('GET', `/session/${sessionId}/message`);
+        return Array.isArray(messages) ? messages : [];
     }
 
     public cancel(): void {
-        if (this.currentChild) {
-            OpenCodeClient.outputChannel.appendLine(`[CANCEL] Terminating current process`);
-            this.currentChild.kill();
-            this.currentChild = undefined;
-        }
+        const sessionId = this.currentSessionId;
+        if (!sessionId) return;
+        void this.requestJson('POST', `/session/${sessionId}/abort`, {});
+    }
+
+    public async warmServer(): Promise<void> {
+        await this.ensureServer();
     }
 
     private parseModels(output: string): ModelInfo[] {

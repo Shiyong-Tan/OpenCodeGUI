@@ -24,6 +24,16 @@ type ChangeListRecord = {
     anchorMessageId: string;
     createdAt: number;
     reverted?: boolean;
+    statsByPath?: Record<string, { additions: number | null; deletions: number | null }>;
+};
+
+type CanceledTurnRecord = {
+    opId?: string;
+    localKey?: string;
+    userMsgId?: string;
+    assistantMsgId?: string;
+    textHash?: string;
+    canceledAt: number;
 };
 
 type PersistedRevertedSegment = {
@@ -55,6 +65,21 @@ type PersistedRevertedSegment = {
     updatedAt: number;
 };
 
+type AttachmentPayload = {
+    filename?: string;
+    mime?: string;
+    dataBase64?: string;
+    tempPath?: string;
+};
+
+type SavedAttachment = {
+    token: string;
+    filename: string;
+    mime: string;
+    sizeBytes: number;
+    relPath: string;
+};
+
 /**
  * Simplified SegmentState interface (V2)
  * Only tracks essential data, no state/anchor/resolved complexity
@@ -80,22 +105,27 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private selectedVariant?: string;
     private selectedMode?: string;
     private pendingClientMessageId?: string;
+    private lastDraft?: { text: string; attachments: string[]; model?: string; variant?: string; mode?: string };
     private currentDiffFilePath: string | null = null;
     private diffHashes = new Map<string, { before: string; after: string }>();
     private revertedSegment?: { conflicts: ConflictDetail[]; discarded?: boolean };
     private clientMessageIdMap = new Map<string, string>();
     private revertedSegmentHistory: Array<{ isActive: boolean; discarded: boolean; startMessageId?: string; startMessageIndex?: number; endMessageId?: string; endMessageIndex?: number; collapsed: boolean; messageIds?: string[] }> = [];
-    private pendingConflict?: { kind: 'undo' | 'restore'; startMessageId?: string; operationId?: string };
+    private pendingConflict?: { kind: 'undo' | 'restore' | 'restoreSegment'; startMessageId?: string; endMessageId?: string; operationId?: string; noticeKey?: string };
     private uiDebugChannel!: vscode.OutputChannel;
     private undoSegmentsBySession: Map<string, Map<string, SegmentState>> = new Map();
     private readonly UNDO_SEGMENTS_KEY = 'opencode.undoSegmentsBySession.v1';
     private pendingAssistantTmpKeyBySession = new Map<string, string>();
+    private pendingAssistantMessageIdBySession = new Map<string, string>();
     private gitUndoEnabled = false;
     private gitUndoReason?: string;
     private pendingBaselineTurnKey?: string;
     private baselineReady = true;
     private pendingBaselineFailed = false;
     private readonly repoManager: GitRepoManager;
+    private assistantTextBufferBySession = new Map<string, string>();
+    private attachmentCleanupTimer?: NodeJS.Timeout;
+    private attachmentCleanupInFlight = false;
 
     private async ensureDir(dir: string): Promise<void> {
         await fs.promises.mkdir(dir, { recursive: true });
@@ -131,12 +161,32 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return pathModule.join(this._context.globalStorageUri.fsPath, 'sessionChangeLists');
     }
 
+    private getCanceledTurnsDir(): string {
+        return pathModule.join(this._context.globalStorageUri.fsPath, 'sessionCanceledTurns');
+    }
+
     private getChangeListPath(sessionId: string): string {
         return pathModule.join(this.getChangeListDir(), `${sessionId}.json`);
     }
 
+    private getCanceledTurnsPath(sessionId: string): string {
+        return pathModule.join(this.getCanceledTurnsDir(), `${sessionId}.json`);
+    }
+
     private async readChangeLists(sessionId: string): Promise<ChangeListRecord[]> {
         const filePath = this.getChangeListPath(sessionId);
+        if (!fs.existsSync(filePath)) return [];
+        try {
+            const text = await fs.promises.readFile(filePath, 'utf-8');
+            const parsed = JSON.parse(text);
+            return Array.isArray(parsed) ? parsed : [];
+        } catch {
+            return [];
+        }
+    }
+
+    private async readCanceledTurns(sessionId: string): Promise<CanceledTurnRecord[]> {
+        const filePath = this.getCanceledTurnsPath(sessionId);
         if (!fs.existsSync(filePath)) return [];
         try {
             const text = await fs.promises.readFile(filePath, 'utf-8');
@@ -157,6 +207,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         await fs.promises.rename(tmpPath, filePath);
     }
 
+    private async writeCanceledTurns(sessionId: string, records: CanceledTurnRecord[]): Promise<void> {
+        const dir = this.getCanceledTurnsDir();
+        await this.ensureDir(dir);
+        const filePath = this.getCanceledTurnsPath(sessionId);
+        const tmpPath = `${filePath}.tmp`;
+        const text = JSON.stringify(records, null, 2);
+        await fs.promises.writeFile(tmpPath, text, 'utf-8');
+        await fs.promises.rename(tmpPath, filePath);
+    }
+
     private async upsertChangeList(sessionId: string, record: ChangeListRecord): Promise<void> {
         const records = await this.readChangeLists(sessionId);
         const idx = records.findIndex((item) => item.id === record.id);
@@ -166,6 +226,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             records[idx] = { ...records[idx], ...record };
         }
         await this.writeChangeLists(sessionId, records);
+    }
+
+    private async upsertCanceledTurn(sessionId: string, record: CanceledTurnRecord): Promise<void> {
+        const records = await this.readCanceledTurns(sessionId);
+        const key = record.opId || record.localKey;
+        const idx = key ? records.findIndex((item) => (item.opId || item.localKey) === key) : -1;
+        if (idx === -1) {
+            records.push(record);
+        } else {
+            records[idx] = { ...records[idx], ...record };
+        }
+        await this.writeCanceledTurns(sessionId, records);
     }
 
     private async setChangeListReverted(sessionId: string, commitHead: string, reverted: boolean, webview: vscode.Webview): Promise<void> {
@@ -186,8 +258,30 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         webview.postMessage({ type: 'changeListUpdate', sessionId, commitHead, reverted });
     }
 
+    private async resolveChangeListCommits(
+        sessionId: string,
+        messageIds: string[] | undefined,
+        fallbackCommits: string[]
+    ): Promise<string[]> {
+        const fromMessages = await this.client.getCommitHashesForMessageIds(sessionId, messageIds || []);
+        const merged = [...fromMessages, ...fallbackCommits].filter(Boolean);
+        return Array.from(new Set(merged));
+    }
+
     private async injectChangeLists(sessionId: string, formatted: { title: string; messages: SessionMessage[] }): Promise<{ title: string; messages: SessionMessage[] }> {
         if (!sessionId) return formatted;
+        const canceled = await this.readCanceledTurns(sessionId);
+        const canceledUserIds = new Set(canceled.map((item) => item.userMsgId).filter((id): id is string => typeof id === 'string' && id.length > 0));
+        const canceledAssistantIds = new Set(canceled.map((item) => item.assistantMsgId).filter((id): id is string => typeof id === 'string' && id.length > 0));
+        const filteredMessages = (formatted.messages || []).filter((message) => {
+            if (!message?.id) return true;
+            if (canceledUserIds.has(message.id) || canceledAssistantIds.has(message.id)) return false;
+            const meta = message.meta as { assistantId?: string; parentID?: string } | undefined;
+            if (meta?.assistantId && canceledAssistantIds.has(meta.assistantId)) return false;
+            if (meta?.parentID && canceledUserIds.has(meta.parentID)) return false;
+            return true;
+        });
+        formatted = { ...formatted, messages: filteredMessages };
         const records = await this.readChangeLists(sessionId);
         if (!records.length) return formatted;
 
@@ -235,7 +329,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         scope: 'turn',
                         commitHead: record.commitHead,
                         commitBase: record.commitBase,
-                        reverted: record.reverted === true
+                        reverted: record.reverted === true,
+                        statsByPath: record.statsByPath || {}
                     }
                 });
                 seenIds.add(record.id);
@@ -354,6 +449,38 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return new Set(files);
     }
 
+    private async getInternalDiffStats(
+        repo: GitRepoRef,
+        baseCommit: string,
+        headCommit: string
+    ): Promise<Record<string, { additions: number | null; deletions: number | null }>> {
+        if (!baseCommit || !headCommit) return {};
+        const diffResult = await runGit(repo, ['diff', '--numstat', `${baseCommit}..${headCommit}`]);
+        if (diffResult.code !== 0) {
+            this.uiDebugChannel.appendLine(`[EXT][INTERNAL_DIFF_STATS] failed base=${baseCommit} head=${headCommit}`);
+            return {};
+        }
+        const stats: Record<string, { additions: number | null; deletions: number | null }> = {};
+        const lines = (diffResult.stdout || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+        for (const line of lines) {
+            const parts = line.split('\t');
+            if (parts.length < 3) continue;
+            const addRaw = parts[0];
+            const delRaw = parts[1];
+            const pathRaw = parts.slice(2).join('\t');
+            const normalizedPath = pathRaw.replace(/\\/g, '/');
+            const additions = addRaw === '-' ? null : Number.parseInt(addRaw, 10);
+            const deletions = delRaw === '-' ? null : Number.parseInt(delRaw, 10);
+            if (!Number.isFinite(additions as number) && additions !== null) continue;
+            if (!Number.isFinite(deletions as number) && deletions !== null) continue;
+            stats[normalizedPath] = {
+                additions: additions === null ? null : additions,
+                deletions: deletions === null ? null : deletions
+            };
+        }
+        return stats;
+    }
+
     private async emitDiffFileList(sessionId: string, webview: vscode.Webview): Promise<void> {
         if (!this.gitUndoEnabled || !sessionId) return;
         const repo = await this.resolveInternalRepo(sessionId);
@@ -376,6 +503,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const files = Array.from(currentSet);
         if (!files.length) return;
         files.sort();
+        const statsByPath = await this.getInternalDiffStats(repo, baseCommit, headCommit);
         const anchorMessageId = this.client.getTurnAssistantMsgId(sessionId);
         const changeListId = headCommit ? `system:changeList:${headCommit}` : `changes:${Date.now()}`;
         webview.postMessage({
@@ -386,6 +514,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             scope: 'turn',
             commitHead: headCommit,
             commitBase: baseCommit,
+            statsByPath,
             anchorMessageId,
             changeListId
         });
@@ -395,6 +524,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 commitHead: headCommit,
                 commitBase: baseCommit,
                 files,
+                statsByPath,
                 anchorMessageId,
                 createdAt: Date.now()
             });
@@ -469,13 +599,22 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         private readonly diffProvider: OpenCodeDiffProvider
     ) {
         this.client = new OpenCodeClient();
+        this.client.setStorage(this._context.globalState);
         this.uiDebugChannel = vscode.window.createOutputChannel('OpenCode UI Debug');
         this.uiDebugChannel.show(true);
         this.client.setUiDebugChannel(this.uiDebugChannel);
+        void this.client.warmServer();
+        process.on('exit', () => { void this.client.shutdownServer(); });
+        process.on('SIGINT', () => { void this.client.shutdownServer(); });
+        process.on('SIGTERM', () => { void this.client.shutdownServer(); });
+        process.on('uncaughtException', () => { void this.client.shutdownServer(); });
+        process.on('unhandledRejection', () => { void this.client.shutdownServer(); });
         const workspaceRoot = this.getWorkspaceRootPath();
         this.repoManager = new GitRepoManager(workspaceRoot, (message) => this.uiDebugChannel.appendLine(message));
         void this.initGitUndo();
         void this.ensureGitignoreIgnoresOpencode();
+        this.scheduleAttachmentCleanup('activate');
+        this.startAttachmentCleanupTimer();
 
         try {
             const raw = this._context.globalState.get<string>(this.UNDO_SEGMENTS_KEY);
@@ -524,6 +663,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         webviewView.webview.onDidReceiveMessage(async (data) => {
             const activeWebview = this._view?.webview || webviewView.webview;
+            try {
+                const keys = data && typeof data === 'object' ? Object.keys(data).sort() : [];
+                this.uiDebugChannel.appendLine(`EXT: wv.msg | type=${data?.type || 'unknown'} | keys=[${keys.join(',')}]`);
+            } catch {
+                this.uiDebugChannel.appendLine('EXT: wv.msg | type=unknown | keys=[]');
+            }
 
             // Diagnostic logging for undoToMessage
             if (data.type === 'undoToMessage') {
@@ -585,14 +730,26 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                     // this.uiDebugChannel.appendLine(`[EXT][SEND_START] sessionId=${this.currentSessionId} attachments=${data.attachments?.length || 0}`);
 
+                    const reqId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
                     try {
-                        const attachments = Array.isArray(data.attachments) ? data.attachments : [];
+                        const attachments = Array.isArray(data.attachments) ? data.attachments as AttachmentPayload[] : [];
+                        const attachKeys = attachments.length ? Object.keys(attachments[0] || {}).join(',') : '';
+                        this.uiDebugChannel.appendLine(`EXT: send.enter | reqId=${reqId} | sessionId=${this.currentSessionId || 'null'} | hasAttachments=${String(Boolean(attachments.length))} | attachmentsCount=${attachments.length} | attachKeys=${attachKeys}`);
                         const userText = data.value as string;
-                        const modelText = userText;
+                        let modelText = userText;
+                        this.lastDraft = {
+                            text: userText,
+                            attachments: [],
+                            model: this.selectedModel,
+                            variant: this.selectedVariant,
+                            mode: this.selectedMode
+                        };
                         const clientMessageId = data.clientMessageId || `local-${Date.now()}`;
                         this.pendingClientMessageId = clientMessageId;
+                        const opId = typeof data.opId === 'string' ? data.opId : undefined;
                         if (this.currentSessionId) {
-                            this.client.startTurn(this.currentSessionId, clientMessageId);
+                            this.client.startTurnWithOp(this.currentSessionId, clientMessageId, opId);
+                            this.assistantTextBufferBySession.set(this.currentSessionId, '');
                         }
                         if (typeof data.tmpKey === 'string' && data.tmpKey.startsWith('tmp:') && this.currentSessionId) {
                             this.pendingAssistantTmpKeyBySession.set(this.currentSessionId, data.tmpKey);
@@ -603,7 +760,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         const liveWebview = this._view?.webview || activeWebview;
                         this.clientMessageIdMap.set(clientMessageId, clientMessageId);
 
-                        const attachmentNames = attachments.map((item: string) => pathModule.basename(item));
+                        const attachmentNames = attachments.map((item) => {
+                            if (item?.filename) return this.sanitizeFilename(item.filename);
+                            if (item?.tempPath) return pathModule.basename(item.tempPath);
+                            return 'attachment';
+                        });
                         const fileNames = attachmentNames.filter((name: string) => !this.isImageFileName(name));
                         const attachmentLines = fileNames.map((name: string) => `📄 ${name}`);
                         const displayText = attachmentLines.length
@@ -622,6 +783,9 @@ ${attachmentLines.join('\n')}`
 
                         const assistantMessageId = this.client.createInternalMessageId('assistant', this.currentSessionId);
                         const assistantMessageIndex = this.client.registerMessage(assistantMessageId);
+                        if (this.currentSessionId) {
+                            this.pendingAssistantMessageIdBySession.set(this.currentSessionId, assistantMessageId);
+                        }
                         liveWebview.postMessage({
                             type: 'messageAppend',
                             message: pendingUserMessage,
@@ -634,13 +798,33 @@ ${attachmentLines.join('\n')}`
                             sessionId: this.currentSessionId
                         });
 
+                        const savedAttachments: SavedAttachment[] = [];
+                        if (!attachments.length) {
+                            this.uiDebugChannel.appendLine(`EXT: attach.precheck.skip | reqId=${reqId} | reason=no_attachments`);
+                        } else if (this.currentSessionId) {
+                            for (const attachment of attachments) {
+                                try {
+                                    const saved = await this.saveAttachment(this.currentSessionId, attachment, reqId);
+                                    if (saved) {
+                                        savedAttachments.push(saved);
+                                    }
+                                } catch (error) {
+                                    this.uiDebugChannel.appendLine(`EXT: attach.save.fail | reqId=${reqId} | filename=${attachment?.filename || 'unknown'} | mime=${attachment?.mime || 'unknown'} | err=${String(error)}`);
+                                }
+                            }
+                            if (savedAttachments.length) {
+                                const manifest = this.buildAttachmentManifest(savedAttachments);
+                                modelText = `${modelText}\n\n${manifest}`;
+                            }
+                        }
+                        this.uiDebugChannel.appendLine(`EXT: send.parts.built | reqId=${reqId} | textParts=1 | manifestCount=${savedAttachments.length} | savedCount=${savedAttachments.length}`);
+
                         await this.client.chat(
                             modelText,
                             {
                                 model: this.selectedModel,
                                 variant: this.selectedVariant,
                                 sessionId: this.currentSessionId,
-                                files: attachments,
                                 mode: this.selectedMode
                             },
                             (event: ChatEvent) => {
@@ -649,6 +833,9 @@ ${attachmentLines.join('\n')}`
                         );
 
                         OpenCodeClient.outputChannel.appendLine(`[BRIDGE] Chat done`);
+                        if (this.currentSessionId) {
+                            this.flushAssistantBufferToWebview(this.currentSessionId, liveWebview);
+                        }
                         liveWebview.postMessage({ type: 'chatDone', sessionId: this.currentSessionId });
                         if (this.currentSessionId) {
                             await this.client.commitPendingTurnChanges(this.currentSessionId);
@@ -676,6 +863,7 @@ ${attachmentLines.join('\n')}`
                             }
                         }
                     } catch (error) {
+                        this.uiDebugChannel.appendLine(`EXT: send.abort | reqId=${reqId} | reason=${String(error)}`);
                         OpenCodeClient.outputChannel.appendLine(`[BRIDGE] Error: ${error}`);
                         vscode.window.showErrorMessage(`OpenCode Error: ${error}`);
                         this.postAddResponse(activeWebview, `Error: ${error}`);
@@ -690,6 +878,9 @@ ${attachmentLines.join('\n')}`
                         if (this.pendingClientMessageId) {
                             await this.handleAbortedMessage(this.pendingClientMessageId, activeWebview);
                             this.pendingClientMessageId = undefined;
+                        }
+                        if (this.currentSessionId) {
+                            this.assistantTextBufferBySession.delete(this.currentSessionId);
                         }
                     }
                     break;
@@ -1117,26 +1308,26 @@ ${attachmentLines.join('\n')}`
                         this.uiDebugChannel.appendLine(`[EXT][UNDO_CALL] anchorMsgId=${resolvedMessageId} sessionId=${sessionId || 'null'} opId=${operationId || 'null'}`);
                         this.uiDebugChannel.appendLine(`[EXT][UNDO_RX] anchorMsgId=${data.messageId} resolvedMsgId=${resolvedMessageId} sessionId=${sessionId || 'null'} opId=${operationId || 'null'}`);
                         const previousSegment = this.client.getRevertedSegment();
-                        const result = await this.client.undoFromMessage(resolvedMessageId);
+                            const result = await this.client.undoFromMessage(resolvedMessageId);
                         const currentSegment = this.client.getRevertedSegment();
                         this.uiDebugChannel.appendLine(`[EXT][UNDO_RESULT] applied=${result.applied} conflicts=${result.conflicts.length} touched=${result.touchedFiles.length} segmentStart=${currentSegment?.startMessageId || 'null'} segmentEnd=${currentSegment?.endMessageId || 'null'}`);
                         this.uiDebugChannel.appendLine(`[EXT][UNDO_DONE] applied=${result.applied} conflicts=${result.conflicts.length} sessionId=${sessionId || 'null'}`);
-                        if (!result.applied && result.conflicts.length) {
-                            this.pendingConflict = { kind: 'undo', startMessageId: resolvedMessageId, operationId };
-                            const liveWebview = this._view?.webview || activeWebview;
-                            this.uiDebugChannel.appendLine(`EXT: undo.postToWebview | type=conflictCard | sessionId | ${sessionId || 'null'} | opId | ${operationId || 'null'}`);
-                            liveWebview.postMessage({
-                                type: 'conflictCard',
-                                kind: 'undo',
-                                startMessageId: resolvedMessageId,
-                                conflicts: result.conflicts,
-                                sessionId: sessionId,
-                                operationId,
-                                noticeKey
-                            });
-                            this.postAddResponse(activeWebview, `Undo paused due to ${result.conflicts.length} conflicts.`, { operationId });
-                            break;
-                        }
+                            if (!result.applied && result.conflicts.length) {
+                                this.pendingConflict = { kind: 'undo', startMessageId: resolvedMessageId, operationId };
+                                const liveWebview = this._view?.webview || activeWebview;
+                                this.uiDebugChannel.appendLine(`EXT: undo.postToWebview | type=conflictCard | sessionId | ${sessionId || 'null'} | opId | ${operationId || 'null'}`);
+                                liveWebview.postMessage({
+                                    type: 'conflictCard',
+                                    kind: 'undo',
+                                    startMessageId: resolvedMessageId,
+                                    conflicts: result.conflicts,
+                                    sessionId: sessionId,
+                                    operationId,
+                                    noticeKey
+                                });
+                                // conflictCard provides the user-facing prompt; no extra system message needed.
+                                break;
+                            }
                         if (!result.applied && !result.conflicts.length) {
                             this.postAddResponse(activeWebview, 'Undo applied. No tracked file changes were available to revert.', { operationId });
                             break;
@@ -1196,9 +1387,12 @@ ${attachmentLines.join('\n')}`
                                 operationId,
                                 noticeKey
                             });
-                            const commitsToMark = Array.isArray(segment.startCommits) && segment.startCommits.length
+                            const fallbackCommits = Array.isArray(segment.startCommits) && segment.startCommits.length
                                 ? segment.startCommits
                                 : (segment.startCommit ? [segment.startCommit] : []);
+                            const commitsToMark = finalSessionId
+                                ? await this.resolveChangeListCommits(finalSessionId, segment.messageIds, fallbackCommits)
+                                : [];
                             if (finalSessionId && commitsToMark.length) {
                                 for (const commitHash of commitsToMark) {
                                     await this.setChangeListReverted(finalSessionId, commitHash, true, liveWebview);
@@ -1233,17 +1427,59 @@ ${attachmentLines.join('\n')}`
                     break;
                 }
                 case "cancel": {
+                    if (this.currentSessionId) {
+                        await this.client.revertPendingTurnChangesToCurrentBase(this.currentSessionId);
+                        const canceledAt = Date.now();
+                        const { userMsgId, assistantMsgId } = this.client.getPendingTurnMessageIds(this.currentSessionId);
+                        await this.upsertCanceledTurn(this.currentSessionId, {
+                            opId: typeof data.opId === 'string' ? data.opId : undefined,
+                            localKey: this.pendingClientMessageId,
+                            userMsgId,
+                            assistantMsgId,
+                            canceledAt
+                        });
+                    }
                     this.client.cancel();
+                    const cancelSessionId = typeof data.sessionId === 'string' ? data.sessionId : this.currentSessionId;
+                    const cancelOpId = typeof data.opId === 'string' ? data.opId : undefined;
+                    if (cancelSessionId) {
+                        this.client.cancelTurn(cancelSessionId, cancelOpId);
+                    }
                     if (this.pendingClientMessageId) {
                         await this.handleAbortedMessage(this.pendingClientMessageId, activeWebview);
+                        const mappedUser = this.clientMessageIdMap.get(this.pendingClientMessageId);
+                        if (mappedUser && mappedUser !== this.pendingClientMessageId) {
+                            await this.handleAbortedMessage(mappedUser, activeWebview);
+                        }
                         this.pendingClientMessageId = undefined;
                     }
-                    this.postAddResponse(activeWebview, 'Canceled.');
+                    if (this.currentSessionId) {
+                        const tmpKey = this.pendingAssistantTmpKeyBySession.get(this.currentSessionId);
+                        const mappedAssistant = tmpKey ? this.clientMessageIdMap.get(tmpKey) : undefined;
+                        const pendingAssistant = this.pendingAssistantMessageIdBySession.get(this.currentSessionId);
+                        if (tmpKey) {
+                            await this.handleAbortedMessage(tmpKey, activeWebview);
+                            this.pendingAssistantTmpKeyBySession.delete(this.currentSessionId);
+                        }
+                        if (pendingAssistant) {
+                            await this.handleAbortedMessage(pendingAssistant, activeWebview);
+                            this.pendingAssistantMessageIdBySession.delete(this.currentSessionId);
+                        }
+                        if (mappedAssistant && mappedAssistant !== tmpKey) {
+                            await this.handleAbortedMessage(mappedAssistant, activeWebview);
+                        }
+                        this.assistantTextBufferBySession.delete(this.currentSessionId);
+                    }
+                    if (this.lastDraft) {
+                        activeWebview.postMessage({
+                            type: 'restoreDraft',
+                            payload: { ...this.lastDraft }
+                        });
+                    }
                     activeWebview.postMessage({ type: 'chatDone', sessionId: this.currentSessionId });
                     if (this.currentSessionId) {
                         await this.client.commitPendingTurnChanges(this.currentSessionId);
                     }
-                    await this.resolvePendingUserUpgrade(this.currentSessionId, activeWebview);
                     if (this.currentSessionId) {
                         this.client.finishTurn(this.currentSessionId);
                     }
@@ -1258,9 +1494,12 @@ ${attachmentLines.join('\n')}`
                         }
                         const operationId = typeof data.operationId === 'string' ? data.operationId : undefined;
                         const currentSegment = this.client.getRevertedSegment();
-                        const commitsToClear = Array.isArray(currentSegment?.startCommits) && currentSegment?.startCommits?.length
+                        const fallbackCommits = Array.isArray(currentSegment?.startCommits) && currentSegment?.startCommits?.length
                             ? currentSegment.startCommits
                             : (currentSegment?.startCommit ? [currentSegment.startCommit] : []);
+                        const commitsToClear = this.currentSessionId
+                            ? await this.resolveChangeListCommits(this.currentSessionId, currentSegment?.messageIds, fallbackCommits)
+                            : fallbackCommits;
                         const result = await this.client.restoreAll();
                         if (!result.applied && result.conflicts.length) {
                             this.pendingConflict = { kind: 'restore', operationId };
@@ -1271,7 +1510,7 @@ ${attachmentLines.join('\n')}`
                                 conflicts: result.conflicts,
                                 sessionId: this.currentSessionId
                             });
-                            this.postAddResponse(activeWebview, `Restore paused due to ${result.conflicts.length} conflicts.`, { operationId });
+                            // conflictCard provides the user-facing prompt; no extra system message needed.
                             break;
                         }
                         this.revertedSegment = { conflicts: [] };
@@ -1321,43 +1560,40 @@ ${attachmentLines.join('\n')}`
                     }
                     try {
                         const currentSegment = this.client.getRevertedSegment();
-                        const commitsToClear = Array.isArray(currentSegment?.startCommits) && currentSegment?.startCommits?.length
+                        const segMap = this.undoSegmentsBySession.get(sessionId);
+                        const persistedSegment = noticeKey ? segMap?.get(noticeKey) : undefined;
+                        const messageIds = Array.isArray(persistedSegment?.memberMsgIds) && persistedSegment?.memberMsgIds?.length
+                            ? persistedSegment.memberMsgIds
+                            : (Array.isArray(currentSegment?.messageIds) ? currentSegment?.messageIds : []);
+                        const fallbackCommits = Array.isArray(currentSegment?.startCommits) && currentSegment?.startCommits?.length
                             ? currentSegment.startCommits
                             : (currentSegment?.startCommit ? [currentSegment.startCommit] : []);
-                        const result = await this.client.restoreFromMessage(anchorMsgId, endMsgId);
+                        const commitsToClear = sessionId
+                            ? await this.resolveChangeListCommits(sessionId, messageIds, fallbackCommits)
+                            : fallbackCommits;
+                        const result = await this.client.restoreFromMessage(anchorMsgId, endMsgId, { messageIds });
                         const liveWebview = this._view?.webview || activeWebview;
-                        liveWebview.postMessage({
-                            type: 'restoredSegment',
-                            noticeKey,
-                            anchorMsgId,
-                            applied: result.applied,
-                            conflicts: result.conflicts,
-                            sessionId: sessionId
-                        });
                         this.uiDebugChannel.appendLine(`[EXT][RESTORE_TX] type=restoredSegment sessionId=${sessionId || 'null'} noticeKey=${noticeKey || 'null'} applied=${result.applied}`);
-                        if (result.applied && sessionId && commitsToClear.length) {
-                            for (const commitHash of commitsToClear) {
-                                await this.setChangeListReverted(sessionId, commitHash, false, liveWebview);
-                            }
-                        }
                         if (result.applied) {
-                            this.client.discardRevertedSegment();
-                            const discardedSegment = this.client.getRevertedSegment();
-                            liveWebview.postMessage({
-                                type: 'revertedSegmentDiscarded',
-                                segment: discardedSegment ? { ...discardedSegment, historySegments: this.revertedSegmentHistory } : discardedSegment,
-                                sessionId: this.currentSessionId
-                            });
-                            this.postAddResponse(activeWebview, 'Restore applied.', { operationId: undefined });
-                            this.refreshDiffIfTouched(result.touchedFiles);
+                            await this.applyRestoreSegmentSuccess(
+                                sessionId,
+                                noticeKey,
+                                anchorMsgId,
+                                endMsgId,
+                                result,
+                                commitsToClear,
+                                undefined,
+                                liveWebview
+                            );
                         } else if (result.conflicts.length) {
+                            this.pendingConflict = { kind: 'restoreSegment', startMessageId: anchorMsgId, endMessageId: endMsgId, noticeKey };
                             liveWebview.postMessage({
                                 type: 'conflictCard',
                                 kind: 'restore',
                                 conflicts: result.conflicts,
                                 sessionId: sessionId
                             });
-                            this.postAddResponse(activeWebview, `Restore paused due to ${result.conflicts.length} conflicts.`);
+                            // conflictCard provides the user-facing prompt; no extra system message needed.
                         }
                     } catch (error) {
                         vscode.window.showErrorMessage(`Restore failed: ${error}`);
@@ -1388,11 +1624,11 @@ ${attachmentLines.join('\n')}`
                 }
                 case "conflictDecision": {
                     if (!this.pendingConflict || !data.decision) return;
-                    const decision = data.decision as 'continue' | 'cancel';
+                    const decision = data.decision as 'override' | 'skip' | 'continue' | 'cancel';
                     const conflictContext = this.pendingConflict;
                     this.pendingConflict = undefined;
-                    if (decision === 'cancel') {
-                        this.postAddResponse(activeWebview, 'Conflict resolution canceled.', { operationId: conflictContext.operationId });
+                    if (decision === 'cancel' || decision === 'skip') {
+                        // skip means abandon the operation; do nothing.
                         break;
                     }
                     try {
@@ -1440,7 +1676,7 @@ ${attachmentLines.join('\n')}`
                                     await this.persistRevertedSegment(this.currentSessionId, segment, result.conflicts, false);
                                 }
                             }
-                            this.postAddResponse(activeWebview, 'Undo applied (force mode).', { operationId: conflictContext.operationId });
+                            this.postAddResponse(activeWebview, 'Undo applied.', { operationId: conflictContext.operationId });
                             this.refreshDiffIfTouched(result.touchedFiles);
                         }
                         if (conflictContext.kind === 'restore') {
@@ -1472,8 +1708,36 @@ ${attachmentLines.join('\n')}`
                             if (this.currentSessionId) {
                                 await this.clearPersistedSegment(this.currentSessionId);
                             }
-                            this.postAddResponse(activeWebview, 'Restore applied (force mode).', { operationId: conflictContext.operationId });
+                            this.postAddResponse(activeWebview, 'Restore applied.', { operationId: conflictContext.operationId });
                             this.refreshDiffIfTouched(result.touchedFiles);
+                        }
+                        if (conflictContext.kind === 'restoreSegment' && conflictContext.startMessageId) {
+                            const currentSegment = this.client.getRevertedSegment();
+                            const segMap = this.undoSegmentsBySession.get(this.currentSessionId || '');
+                            const persistedSegment = conflictContext.noticeKey ? segMap?.get(conflictContext.noticeKey) : undefined;
+                            const messageIds = Array.isArray(persistedSegment?.memberMsgIds) && persistedSegment?.memberMsgIds?.length
+                                ? persistedSegment.memberMsgIds
+                                : (Array.isArray(currentSegment?.messageIds) ? currentSegment?.messageIds : []);
+                            const result = await this.client.restoreFromMessage(conflictContext.startMessageId, conflictContext.endMessageId, { force: true, messageIds });
+                            if (this.currentSessionId && conflictContext.noticeKey) {
+                                const currentSegment = this.client.getRevertedSegment();
+                            const fallbackCommits = Array.isArray(currentSegment?.startCommits) && currentSegment?.startCommits?.length
+                                ? currentSegment.startCommits
+                                : (currentSegment?.startCommit ? [currentSegment.startCommit] : []);
+                            const commitsToClear = this.currentSessionId
+                                ? await this.resolveChangeListCommits(this.currentSessionId, messageIds, fallbackCommits)
+                                : fallbackCommits;
+                                await this.applyRestoreSegmentSuccess(
+                                    this.currentSessionId,
+                                    conflictContext.noticeKey,
+                                    conflictContext.startMessageId,
+                                    conflictContext.endMessageId,
+                                    result,
+                                    commitsToClear,
+                                    conflictContext.operationId,
+                                    activeWebview
+                                );
+                            }
                         }
                     } catch (error) {
                         vscode.window.showErrorMessage(`Conflict resolution failed: ${error}`);
@@ -1549,6 +1813,10 @@ ${attachmentLines.join('\n')}`
         this.selectedModel = defaultModel;
         this.selectedVariant = defaultVariant;
         this.selectedMode = defaultMode;
+
+        if (!models.length) {
+            void this.refreshModels(webview);
+        }
 
         if (!storedModel && defaultModel) {
             await this._context.globalState.update('opencode.model', defaultModel);
@@ -1878,10 +2146,263 @@ ${attachmentLines.join('\n')}`
         }
     }
 
+    private getMimeFromName(name: string): string {
+        const ext = pathModule.extname(String(name || '')).toLowerCase();
+        if (ext) {
+            const imageMime = this.getImageMimeFromName(name);
+            if (imageMime) return imageMime;
+        }
+        switch (ext) {
+            case '.txt':
+                return 'text/plain';
+            case '.md':
+                return 'text/markdown';
+            case '.json':
+                return 'application/json';
+            case '.pdf':
+                return 'application/pdf';
+            case '.csv':
+                return 'text/csv';
+            case '.xml':
+                return 'application/xml';
+            default:
+                return 'application/octet-stream';
+        }
+    }
+
+    private getExtFromMime(mime: string): string {
+        switch (mime) {
+            case 'image/png':
+                return 'png';
+            case 'image/jpeg':
+                return 'jpg';
+            case 'image/gif':
+                return 'gif';
+            case 'image/webp':
+                return 'webp';
+            case 'image/bmp':
+                return 'bmp';
+            case 'image/svg+xml':
+                return 'svg';
+            case 'image/tiff':
+                return 'tiff';
+            case 'image/x-icon':
+                return 'ico';
+            case 'image/heic':
+                return 'heic';
+            case 'text/plain':
+                return 'txt';
+            case 'text/markdown':
+                return 'md';
+            case 'application/json':
+                return 'json';
+            case 'application/pdf':
+                return 'pdf';
+            case 'text/csv':
+                return 'csv';
+            case 'application/xml':
+                return 'xml';
+            default:
+                return 'bin';
+        }
+    }
+
+    private sanitizeFilename(name: string): string {
+        const base = pathModule.basename(String(name || '').trim());
+        const sanitized = base.replace(/[^A-Za-z0-9._-]/g, '-').replace(/-+/g, '-');
+        if (!sanitized || sanitized === '.' || sanitized === '..') {
+            return 'attachment';
+        }
+        return sanitized;
+    }
+
+    private getAttachmentsRootPath(): string | null {
+        const workspaceRoot = this.getWorkspaceRootPath();
+        if (!workspaceRoot) return null;
+        return pathModule.join(workspaceRoot, '.opencode', 'attachments');
+    }
+
+    private buildAttachmentManifest(saved: SavedAttachment[]): string {
+        if (!saved.length) return '';
+        const lines = ['---', 'Attachments (workspace files; read from disk; DO NOT use any URL):'];
+        for (const item of saved) {
+            lines.push(`- ${item.filename} | mime=${item.mime} | size=${item.sizeBytes} | path=${item.relPath}`);
+        }
+        lines.push('');
+        lines.push('Authorization (IMPORTANT):');
+        lines.push('- You are explicitly authorized to read ALL files listed above.');
+        lines.push('- Access is READ-ONLY.');
+        lines.push('- Access is strictly limited to the listed attachment paths.');
+        lines.push('- Do NOT ask for confirmation before reading them.');
+        lines.push('');
+        lines.push('Instructions:');
+        lines.push('- Read the listed attachments as needed to complete the task.');
+        lines.push('- If an attachment is an image/screenshot, you may read it and extract information.');
+        lines.push('- If OCR/parsing is needed, do so in read-only mode and report the extracted text/summary.');
+        lines.push('---');
+        return lines.join('\n');
+    }
+
+    private async saveAttachment(sessionId: string, attachment: AttachmentPayload, reqId: string): Promise<SavedAttachment | null> {
+        const workspaceRoot = this.getWorkspaceRootPath();
+        if (!workspaceRoot) {
+            this.uiDebugChannel.appendLine(`EXT: attach.save.fail | reqId=${reqId} | filename=${attachment?.filename || 'unknown'} | mime=${attachment?.mime || 'unknown'} | err=no-workspace`);
+            return null;
+        }
+        const attachmentsRoot = this.getAttachmentsRootPath();
+        if (!attachmentsRoot) {
+            this.uiDebugChannel.appendLine(`EXT: attach.save.fail | reqId=${reqId} | filename=${attachment?.filename || 'unknown'} | mime=${attachment?.mime || 'unknown'} | err=no-attachments-root`);
+            return null;
+        }
+
+        const token = crypto.randomBytes(8).toString('hex');
+        const inputName = typeof attachment?.filename === 'string' ? attachment.filename : '';
+        const fallbackMime = inputName ? this.getMimeFromName(inputName) : 'application/octet-stream';
+        const mime = typeof attachment?.mime === 'string' && attachment.mime ? attachment.mime : fallbackMime;
+        let filename = inputName ? this.sanitizeFilename(inputName) : '';
+        if (!filename) {
+            const ext = this.getExtFromMime(mime);
+            filename = `attachment-${Date.now()}.${ext}`;
+        }
+
+        const dataBase64 = typeof attachment?.dataBase64 === 'string' ? attachment.dataBase64 : '';
+        const tempPath = typeof attachment?.tempPath === 'string' ? attachment.tempPath : '';
+        if (!dataBase64 && !tempPath) {
+            this.uiDebugChannel.appendLine(`EXT: attach.skip | reqId=${reqId} | reason=missing-data | filename=${filename} | mime=${mime}`);
+            return null;
+        }
+
+        const targetDir = pathModule.join(attachmentsRoot, sessionId, token);
+        await fs.promises.mkdir(targetDir, { recursive: true });
+        const filePath = pathModule.join(targetDir, filename);
+        const tmpPath = `${filePath}.tmp`;
+        let buffer: Buffer;
+
+        try {
+            if (dataBase64) {
+                const normalized = dataBase64.startsWith('data:')
+                    ? dataBase64.slice(dataBase64.indexOf(',') + 1)
+                    : dataBase64;
+                buffer = Buffer.from(normalized, 'base64');
+            } else {
+                buffer = await fs.promises.readFile(tempPath);
+            }
+            await fs.promises.writeFile(tmpPath, buffer);
+            await fs.promises.rename(tmpPath, filePath);
+        } catch (error) {
+            try {
+                if (fs.existsSync(tmpPath)) {
+                    await fs.promises.unlink(tmpPath);
+                }
+            } catch {
+                // ignore
+            }
+            this.uiDebugChannel.appendLine(`EXT: attach.save.fail | reqId=${reqId} | filename=${filename} | mime=${mime} | err=${String(error)}`);
+            return null;
+        }
+
+        const relPath = pathModule.relative(workspaceRoot, filePath).replace(/\\/g, '/');
+        const sizeBytes = buffer.length;
+        this.uiDebugChannel.appendLine(`EXT: attach.save.ok | reqId=${reqId} | token=${token} | filename=${filename} | mime=${mime} | bytes=${sizeBytes} | relPath=${relPath}`);
+        return { token, filename, mime, sizeBytes, relPath };
+    }
+
+    private scheduleAttachmentCleanup(reason: 'activate' | 'timer' | 'manual'): void {
+        setTimeout(() => {
+            void this.runAttachmentCleanup(reason);
+        }, 0);
+    }
+
+    private startAttachmentCleanupTimer(): void {
+        if (this.attachmentCleanupTimer) return;
+        const intervalMs = 6 * 60 * 60 * 1000;
+        this.attachmentCleanupTimer = setInterval(() => {
+            void this.runAttachmentCleanup('timer');
+        }, intervalMs);
+    }
+
+    private async runAttachmentCleanup(reason: 'activate' | 'timer' | 'manual'): Promise<void> {
+        if (this.attachmentCleanupInFlight) {
+            this.uiDebugChannel.appendLine(`EXT: attach.cleanup.skip | reason=in-flight | trigger=${reason}`);
+            return;
+        }
+        const attachmentsRoot = this.getAttachmentsRootPath();
+        if (!attachmentsRoot || !fs.existsSync(attachmentsRoot)) {
+            this.uiDebugChannel.appendLine(`EXT: attach.cleanup.skip | reason=missing-root | trigger=${reason}`);
+            return;
+        }
+        this.attachmentCleanupInFlight = true;
+        try {
+            const ttlMs = 7 * 24 * 60 * 60 * 1000;
+            const now = Date.now();
+            const sizeCap = 2 * 1024 * 1024 * 1024;
+            const sizeTarget = Math.floor(1.8 * 1024 * 1024 * 1024);
+            const files: Array<{ path: string; size: number; mtimeMs: number }> = [];
+
+            const walk = async (dir: string): Promise<void> => {
+                const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+                for (const entry of entries) {
+                    const fullPath = pathModule.join(dir, entry.name);
+                    if (entry.isDirectory()) {
+                        await walk(fullPath);
+                        continue;
+                    }
+                    if (!entry.isFile()) continue;
+                    try {
+                        const stat = await fs.promises.stat(fullPath);
+                        files.push({ path: fullPath, size: stat.size, mtimeMs: stat.mtimeMs });
+                    } catch {
+                        // ignore
+                    }
+                }
+            };
+
+            await walk(attachmentsRoot);
+            const beforeBytes = files.reduce((sum, file) => sum + file.size, 0);
+            let deletedFiles = 0;
+
+            for (const file of files) {
+                if (now - file.mtimeMs < ttlMs) continue;
+                try {
+                    await fs.promises.unlink(file.path);
+                    deletedFiles += 1;
+                } catch {
+                    // ignore
+                }
+            }
+
+            let remainingFiles = files.filter((file) => fs.existsSync(file.path));
+            let totalBytes = remainingFiles.reduce((sum, file) => sum + file.size, 0);
+            if (totalBytes > sizeCap) {
+                remainingFiles = remainingFiles.sort((a, b) => a.mtimeMs - b.mtimeMs);
+                for (const file of remainingFiles) {
+                    if (totalBytes <= sizeTarget) break;
+                    try {
+                        await fs.promises.unlink(file.path);
+                        deletedFiles += 1;
+                        totalBytes -= file.size;
+                    } catch {
+                        // ignore
+                    }
+                }
+            }
+
+            this.uiDebugChannel.appendLine(`EXT: attach.cleanup | reason=${reason} | ttlDays=7 | beforeBytes=${beforeBytes} | afterBytes=${totalBytes} | deletedFiles=${deletedFiles}`);
+        } catch (error) {
+            this.uiDebugChannel.appendLine(`EXT: attach.cleanup.error | reason=${reason} | err=${String(error)}`);
+        } finally {
+            this.attachmentCleanupInFlight = false;
+        }
+    }
+
+    public requestAttachmentCleanup(reason: 'manual'): void {
+        this.scheduleAttachmentCleanup(reason);
+    }
+
     private async resolvePendingUserUpgrade(sessionId: string | undefined, webview: vscode.Webview): Promise<void> {
         if (!sessionId) return;
         const result = await this.client.resolveUserMessageUpgrade(sessionId);
-        if (result.status === 'ok') {
+        if (result.status === 'ok' && result.userMsgId && result.userMsgId.startsWith('msg_')) {
             // Update user message ID mapping
             if (result.localKey && result.userMsgId) {
                 this.clientMessageIdMap.set(result.localKey, result.userMsgId);
@@ -1917,18 +2438,56 @@ ${attachmentLines.join('\n')}`
         }
 
         const tmpKey = this.pendingAssistantTmpKeyBySession.get(sessionId);
-        const pendingPayload = {
-            type: 'userMessageUpgrade',
-            sessionId,
-            localKey: result.localKey,
-            userMsgId: result.userMsgId,
-            assistantMsgId: null,
-            awaitingAssistantIdFromExport: true,
-            reason: result.reason,
-            tmpKey
-        };
-        this.uiDebugChannel.appendLine(`EXT: user.upgrade.pending | session=${sessionId} reason=${result.reason} localKey=${result.localKey || 'null'} userMsgId=${result.userMsgId || 'null'}`);
-        webview.postMessage(pendingPayload);
+        if (result.userMsgId && result.userMsgId.startsWith('msg_')) {
+            const pendingPayload = {
+                type: 'userMessageUpgrade',
+                sessionId,
+                localKey: result.localKey,
+                userMsgId: result.userMsgId,
+                assistantMsgId: null,
+                awaitingAssistantIdFromExport: true,
+                reason: result.status === 'ok' ? 'pending-assistant' : result.reason,
+                tmpKey
+            };
+            this.uiDebugChannel.appendLine(`EXT: user.upgrade.pending | session=${sessionId} reason=${result.status === 'ok' ? 'pending-assistant' : result.reason} localKey=${result.localKey || 'null'} userMsgId=${result.userMsgId || 'null'}`);
+            webview.postMessage(pendingPayload);
+        }
+    }
+
+    private async applyRestoreSegmentSuccess(
+        sessionId: string,
+        noticeKey: string,
+        anchorMsgId: string,
+        endMsgId: string | undefined,
+        result: { applied: boolean; conflicts: ConflictDetail[]; touchedFiles: string[] },
+        commitsToClear: string[],
+        operationId: string | undefined,
+        webview: vscode.Webview
+    ): Promise<void> {
+        if (!result.applied) return;
+        const liveWebview = this._view?.webview || webview;
+        if (commitsToClear.length) {
+            for (const commitHash of commitsToClear) {
+                await this.setChangeListReverted(sessionId, commitHash, false, liveWebview);
+            }
+        }
+        liveWebview.postMessage({
+            type: 'restoredSegment',
+            noticeKey,
+            anchorMsgId,
+            applied: true,
+            conflicts: result.conflicts,
+            sessionId
+        });
+        this.client.discardRevertedSegment();
+        const discardedSegment = this.client.getRevertedSegment();
+        liveWebview.postMessage({
+            type: 'revertedSegmentDiscarded',
+            segment: discardedSegment ? { ...discardedSegment, historySegments: this.revertedSegmentHistory, noticeKey } : discardedSegment,
+            sessionId: this.currentSessionId
+        });
+        this.postAddResponse(liveWebview, 'Restore applied.', { operationId });
+        this.refreshDiffIfTouched(result.touchedFiles);
     }
 
     private handleChatEvent(event: ChatEvent, webview: vscode.Webview): void {
@@ -1981,10 +2540,10 @@ ${attachmentLines.join('\n')}`
         }
 
         if (event.type === 'text' && event.text) {
-            const liveWebview = this._view?.webview || webview;
             const sessionId = event.sessionId || this.currentSessionId;
-            const tmpKey = sessionId ? this.pendingAssistantTmpKeyBySession.get(sessionId) : undefined;
-            liveWebview.postMessage({ type: 'chatChunk', value: event.text, sessionId: this.currentSessionId, assistantMsgId: event.assistantMsgId, tmpKey });
+            if (sessionId) {
+                this.appendAssistantBuffer(sessionId, event.text);
+            }
             return;
         }
 
@@ -2031,7 +2590,17 @@ ${attachmentLines.join('\n')}`
             const picked = this.pickActiveFile(event.files);
             if (!picked) return;
             const { file: active, index } = picked;
-            if (!active.before || !active.after) return;
+            // Only auto-open diff for file changes produced by tool_use write/edit/apply_patch.
+            // Ignore session-wide diffs (e.g. session.diff) which can be emitted during read-only work.
+            const isToolUseChange =
+                active.type === 'update' ||
+                active.type === 'create' ||
+                active.type === 'delete' ||
+                typeof active.existsBefore === 'boolean' ||
+                typeof active.existsAfter === 'boolean';
+            if (!isToolUseChange) return;
+
+            if (typeof active.before !== 'string' || typeof active.after !== 'string') return;
             const beforeText = this.normalizeText(active.before);
             const afterText = this.normalizeText(active.after);
             const beforeHash = this.hashText(beforeText);
@@ -2052,9 +2621,26 @@ ${attachmentLines.join('\n')}`
         }
 
         if (event.type === 'raw' && event.text) {
-            const liveWebview = this._view?.webview || webview;
-            liveWebview.postMessage({ type: 'chatChunk', value: event.text, sessionId: this.currentSessionId });
+            // Ignore raw streaming chunks for non-streaming UI.
         }
+    }
+
+    private appendAssistantBuffer(sessionId: string, chunk: string): void {
+        const next = (this.assistantTextBufferBySession.get(sessionId) || '') + chunk;
+        this.assistantTextBufferBySession.set(sessionId, next);
+    }
+
+    private flushAssistantBufferToWebview(sessionId: string, webview: vscode.Webview): void {
+        const text = this.assistantTextBufferBySession.get(sessionId) || '';
+        this.assistantTextBufferBySession.delete(sessionId);
+        if (!text) return;
+        const tmpKey = this.pendingAssistantTmpKeyBySession.get(sessionId);
+        webview.postMessage({
+            type: 'assistantMessageMeta',
+            lastText: text,
+            sessionId,
+            tmpKey
+        });
     }
 
     private async refreshModels(webview: vscode.Webview): Promise<void> {
@@ -2122,6 +2708,10 @@ ${attachmentLines.join('\n')}`
         } catch {
             return undefined;
         }
+    }
+
+    public async shutdownServer(): Promise<void> {
+        await this.client.shutdownServer();
     }
 
     private async clearPersistedSegment(sessionId: string): Promise<void> {
@@ -2294,14 +2884,14 @@ ${attachmentLines.join('\n')}`
         }
 
         const multiRoleIds = Array.from(idRoleMap.entries()).filter(([, roles]) => roles.size > 1).map(([id]) => id);
-        this.uiDebugChannel.appendLine(`[DBG_EXPORT] session=${sessionId} messages:`);
-        for (const line of exportLines) {
-            this.uiDebugChannel.appendLine(`[DBG_EXPORT] ${line}`);
-        }
-        this.uiDebugChannel.appendLine(`[DBG_EXPORT] total=${rawMessages.length} duplicateIds=${duplicateIds} multiRoleIds=${multiRoleIds.length}`);
-        if (multiRoleIds.length) {
-            this.uiDebugChannel.appendLine(`[DBG_EXPORT] multiRoleSample=[${multiRoleIds.slice(0, 5).join(', ')}]`);
-        }
+        // this.uiDebugChannel.appendLine(`[DBG_EXPORT] session=${sessionId} messages:`);
+        // for (const line of exportLines) {
+        //     this.uiDebugChannel.appendLine(`[DBG_EXPORT] ${line}`);
+        // }
+        // this.uiDebugChannel.appendLine(`[DBG_EXPORT] total=${rawMessages.length} duplicateIds=${duplicateIds} multiRoleIds=${multiRoleIds.length}`);
+        // if (multiRoleIds.length) {
+        //     this.uiDebugChannel.appendLine(`[DBG_EXPORT] multiRoleSample=[${multiRoleIds.slice(0, 5).join(', ')}]`);
+        // }
 
         for (const message of rawMessages) {
             const role = message?.info?.role === 'user' ? 'user' : 'assistant';
@@ -2335,6 +2925,9 @@ ${attachmentLines.join('\n')}`
         this.pendingClientMessageId = undefined;
         this.currentDiffFilePath = null;
         this.diffHashes.clear();
+        this.assistantTextBufferBySession.clear();
+        this.pendingAssistantTmpKeyBySession.clear();
+        this.pendingAssistantMessageIdBySession.clear();
     }
 
     private resetUiState(): void {
@@ -2347,6 +2940,12 @@ ${attachmentLines.join('\n')}`
     private async handleAbortedMessage(messageId: string, webview: vscode.Webview): Promise<void> {
         this.client.removeMessageId(messageId);
         this.clientMessageIdMap.delete(messageId);
+        if (this.currentSessionId) {
+            const tmpKey = this.pendingAssistantTmpKeyBySession.get(this.currentSessionId);
+            if (tmpKey === messageId) {
+                this.pendingAssistantTmpKeyBySession.delete(this.currentSessionId);
+            }
+        }
         for (const [key, value] of this.clientMessageIdMap.entries()) {
             if (value === messageId) {
                 this.clientMessageIdMap.delete(key);

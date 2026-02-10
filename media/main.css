@@ -212,6 +212,31 @@ body {
     padding: 6px 8px;
 }
 
+.code-block-wrap {
+    position: relative;
+}
+
+.code-copy-btn {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    border: none;
+    border-radius: 6px;
+    padding: 2px 6px;
+    font-size: inherit;
+    cursor: pointer;
+    background: var(--vscode-button-secondaryBackground);
+    color: var(--vscode-button-secondaryForeground);
+    opacity: 0;
+    user-select: none;
+    pointer-events: none;
+}
+
+.code-block-wrap:hover .code-copy-btn {
+    opacity: 1;
+    pointer-events: auto;
+}
+
 .message-images {
     margin-top: 6px;
     display: grid;
@@ -448,6 +473,11 @@ body {
     margin-bottom: 8px;
 }
 
+.conflict-card-hint {
+    font-size: calc(var(--card-header-size) * 0.8);
+    color: var(--vscode-descriptionForeground);
+}
+
 .change-list-reverted {
     margin: -2px 0 8px 0;
     font-size: 0.85em;
@@ -465,6 +495,48 @@ body {
     cursor: pointer;
     color: var(--vscode-textLink-foreground);
     font-size: 0.85em;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.conflict-card-item summary::marker {
+    content: '';
+}
+
+.conflict-card-item summary::-webkit-details-marker {
+    display: none;
+}
+
+.conflict-card-item summary::before {
+    content: '';
+    width: 3px;
+    height: 3px;
+    border-radius: 999px;
+    background: currentColor;
+    flex: 0 0 auto;
+    opacity: 0.9;
+}
+
+.change-list-stats {
+    margin-left: auto;
+    font-size: 0.85em;
+    white-space: nowrap;
+    color: var(--vscode-descriptionForeground);
+}
+
+.change-list-add {
+    color: #2ea043;
+    font-weight: 600;
+}
+
+.change-list-del {
+    color: #d1242f;
+    font-weight: 600;
+}
+
+.change-list-sep {
+    color: var(--vscode-descriptionForeground);
 }
 
 .conflict-card-meta {

@@ -52,6 +52,9 @@ let baselineMessage = null;
 let sendButtonEl = null;
 let inputEl = null;
 const pendingUiPrompts = [];
+const agentTimeoutBySession = new Map();
+const agentTimeoutNoticeBySession = new Map();
+const agentTimeoutOpBySession = new Map();
 
 function formatList(values, max = 20) {
     if (!Array.isArray(values)) return '[]';
@@ -101,6 +104,58 @@ function timelineCounts(timeline) {
         else if (id.startsWith('local-')) local++;
     }
     return { msg, tmp, local };
+}
+
+function isThinkingActive(sessionId) {
+    const session = getSessionState(sessionId);
+    if (!session || !session.thinkingId) return false;
+    const msg = session.messagesById.get(session.thinkingId);
+    if (!msg) return false;
+    if (msg.meta?.isThinking === true) return true;
+    const text = typeof msg.text === 'string' ? msg.text.trim() : '';
+    return text === 'Thinking...';
+}
+
+function clearAgentTimeout(sessionId, reason, removeNotice = false) {
+    if (!sessionId) return;
+    const timer = agentTimeoutBySession.get(sessionId);
+    if (timer) {
+        clearTimeout(timer);
+        agentTimeoutBySession.delete(sessionId);
+    }
+    agentTimeoutOpBySession.delete(sessionId);
+    if (removeNotice) {
+        agentTimeoutNoticeBySession.delete(sessionId);
+        window.__oc?.renderFromState?.();
+    }
+    if (timer) {
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: ['WV: agentTimeout.cancel', `sessionId=${sessionId}`, `reason=${reason || 'unknown'}`]
+        });
+    }
+}
+
+function startAgentTimeout(sessionId, opId) {
+    if (!sessionId) return;
+    clearAgentTimeout(sessionId, 'restart', true);
+    agentTimeoutOpBySession.set(sessionId, opId || null);
+    const timer = setTimeout(() => {
+        const currentOp = agentTimeoutOpBySession.get(sessionId);
+        if ((opId || null) !== currentOp) return;
+        if (!isThinkingActive(sessionId)) return;
+        agentTimeoutNoticeBySession.set(sessionId, 'The agent is not responding, probably due to the usage limit.');
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: ['WV: agentTimeout.fire', `sessionId=${sessionId}`, `opId=${opId || 'null'}`]
+        });
+        window.__oc?.renderFromState?.();
+    }, 30000);
+    agentTimeoutBySession.set(sessionId, timer);
+    vscode.postMessage({
+        type: 'ui-debug',
+        payload: ['WV: agentTimeout.start', `sessionId=${sessionId}`, `opId=${opId || 'null'}`, 'delay=30000']
+    });
 }
 
 function logTimelineSnapshot(action, timeline, details) {
@@ -182,6 +237,11 @@ function createSessionState() {
         thinkingId: null,
         currentTurnAssistantKey: null,
         currentTurnAssistantMsgId: null,
+        lastTurnUserId: null,
+        lastTurnAssistantId: null,
+        cancelledTurn: false,
+        canceledActiveTurn: false,
+        activeTurnOpId: null,
         pendingAssistantUpgrade: null,
         nextOrder: 0,
         serverIdToKey: new Map(),
@@ -202,6 +262,49 @@ function getSessionState(sessionId, create = false) {
         sessionsById.set(sessionId, createSessionState());
     }
     return sessionsById.get(sessionId) || null;
+}
+
+function removeMessageFromSession(session, messageId) {
+    if (!session || !messageId) return;
+    session.messagesById.delete(messageId);
+    if (Array.isArray(session.timeline) && session.timeline.length) {
+        session.timeline = session.timeline.filter((id) => id !== messageId);
+    }
+    session.hiddenSet.delete(messageId);
+    if (session.thinkingId === messageId) {
+        session.thinkingId = null;
+    }
+    if (session.currentTurnAssistantKey === messageId) {
+        session.currentTurnAssistantKey = null;
+    }
+    if (session.currentTurnAssistantMsgId === messageId) {
+        session.currentTurnAssistantMsgId = null;
+    }
+}
+
+    function cancelLocalTurn(sessionId) {
+        const session = getSessionState(sessionId);
+        if (!session) return;
+    const userId = session.lastTurnUserId;
+    const assistantId = session.lastTurnAssistantId;
+    if (userId) {
+        removeMessageFromSession(session, userId);
+    }
+    if (assistantId) {
+        removeMessageFromSession(session, assistantId);
+    }
+    if (session.thinkingId && session.thinkingId !== assistantId) {
+        removeMessageFromSession(session, session.thinkingId);
+    }
+    session.lastTurnUserId = null;
+    session.lastTurnAssistantId = null;
+    session.cancelledTurn = true;
+    session.canceledActiveTurn = true;
+    session.pendingAssistantUpgrade = null;
+    session.currentTurnAssistantKey = null;
+    session.currentTurnAssistantMsgId = null;
+    session.activeTurnOpId = null;
+    window.__oc?.renderFromState?.();
 }
 
 function getEventSessionId(message, eventName) {
@@ -957,18 +1060,16 @@ function applyRevertedSegmentPayload(sessionId, payload, noticeKeyFromCaller) {
     
     // Compute memberMsgIds from timeline
     let memberMsgIds = computeMemberMsgIdsFromTimeline(
-        session, 
-        anchorMsgId, 
+        session,
+        anchorMsgId,
         endMsgId
     );
 
-    if (memberMsgIds.length === 0 && Array.isArray(payload.messageIds) && payload.messageIds.length) {
-        const mappedMembers = payload.messageIds
-            .map((id) => resolveSegmentMessageId(session, id))
-            .filter((id) => id && session.timeline.includes(id));
-        if (mappedMembers.length) {
-            memberMsgIds = mappedMembers;
-        }
+    const payloadMemberMsgIds = Array.isArray(payload.messageIds)
+        ? payload.messageIds.filter((id) => typeof id === 'string' && id.startsWith('msg_'))
+        : [];
+    if (payloadMemberMsgIds.length) {
+        memberMsgIds = payloadMemberMsgIds;
     }
 
     if (memberMsgIds.length === 0 && anchorMsgId) {
@@ -1394,7 +1495,8 @@ function handleToggleSegment(sessionId, segmentId) {
 }
 
 function renderMarkdownInto(element, text) {
-    const normalized = normalizeInlineMath(normalizeBlockMath(text || ''));
+    const unwrapped = escapeSystemReminderTags(text || '');
+    const normalized = normalizeInlineMath(normalizeBlockMath(unwrapped));
     const raw = md.render(normalized);
     element.innerHTML = purify.sanitize(raw, {
         ALLOWED_TAGS: [
@@ -1416,6 +1518,93 @@ function renderMarkdownInto(element, text) {
         }
     }
     wrapTables(element);
+    enhanceCodeBlocksWithCopyButtons(element);
+}
+
+function enhanceCodeBlocksWithCopyButtons(root) {
+    if (!root || typeof root.querySelectorAll !== 'function') return;
+    if (root.closest && root.closest('.conflict-card')) return;
+
+    const assistantRoot = root.closest ? root.closest('.message.bot') : null;
+    const containers = assistantRoot
+        ? [assistantRoot]
+        : Array.from(root.querySelectorAll('.message.bot'));
+
+    for (const container of containers) {
+        const contentRoot = container.querySelector('.message-content') || container;
+        for (const pre of contentRoot.querySelectorAll('pre')) {
+            if (pre.dataset.hasCopyBtn === '1') continue;
+            const code = pre.querySelector('code');
+            if (!code) continue;
+            pre.dataset.hasCopyBtn = '1';
+
+            let wrapper = pre.parentElement;
+            if (!wrapper || !wrapper.classList.contains('code-block-wrap')) {
+                wrapper = document.createElement('div');
+                wrapper.className = 'code-block-wrap';
+                pre.parentElement?.insertBefore(wrapper, pre);
+                wrapper.appendChild(pre);
+            }
+
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'code-copy-btn';
+            btn.textContent = 'Copy';
+            btn.addEventListener('click', async (event) => {
+                event.stopPropagation();
+                const text = code.innerText || '';
+                if (!text) return;
+                let copied = false;
+                if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+                    try {
+                        await navigator.clipboard.writeText(text);
+                        copied = true;
+                    } catch {
+                        copied = false;
+                    }
+                }
+                if (!copied) {
+                    try {
+                        const textarea = document.createElement('textarea');
+                        textarea.value = text;
+                        textarea.setAttribute('readonly', '');
+                        textarea.style.position = 'absolute';
+                        textarea.style.left = '-9999px';
+                        document.body.appendChild(textarea);
+                        textarea.select();
+                        copied = document.execCommand('copy');
+                        document.body.removeChild(textarea);
+                    } catch {
+                        copied = false;
+                    }
+                }
+                const prev = 'Copy';
+                if (btn._copyResetTimer) {
+                    clearTimeout(btn._copyResetTimer);
+                }
+                if (copied) {
+                    btn.textContent = 'Copied!';
+                    btn._copyResetTimer = setTimeout(() => {
+                        btn.textContent = prev;
+                    }, 800);
+                } else {
+                    btn.textContent = 'Failed';
+                    btn._copyResetTimer = setTimeout(() => {
+                        btn.textContent = prev;
+                    }, 1200);
+                }
+            });
+            wrapper.appendChild(btn);
+        }
+    }
+}
+
+function escapeSystemReminderTags(text) {
+    if (!text || typeof text !== 'string') return text;
+    return text
+        .replace(/<system-reminder\b[^>]*>/gi, '&lt;system-reminder&gt;')
+        .replace(/<\/system-reminder>/gi, '&lt;/system-reminder&gt;')
+        .replace(/\r\n/g, '\n');
 }
 
 function isCopilotProvider(providerId) {
@@ -1593,11 +1782,14 @@ function renderMessageElement(message, renderedSet) {
     }
     renderedSet.add(message.id);
 
-    if (message.meta?.kind === 'changeList') {
-        const files = Array.isArray(message.meta?.files) ? message.meta.files : [];
-        if (!files.length) return;
-        const commitHead = typeof message.meta?.commitHead === 'string' ? message.meta.commitHead : undefined;
-        const commitBase = typeof message.meta?.commitBase === 'string' ? message.meta.commitBase : undefined;
+        if (message.meta?.kind === 'changeList') {
+            const files = Array.isArray(message.meta?.files) ? message.meta.files : [];
+            if (!files.length) return;
+            const commitHead = typeof message.meta?.commitHead === 'string' ? message.meta.commitHead : undefined;
+            const commitBase = typeof message.meta?.commitBase === 'string' ? message.meta.commitBase : undefined;
+            const statsByPath = message.meta?.statsByPath && typeof message.meta.statsByPath === 'object'
+                ? message.meta.statsByPath
+                : {};
 
         const container = document.createElement('div');
         container.className = 'conflict-card change-list-card';
@@ -1641,8 +1833,39 @@ function renderMessageElement(message, renderedSet) {
             baseSpan.className = 'conflict-card-file';
             baseSpan.textContent = base;
 
+            const stats = statsByPath[normalized];
+            const showStats = stats && (Number.isFinite(stats.additions) || Number.isFinite(stats.deletions));
+            let statsWrap = null;
+            if (showStats) {
+                statsWrap = document.createElement('span');
+                statsWrap.className = 'change-list-stats';
+
+                if (Number.isFinite(stats.additions)) {
+                    const addSpan = document.createElement('span');
+                    addSpan.className = 'change-list-add';
+                    addSpan.textContent = `+${stats.additions}`;
+                    statsWrap.appendChild(addSpan);
+                }
+
+                if (Number.isFinite(stats.deletions)) {
+                    if (statsWrap.childNodes.length) {
+                        const sep = document.createElement('span');
+                        sep.className = 'change-list-sep';
+                        sep.textContent = ' | ';
+                        statsWrap.appendChild(sep);
+                    }
+                    const delSpan = document.createElement('span');
+                    delSpan.className = 'change-list-del';
+                    delSpan.textContent = `-${stats.deletions}`;
+                    statsWrap.appendChild(delSpan);
+                }
+            }
+
             summary.appendChild(dirSpan);
             summary.appendChild(baseSpan);
+            if (statsWrap) {
+                summary.appendChild(statsWrap);
+            }
             details.appendChild(summary);
             list.appendChild(details);
         }
@@ -1792,7 +2015,9 @@ function renderMessageElement(message, renderedSet) {
         } else if (message.role === 'assistant') {
             renderMarkdownInto(content, message.text || '');
         } else {
-            content.textContent = message.text || '';
+            const raw = message.text || '';
+            const sanitized = message.role === 'user' ? stripAttachmentManifest(raw) : raw;
+            content.textContent = sanitized;
         }
         div.appendChild(content);
 
@@ -1857,6 +2082,18 @@ function renderMessageElement(message, renderedSet) {
         }
 
         chatContainer.appendChild(div);
+    }
+
+    function stripAttachmentManifest(text) {
+        if (!text) return text;
+        const marker = '---\nAttachments (workspace files; read from disk; DO NOT use any URL):';
+        const start = text.indexOf(marker);
+        if (start === -1) return text;
+        const end = text.indexOf('\n---', start + marker.length);
+        if (end === -1) return text;
+        const before = text.slice(0, start).trimEnd();
+        const after = text.slice(end + '\n---'.length).trimStart();
+        return [before, after].filter(Boolean).join('\n\n');
     }
 
     function renderSegmentElement(session, segment, renderedSet, renderKey) {
@@ -2043,6 +2280,19 @@ function renderMessageElement(message, renderedSet) {
         if (lastConflictPayload && lastConflictPayload.sessionId === activeSessionId) {
             renderConflictCard(lastConflictPayload);
         }
+
+        const notice = activeSessionId ? agentTimeoutNoticeBySession.get(activeSessionId) : null;
+        if (notice) {
+            const div = document.createElement('div');
+            div.className = 'message system';
+            const content = document.createElement('div');
+            content.className = 'message-content';
+            content.textContent = notice;
+            div.appendChild(content);
+            chatContainer.appendChild(div);
+        }
+
+        enhanceCodeBlocksWithCopyButtons(chatContainer);
 
         const tables = chatContainer.querySelectorAll('table');
         const wraps = chatContainer.querySelectorAll('.md-table-wrap');
@@ -2674,15 +2924,19 @@ function renderMessageElement(message, renderedSet) {
         }
     }
 
-    function applyPromptToSession(sessionId, payload) {
-        const session = getSessionState(sessionId, true);
-        const displayText = payload.text || 'Image attached.';
+function applyPromptToSession(sessionId, payload) {
+    const session = getSessionState(sessionId, true);
+    session.cancelledTurn = false;
+    session.canceledActiveTurn = false;
+    session.activeTurnOpId = payload.opId || null;
+    const displayText = payload.text || 'Image attached.';
         const userMessage = upsertMessage(session, {
             id: payload.clientMessageId,
             role: 'user',
             text: displayText,
             meta: { clientId: payload.clientMessageId, images: payload.images || [] }
         });
+        session.lastTurnUserId = payload.clientMessageId;
         if (payload.clientMessageId && payload.clientMessageId.startsWith('local-')) {
             vscode.postMessage({ type: 'registerPendingUserLocal', sessionId, localKey: payload.clientMessageId });
         }
@@ -2707,9 +2961,11 @@ function renderMessageElement(message, renderedSet) {
             });
             session.thinkingId = thinkingMsg.id;
             session.currentTurnAssistantKey = thinkingMsg.id;
+            session.lastTurnAssistantId = thinkingMsg.id;
         }
 
         assertInvariants(sessionId, 'sendPrompt');
+        startAgentTimeout(sessionId, payload.opId || null);
     }
 
     function handleAssistantMeta(sessionId, message) {
@@ -2770,6 +3026,11 @@ function renderMessageElement(message, renderedSet) {
         const target = session.messagesById.get(targetId);
         if (target) {
             const nextText = typeof message.lastText === 'string' ? message.lastText : target.text;
+            const normalized = typeof nextText === 'string' ? nextText.trim() : '';
+            const hasStatusChange = normalized.length > 0 && normalized !== 'Thinking...';
+            if (hasStatusChange) {
+                clearAgentTimeout(sessionId, 'assistantMeta-status-change');
+            }
             target.text = nextText;
             target.meta = { ...target.meta, internalId: backendId, isThinking: true };
             vscode.postMessage({ type: 'ui-debug', payload: ['handleAssistantMeta', 'merged', targetId] });
@@ -2780,6 +3041,7 @@ function renderMessageElement(message, renderedSet) {
 
     function handleChatChunk(sessionId, message) {
         const session = getSessionState(sessionId, true);
+        clearAgentTimeout(sessionId, 'chatChunk');
         const backendId = getEventMessageId(message);
         const chunkText = getEventChunkText(message);
 
@@ -2833,6 +3095,7 @@ function renderMessageElement(message, renderedSet) {
     function handleChatDone(sessionId, message) {
         const session = getSessionState(sessionId);
         if (!session) return;
+        clearAgentTimeout(sessionId, 'chatDone');
     if (session.thinkingId && session.messagesById.has(session.thinkingId)) {
         const msg = session.messagesById.get(session.thinkingId);
         msg.meta.isThinking = false;
@@ -2880,7 +3143,12 @@ function renderMessageElement(message, renderedSet) {
 
     sendBtn.addEventListener('click', () => {
         if (isBusy) {
-            vscode.postMessage({ type: 'cancel' });
+            if (activeSessionId) {
+                clearAgentTimeout(activeSessionId, 'cancel', true);
+                cancelLocalTurn(activeSessionId);
+            }
+            const activeOpId = activeSessionId ? getSessionState(activeSessionId)?.activeTurnOpId || null : null;
+            vscode.postMessage({ type: 'cancel', sessionId: activeSessionId || undefined, opId: activeOpId || undefined });
             return;
         }
         logSegmentState(activeSessionId, 'before-turn');
@@ -2903,9 +3171,23 @@ function renderMessageElement(message, renderedSet) {
         const fallbackText = hasNonImage ? 'Attachment added.' : 'Image attached.';
         const messageText = text || fallbackText;
         const clientMessageId = `local-${Date.now()}-${messageCounter++}`;
+        const opId = `op-${Date.now()}-${messageCounter}`;
         const messageImages = attachments
             .map((item) => item.dataUrl)
             .filter((value) => typeof value === 'string' && value.length > 0);
+        const attachmentsPayload = attachments.map((item) => {
+            const dataUrl = typeof item?.dataUrl === 'string' ? item.dataUrl : '';
+            const commaIndex = dataUrl.indexOf(',');
+            const dataBase64 = (dataUrl && dataUrl.startsWith('data:') && commaIndex !== -1)
+                ? dataUrl.slice(commaIndex + 1)
+                : undefined;
+            return {
+                filename: typeof item?.name === 'string' ? item.name : undefined,
+                mime: typeof item?.mime === 'string' ? item.mime : undefined,
+                dataBase64,
+                tempPath: typeof item?.filePath === 'string' ? item.filePath : undefined
+            };
+        });
 
         setBusy(true);
         if (!activeSessionId) {
@@ -2913,6 +3195,7 @@ function renderMessageElement(message, renderedSet) {
             pendingUiPrompts.push({
                 text: messageText,
                 clientMessageId,
+                opId,
                 mode: selectedMode,
                 images: messageImages
             });
@@ -2920,6 +3203,7 @@ function renderMessageElement(message, renderedSet) {
             applyPromptToSession(activeSessionId, {
                 text: messageText,
                 clientMessageId,
+                opId,
                 mode: selectedMode,
                 images: messageImages
             });
@@ -2931,7 +3215,6 @@ function renderMessageElement(message, renderedSet) {
             logSessionState(activeSessionId, 'UI_SEND_PROMPT');
         }
 
-        const attachmentPaths = attachments.map((item) => item.filePath);
         const tmpKey = activeSessionId ? getSessionState(activeSessionId)?.thinkingId || null : null;
         const mode = selectedMode || 'unknown';
         const isBuild = mode === 'build';
@@ -2948,7 +3231,7 @@ function renderMessageElement(message, renderedSet) {
                 payload: ['[WV][SEG_DISCARD_SKIP]', `reason=not-build`, `mode=${mode}`, `sessionId=${activeSessionId || 'null'}`]
             });
         }
-        vscode.postMessage({ type: 'sendMessage', value: messageText, attachments: attachmentPaths, clientMessageId, sessionId: activeSessionId || undefined, tmpKey });
+        vscode.postMessage({ type: 'sendMessage', value: messageText, attachments: attachmentsPayload, clientMessageId, sessionId: activeSessionId || undefined, tmpKey, opId });
         attachments = [];
         renderAttachments();
         input.value = '';
@@ -2976,6 +3259,9 @@ function renderMessageElement(message, renderedSet) {
     modelSelect.addEventListener('change', (e) => {
         selectedModel = e.target.value;
         updateVariantOptions();
+        if (activeSessionId) {
+            clearAgentTimeout(activeSessionId, 'modelChange', true);
+        }
         vscode.postMessage({ type: 'setModel', value: selectedModel });
     });
 
@@ -3506,6 +3792,14 @@ window.addEventListener('message', (event) => {
             case 'assistantMessageMeta': {
                 const sessionId = getEventSessionId(message, 'assistantMessageMeta');
                 if (!sessionId) break;
+                const session = getSessionState(sessionId, true);
+                if (session?.canceledActiveTurn) {
+                    vscode.postMessage({
+                        type: 'ui-debug',
+                        payload: ['assistantMessageMeta', 'drop-canceledActiveTurn', `sessionId=${sessionId}`]
+                    });
+                    break;
+                }
                 logIdCandidates('[DBG_META]', message, sessionId, activeSessionId);
                 handleAssistantMeta(sessionId, message);
                 // Removed: reconcilePendingSegments - new system uses applyHydratedSegments
@@ -3517,6 +3811,14 @@ window.addEventListener('message', (event) => {
             case 'chatChunk': {
                 const sessionId = getEventSessionId(message, 'chatChunk');
                 if (!sessionId) break;
+                const session = getSessionState(sessionId);
+                if (session?.canceledActiveTurn) {
+                    vscode.postMessage({
+                        type: 'ui-debug',
+                        payload: ['chatChunk', 'drop-canceledActiveTurn', `sessionId=${sessionId}`]
+                    });
+                    break;
+                }
                 handleChatChunk(sessionId, message);
                 window.__oc?.renderFromState?.();
                 scrollToBottom();
@@ -3532,11 +3834,49 @@ window.addEventListener('message', (event) => {
                     const tail = formatTail(session.timeline);
                     vscode.postMessage({ type: 'ui-debug', payload: ['[DBG_CHATDONE]', `timelineTail=${tail}`] });
                 }
+                if (session?.canceledActiveTurn) {
+                    setBusy(false);
+                    logSessionState(sessionId, 'chatDone.canceledActiveTurn');
+                    break;
+                }
                 handleChatDone(sessionId, message);
+                if (session) {
+                    session.cancelledTurn = false;
+                }
                 window.__oc?.renderFromState?.();
                 scrollToBottom();
                 setBusy(false);
                 logSessionState(sessionId, 'chatDone');
+                break;
+            }
+            case 'restoreDraft': {
+                const draft = message?.payload || {};
+                if (typeof draft.text === 'string' && inputEl) {
+                    inputEl.value = draft.text;
+                }
+                if (Array.isArray(draft.attachments)) {
+                    attachments = draft.attachments.map((filePath) => ({ filePath }));
+                    renderAttachments();
+                }
+                if (typeof draft.model === 'string') {
+                    selectedModel = draft.model;
+                    modelSelect.value = selectedModel;
+                    updateVariantOptions();
+                }
+                if (typeof draft.variant === 'string') {
+                    selectedVariant = draft.variant;
+                    variantSelect.value = selectedVariant;
+                }
+                if (typeof draft.mode === 'string') {
+                    selectedMode = draft.mode;
+                    modeSelect.value = selectedMode;
+                    applyModeStyles(selectedMode);
+                    renderModeSelect();
+                }
+                setBusy(false);
+                if (inputEl) {
+                    inputEl.focus();
+                }
                 break;
             }
             case 'userMessageUpgrade': {
@@ -3548,6 +3888,10 @@ window.addEventListener('message', (event) => {
                 const session = getSessionState(sessionId);
                 if (!session) {
                     vscode.postMessage({ type: 'ui-debug', payload: ['user.upgrade', `user.upgrade: localKey=${message?.localKey || 'null'} msgId=${message?.userMsgId || 'null'} replaced=false reason=session-mismatch`] });
+                    break;
+                }
+                if (session.canceledActiveTurn) {
+                    vscode.postMessage({ type: 'ui-debug', payload: ['user.upgrade', 'drop-cancelled', `localKey=${message?.localKey || 'null'}`, `msgId=${message?.userMsgId || 'null'}`] });
                     break;
                 }
                 const localKey = message?.localKey;
@@ -3730,6 +4074,9 @@ window.addEventListener('message', (event) => {
                 const changeListId = typeof message.changeListId === 'string' && message.changeListId.length
                     ? message.changeListId
                     : (commitHead ? `system:changeList:${commitHead}` : `changes:${Date.now()}`);
+                const statsByPath = message.statsByPath && typeof message.statsByPath === 'object'
+                    ? message.statsByPath
+                    : {};
                 const session = getSessionState(sessionId, true);
                 upsertMessage(session, {
                     id: changeListId,
@@ -3742,7 +4089,8 @@ window.addEventListener('message', (event) => {
                         scope: message.scope || 'turn',
                         commitHead: commitHead || undefined,
                         commitBase: commitBase || undefined,
-                        reverted: message.reverted === true
+                        reverted: message.reverted === true,
+                        statsByPath
                     }
                 });
                 window.__oc?.renderFromState?.();
@@ -3771,6 +4119,13 @@ window.addEventListener('message', (event) => {
                 const sessionId = getEventSessionId(message, 'messageAppend');
                 if (!sessionId) break;
                 const session = getSessionState(sessionId, true);
+                if (session?.canceledActiveTurn && message?.message?.id === session.lastTurnUserId) {
+                    vscode.postMessage({
+                        type: 'ui-debug',
+                        payload: ['messageAppend', 'drop-cancelled', `messageId=${message?.message?.id || 'null'}`]
+                    });
+                    break;
+                }
                 if (message.message && message.message.id) {
                     upsertMessage(session, {
                         id: message.message.id,
@@ -4001,7 +4356,10 @@ window.addEventListener('message', (event) => {
                     const originalMemberMsgIds = shouldComputeMembers
                         ? computeMemberMsgIdsFromTimeline(session, anchorForUpsert, endForUpsert)
                         : [];
-                    let memberMsgIds = originalMemberMsgIds;
+                    const payloadMemberMsgIds = Array.isArray(segPayload?.messageIds)
+                        ? segPayload.messageIds.filter((id) => typeof id === 'string' && id.startsWith('msg_'))
+                        : [];
+                    let memberMsgIds = payloadMemberMsgIds.length ? payloadMemberMsgIds : originalMemberMsgIds;
                     const originalEndMsgId = endForUpsert;
                     vscode.postMessage({
                         type: 'ui-debug',
@@ -4526,11 +4884,11 @@ window.addEventListener('message', (event) => {
             case 'removeMessage': {
                 const sessionId = getEventSessionId(message, 'removeMessage');
                 if (!sessionId) break;
-                const session = getSessionState(sessionId);
+                const session = getSessionState(sessionId, true);
                 if (!session) break;
-                const msg = session.messagesById.get(message.messageId);
-                if (msg) {
-                    msg.meta.isRemoved = true;
+                const messageId = message.messageId;
+                if (typeof messageId === 'string' && messageId.length) {
+                    removeMessageFromSession(session, messageId);
                 }
                 window.__oc?.renderFromState?.();
                 scrollToBottom();
@@ -4574,6 +4932,11 @@ function renderConflictCard(payload) {
     header.className = 'conflict-card-header';
     header.textContent = 'Conflicts detected. Execution paused.';
     container.appendChild(header);
+
+    const hint = document.createElement('div');
+    hint.className = 'conflict-card-hint';
+    hint.textContent = 'Select continue to override the conflict and make a hard restore.';
+    container.appendChild(hint);
 
     const list = document.createElement('div');
     list.className = 'conflict-card-list';
@@ -4624,20 +4987,20 @@ function renderConflictCard(payload) {
     const cancelBtn = document.createElement('button');
     cancelBtn.type = 'button';
     cancelBtn.className = 'conflict-card-btn secondary';
-    cancelBtn.textContent = 'Cancel';
+    cancelBtn.textContent = 'Skip';
     cancelBtn.addEventListener('click', () => {
         if (conflictCardEl && conflictCardEl.parentElement) {
             conflictCardEl.parentElement.removeChild(conflictCardEl);
         }
         conflictCardEl = null;
         lastConflictPayload = null;
-        vscode.postMessage({ type: 'conflictDecision', decision: 'cancel' });
+        vscode.postMessage({ type: 'conflictDecision', decision: 'skip' });
     });
 
     const continueBtn = document.createElement('button');
     continueBtn.type = 'button';
     continueBtn.className = 'conflict-card-btn';
-    continueBtn.textContent = 'Continue';
+    continueBtn.textContent = 'Override';
     continueBtn.addEventListener('click', () => {
         if (conflictCardEl && conflictCardEl.parentElement) {
             conflictCardEl.parentElement.removeChild(conflictCardEl);
@@ -4646,7 +5009,7 @@ function renderConflictCard(payload) {
         lastConflictPayload = null;
         vscode.postMessage({
             type: 'conflictDecision',
-            decision: 'continue',
+            decision: 'override',
             kind: payload.kind,
             startMessageId: payload.startMessageId
         });

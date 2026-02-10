@@ -39,6 +39,10 @@
       {
         "command": "opencode.checkVersion",
         "title": "OpenCode: Check Version"
+      },
+      {
+        "command": "opencode.clearAttachmentsCache",
+        "title": "OpenCode: Clear Attachments Cache"
       }
     ]
   },

@@ -486,15 +486,111 @@ export class GitUndoEngine {
         const checkedOut: string[] = [];
         for (const filePath of fileSet) {
             const existsInCommit = (await runGit(repo, ['cat-file', '-e', `${commit}:${filePath}`])).code === 0;
-            const absPath = path.join(repo.workTree, filePath);
             if (existsInCommit) {
-                await runGit(repo, ['checkout', commit], { paths: [filePath] });
+                await runGit(repo, ['checkout', commit, '--'], { paths: [filePath] });
                 checkedOut.push(filePath);
-            } else {
-                this.logger(`skipped-missing-in-target | commit=${commit} path=${filePath}`);
+                continue;
             }
+            await runGit(repo, ['rm', '-f', '--ignore-unmatch'], { paths: [filePath] });
+            const absPath = path.join(repo.workTree, filePath);
+            if (fs.existsSync(absPath)) {
+                try {
+                    await fs.promises.unlink(absPath);
+                } catch {
+                    // ignore
+                }
+            }
+            deleted.push(filePath);
         }
         return { deleted, checkedOut };
+    }
+
+    private async applyWorkspaceToTargetCommit(
+        repo: GitRepoRef,
+        fileSet: string[],
+        targetCommit: string,
+        mode: 'undo' | 'restore',
+        options?: { forceOverride?: boolean }
+    ): Promise<{ conflicts: ConflictInfo[]; touchedFiles: string[] }>
+    {
+        const conflicts: ConflictInfo[] = [];
+        const touchedFiles: string[] = [];
+        const forceOverride = options?.forceOverride === true;
+
+        for (const filePath of fileSet) {
+            const absPath = path.join(repo.workTree, filePath);
+            const existsInTarget = (await runGit(repo, ['cat-file', '-e', `${targetCommit}:${filePath}`])).code === 0;
+            const localExists = fs.existsSync(absPath);
+            const tracked = (await runGit(repo, ['ls-files', '--error-unmatch'], { paths: [filePath] })).code === 0;
+            const untrackedConflict = localExists && !tracked;
+
+            let action = 'skip';
+            let reason = 'none';
+
+            if (existsInTarget) {
+                if (untrackedConflict && !forceOverride) {
+                    action = 'skip';
+                    reason = 'existing-untracked-conflict';
+                    conflicts.push({ path: filePath, expectedExists: true, currentExists: localExists });
+                } else {
+                    const checkoutResult = await runGit(repo, ['checkout', targetCommit], { paths: [filePath] });
+                    if (checkoutResult.code === 0) {
+                        action = 'restore';
+                        touchedFiles.push(filePath);
+                    } else {
+                        action = 'skip';
+                        reason = 'io-error';
+                        conflicts.push({ path: filePath, expectedExists: true, currentExists: localExists });
+                    }
+                }
+            } else {
+                if (untrackedConflict && !forceOverride) {
+                    action = 'skip';
+                    reason = 'local-untracked-protect';
+                    conflicts.push({ path: filePath, expectedExists: false, currentExists: localExists });
+                } else {
+                    const rmResult = await runGit(repo, ['rm', '-f', '--ignore-unmatch'], { paths: [filePath] });
+                    if (fs.existsSync(absPath)) {
+                        try {
+                            await fs.promises.unlink(absPath);
+                        } catch {
+                            // ignore
+                        }
+                    }
+                    if (rmResult.code === 0 || !fs.existsSync(absPath)) {
+                        action = 'delete';
+                        touchedFiles.push(filePath);
+                    } else {
+                        action = 'skip';
+                        reason = 'io-error';
+                        conflicts.push({ path: filePath, expectedExists: false, currentExists: localExists });
+                    }
+                }
+            }
+
+            this.logger(`${mode}.plan | path=${filePath} | targetCommit=${targetCommit} | existsInTarget=${String(existsInTarget)} | localExists=${String(localExists)} | tracked=${String(tracked)} | action=${action} | reason=${reason}`);
+        }
+
+        return { conflicts, touchedFiles };
+    }
+
+    public async forceRestore(sessionId: string, restoreCommit: string, fileSet: string[]): Promise<RestoreResult> {
+        if (!this.isEnabled()) {
+            return { conflicts: [], touchedFiles: [], applied: false };
+        }
+        const repo = await this.repoManager.resolveRepo(sessionId, restoreCommit);
+        return this.lockManager.withRepoLock(repo, this.logger, async () => {
+            this.logger(`forceRestore.start | sessionId=${sessionId} restoreCommit=${restoreCommit} fileSet=${fileSet.length}`);
+            if (!fileSet.length) {
+                return { conflicts: [], touchedFiles: [], applied: true };
+            }
+            const applied = await this.applyCheckoutToCommit(repo, restoreCommit, fileSet);
+            this.logger(`forceRestore.apply | sessionId=${sessionId} deleted=${applied.deleted.length} checkedOut=${applied.checkedOut.length}`);
+            const map = await this.mapStore.loadSessionMap(sessionId, repo.repoId);
+            const updated = { ...map, currentBaseCommit: restoreCommit };
+            await this.mapStore.saveSessionMap(sessionId, updated);
+            return { conflicts: [], touchedFiles: [...applied.checkedOut, ...applied.deleted], applied: true };
+        });
     }
 
     private collectTouchedUnion(map: { entries: SessionEntry[] }, startCommit: string, headCommit: string): string[] {
@@ -547,30 +643,30 @@ export class GitUndoEngine {
             }
             const touchedUnion = this.collectTouchedUnion(map, startCommit, headCommit);
             const fileSet = await this.computeFileSet(repo, targetCommit, headCommit, touchedUnion);
-            this.logger(`fileSet.beforeFilter | size=${fileSet.length}`);
-            const filteredFileSet = await this.filterTrackedFiles(repo, fileSet);
-            this.logger(`fileSet.afterFilter | size=${filteredFileSet.length}`);
-            if (!filteredFileSet.length) {
-                return { conflicts: [], touchedFiles: [], applied: true, startCommit, startCommits: [startCommit], restoreCommit: headCommit, undoTargetCommit: targetCommit, fileSet: filteredFileSet };
+            this.logger(`fileSet.beforeApply | size=${fileSet.length}`);
+            if (!fileSet.length) {
+                return { conflicts: [], touchedFiles: [], applied: true, startCommit, startCommits: [startCommit], restoreCommit: headCommit, undoTargetCommit: targetCommit, fileSet };
             }
-            const conflicts = force ? [] : await this.ensureWorkspaceMatchesCommit(repo, baseCommit, filteredFileSet);
-            this.logger(`precheck | commit=${baseCommit} fileSet=${filteredFileSet.length} conflicts=${conflicts.length}`);
+            const conflicts = force ? [] : await this.ensureWorkspaceMatchesCommit(repo, baseCommit, fileSet);
+            this.logger(`precheck | commit=${baseCommit} fileSet=${fileSet.length} conflicts=${conflicts.length}`);
             if (conflicts.length) {
-                return { conflicts, touchedFiles: [], applied: false, startCommit, startCommits: [startCommit], restoreCommit: headCommit, undoTargetCommit: targetCommit, fileSet: filteredFileSet };
+                return { conflicts, touchedFiles: [], applied: false, startCommit, startCommits: [startCommit], restoreCommit: headCommit, undoTargetCommit: targetCommit, fileSet };
             }
-            const applied = await this.applyCheckoutToCommit(repo, targetCommit, filteredFileSet);
-            this.logger(`undo.apply | sessionId=${sessionId} fileSet=${filteredFileSet.length} deleted=${applied.deleted.length} checkedOut=${applied.checkedOut.length}`);
+            const applyResult = await this.applyWorkspaceToTargetCommit(repo, fileSet, targetCommit, 'undo', { forceOverride: force });
+            if (applyResult.conflicts.length) {
+                return { conflicts: applyResult.conflicts, touchedFiles: [], applied: false, startCommit, startCommits: [startCommit], restoreCommit: headCommit, undoTargetCommit: targetCommit, fileSet };
+            }
             const updated = { ...map, currentBaseCommit: targetCommit };
             await this.mapStore.saveSessionMap(sessionId, updated);
             return {
-                conflicts: [],
-                touchedFiles: [...applied.checkedOut, ...applied.deleted],
+                conflicts: applyResult.conflicts,
+                touchedFiles: applyResult.touchedFiles,
                 applied: true,
                 startCommit,
                 startCommits: [startCommit],
                 restoreCommit: headCommit,
                 undoTargetCommit: targetCommit,
-                fileSet: filteredFileSet
+                fileSet
             };
         });
     }
@@ -651,22 +747,22 @@ export class GitUndoEngine {
                 }
             }
             fileSet = unique(fileSet);
-            this.logger(`fileSet.beforeFilter | size=${fileSet.length}`);
-            const filteredFileSet = await this.filterTrackedFiles(repo, fileSet);
-            this.logger(`fileSet.afterFilter | size=${filteredFileSet.length}`);
-            if (!filteredFileSet.length) {
+            this.logger(`fileSet.beforeApply | size=${fileSet.length}`);
+            if (!fileSet.length) {
                 return { conflicts: [], touchedFiles: [], applied: true };
             }
-            const conflicts = force ? [] : await this.ensureWorkspaceMatchesCommit(repo, precheckCommit, filteredFileSet, true);
-            this.logger(`precheck | commit=${precheckCommit} fileSet=${filteredFileSet.length} conflicts=${conflicts.length}`);
+            const conflicts = force ? [] : await this.ensureWorkspaceMatchesCommit(repo, precheckCommit, fileSet, true);
+            this.logger(`precheck | commit=${precheckCommit} fileSet=${fileSet.length} conflicts=${conflicts.length}`);
             if (conflicts.length) {
                 return { conflicts, touchedFiles: [], applied: false };
             }
-            const applied = await this.applyCheckoutToCommit(repo, restoreCommit, filteredFileSet);
-            this.logger(`restore.apply | sessionId=${sessionId} deleted=${applied.deleted.length} checkedOut=${applied.checkedOut.length}`);
+            const applyResult = await this.applyWorkspaceToTargetCommit(repo, fileSet, restoreCommit, 'restore', { forceOverride: force });
+            if (applyResult.conflicts.length) {
+                return { conflicts: applyResult.conflicts, touchedFiles: [], applied: false };
+            }
             const updated = { ...map, currentBaseCommit: restoreCommit };
             await this.mapStore.saveSessionMap(sessionId, updated);
-            return { conflicts: [], touchedFiles: [...applied.checkedOut, ...applied.deleted], applied: true };
+            return { conflicts: applyResult.conflicts, touchedFiles: applyResult.touchedFiles, applied: true };
         });
     }
 }

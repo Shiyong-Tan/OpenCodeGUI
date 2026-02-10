@@ -52,7 +52,12 @@ export type FileChangeSpec =
     | { type: 'rename'; oldPath: string; newPath: string }
     | { type: 'multi'; items: FileChangeSpec[] };
 
-export type ConflictInfo = { path: string; diffText?: string };
+export type ConflictInfo = {
+    path: string;
+    diffText?: string;
+    expectedExists?: boolean;
+    currentExists?: boolean;
+};
 export type UndoResult = {
     conflicts: ConflictInfo[];
     touchedFiles: string[];
