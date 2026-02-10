@@ -66,6 +66,16 @@ export function activate(context: vscode.ExtensionContext) {
 
 	context.subscriptions.push(disposable);
 
+	sidebarProvider.recomputeWorkspaceRoot('activate');
+	context.subscriptions.push(
+		vscode.workspace.onDidChangeWorkspaceFolders(() => {
+			sidebarProvider.recomputeWorkspaceRoot('folders-change');
+		})
+	);
+	setTimeout(() => {
+		sidebarProvider.recomputeWorkspaceRoot('delayed-check');
+	}, 500);
+
 	context.subscriptions.push(
 		vscode.commands.registerCommand('opencode.clearAttachmentsCache', () => {
 			sidebarProvider.requestAttachmentCleanup('manual');

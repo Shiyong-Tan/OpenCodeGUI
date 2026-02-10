@@ -1,2 +1,2 @@
-# Hello World script
 print("Hello, World!")
+# Simple Hello World script

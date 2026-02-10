@@ -1,4 +1,3 @@
-# Hello World program
-# This prints a greeting message
 print("Hello, World!")
 print('revert test unrevert')
+# This is a simple Hello World program

@@ -101,7 +101,7 @@ export class OpenCodeClient {
     private serverBaseUrl?: string;
     private serverPort?: number;
     private serverStartPromise?: Promise<void>;
-    private readonly workspaceRoot: string;
+    private workspaceRoot: string;
     private storage?: vscode.Memento;
     private serverPid?: number;
     private eventStreamAbort?: AbortController;
@@ -134,6 +134,7 @@ export class OpenCodeClient {
     private activeTurnOpIdBySession = new Map<string, string>();
     private pendingUserMsgIdBySession = new Map<string, string>();
     private pendingAssistantMsgIdBySession = new Map<string, string>();
+    private backgroundKillByPid = new Map<number, Promise<void>>();
 
     public resetSessionState(): void {
         this.currentSessionId = undefined;
@@ -158,9 +159,25 @@ export class OpenCodeClient {
     }
 
     constructor() {
-        this.workspaceRoot = this.getWorkspaceRoot();
+        this.workspaceRoot = this.resolveWorkspaceRoot();
         this.gitUndo = new GitUndoEngine(this.workspaceRoot, (message) => this.logUiDebug(message));
     }
+
+    public getWorkspaceRoot(): string {
+        return this.workspaceRoot;
+    }
+
+    public setWorkspaceRoot(newRoot: string): void {
+        if (!newRoot || newRoot === this.workspaceRoot) return;
+        this.workspaceRoot = newRoot;
+        this.gitUndo = new GitUndoEngine(this.workspaceRoot, (message) => this.logUiDebug(message));
+        this.gitUndoAvailable = false;
+    }
+
+    public getServerPid(): number | undefined {
+        return this.serverProcess?.pid || this.serverPid;
+    }
+
 
     public setStorage(storage: vscode.Memento): void {
         this.storage = storage;
@@ -1304,7 +1321,7 @@ export class OpenCodeClient {
     }
 
 
-    private getWorkspaceRoot(): string {
+    private resolveWorkspaceRoot(): string {
         const workspaceFolder = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0
             ? vscode.workspace.workspaceFolders[0].uri.fsPath
             : process.cwd();
@@ -1581,23 +1598,109 @@ export class OpenCodeClient {
         } catch {
             return;
         }
+
+        const workspaceCheck = await this.validateServerWorkspace(baseUrl, this.workspaceRoot);
+        if (workspaceCheck !== true) {
+            const rejectReason = workspaceCheck === false ? 'workspace-mismatch' : 'workspace-unknown';
+            this.logUiDebug(
+                `EXT: server.attach.reject | reason=${rejectReason} | workspace=${this.workspaceRoot} | pid=${record.pid || 'null'} | port=${record.port}`
+            );
+            if (typeof record.pid === 'number') {
+                this.startBackgroundKill(record.pid, rejectReason);
+            }
+            delete state[this.workspaceRoot];
+            await this.storage.update(this.serverStateKey, state);
+            this.serverProcess = undefined;
+            this.serverPid = undefined;
+            this.serverPort = undefined;
+            this.serverBaseUrl = undefined;
+            this.logUiDebug(`EXT: server.state.cleared | workspace=${this.workspaceRoot}`);
+            return;
+        }
+
         this.serverPort = record.port;
         this.serverPid = record.pid;
         this.serverBaseUrl = baseUrl;
+        this.logUiDebug(
+            `EXT: server.attach.ok | workspace=${this.workspaceRoot} | pid=${record.pid || 'null'} | port=${record.port} | workspaceCheck=match`
+        );
+    }
+
+    private normalizeWorkspaceRoot(root: string): string {
+        const resolved = path.resolve(root);
+        if (process.platform === 'win32') {
+            return resolved.toLowerCase();
+        }
+        return resolved;
+    }
+
+    private async validateServerWorkspace(baseUrl: string, workspaceRoot: string): Promise<boolean | undefined> {
+        try {
+            const sessions = await this.requestJsonAtBaseUrl<any[]>(baseUrl, 'GET', '/session');
+            if (!Array.isArray(sessions) || !sessions.length) {
+                this.logUiDebug(`EXT: server.attach.cwd-check | workspace=${workspaceRoot} | sessions=0 | result=unknown`);
+                return undefined;
+            }
+            const expected = this.normalizeWorkspaceRoot(workspaceRoot);
+            const checks = Math.min(20, sessions.length);
+            let sawCwd = false;
+            for (let i = 0; i < checks; i++) {
+                const sessionId = sessions[i]?.id;
+                if (typeof sessionId !== 'string' || !sessionId) continue;
+                const info = await this.requestJsonAtBaseUrl<any>(baseUrl, 'GET', `/session/${sessionId}`);
+                const cwd = info?.path?.cwd;
+                if (typeof cwd !== 'string' || !cwd) continue;
+                sawCwd = true;
+                const actual = this.normalizeWorkspaceRoot(cwd);
+                if (actual === expected) {
+                    this.logUiDebug(`EXT: server.attach.cwd-check | workspace=${workspaceRoot} | sessionId=${sessionId} | sessionCwd=${cwd} | result=match`);
+                    return true;
+                }
+            }
+            if (!sawCwd) {
+                this.logUiDebug(`EXT: server.attach.cwd-check | workspace=${workspaceRoot} | sessions=${sessions.length} | result=unknown-no-cwd`);
+                return undefined;
+            }
+            this.logUiDebug(`EXT: server.attach.cwd-check | workspace=${workspaceRoot} | sessions=${sessions.length} | result=mismatch`);
+            return false;
+        } catch (error) {
+            this.logUiDebug(`EXT: server.attach.cwd-check.fail | workspace=${workspaceRoot} | err=${String(error)}`);
+            return undefined;
+        }
+    }
+
+    private startBackgroundKill(pid: number, reason: string): void {
+        if (!pid || this.backgroundKillByPid.has(pid)) {
+            return;
+        }
+        this.logUiDebug(`EXT: server.kill.async.start | pid=${pid} | reason=${reason}`);
+        const task = (async () => {
+            try {
+                await this.killProcessTree(pid);
+                this.logUiDebug(`EXT: server.kill.async.done | pid=${pid}`);
+            } catch (error) {
+                this.logUiDebug(`EXT: server.kill.async.fail | pid=${pid} | err=${String(error)}`);
+            } finally {
+                this.backgroundKillByPid.delete(pid);
+            }
+        })();
+        this.backgroundKillByPid.set(pid, task);
     }
 
     private async killProcessTree(pid: number): Promise<void> {
         if (process.platform === 'win32') {
             await new Promise<void>((resolve) => {
                 const attemptKill = () => {
-                    cp.exec(`taskkill /PID ${pid} /T /F`, (err, stdout) => {
-                        const output = String(stdout || '');
-                        if (output.includes('SUCCESS')) {
+                    cp.exec(`taskkill /PID ${pid} /T /F`, async (_err, stdout, stderr) => {
+                        const output = `${String(stdout || '')}\n${String(stderr || '')}`;
+                        if (/SUCCESS/i.test(output)) {
                             resolve();
                             return;
                         }
-                        if (err) {
-                            // retry until success, no timeout
+                        const exists = await this.isProcessRunningWindows(pid);
+                        if (!exists) {
+                            resolve();
+                            return;
                         }
                         setTimeout(attemptKill, 500);
                     });
@@ -1611,6 +1714,23 @@ export class OpenCodeClient {
         } catch {
             // ignore
         }
+    }
+
+    private async isProcessRunningWindows(pid: number): Promise<boolean> {
+        return new Promise<boolean>((resolve) => {
+            cp.exec(`tasklist /FI "PID eq ${pid}" /FO CSV /NH`, (err, stdout, stderr) => {
+                const output = `${String(stdout || '')}\n${String(stderr || '')}`;
+                if (err && /No tasks are running|没有运行的任务|找不到/i.test(output)) {
+                    resolve(false);
+                    return;
+                }
+                if (/No tasks are running|没有运行的任务|找不到/i.test(output)) {
+                    resolve(false);
+                    return;
+                }
+                resolve(new RegExp(`\\b${pid}\\b`).test(output));
+            });
+        });
     }
 
     public async shutdownServer(): Promise<void> {
@@ -1682,6 +1802,23 @@ export class OpenCodeClient {
         if (!response.ok) {
             const text = await response.text();
             throw new Error(`Server ${method} ${path} failed: ${response.status} ${text}`);
+        }
+        if (response.status === 204) {
+            return {} as T;
+        }
+        return (await response.json()) as T;
+    }
+
+    private async requestJsonAtBaseUrl<T>(baseUrl: string, method: string, reqPath: string, body?: any): Promise<T> {
+        const url = new URL(reqPath, baseUrl);
+        const options: any = { method, headers: { 'Content-Type': 'application/json' } };
+        if (body !== undefined && method !== 'GET') {
+            options.body = JSON.stringify(body);
+        }
+        const response = await fetch(url, options as any);
+        if (!response.ok) {
+            const text = await response.text();
+            throw new Error(`Server ${method} ${reqPath} failed: ${response.status} ${text}`);
         }
         if (response.status === 204) {
             return {} as T;
@@ -2144,6 +2281,11 @@ export class OpenCodeClient {
             return { id: session.id };
         }
         throw new Error('Failed to create session.');
+    }
+
+    public async getSessionInfo(sessionId: string): Promise<any> {
+        await this.ensureServer();
+        return this.requestJson<any>('GET', `/session/${sessionId}`);
     }
 
     public async exportSession(sessionId: string): Promise<any> {

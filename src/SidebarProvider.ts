@@ -126,13 +126,81 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private assistantTextBufferBySession = new Map<string, string>();
     private attachmentCleanupTimer?: NodeJS.Timeout;
     private attachmentCleanupInFlight = false;
+    private lastKnownModels: ModelInfo[] = [];
+    private workspaceSwitchInFlight = false;
+    private currentWorkspaceKey = '';
 
     private async ensureDir(dir: string): Promise<void> {
         await fs.promises.mkdir(dir, { recursive: true });
     }
 
+    private normalizeWorkspaceRoot(root: string): string {
+        const resolved = pathModule.resolve(root);
+        if (process.platform === 'win32') {
+            return resolved.toLowerCase();
+        }
+        return resolved;
+    }
+
+    private getWorkspaceKeyForRoot(root: string): string {
+        const normalized = this.normalizeWorkspaceRoot(root);
+        return crypto.createHash('sha1').update(normalized).digest('hex');
+    }
+
+    private getWorkspaceKey(): string {
+        return this.currentWorkspaceKey || 'no-workspace';
+    }
+
+    private getSessionCwd(info: any): string | undefined {
+        const cwd = info?.path?.cwd;
+        if (typeof cwd !== 'string' || !cwd) return undefined;
+        return cwd;
+    }
+
+    private async getSessionWorkspaceMatch(sessionId: string, workspaceRoot: string): Promise<'match' | 'mismatch' | 'unknown'> {
+        try {
+            const info = await this.client.getSessionInfo(sessionId);
+            const sessionCwd = this.getSessionCwd(info);
+            if (!sessionCwd) {
+                this.uiDebugChannel.appendLine(`[EXT][SESSION_FILTER_SKIP] sessionId=${sessionId} reason=missing-cwd`);
+                return 'unknown';
+            }
+            const expected = this.normalizeWorkspaceRoot(workspaceRoot);
+            const actual = this.normalizeWorkspaceRoot(sessionCwd);
+            const matched = expected === actual;
+            this.uiDebugChannel.appendLine(
+                `[EXT][SESSION_FILTER] sessionId=${sessionId} workspace=${workspaceRoot} sessionCwd=${sessionCwd} matched=${String(matched)}`
+            );
+            return matched ? 'match' : 'mismatch';
+        } catch (error) {
+            this.uiDebugChannel.appendLine(`[EXT][SESSION_FILTER_ERR] sessionId=${sessionId} err=${String(error)}`);
+            return 'unknown';
+        }
+    }
+
+    private async sessionMatchesWorkspace(sessionId: string, workspaceRoot: string): Promise<boolean> {
+        return (await this.getSessionWorkspaceMatch(sessionId, workspaceRoot)) === 'match';
+    }
+
+    private async findMostRecentWorkspaceSession(
+        sessions: SessionInfo[],
+        workspaceRoot: string,
+        maxChecks = 20
+    ): Promise<SessionInfo | undefined> {
+        const checks = Math.min(Math.max(maxChecks, 1), sessions.length);
+        for (let i = 0; i < checks; i++) {
+            const candidate = sessions[i];
+            if (!candidate?.id) continue;
+            const matched = await this.sessionMatchesWorkspace(candidate.id, workspaceRoot);
+            if (matched) {
+                return candidate;
+            }
+        }
+        return undefined;
+    }
+
     private getSnapshotDir(): string {
-        return pathModule.join(this._context.globalStorageUri.fsPath, 'sessionSnapshots');
+        return pathModule.join(this._context.globalStorageUri.fsPath, 'sessionSnapshots', this.getWorkspaceKey());
     }
 
     private getSnapshotFile(sessionId: string): string {
@@ -158,11 +226,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private getChangeListDir(): string {
-        return pathModule.join(this._context.globalStorageUri.fsPath, 'sessionChangeLists');
+        return pathModule.join(this._context.globalStorageUri.fsPath, 'sessionChangeLists', this.getWorkspaceKey());
     }
 
     private getCanceledTurnsDir(): string {
-        return pathModule.join(this._context.globalStorageUri.fsPath, 'sessionCanceledTurns');
+        return pathModule.join(this._context.globalStorageUri.fsPath, 'sessionCanceledTurns', this.getWorkspaceKey());
     }
 
     private getChangeListPath(sessionId: string): string {
@@ -710,6 +778,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             const sessionInfo = await this.client.createSession();
                             this.currentSessionId = sessionInfo.id;
                             this.client.setSessionId(this.currentSessionId);
+                            const workspaceFolder = this.client.getWorkspaceRoot() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+                            if (workspaceFolder) {
+                                const workspaceKey = this.getWorkspaceKeyForRoot(workspaceFolder);
+                                await this._context.globalState.update(`recentSession.${workspaceKey}`, this.currentSessionId);
+                                this.uiDebugChannel.appendLine(
+                                    `[EXT][RECENT_SESSION_UPDATED] sessionId=${this.currentSessionId} reason=sendMessage-createSession workspace=${workspaceFolder}`
+                                );
+                            }
                             // this.uiDebugChannel.appendLine(`[EXT][SEND_SESSION_CREATED] id=${this.currentSessionId}`);
                             const liveWebview = this._view?.webview || activeWebview;
                             liveWebview.postMessage({
@@ -1075,10 +1151,11 @@ ${attachmentLines.join('\n')}`
                         this.resetUiState();
                         this.currentSessionId = data.sessionId;
                         this.client.setSessionId(this.currentSessionId);
-                        const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-                        if (workspaceFolder) {
-                            await this._context.globalState.update(`recentSession.${workspaceFolder}`, data.sessionId);
-                        }
+                            const workspaceFolder = this.client.getWorkspaceRoot() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+                            if (workspaceFolder) {
+                                const workspaceKey = this.getWorkspaceKeyForRoot(workspaceFolder);
+                                await this._context.globalState.update(`recentSession.${workspaceKey}`, data.sessionId);
+                            }
                         await this.ensureSessionUndoReady(data.sessionId, activeWebview);
                         const cwd = workspaceFolder || process.cwd();
                         // this.uiDebugChannel.appendLine(`[EXT][EXPORT_TRY] sessionId=${data.sessionId} cwd=${cwd} cmd="opencode export ${data.sessionId}"`);
@@ -1266,10 +1343,11 @@ ${attachmentLines.join('\n')}`
                     this.resetSessionState();
                     this.currentSessionId = undefined;
                     this.client.setSessionId(this.currentSessionId);
-                    const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-                    if (workspaceFolder) {
-                        await this._context.globalState.update(`recentSession.${workspaceFolder}`, undefined);
-                    }
+                        const workspaceFolder = this.client.getWorkspaceRoot() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+                        if (workspaceFolder) {
+                            const workspaceKey = this.getWorkspaceKeyForRoot(workspaceFolder);
+                            await this._context.globalState.update(`recentSession.${workspaceKey}`, undefined);
+                        }
                     activeWebview.postMessage({ type: 'newSession', sessionId: this.currentSessionId });
                     if (this.gitUndoEnabled) {
                         this.pendingBaselineTurnKey = `baseline-${Date.now()}`;
@@ -1793,6 +1871,9 @@ ${attachmentLines.join('\n')}`
         let sessions: SessionInfo[] = [];
         try {
             models = await this.client.listModels();
+            if (models.length) {
+                this.lastKnownModels = models;
+            }
         } catch (error) {
             this.postAddResponse(webview, `Failed to load models: ${error}`);
         }
@@ -1806,27 +1887,74 @@ ${attachmentLines.join('\n')}`
         const storedVariant = this._context.globalState.get<string>('opencode.variant');
         const storedMode = this._context.globalState.get<string>('opencode.mode');
 
-        const defaultModel = storedModel || (models[0] ? models[0].fullId : undefined);
-        const defaultVariant = storedVariant || undefined;
         const defaultMode = storedMode || 'build';
 
-        this.selectedModel = defaultModel;
-        this.selectedVariant = defaultVariant;
         this.selectedMode = defaultMode;
 
         if (!models.length) {
-            void this.refreshModels(webview);
+            const refreshed = await this.refreshModels(webview);
+            if (refreshed.length) {
+                models = refreshed;
+            } else if (this.lastKnownModels.length) {
+                models = this.lastKnownModels;
+            }
         }
 
-        if (!storedModel && defaultModel) {
-            await this._context.globalState.update('opencode.model', defaultModel);
+        const modelMap = new Map(models.map((model) => [model.fullId, model]));
+        let resolvedModel = storedModel;
+        if (!resolvedModel || !modelMap.has(resolvedModel)) {
+            resolvedModel = models[0]?.fullId;
         }
 
-        const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        let resolvedVariant = storedVariant || undefined;
+        const resolvedModelInfo = resolvedModel ? modelMap.get(resolvedModel) : undefined;
+        const variants = resolvedModelInfo?.variants || [];
+        if (resolvedVariant && !variants.includes(resolvedVariant)) {
+            resolvedVariant = undefined;
+        }
+
+        this.selectedModel = resolvedModel;
+        this.selectedVariant = resolvedVariant;
+
+        if (resolvedModel && resolvedModel !== storedModel) {
+            await this._context.globalState.update('opencode.model', resolvedModel);
+        }
+        if ((resolvedVariant || '') !== (storedVariant || '')) {
+            await this._context.globalState.update('opencode.variant', resolvedVariant);
+        }
+        this.uiDebugChannel.appendLine(
+            `[EXT][INIT_MODEL_RESOLVE] models=${models.length} storedModel=${storedModel || 'null'} selectedModel=${resolvedModel || 'null'} storedVariant=${storedVariant || 'null'} selectedVariant=${resolvedVariant || 'null'}`
+        );
+
+        const workspaceRoot = this.client.getWorkspaceRoot() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const workspaceCount = vscode.workspace.workspaceFolders?.length || 0;
+        if (workspaceRoot) {
+            this.currentWorkspaceKey = this.getWorkspaceKeyForRoot(workspaceRoot);
+        }
+        this.uiDebugChannel.appendLine(
+            `EXT: workspace.root.select | mode=first-folder | root=${workspaceRoot || 'null'} | count=${workspaceCount}`
+        );
+
+        const workspaceFolder = workspaceRoot;
         let recentSessionId: string | undefined;
         if (workspaceFolder) {
-            recentSessionId = this._context.globalState.get<string>(`recentSession.${workspaceFolder}`);
+            const workspaceKey = this.getWorkspaceKeyForRoot(workspaceFolder);
+            recentSessionId = this._context.globalState.get<string>(`recentSession.${workspaceKey}`);
         }
+        if (workspaceFolder && recentSessionId) {
+            const recentMatch = await this.getSessionWorkspaceMatch(recentSessionId, workspaceFolder);
+            if (recentMatch === 'mismatch') {
+                this.uiDebugChannel.appendLine(
+                    `[EXT][RECENT_SESSION_SKIP] sessionId=${recentSessionId} reason=workspace-mismatch workspace=${workspaceFolder}`
+                );
+                recentSessionId = undefined;
+            } else if (recentMatch === 'unknown') {
+                this.uiDebugChannel.appendLine(
+                    `[EXT][RECENT_SESSION_ACCEPT] sessionId=${recentSessionId} reason=trusted-recent-missing-cwd workspace=${workspaceFolder}`
+                );
+            }
+        }
+        let snapshotLoaded = false;
                 if (recentSessionId) {
                     try {
                         const cwd = workspaceFolder || process.cwd();
@@ -1865,7 +1993,7 @@ ${attachmentLines.join('\n')}`
                                     // this.uiDebugChannel.appendLine(`[EXT][SNAP_LOAD_OK] sessionId=${recentSessionId} file=${this.getSnapshotFile(recentSessionId)} bytes=${snap.bytes}`);
                                     this.currentSessionId = recentSessionId;
                                     this.client.setSessionId(this.currentSessionId);
-                                    return;
+                                    snapshotLoaded = true;
                                 }
                                 this.uiDebugChannel.appendLine(`[EXT][SNAP_LOAD_MISS] sessionId=${recentSessionId} file=${this.getSnapshotFile(recentSessionId)}`);
                             } catch (err) {
@@ -1883,37 +2011,38 @@ ${attachmentLines.join('\n')}`
                             return;
                         }
 
-                        const exportData = normalized.data;
-                        const formattedRaw = this.formatSession(exportData);
-                        const formatted = await this.injectChangeLists(recentSessionId, formattedRaw);
-                        this.currentSessionId = recentSessionId;
-                        this.client.setSessionId(this.currentSessionId);
-                        const liveWebview = this._view?.webview || webview;
-                        await this.ensureSessionUndoReady(recentSessionId, liveWebview);
-                        const persisted = await this.loadPersistedSegment(recentSessionId);
-                        const historySegments = persisted?.segment?.historySegments || [];
-                        if (persisted?.segment?.historySegments) {
-                            this.revertedSegmentHistory = persisted.segment.historySegments;
-                        } else {
-                            this.revertedSegmentHistory = [];
-                        }
-                        if (persisted?.segment) {
-                            this.client.setRevertedSegment({
-                                isActive: Boolean(persisted.segment.isActive),
-                                discarded: Boolean(persisted.discarded),
-                                startMessageId: persisted.segment.startMessageId || recentSessionId,
-                                startMessageIndex: persisted.segment.startMessageIndex ?? 0,
-                                endMessageId: persisted.segment.endMessageId || recentSessionId,
-                                endMessageIndex: persisted.segment.endMessageIndex ?? (persisted.segment.startMessageIndex ?? 0),
-                                opIds: persisted.segment.opIds || [],
-                                collapsed: true,
-                                conflicts: persisted.conflicts || [],
-                                messageIds: persisted.segment.messageIds,
-                                operationId: persisted.segment.operationId
-                            });
-                        }
-                        const segMap = this.undoSegmentsBySession.get(recentSessionId);
-                        const segments = segMap ? Array.from(segMap.values()) : [];
+                        if (!snapshotLoaded) {
+                            const exportData = normalized.data;
+                            const formattedRaw = this.formatSession(exportData);
+                            const formatted = await this.injectChangeLists(recentSessionId, formattedRaw);
+                            this.currentSessionId = recentSessionId;
+                            this.client.setSessionId(this.currentSessionId);
+                            const liveWebview = this._view?.webview || webview;
+                            await this.ensureSessionUndoReady(recentSessionId, liveWebview);
+                            const persisted = await this.loadPersistedSegment(recentSessionId);
+                            const historySegments = persisted?.segment?.historySegments || [];
+                            if (persisted?.segment?.historySegments) {
+                                this.revertedSegmentHistory = persisted.segment.historySegments;
+                            } else {
+                                this.revertedSegmentHistory = [];
+                            }
+                            if (persisted?.segment) {
+                                this.client.setRevertedSegment({
+                                    isActive: Boolean(persisted.segment.isActive),
+                                    discarded: Boolean(persisted.discarded),
+                                    startMessageId: persisted.segment.startMessageId || recentSessionId,
+                                    startMessageIndex: persisted.segment.startMessageIndex ?? 0,
+                                    endMessageId: persisted.segment.endMessageId || recentSessionId,
+                                    endMessageIndex: persisted.segment.endMessageIndex ?? (persisted.segment.startMessageIndex ?? 0),
+                                    opIds: persisted.segment.opIds || [],
+                                    collapsed: true,
+                                    conflicts: persisted.conflicts || [],
+                                    messageIds: persisted.segment.messageIds,
+                                    operationId: persisted.segment.operationId
+                                });
+                            }
+                            const segMap = this.undoSegmentsBySession.get(recentSessionId);
+                            const segments = segMap ? Array.from(segMap.values()) : [];
 
                         // this.uiDebugChannel.appendLine(
                         //     `[EXT][SEG_HYDRATE_LOAD] sessionId=${recentSessionId} found=${segments.length} ` +
@@ -1924,31 +2053,32 @@ ${attachmentLines.join('\n')}`
                         //     `[EXT][SEG_HYDRATE_SEND] sessionId=${recentSessionId} count=${segments.length} reason=sendInit`
                         // );
                         
-                        const timelineMsgCount = formatted.messages.filter((m) => typeof m.id === 'string' && m.id.startsWith('msg_')).length;
-                        this.uiDebugChannel.appendLine(
-                            `sessionData.send | sessionId | ${recentSessionId} | messagesCount | ${formatted.messages.length} | ` +
-                            `timelineMsgCount | ${timelineMsgCount} | segmentsCount | ${segments.length}`
-                        );
-                        
-                        const sessionPayload = {
-                            type: 'sessionData',
-                            sessionId: recentSessionId,
-                            title: formatted.title,
-                            messages: formatted.messages,
-                            segments: segments  // Simplified segment array (no complex mapping)
-                        };
-                        
-                        liveWebview.postMessage(sessionPayload);
-                        try {
-                            const snapshotObj = {
+                            const timelineMsgCount = formatted.messages.filter((m) => typeof m.id === 'string' && m.id.startsWith('msg_')).length;
+                            this.uiDebugChannel.appendLine(
+                                `sessionData.send | sessionId | ${recentSessionId} | messagesCount | ${formatted.messages.length} | ` +
+                                `timelineMsgCount | ${timelineMsgCount} | segmentsCount | ${segments.length}`
+                            );
+                            
+                            const sessionPayload = {
+                                type: 'sessionData',
                                 sessionId: recentSessionId,
-                                exportedAt: Date.now(),
-                                sessionData: sessionPayload
+                                title: formatted.title,
+                                messages: formatted.messages,
+                                segments: segments  // Simplified segment array (no complex mapping)
                             };
-                            const bytes = await this.writeSnapshotAtomic(recentSessionId, snapshotObj);
-                            this.uiDebugChannel.appendLine(`[EXT][SNAP_SAVE] sessionId=${recentSessionId} file=${this.getSnapshotFile(recentSessionId)} bytes=${bytes}`);
-                        } catch (err) {
-                            this.uiDebugChannel.appendLine(`[EXT][SNAP_SAVE_FAIL] sessionId=${recentSessionId} err=${String(err)}`);
+                            
+                            liveWebview.postMessage(sessionPayload);
+                            try {
+                                const snapshotObj = {
+                                    sessionId: recentSessionId,
+                                    exportedAt: Date.now(),
+                                    sessionData: sessionPayload
+                                };
+                                const bytes = await this.writeSnapshotAtomic(recentSessionId, snapshotObj);
+                                this.uiDebugChannel.appendLine(`[EXT][SNAP_SAVE] sessionId=${recentSessionId} file=${this.getSnapshotFile(recentSessionId)} bytes=${bytes}`);
+                            } catch (err) {
+                                this.uiDebugChannel.appendLine(`[EXT][SNAP_SAVE_FAIL] sessionId=${recentSessionId} err=${String(err)}`);
+                            }
                         }
                 } catch (err) {
                     this.uiDebugChannel.appendLine(`[EXT][EXPORT_FAILED] sessionId=${recentSessionId} err=${String(err)}`);
@@ -1961,51 +2091,67 @@ ${attachmentLines.join('\n')}`
             this.uiDebugChannel.appendLine(`[EXT][NO_SESSION] checking sessions.length=${sessions.length}`);
             
             if (sessions.length > 0) {
-                // Auto-select most recent session
-                const mostRecent = sessions[0];  // Already sorted by updatedAt desc
-                this.currentSessionId = mostRecent.id;
-                this.client.setSessionId(this.currentSessionId);
-                this.uiDebugChannel.appendLine(`[EXT][AUTO_SELECT] sessionId=${this.currentSessionId} reason=no-current-session`);
-                
-                // Save as recent session for this workspace
+                let mostRecent: SessionInfo | undefined;
                 if (workspaceFolder) {
-                    await this._context.globalState.update(`recentSession.${workspaceFolder}`, this.currentSessionId);
+                    mostRecent = await this.findMostRecentWorkspaceSession(sessions, workspaceFolder);
+                    this.uiDebugChannel.appendLine(
+                        `[EXT][SESSION_FILTER_RESULT] workspace=${workspaceFolder} total=${sessions.length} matched=${mostRecent ? 1 : 0}`
+                    );
+                } else {
+                    mostRecent = sessions[0];
                 }
+
+                if (!mostRecent) {
+                    this.uiDebugChannel.appendLine('[EXT][AUTO_SELECT_SKIP] reason=no-workspace-session-match');
+                } else {
+                    this.currentSessionId = mostRecent.id;
+                    this.client.setSessionId(this.currentSessionId);
+                    this.uiDebugChannel.appendLine(`[EXT][AUTO_SELECT] sessionId=${this.currentSessionId} reason=no-current-session`);
                 
-                // Try to load this session's data
-                try {
-                    const exportResult = await this.client.exportSession(this.currentSessionId);
-                    const formattedRaw = this.formatSession(exportResult);
-                    const formatted = await this.injectChangeLists(this.currentSessionId, formattedRaw);
-                    const segMap = this.undoSegmentsBySession.get(this.currentSessionId);
-                    const segments = segMap ? Array.from(segMap.values()) : [];
-                    
-                    const liveWebview = this._view?.webview || webview;
-                    liveWebview.postMessage({
-                        type: 'sessionData',
-                        sessionId: this.currentSessionId,
-                        title: formatted.title,
-                        messages: formatted.messages,
-                        segments: segments
-                    });
-                    this.uiDebugChannel.appendLine(`[EXT][AUTO_SELECT_LOADED] sessionId=${this.currentSessionId} messages=${formatted.messages.length}`);
-                } catch (err) {
-                    this.uiDebugChannel.appendLine(`[EXT][AUTO_SELECT_LOAD_FAILED] sessionId=${this.currentSessionId} err=${String(err)}`);
-                    // Try snapshot as fallback
+                    // Save as recent session for this workspace
+                    if (workspaceFolder) {
+                        const workspaceKey = this.getWorkspaceKeyForRoot(workspaceFolder);
+                        await this._context.globalState.update(`recentSession.${workspaceKey}`, this.currentSessionId);
+                    }
+                
+                    // Try to load this session's data
                     try {
-                        const snap = await this.readSnapshot(this.currentSessionId);
-                        if (snap?.obj?.sessionData) {
-                            const liveWebview = this._view?.webview || webview;
-                            liveWebview.postMessage(snap.obj.sessionData);
-                            this.uiDebugChannel.appendLine(`[EXT][AUTO_SELECT_SNAP_OK] sessionId=${this.currentSessionId}`);
+                        const exportResult = await this.client.exportSession(this.currentSessionId);
+                        const formattedRaw = this.formatSession(exportResult);
+                        const formatted = await this.injectChangeLists(this.currentSessionId, formattedRaw);
+                        const segMap = this.undoSegmentsBySession.get(this.currentSessionId);
+                        const segments = segMap ? Array.from(segMap.values()) : [];
+
+                        const liveWebview = this._view?.webview || webview;
+                        liveWebview.postMessage({
+                            type: 'sessionData',
+                            sessionId: this.currentSessionId,
+                            title: formatted.title,
+                            messages: formatted.messages,
+                            segments: segments
+                        });
+                        this.uiDebugChannel.appendLine(`[EXT][AUTO_SELECT_LOADED] sessionId=${this.currentSessionId} messages=${formatted.messages.length}`);
+                    } catch (err) {
+                        this.uiDebugChannel.appendLine(`[EXT][AUTO_SELECT_LOAD_FAILED] sessionId=${this.currentSessionId} err=${String(err)}`);
+                        // Try snapshot as fallback
+                        try {
+                            const snap = await this.readSnapshot(this.currentSessionId);
+                            if (snap?.obj?.sessionData) {
+                                const liveWebview = this._view?.webview || webview;
+                                liveWebview.postMessage(snap.obj.sessionData);
+                                this.uiDebugChannel.appendLine(`[EXT][AUTO_SELECT_SNAP_OK] sessionId=${this.currentSessionId}`);
+                            }
+                        } catch (snapErr) {
+                            this.uiDebugChannel.appendLine(`[EXT][AUTO_SELECT_SNAP_FAILED] sessionId=${this.currentSessionId}`);
                         }
-                    } catch (snapErr) {
-                        this.uiDebugChannel.appendLine(`[EXT][AUTO_SELECT_SNAP_FAILED] sessionId=${this.currentSessionId}`);
                     }
                 }
-            } else {
+
+            }
+
+            if (!this.currentSessionId) {
                 // No sessions exist - create new one
-                this.uiDebugChannel.appendLine(`[EXT][CREATE_NEW_SESSION] reason=no-sessions-exist`);
+                this.uiDebugChannel.appendLine(`[EXT][CREATE_NEW_SESSION] reason=${sessions.length > 0 ? 'no-workspace-session-match' : 'no-sessions-exist'}`);
                 try {
                     const newSession = await this.client.createSession();
                     this.currentSessionId = newSession.id;
@@ -2014,7 +2160,8 @@ ${attachmentLines.join('\n')}`
                     
                     // Save as recent session
                     if (workspaceFolder) {
-                        await this._context.globalState.update(`recentSession.${workspaceFolder}`, this.currentSessionId);
+                        const workspaceKey = this.getWorkspaceKeyForRoot(workspaceFolder);
+                        await this._context.globalState.update(`recentSession.${workspaceKey}`, this.currentSessionId);
                     }
                     
                     const liveWebview = this._view?.webview || webview;
@@ -2037,15 +2184,15 @@ ${attachmentLines.join('\n')}`
         const liveWebview = this._view?.webview || webview;
         this.uiDebugChannel.appendLine(
             `[EXT][INIT_SEND] models=${models.length} sessions=${sessions.length} ` +
-            `currentSessionId=${this.currentSessionId} selectedModel=${defaultModel || 'NULL'}`
+            `currentSessionId=${this.currentSessionId} selectedModel=${this.selectedModel || 'NULL'}`
         );
 
         liveWebview.postMessage({
             type: 'init',
             models,
             sessions,
-            selectedModel: defaultModel,
-            selectedVariant: defaultVariant,
+            selectedModel: this.selectedModel,
+            selectedVariant: this.selectedVariant,
             selectedMode: defaultMode,
             currentSessionId: this.currentSessionId,
             sessionId: this.currentSessionId
@@ -2399,6 +2546,56 @@ ${attachmentLines.join('\n')}`
         this.scheduleAttachmentCleanup(reason);
     }
 
+    public recomputeWorkspaceRoot(reason: 'activate' | 'folders-change' | 'delayed-check'): void {
+        const workspaceCount = vscode.workspace.workspaceFolders?.length || 0;
+        const newRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!newRoot) {
+            this.uiDebugChannel.appendLine(`EXT: workspace.root.none | reason=${reason}`);
+            return;
+        }
+        const normalized = this.normalizeWorkspaceRoot(newRoot);
+        const currentRoot = this.normalizeWorkspaceRoot(this.client.getWorkspaceRoot() || newRoot);
+        this.uiDebugChannel.appendLine(
+            `EXT: workspace.root.select | mode=first-folder | root=${newRoot} | count=${workspaceCount}`
+        );
+        if (normalized === currentRoot) return;
+        void this.switchWorkspaceRoot(currentRoot, normalized, reason);
+    }
+
+    private async switchWorkspaceRoot(oldRoot: string, newRoot: string, reason: string): Promise<void> {
+        if (this.workspaceSwitchInFlight) {
+            this.uiDebugChannel.appendLine(`EXT: workspace.switch.skip | reason=in-flight | trigger=${reason}`);
+            return;
+        }
+        this.workspaceSwitchInFlight = true;
+        try {
+            this.uiDebugChannel.appendLine(`EXT: workspace.changed | reason=${reason} | old=${oldRoot} | new=${newRoot}`);
+            const oldPid = this.client.getServerPid();
+            await this.client.shutdownServer();
+            this.uiDebugChannel.appendLine(`EXT: server.stop | reason=workspace-change | pid=${oldPid || 'null'}`);
+
+            this.client.setWorkspaceRoot(newRoot);
+            this.currentWorkspaceKey = this.getWorkspaceKeyForRoot(newRoot);
+            this.client.resetSessionState();
+            this.currentSessionId = undefined;
+            this.revertedSegmentHistory = [];
+            this.revertedSegment = undefined;
+
+            await this.client.ensureServer();
+            const newPid = this.client.getServerPid();
+            this.uiDebugChannel.appendLine(`EXT: server.start | cwd=${newRoot} | pid=${newPid || 'null'}`);
+
+            const liveWebview = this._view?.webview;
+            if (liveWebview) {
+                await this.sendInit(liveWebview);
+            }
+        } catch (error) {
+            this.uiDebugChannel.appendLine(`EXT: workspace.switch.error | reason=${reason} | err=${String(error)}`);
+        } finally {
+            this.workspaceSwitchInFlight = false;
+        }
+    }
+
     private async resolvePendingUserUpgrade(sessionId: string | undefined, webview: vscode.Webview): Promise<void> {
         if (!sessionId) return;
         const result = await this.client.resolveUserMessageUpgrade(sessionId);
@@ -2643,13 +2840,18 @@ ${attachmentLines.join('\n')}`
         });
     }
 
-    private async refreshModels(webview: vscode.Webview): Promise<void> {
+    private async refreshModels(webview: vscode.Webview): Promise<ModelInfo[]> {
         try {
             const models = await this.client.listModels();
+            if (models.length) {
+                this.lastKnownModels = models;
+            }
             webview.postMessage({ type: 'models', models, sessionId: this.currentSessionId });
+            return models;
         } catch (error) {
             this.postAddResponse(webview, `Failed to refresh models: ${error}`);
         }
+        return [];
     }
 
     private async refreshSessions(webview: vscode.Webview, requestId: string): Promise<void> {
@@ -2663,7 +2865,7 @@ ${attachmentLines.join('\n')}`
     }
 
     private getRevertedSegmentStorageDir(): string {
-        return this._context.globalStorageUri.fsPath;
+        return pathModule.join(this._context.globalStorageUri.fsPath, 'revertedSegments', this.getWorkspaceKey());
     }
 
     private getRevertedSegmentPath(sessionId: string): string {
@@ -3064,7 +3266,7 @@ ${attachmentLines.join('\n')}`
                         <span>Sessions</span>
                         <div class="session-panel-actions">
                             <button class="icon-btn" id="refresh-sessions" title="Refresh">
-                                <svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M8 3a5 5 0 1 1-4.546 2.916l.908-.417A4 4 0 1 0 8 4V1.5L11 4 8 6.5V4z"/></svg>
+                                ↺
                             </button>
                             <button class="icon-btn" id="close-sessions" title="Close">
                                 <svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.75.75 0 1 1 1.06 1.06L9.06 8l3.22 3.22a.75.75 0 1 1-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 0 1-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06z"/></svg>
