@@ -94,6 +94,21 @@ type RevertedSegment = {
     fileSet?: string[];
 };
 
+type ServerLock = {
+    workspaceRoot: string;
+    port: number;
+    password: string;
+    updatedAt: string;
+};
+
+type ServerConn = {
+    host: string;
+    port: number;
+    baseUrl: string;
+    authHeader: string;
+    lock: ServerLock;
+};
+
 export class OpenCodeClient {
     public static outputChannel = vscode.window.createOutputChannel("OpenCode CLI");
     private currentChild?: cp.ChildProcess;
@@ -104,12 +119,17 @@ export class OpenCodeClient {
     private workspaceRoot: string;
     private storage?: vscode.Memento;
     private serverPid?: number;
+    private serverPassword?: string;
+    private serverLockCache?: { lock: ServerLock; baseUrl: string; authHeader: string; mtimeMs: number };
     private eventStreamAbort?: AbortController;
     private eventStreamActive = false;
     private eventStreamBackoffMs = 1000;
     private readonly eventListeners = new Set<(event: ChatEvent) => void>();
     private readonly sessionIdleWaiters = new Map<string, Array<() => void>>();
-    private readonly serverStateKey = 'opencode.serverStateByWorkspace.v1';
+    private readonly serverLockDir = '.opencode';
+    private readonly serverLockFile = 'server.lock.json';
+    private readonly serverPortBase = 42000;
+    private readonly serverPortRange = 256;
     private resolvedBin?: string;
     private useCmdWrapper = false;
     private currentSessionId?: string;
@@ -134,7 +154,6 @@ export class OpenCodeClient {
     private activeTurnOpIdBySession = new Map<string, string>();
     private pendingUserMsgIdBySession = new Map<string, string>();
     private pendingAssistantMsgIdBySession = new Map<string, string>();
-    private backgroundKillByPid = new Map<number, Promise<void>>();
 
     public resetSessionState(): void {
         this.currentSessionId = undefined;
@@ -172,6 +191,14 @@ export class OpenCodeClient {
         this.workspaceRoot = newRoot;
         this.gitUndo = new GitUndoEngine(this.workspaceRoot, (message) => this.logUiDebug(message));
         this.gitUndoAvailable = false;
+        this.serverProcess = undefined;
+        this.serverBaseUrl = undefined;
+        this.serverPort = undefined;
+        this.serverPid = undefined;
+        this.serverPassword = undefined;
+        this.serverStartPromise = undefined;
+        this.eventStreamAbort?.abort();
+        this.eventStreamActive = false;
     }
 
     public getServerPid(): number | undefined {
@@ -188,9 +215,14 @@ export class OpenCodeClient {
             return;
         }
         if (!this.serverStartPromise) {
-            this.serverStartPromise = this.startServer();
+            this.serverStartPromise = this.ensureServerForWorkspace(this.workspaceRoot, 'ensure');
         }
-        await this.serverStartPromise;
+        try {
+            await this.serverStartPromise;
+        } catch (error) {
+            this.serverStartPromise = undefined;
+            throw error;
+        }
         if (!this.eventStreamActive) {
             this.connectEventStream();
         }
@@ -1555,136 +1587,385 @@ export class OpenCodeClient {
         return this.serverBaseUrl;
     }
 
-    private async startServer(): Promise<void> {
-        await this.attachOrCreateServer();
+    private normalizeWorkspaceRootForHash(workspaceRoot: string): string {
+        let normalized = workspaceRoot.replace(/\\/g, '/');
+        normalized = normalized.replace(/\/+$/, '');
+        if (process.platform === 'win32') {
+            normalized = normalized.toLowerCase();
+        }
+        return normalized;
+    }
+
+    private hashWorkspaceRoot(workspaceRoot: string): number {
+        const normalized = this.normalizeWorkspaceRootForHash(workspaceRoot);
+        let hash = 0;
+        for (let i = 0; i < normalized.length; i++) {
+            hash = ((hash * 31) + normalized.charCodeAt(i)) >>> 0;
+        }
+        return hash;
+    }
+
+    private getLockDirPath(workspaceRoot: string): string {
+        return path.join(workspaceRoot, this.serverLockDir);
+    }
+
+    private getLockFilePath(workspaceRoot: string): string {
+        return path.join(this.getLockDirPath(workspaceRoot), this.serverLockFile);
+    }
+
+    private async ensureLockDir(workspaceRoot: string): Promise<void> {
+        const dirPath = this.getLockDirPath(workspaceRoot);
+        await fs.promises.mkdir(dirPath, { recursive: true });
+    }
+
+    private generateServerPassword(): string {
+        return crypto.randomBytes(32).toString('base64');
+    }
+
+    private getDefaultPort(workspaceRoot: string): number {
+        const hash = this.hashWorkspaceRoot(workspaceRoot);
+        return this.serverPortBase + (hash % this.serverPortRange);
+    }
+
+    private getPasswordPrefix(password: string): string {
+        return password.slice(0, 6);
+    }
+
+    private async readServerLockFromDisk(workspaceRoot: string): Promise<{ lock: ServerLock; mtimeMs: number } | null> {
+        const lockPath = this.getLockFilePath(workspaceRoot);
+        try {
+            const raw = await fs.promises.readFile(lockPath, 'utf-8');
+            const parsed = JSON.parse(raw);
+            if (!parsed || typeof parsed !== 'object') return null;
+            const port = Number(parsed.port);
+            const password = typeof parsed.password === 'string' ? parsed.password : '';
+            const lock: ServerLock = {
+                workspaceRoot: typeof parsed.workspaceRoot === 'string' ? parsed.workspaceRoot : workspaceRoot,
+                port: Number.isFinite(port) ? port : this.getDefaultPort(workspaceRoot),
+                password: password || this.generateServerPassword(),
+                updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : new Date().toISOString()
+            };
+            const stat = await fs.promises.stat(lockPath);
+            return { lock, mtimeMs: stat.mtimeMs };
+        } catch {
+            return null;
+        }
+    }
+
+    private async writeServerLock(lock: ServerLock, workspaceRoot: string, logUpdate: boolean): Promise<number> {
+        const pathFull = this.getLockFilePath(workspaceRoot);
+        const tmpPath = `${pathFull}.tmp`;
+        const payload: ServerLock = {
+            workspaceRoot: lock.workspaceRoot,
+            port: lock.port,
+            password: lock.password,
+            updatedAt: new Date().toISOString()
+        };
+        await fs.promises.writeFile(tmpPath, JSON.stringify(payload, null, 2), 'utf-8');
+        await fs.promises.rename(tmpPath, pathFull);
+        const stat = await fs.promises.stat(pathFull);
+        if (logUpdate) {
+            this.logUiDebug(`EXT: server.lock.update | port=${payload.port} | updatedAt=${payload.updatedAt}`);
+        }
+        return stat.mtimeMs;
+    }
+
+    private updateServerLockCache(lock: ServerLock, mtimeMs: number): void {
+        this.serverLockCache = {
+            lock,
+            baseUrl: `http://127.0.0.1:${lock.port}`,
+            authHeader: this.buildAuthHeader(lock.password),
+            mtimeMs
+        };
+    }
+
+    private async readOrCreateServerLock(workspaceRoot: string): Promise<{ lock: ServerLock; mtimeMs: number }> {
+        await this.ensureLockDir(workspaceRoot);
+        const lockPath = this.getLockFilePath(workspaceRoot);
+        const exists = fs.existsSync(lockPath);
+        const defaultPort = this.getDefaultPort(workspaceRoot);
+
+        if (!exists) {
+            this.logUiDebug(
+                `EXT: server.lock.read | path=${lockPath} | exists=false | port=${defaultPort} | hasPassword=false`
+            );
+            const lock: ServerLock = {
+                workspaceRoot,
+                port: defaultPort,
+                password: this.generateServerPassword(),
+                updatedAt: new Date().toISOString()
+            };
+            await this.writeServerLock(lock, workspaceRoot, false);
+            this.logUiDebug(
+                `EXT: server.lock.create | path=${lockPath} | port=${lock.port} | passwordHashPrefix=${this.getPasswordPrefix(lock.password)}`
+            );
+            const reread = await this.readServerLockFromDisk(workspaceRoot);
+            if (reread) {
+                this.logUiDebug(
+                    `EXT: server.lock.read | path=${lockPath} | exists=true | port=${reread.lock.port} | hasPassword=${String(Boolean(reread.lock.password))}`
+                );
+                return reread;
+            }
+            const stat = await fs.promises.stat(lockPath);
+            return { lock, mtimeMs: stat.mtimeMs };
+        }
+
+        const loaded = await this.readServerLockFromDisk(workspaceRoot);
+        if (!loaded) {
+            this.logUiDebug(
+                `EXT: server.lock.read | path=${lockPath} | exists=true | port=${defaultPort} | hasPassword=false`
+            );
+            const lock: ServerLock = {
+                workspaceRoot,
+                port: defaultPort,
+                password: this.generateServerPassword(),
+                updatedAt: new Date().toISOString()
+            };
+            const mtimeMs = await this.writeServerLock(lock, workspaceRoot, false);
+            this.logUiDebug(
+                `EXT: server.lock.create | path=${lockPath} | port=${lock.port} | passwordHashPrefix=${this.getPasswordPrefix(lock.password)}`
+            );
+            return { lock, mtimeMs };
+        }
+
+        const lock = loaded.lock;
+        this.logUiDebug(
+            `EXT: server.lock.read | path=${lockPath} | exists=true | port=${lock.port} | hasPassword=${String(Boolean(lock.password))}`
+        );
+        let updated = false;
+        const prevPort = lock.port;
+        if (lock.workspaceRoot !== workspaceRoot) {
+            lock.workspaceRoot = workspaceRoot;
+            updated = true;
+        }
+        if (!lock.password) {
+            lock.password = this.generateServerPassword();
+            updated = true;
+        }
+        if (!Number.isFinite(lock.port)) {
+            lock.port = defaultPort;
+            updated = true;
+        }
+        if (updated) {
+            const portChanged = lock.port !== prevPort;
+            const mtimeMs = await this.writeServerLock(lock, workspaceRoot, portChanged);
+            return { lock, mtimeMs };
+        }
+        return loaded;
+    }
+
+    private async getServerConn(forceRefresh = false): Promise<ServerConn> {
+        const lockPath = this.getLockFilePath(this.workspaceRoot);
+        if (!forceRefresh && this.serverLockCache) {
+            try {
+                const stat = await fs.promises.stat(lockPath);
+                if (stat.mtimeMs === this.serverLockCache.mtimeMs) {
+                    return {
+                        host: '127.0.0.1',
+                        port: this.serverLockCache.lock.port,
+                        baseUrl: this.serverLockCache.baseUrl,
+                        authHeader: this.serverLockCache.authHeader,
+                        lock: this.serverLockCache.lock
+                    };
+                }
+            } catch {
+                // fall through to refresh
+            }
+        }
+
+        const { lock, mtimeMs } = await this.readOrCreateServerLock(this.workspaceRoot);
+        this.updateServerLockCache(lock, mtimeMs);
+        return {
+            host: '127.0.0.1',
+            port: lock.port,
+            baseUrl: `http://127.0.0.1:${lock.port}`,
+            authHeader: this.buildAuthHeader(lock.password),
+            lock
+        };
+    }
+
+    private buildAuthHeader(password: string): string {
+        return `Basic ${Buffer.from(`opencode:${password}`).toString('base64')}`;
+    }
+
+    private async serverFetchOnce(
+        conn: { baseUrl: string; authHeader: string },
+        reqPath: string,
+        init: RequestInit,
+        opName: string,
+        timeoutMs: number
+    ): Promise<Response> {
+        const url = new URL(reqPath, conn.baseUrl).toString();
+        const headers = new Headers(init.headers || undefined);
+        headers.set('Authorization', conn.authHeader);
+        if (!headers.has('Content-Type') && init.body && typeof init.body === 'string') {
+            headers.set('Content-Type', 'application/json');
+        }
+
+        let controller: AbortController | undefined;
+        let timeoutId: NodeJS.Timeout | undefined;
+        if (timeoutMs > 0) {
+            controller = new AbortController();
+            timeoutId = setTimeout(() => controller?.abort(), timeoutMs);
+            if (init.signal) {
+                init.signal.addEventListener('abort', () => controller?.abort(), { once: true });
+            }
+        }
+
+        try {
+            const response = await fetch(url, {
+                ...init,
+                headers,
+                signal: controller ? controller.signal : init.signal
+            } as any);
+            this.logUiDebug(`EXT: server.fetch | url=${url} | op=${opName} | status=${response.status}`);
+            return response;
+        } catch (error) {
+            this.logUiDebug(`EXT: server.fetch | url=${url} | op=${opName} | err=${String(error)}`);
+            throw error;
+        } finally {
+            if (timeoutId) clearTimeout(timeoutId);
+        }
+    }
+
+    private async serverFetch(
+        reqPath: string,
+        init: RequestInit = {},
+        options?: { opName?: string; retry?: boolean; timeoutMs?: number; conn?: ServerConn }
+    ): Promise<Response> {
+        const opName = options?.opName || 'fetch';
+        const retry = options?.retry !== false;
+        const timeoutMs = options?.timeoutMs ?? 2000;
+        const conn = options?.conn || await this.getServerConn();
+        try {
+            const response = await this.serverFetchOnce(conn, reqPath, init, opName, timeoutMs);
+            if (response.status === 401 && retry) {
+                await this.migrateServerPort(conn.lock, '401');
+                const nextConn = await this.getServerConn(true);
+                return this.serverFetch(reqPath, init, { opName, retry: false, timeoutMs, conn: nextConn });
+            }
+            return response;
+        } catch (error) {
+            if (!retry) throw error;
+            await this.ensureServerForWorkspace(conn.lock.workspaceRoot, 'fetch-retry');
+            const nextConn = await this.getServerConn(true);
+            return this.serverFetch(reqPath, init, { opName, retry: false, timeoutMs, conn: nextConn });
+        }
+    }
+
+    private async checkServerHealth(port: number, password: string, timeoutMs = 1000): Promise<'ok' | 'unauthorized' | 'timeout' | 'connrefused' | 'unreachable'> {
+        const conn: ServerConn = {
+            host: '127.0.0.1',
+            port,
+            baseUrl: `http://127.0.0.1:${port}`,
+            authHeader: this.buildAuthHeader(password),
+            lock: { workspaceRoot: this.workspaceRoot, port, password, updatedAt: new Date().toISOString() }
+        };
+        try {
+            const response = await this.serverFetch('/global/health', { method: 'GET' }, { opName: 'health', retry: false, timeoutMs, conn });
+            if (response.status === 200) return 'ok';
+            if (response.status === 401) return 'unauthorized';
+            return 'unreachable';
+        } catch (error) {
+            if ((error as Error)?.name === 'AbortError') return 'timeout';
+            const err = error as NodeJS.ErrnoException;
+            if (err && err.code === 'ECONNREFUSED') return 'connrefused';
+            return 'unreachable';
+        }
+    }
+
+    private async ensureServerForWorkspace(workspaceRoot: string, reason: string): Promise<void> {
         if (this.serverBaseUrl) {
             return;
         }
-        const port = await this.findAvailablePort(4096, 4125);
-        const spawnSpec = await this.buildServeSpawn(['serve', '--port', String(port)]);
+        const { lock, mtimeMs } = await this.readOrCreateServerLock(workspaceRoot);
+        this.updateServerLockCache(lock, mtimeMs);
+        const initialHealth = await this.checkServerHealth(lock.port, lock.password, 1000);
+        this.logUiDebug(`EXT: server.health.try | port=${lock.port} | result=${initialHealth}`);
+
+        if (initialHealth === 'ok') {
+            this.serverBaseUrl = `http://127.0.0.1:${lock.port}`;
+            this.serverPort = lock.port;
+            this.serverPassword = lock.password;
+            this.updateServerLockCache(lock, mtimeMs);
+            this.logUiDebug(`EXT: server.reuse | port=${lock.port}`);
+            return;
+        }
+
+        if (initialHealth === 'unauthorized') {
+            await this.migrateServerPort(lock, '401');
+            return;
+        }
+
+        await this.startServerWithLock(lock);
+    }
+
+    private async migrateServerPort(lock: ServerLock, reason: '401' | 'EADDRINUSE'): Promise<void> {
+        const baseHash = this.hashWorkspaceRoot(lock.workspaceRoot);
+        const startPort = lock.port;
+        for (let i = 0; i < this.serverPortRange; i++) {
+            const candidate = this.serverPortBase + ((baseHash + i) % this.serverPortRange);
+            const result = await this.checkServerHealth(candidate, lock.password, 1000);
+            this.logUiDebug(`EXT: server.health.try | port=${candidate} | result=${result}`);
+            if (result === 'ok') {
+                lock.port = candidate;
+                const mtimeMs = await this.writeServerLock(lock, lock.workspaceRoot, candidate !== startPort);
+                this.serverBaseUrl = `http://127.0.0.1:${candidate}`;
+                this.serverPort = candidate;
+                this.serverPassword = lock.password;
+                this.updateServerLockCache(lock, mtimeMs);
+                this.logUiDebug(`EXT: server.reuse | port=${candidate}`);
+                if (candidate !== startPort) {
+                    this.logUiDebug(`EXT: server.migrate | fromPort=${startPort} | toPort=${candidate} | reason=${reason}`);
+                }
+                return;
+            }
+            if (result === 'unauthorized') {
+                continue;
+            }
+            lock.port = candidate;
+            const mtimeMs = await this.writeServerLock(lock, lock.workspaceRoot, candidate !== startPort);
+            this.updateServerLockCache(lock, mtimeMs);
+            if (candidate !== startPort) {
+                this.logUiDebug(`EXT: server.migrate | fromPort=${startPort} | toPort=${candidate} | reason=${reason}`);
+            }
+            await this.startServerWithLock(lock);
+            return;
+        }
+
+        const message = `OpenCode server failed to find available port in range ${this.serverPortBase}-${this.serverPortBase + this.serverPortRange - 1}.`;
+        vscode.window.showErrorMessage(message);
+        throw new Error(message);
+    }
+
+    private async startServerWithLock(lock: ServerLock): Promise<void> {
+        const port = lock.port;
+        const spawnSpec = await this.buildServeSpawn(['serve', '--port', String(port), '--hostname', '127.0.0.1']);
         this.serverProcess = cp.spawn(spawnSpec.command, spawnSpec.args, {
             cwd: this.workspaceRoot,
             shell: false,
-            env: { ...process.env, PYTHONIOENCODING: 'utf-8' }
+            env: { ...process.env, PYTHONIOENCODING: 'utf-8', OPENCODE_SERVER_PASSWORD: lock.password }
         });
         this.serverPort = port;
         this.serverPid = this.serverProcess.pid;
         this.serverBaseUrl = `http://127.0.0.1:${port}`;
-        await this.waitForServerHealthy();
-        this.persistServerState();
-    }
+        this.serverPassword = lock.password;
+        this.logUiDebug(`EXT: server.start | port=${port} | pid=${this.serverPid || 'null'}`);
 
-    private persistServerState(): void {
-        if (!this.storage || !this.serverProcess || !this.serverPort) return;
-        const state = this.storage.get<Record<string, any>>(this.serverStateKey) || {};
-        state[this.workspaceRoot] = {
-            pid: this.serverProcess.pid,
-            port: this.serverPort,
-            workspacePath: this.workspaceRoot,
-            startedAt: Date.now()
-        };
-        void this.storage.update(this.serverStateKey, state);
-    }
-
-    private async attachOrCreateServer(): Promise<void> {
-        if (!this.storage) return;
-        const state = this.storage.get<Record<string, any>>(this.serverStateKey) || {};
-        const record = state[this.workspaceRoot];
-        if (!record?.port) return;
-        const baseUrl = `http://127.0.0.1:${record.port}`;
         try {
-            const response = await fetch(`${baseUrl}/global/health`);
-            if (!response.ok) return;
-        } catch {
-            return;
-        }
-
-        const workspaceCheck = await this.validateServerWorkspace(baseUrl, this.workspaceRoot);
-        if (workspaceCheck !== true) {
-            const rejectReason = workspaceCheck === false ? 'workspace-mismatch' : 'workspace-unknown';
-            this.logUiDebug(
-                `EXT: server.attach.reject | reason=${rejectReason} | workspace=${this.workspaceRoot} | pid=${record.pid || 'null'} | port=${record.port}`
-            );
-            if (typeof record.pid === 'number') {
-                this.startBackgroundKill(record.pid, rejectReason);
-            }
-            delete state[this.workspaceRoot];
-            await this.storage.update(this.serverStateKey, state);
-            this.serverProcess = undefined;
-            this.serverPid = undefined;
-            this.serverPort = undefined;
-            this.serverBaseUrl = undefined;
-            this.logUiDebug(`EXT: server.state.cleared | workspace=${this.workspaceRoot}`);
-            return;
-        }
-
-        this.serverPort = record.port;
-        this.serverPid = record.pid;
-        this.serverBaseUrl = baseUrl;
-        this.logUiDebug(
-            `EXT: server.attach.ok | workspace=${this.workspaceRoot} | pid=${record.pid || 'null'} | port=${record.port} | workspaceCheck=match`
-        );
-    }
-
-    private normalizeWorkspaceRoot(root: string): string {
-        const resolved = path.resolve(root);
-        if (process.platform === 'win32') {
-            return resolved.toLowerCase();
-        }
-        return resolved;
-    }
-
-    private async validateServerWorkspace(baseUrl: string, workspaceRoot: string): Promise<boolean | undefined> {
-        try {
-            const sessions = await this.requestJsonAtBaseUrl<any[]>(baseUrl, 'GET', '/session');
-            if (!Array.isArray(sessions) || !sessions.length) {
-                this.logUiDebug(`EXT: server.attach.cwd-check | workspace=${workspaceRoot} | sessions=0 | result=unknown`);
-                return undefined;
-            }
-            const expected = this.normalizeWorkspaceRoot(workspaceRoot);
-            const checks = Math.min(20, sessions.length);
-            let sawCwd = false;
-            for (let i = 0; i < checks; i++) {
-                const sessionId = sessions[i]?.id;
-                if (typeof sessionId !== 'string' || !sessionId) continue;
-                const info = await this.requestJsonAtBaseUrl<any>(baseUrl, 'GET', `/session/${sessionId}`);
-                const cwd = info?.path?.cwd;
-                if (typeof cwd !== 'string' || !cwd) continue;
-                sawCwd = true;
-                const actual = this.normalizeWorkspaceRoot(cwd);
-                if (actual === expected) {
-                    this.logUiDebug(`EXT: server.attach.cwd-check | workspace=${workspaceRoot} | sessionId=${sessionId} | sessionCwd=${cwd} | result=match`);
-                    return true;
-                }
-            }
-            if (!sawCwd) {
-                this.logUiDebug(`EXT: server.attach.cwd-check | workspace=${workspaceRoot} | sessions=${sessions.length} | result=unknown-no-cwd`);
-                return undefined;
-            }
-            this.logUiDebug(`EXT: server.attach.cwd-check | workspace=${workspaceRoot} | sessions=${sessions.length} | result=mismatch`);
-            return false;
+            await this.waitForServerHealthy(port, lock.password);
         } catch (error) {
-            this.logUiDebug(`EXT: server.attach.cwd-check.fail | workspace=${workspaceRoot} | err=${String(error)}`);
-            return undefined;
-        }
-    }
-
-    private startBackgroundKill(pid: number, reason: string): void {
-        if (!pid || this.backgroundKillByPid.has(pid)) {
-            return;
-        }
-        this.logUiDebug(`EXT: server.kill.async.start | pid=${pid} | reason=${reason}`);
-        const task = (async () => {
-            try {
-                await this.killProcessTree(pid);
-                this.logUiDebug(`EXT: server.kill.async.done | pid=${pid}`);
-            } catch (error) {
-                this.logUiDebug(`EXT: server.kill.async.fail | pid=${pid} | err=${String(error)}`);
-            } finally {
-                this.backgroundKillByPid.delete(pid);
+            const health = await this.checkServerHealth(port, lock.password, 1000);
+            if (health === 'unauthorized') {
+                await this.migrateServerPort(lock, 'EADDRINUSE');
+                return;
             }
-        })();
-        this.backgroundKillByPid.set(pid, task);
+            this.serverBaseUrl = undefined;
+            this.serverPort = undefined;
+            this.serverPid = undefined;
+            this.serverPassword = undefined;
+            throw error;
+        }
     }
 
     private async killProcessTree(pid: number): Promise<void> {
@@ -1738,16 +2019,11 @@ export class OpenCodeClient {
         if (pid) {
             await this.killProcessTree(pid);
         }
-        if (this.storage) {
-            const state = this.storage.get<Record<string, any>>(this.serverStateKey) || {};
-            if (state[this.workspaceRoot]) {
-                delete state[this.workspaceRoot];
-                await this.storage.update(this.serverStateKey, state);
-            }
-        }
         this.serverProcess = undefined;
         this.serverBaseUrl = undefined;
         this.serverPort = undefined;
+        this.serverPid = undefined;
+        this.serverPassword = undefined;
         this.serverStartPromise = undefined;
         this.eventStreamAbort?.abort();
         this.eventStreamActive = false;
@@ -1758,15 +2034,11 @@ export class OpenCodeClient {
         return this.buildSpawn(bin, args);
     }
 
-    private async waitForServerHealthy(): Promise<void> {
+    private async waitForServerHealthy(port: number, password: string): Promise<void> {
         const deadline = Date.now() + 15000;
         while (Date.now() < deadline) {
-            try {
-                const health = await this.requestJson<{ healthy: boolean }>('GET', '/global/health');
-                if (health?.healthy) return;
-            } catch {
-                // ignore until timeout
-            }
+            const result = await this.checkServerHealth(port, password, 1000);
+            if (result === 'ok') return;
             await new Promise((resolve) => setTimeout(resolve, 300));
         }
         throw new Error('OpenCode server failed to start.');
@@ -1793,32 +2065,15 @@ export class OpenCodeClient {
     }
 
     private async requestJson<T>(method: string, path: string, body?: any): Promise<T> {
-        const url = new URL(path, this.getServerBaseUrl());
-        const options: any = { method, headers: { 'Content-Type': 'application/json' } };
+        const options: any = { method };
         if (body !== undefined && method !== 'GET') {
             options.body = JSON.stringify(body);
+            options.headers = { 'Content-Type': 'application/json' };
         }
-        const response = await fetch(url, options as any);
+        const response = await this.serverFetch(path, options, { opName: method + ' ' + path });
         if (!response.ok) {
             const text = await response.text();
             throw new Error(`Server ${method} ${path} failed: ${response.status} ${text}`);
-        }
-        if (response.status === 204) {
-            return {} as T;
-        }
-        return (await response.json()) as T;
-    }
-
-    private async requestJsonAtBaseUrl<T>(baseUrl: string, method: string, reqPath: string, body?: any): Promise<T> {
-        const url = new URL(reqPath, baseUrl);
-        const options: any = { method, headers: { 'Content-Type': 'application/json' } };
-        if (body !== undefined && method !== 'GET') {
-            options.body = JSON.stringify(body);
-        }
-        const response = await fetch(url, options as any);
-        if (!response.ok) {
-            const text = await response.text();
-            throw new Error(`Server ${method} ${reqPath} failed: ${response.status} ${text}`);
         }
         if (response.status === 204) {
             return {} as T;
@@ -1838,12 +2093,11 @@ export class OpenCodeClient {
         this.eventStreamActive = true;
         this.eventStreamAbort?.abort();
         this.eventStreamAbort = new AbortController();
-        const url = new URL('/event', this.getServerBaseUrl());
         const signal = this.eventStreamAbort.signal;
 
         const start = async () => {
             try {
-                const response = await fetch(url, { method: 'GET', signal } as any);
+                const response = await this.serverFetch('/event', { method: 'GET', signal }, { opName: 'event', retry: false, timeoutMs: 0 });
                 if (!response.ok || !response.body) {
                     throw new Error(`Event stream failed: ${response.status}`);
                 }
