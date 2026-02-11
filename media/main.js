@@ -1496,7 +1496,7 @@ function handleToggleSegment(sessionId, segmentId) {
 
 function renderMarkdownInto(element, text) {
     const unwrapped = escapeSystemReminderTags(text || '');
-    const normalized = normalizeInlineMath(normalizeBlockMath(unwrapped));
+    const normalized = normalizeLists(normalizeInlineMath(normalizeBlockMath(unwrapped)));
     const raw = md.render(normalized);
     element.innerHTML = purify.sanitize(raw, {
         ALLOWED_TAGS: [
@@ -1634,6 +1634,48 @@ function normalizeInlineMath(text) {
         const trimmed = inner.trim();
         return `$${trimmed}$`;
     });
+}
+
+function normalizeLists(text) {
+    const lines = String(text || '').split('\n');
+    let inFence = false;
+
+    const isFence = (line) => /^\s*```/.test(line) || /^\s*~~~/.test(line);
+    const isOrdered = (line) => /^\s*\d+[.)]\s+/.test(line);
+    const isHeading = (line) => /^\s*#{1,6}\s+/.test(line);
+    const isHr = (line) => /^\s*(\*\s*){3,}$/.test(line)
+        || /^\s*(-\s*){3,}$/.test(line)
+        || /^\s*(_\s*){3,}$/.test(line);
+    const isBlank = (line) => /^\s*$/.test(line);
+    const isUnindentedBullet = (line) => /^[-+*]\s+/.test(line);
+
+    for (let i = 0; i < lines.length; i += 1) {
+        const line = lines[i];
+        if (isFence(line)) {
+            inFence = !inFence;
+            continue;
+        }
+        if (inFence || !isOrdered(line)) continue;
+
+        let j = i + 1;
+        let touched = false;
+        while (j < lines.length) {
+            const next = lines[j];
+            if (isFence(next) || isBlank(next) || isHeading(next) || isHr(next) || isOrdered(next)) break;
+            if (isUnindentedBullet(next)) {
+                lines[j] = `    ${next}`;
+                touched = true;
+                j += 1;
+                continue;
+            }
+            break;
+        }
+        if (touched) {
+            i = j - 1;
+        }
+    }
+
+    return lines.join('\n');
 }
 
 function wrapTables(root) {

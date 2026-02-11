@@ -551,6 +551,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     private async emitDiffFileList(sessionId: string, webview: vscode.Webview): Promise<void> {
         if (!this.gitUndoEnabled || !sessionId) return;
+        if (!this.client.hasActiveTurnWrites(sessionId) && !this.client.hasPendingTurnChanges(sessionId)) {
+            this.uiDebugChannel.appendLine('EXT: diff.skip | reason=no-turn-writes');
+            return;
+        }
         const repo = await this.resolveInternalRepo(sessionId);
         if (!repo) return;
         let headCommit: string | null = null;
@@ -562,6 +566,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
             if (headCommit && baseCommit) break;
             await this.waitMs(100);
+        }
+        if (headCommit && !baseCommit) {
+            this.uiDebugChannel.appendLine('EXT: diff.skip | reason=baseline-only');
+            return;
         }
         if (!headCommit || !baseCommit) {
             this.postAddResponse(webview, 'No baseline available to show changes.');
@@ -1149,6 +1157,7 @@ ${attachmentLines.join('\n')}`
                     if (!data.sessionId) return;
                     try {
                         this.resetUiState();
+                        let sessionDataSent = false;
                         this.currentSessionId = data.sessionId;
                         this.client.setSessionId(this.currentSessionId);
                             const workspaceFolder = this.client.getWorkspaceRoot() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -1189,12 +1198,22 @@ ${attachmentLines.join('\n')}`
                                     };
                                     const liveWebview = this._view?.webview || activeWebview;
                                     liveWebview.postMessage(payload);
+                                    const payloadMessages = Array.isArray(payload?.messages) ? payload.messages.length : 0;
+                                    if (payloadMessages > 0) {
+                                        sessionDataSent = true;
+                                        this.uiDebugChannel.appendLine(
+                                            `EXT: export.warn.nonfatal | sessionId=${data.sessionId} | stderrLastLine=${normalized.stderrLastLine || 'null'}`
+                                        );
+                                    }
                                     // this.uiDebugChannel.appendLine(`[EXT][SNAP_LOAD_OK] sessionId=${data.sessionId} file=${this.getSnapshotFile(data.sessionId)} bytes=${snap.bytes}`);
                                     return;
                                 }
                                 // this.uiDebugChannel.appendLine(`[EXT][SNAP_LOAD_MISS] sessionId=${data.sessionId} file=${this.getSnapshotFile(data.sessionId)}`);
                             } catch (err) {
                                 this.uiDebugChannel.appendLine(`[EXT][SNAP_LOAD_FAIL] sessionId=${data.sessionId} err=${String(err)}`);
+                            }
+                            if (sessionDataSent) {
+                                return;
                             }
                             const liveWebview = this._view?.webview || activeWebview;
                             liveWebview.postMessage({
@@ -1260,6 +1279,9 @@ ${attachmentLines.join('\n')}`
                             segments: segments  // Simplified segment array
                         };
                         liveWebview.postMessage(sessionPayload);
+                        if (formatted.messages.length > 0) {
+                            sessionDataSent = true;
+                        }
                         try {
                             const snapshotObj = {
                                 sessionId: data.sessionId,
@@ -1955,6 +1977,7 @@ ${attachmentLines.join('\n')}`
             }
         }
         let snapshotLoaded = false;
+        let sessionDataSent = false;
                 if (recentSessionId) {
                     try {
                         const cwd = workspaceFolder || process.cwd();
@@ -1990,6 +2013,10 @@ ${attachmentLines.join('\n')}`
                                     const liveWebview = this._view?.webview || webview;
                                     await this.ensureSessionUndoReady(recentSessionId, liveWebview);
                                     liveWebview.postMessage(payload);
+                                    const payloadMessages = Array.isArray(payload?.messages) ? payload.messages.length : 0;
+                                    if (payloadMessages > 0) {
+                                        sessionDataSent = true;
+                                    }
                                     // this.uiDebugChannel.appendLine(`[EXT][SNAP_LOAD_OK] sessionId=${recentSessionId} file=${this.getSnapshotFile(recentSessionId)} bytes=${snap.bytes}`);
                                     this.currentSessionId = recentSessionId;
                                     this.client.setSessionId(this.currentSessionId);
@@ -1998,6 +2025,12 @@ ${attachmentLines.join('\n')}`
                                 this.uiDebugChannel.appendLine(`[EXT][SNAP_LOAD_MISS] sessionId=${recentSessionId} file=${this.getSnapshotFile(recentSessionId)}`);
                             } catch (err) {
                                 this.uiDebugChannel.appendLine(`[EXT][SNAP_LOAD_FAIL] sessionId=${recentSessionId} err=${String(err)}`);
+                            }
+                            if (sessionDataSent) {
+                                this.uiDebugChannel.appendLine(
+                                    `EXT: export.warn.nonfatal | sessionId=${recentSessionId} | stderrLastLine=${normalized.stderrLastLine || 'null'}`
+                                );
+                                return;
                             }
                             const liveWebview = this._view?.webview || webview;
                             liveWebview.postMessage({
@@ -2068,6 +2101,9 @@ ${attachmentLines.join('\n')}`
                             };
                             
                             liveWebview.postMessage(sessionPayload);
+                            if (formatted.messages.length > 0) {
+                                sessionDataSent = true;
+                            }
                             try {
                                 const snapshotObj = {
                                     sessionId: recentSessionId,

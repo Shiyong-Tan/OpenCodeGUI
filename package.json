@@ -3,7 +3,8 @@
   "displayName": "OpenCode UI",
   "publisher": "TanShiyong",
   "description": "Antigravity extension for OpenCode CLI",
-  "version": "1.0.0",
+  "icon": "media/marketplace-icon.png",
+  "version": "1.0.7",
   "license": "MIT",
   "repository": {
     "type": "git",

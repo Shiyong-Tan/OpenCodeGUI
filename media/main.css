@@ -500,6 +500,11 @@ body {
     gap: 6px;
 }
 
+.conflict-card-path {
+    color: var(--vscode-descriptionForeground);
+    margin-right: -6px;
+}
+
 .conflict-card-item summary::marker {
     content: '';
 }

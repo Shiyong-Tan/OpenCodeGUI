@@ -145,6 +145,7 @@ export class OpenCodeClient {
     private uiDebugChannel?: vscode.OutputChannel;
     private turnStateBySession = new Map<string, TurnState>();
     private pendingTurnChangesBySession = new Map<string, PendingTurnChanges>();
+    private turnWriteStateBySession = new Map<string, { turnKey: string; hasWrites: boolean }>();
     private gitUndo?: GitUndoEngine;
     private gitUndoAvailable = false;
     private sessionUndoEnabled = new Map<string, boolean>();
@@ -326,6 +327,7 @@ export class OpenCodeClient {
             lastResolvedAssistantMsgId: undefined,
             turnMessageIds: existing?.turnMessageIds ?? new Set()
         });
+        this.turnWriteStateBySession.set(sessionId, { turnKey: pendingUserLocalKey, hasWrites: false });
         // this.logUiDebug(`[DBG_TURN_START] session=${sessionId} userLocal=${pendingUserLocalKey || 'null'}`);
     }
 
@@ -351,11 +353,82 @@ export class OpenCodeClient {
         if (!sessionId) return;
         this.turnStateBySession.delete(sessionId);
         this.pendingTurnChangesBySession.delete(sessionId);
+        this.turnWriteStateBySession.delete(sessionId);
         this.activeTurnOpIdBySession.delete(sessionId);
         this.canceledActiveTurnBySession.delete(sessionId);
         this.pendingUserMsgIdBySession.delete(sessionId);
         this.pendingAssistantMsgIdBySession.delete(sessionId);
         // this.logUiDebug(`[DBG_TURN_END] session=${sessionId}`);
+    }
+
+    private getTurnKeyForSession(sessionId: string): string | undefined {
+        const state = this.turnStateBySession.get(sessionId);
+        return state?.pendingUserLocalKey || sessionId;
+    }
+
+    private markTurnHasWrites(sessionId: string, reason?: string): void {
+        if (!sessionId) return;
+        const turnKey = this.getTurnKeyForSession(sessionId);
+        if (!turnKey) return;
+        const existing = this.turnWriteStateBySession.get(sessionId);
+        if (!existing || existing.turnKey !== turnKey) {
+            this.turnWriteStateBySession.set(sessionId, { turnKey, hasWrites: true });
+        } else if (!existing.hasWrites) {
+            existing.hasWrites = true;
+        }
+        if (reason) {
+            this.logUiDebug(`EXT: turn.write | sessionId=${sessionId} | turnKey=${turnKey} | reason=${reason}`);
+        }
+    }
+
+    public hasActiveTurnWrites(sessionId: string): boolean {
+        if (!sessionId) return false;
+        const turnKey = this.getTurnKeyForSession(sessionId);
+        if (!turnKey) return false;
+        const state = this.turnWriteStateBySession.get(sessionId);
+        if (!state || state.turnKey !== turnKey) return false;
+        return state.hasWrites === true;
+    }
+
+    public hasPendingTurnChanges(sessionId: string): boolean {
+        if (!sessionId) return false;
+        const pending = this.pendingTurnChangesBySession.get(sessionId);
+        return Boolean(pending?.changes?.length);
+    }
+
+    private isBashCommandReadOnly(command: string | undefined): boolean {
+        const raw = typeof command === 'string' ? command.trim() : '';
+        if (!raw) return true;
+        const lower = raw.toLowerCase();
+        if (/[<>]/.test(lower) || /\btee\b/.test(lower)) return false;
+        const segments = lower.split(/&&|\|\||;|\|/).map((seg) => seg.trim()).filter(Boolean);
+        if (!segments.length) return true;
+        return segments.every((segment) => this.isReadOnlyCommandSegment(segment));
+    }
+
+    private isReadOnlyCommandSegment(segment: string): boolean {
+        const trimmed = segment.replace(/^\s*\(/, '').replace(/\)\s*$/, '').trim();
+        if (!trimmed) return true;
+        const parts = trimmed.split(/\s+/);
+        const cmd = parts[0];
+        if (!cmd) return true;
+        if (cmd === 'git') {
+            const sub = parts[1] || '';
+            const readOnlyGit = new Set(['status', 'diff', 'log', 'show', 'rev-parse', 'ls-files', 'describe']);
+            return readOnlyGit.has(sub);
+        }
+        const readOnlyCommands = new Set([
+            'ls',
+            'dir',
+            'cat',
+            'type',
+            'find',
+            'rg',
+            'grep',
+            'pwd',
+            'whoami'
+        ]);
+        return readOnlyCommands.has(cmd);
     }
 
     public getPendingTurnMessageIds(sessionId: string): { userMsgId?: string; assistantMsgId?: string } {
@@ -752,6 +825,20 @@ export class OpenCodeClient {
                         );
                         if (patchText && onEvent) {
                             onEvent({ type: 'toolPatch', text: patchText, sessionId });
+                        }
+                    }
+                    if (parsed.type === 'tool_use' && parsed.part && parsed.part.tool) {
+                        const toolName = String(parsed.part.tool);
+                        const toolStatus = parsed.part?.state?.status;
+                        if (toolStatus === 'completed') {
+                            if (['apply_patch', 'edit', 'write'].includes(toolName)) {
+                                this.markTurnHasWrites(resolvedSessionId || sessionId || '', `tool_use:${toolName}`);
+                            } else if (toolName === 'bash') {
+                                const command = parsed.part?.state?.input?.command;
+                                if (!this.isBashCommandReadOnly(command)) {
+                                    this.markTurnHasWrites(resolvedSessionId || sessionId || '', 'tool_use:bash');
+                                }
+                            }
                         }
                     }
                     const files = this.extractFilesFromEvent(parsed);
@@ -1206,6 +1293,7 @@ export class OpenCodeClient {
         changeSpecs: FileChangeSpec[]
     ): void {
         if (!sessionId || !turnKey || !changeSpecs.length) return;
+        this.markTurnHasWrites(sessionId, 'file-change');
         const existing = this.pendingTurnChangesBySession.get(sessionId);
         if (existing && existing.turnKey !== turnKey) {
             // this.logUiDebug(`[DBG_TURN_QUEUE] session=${sessionId} staleTurn=${existing.turnKey} newTurn=${turnKey} cleared=true`);
@@ -1869,11 +1957,22 @@ export class OpenCodeClient {
     private async serverFetch(
         reqPath: string,
         init: RequestInit = {},
-        options?: { opName?: string; retry?: boolean; timeoutMs?: number; conn?: ServerConn; skipReady?: boolean }
+        options?: {
+            opName?: string;
+            retry?: boolean;
+            timeoutMs?: number;
+            noTimeout?: boolean;
+            retryOnAbort?: boolean;
+            retryTimeoutMs?: number;
+            conn?: ServerConn;
+            skipReady?: boolean;
+        }
     ): Promise<Response> {
         const opName = options?.opName || 'fetch';
         const retry = options?.retry !== false;
-        const timeoutMs = options?.timeoutMs ?? 2000;
+        const retryOnAbort = options?.retryOnAbort === true;
+        const timeoutMs = options?.noTimeout ? 0 : (options?.timeoutMs ?? 2000);
+        const retryTimeoutMs = options?.retryTimeoutMs ?? timeoutMs;
         if (!options?.skipReady) {
             await this.waitForServerReady();
         }
@@ -1883,14 +1982,45 @@ export class OpenCodeClient {
             if (response.status === 401 && retry) {
                 await this.migrateServerPort(conn.lock, '401');
                 const nextConn = await this.getServerConn(true);
-                return this.serverFetch(reqPath, init, { opName, retry: false, timeoutMs, conn: nextConn });
+                return this.serverFetch(reqPath, init, {
+                    opName,
+                    retry: false,
+                    timeoutMs,
+                    noTimeout: options?.noTimeout,
+                    retryOnAbort,
+                    retryTimeoutMs,
+                    conn: nextConn,
+                    skipReady: true
+                });
             }
             return response;
         } catch (error) {
             if (!retry) throw error;
+            if (retryOnAbort && (error as Error)?.name === 'AbortError') {
+                const nextConn = await this.getServerConn(true);
+                return this.serverFetch(reqPath, init, {
+                    opName,
+                    retry: false,
+                    timeoutMs: retryTimeoutMs,
+                    noTimeout: options?.noTimeout,
+                    retryOnAbort: false,
+                    retryTimeoutMs,
+                    conn: nextConn,
+                    skipReady: true
+                });
+            }
             await this.ensureServerForWorkspace(conn.lock.workspaceRoot, 'fetch-retry');
             const nextConn = await this.getServerConn(true);
-            return this.serverFetch(reqPath, init, { opName, retry: false, timeoutMs, conn: nextConn });
+            return this.serverFetch(reqPath, init, {
+                opName,
+                retry: false,
+                timeoutMs,
+                noTimeout: options?.noTimeout,
+                retryOnAbort,
+                retryTimeoutMs,
+                conn: nextConn,
+                skipReady: true
+            });
         }
     }
 
@@ -2000,9 +2130,14 @@ export class OpenCodeClient {
             await this.waitForServerHealthy(port, lock.password);
             this.markServerReady();
         } catch (error) {
+            const err = error as (Error & { code?: string });
+            if (err?.code === 'UNAUTHORIZED') {
+                await this.migrateServerPort(lock, '401');
+                return;
+            }
             const health = await this.checkServerHealth(port, lock.password, 1000);
             if (health === 'unauthorized') {
-                await this.migrateServerPort(lock, 'EADDRINUSE');
+                await this.migrateServerPort(lock, '401');
                 return;
             }
             this.serverBaseUrl = undefined;
@@ -2084,11 +2219,20 @@ export class OpenCodeClient {
     }
 
     private async waitForServerHealthy(port: number, password: string): Promise<void> {
-        const deadline = Date.now() + 15000;
-        while (Date.now() < deadline) {
-            const result = await this.checkServerHealth(port, password, 1000);
+        const maxAttempts = 10;
+        const baseDelay = 300;
+        const maxDelay = 3000;
+        const timeoutMs = 2000;
+        for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+            const result = await this.checkServerHealth(port, password, timeoutMs);
             if (result === 'ok') return;
-            await new Promise((resolve) => setTimeout(resolve, 300));
+            if (result === 'unauthorized') {
+                const err = new Error('OpenCode server unauthorized.');
+                (err as Error & { code?: string }).code = 'UNAUTHORIZED';
+                throw err;
+            }
+            const delay = Math.min(baseDelay * (2 ** attempt), maxDelay);
+            await new Promise((resolve) => setTimeout(resolve, delay));
         }
         throw new Error('OpenCode server failed to start.');
     }
@@ -2119,7 +2263,8 @@ export class OpenCodeClient {
             options.body = JSON.stringify(body);
             options.headers = { 'Content-Type': 'application/json' };
         }
-        const response = await this.serverFetch(path, options, { opName: method + ' ' + path });
+        const fetchOptions = this.getFetchOptionsForPath(method, path);
+        const response = await this.serverFetch(path, options, fetchOptions);
         if (!response.ok) {
             const text = await response.text();
             throw new Error(`Server ${method} ${path} failed: ${response.status} ${text}`);
@@ -2128,6 +2273,40 @@ export class OpenCodeClient {
             return {} as T;
         }
         return (await response.json()) as T;
+    }
+
+    private getFetchOptionsForPath(method: string, reqPath: string): {
+        opName: string;
+        timeoutMs: number;
+        retryOnAbort?: boolean;
+        retryTimeoutMs?: number;
+    } {
+        const messageMatch = /\/session\/[^/]+\/message$/.test(reqPath);
+        const sessionInfoMatch = /\/session\/[^/]+$/.test(reqPath);
+        if (reqPath === '/global/health') {
+            return { opName: 'health', timeoutMs: 1000 };
+        }
+        if (reqPath === '/config/providers') {
+            return { opName: 'models.list', timeoutMs: 5000 };
+        }
+        if (reqPath === '/session') {
+            return { opName: 'sessions.list', timeoutMs: 5000 };
+        }
+        if (messageMatch) {
+            return {
+                opName: 'session.message',
+                timeoutMs: 30000,
+                retryOnAbort: true,
+                retryTimeoutMs: 45000
+            };
+        }
+        if (sessionInfoMatch) {
+            return { opName: 'session.info', timeoutMs: 5000 };
+        }
+        if (reqPath.startsWith('/session/')) {
+            return { opName: `session.${method.toLowerCase()}`, timeoutMs: 5000 };
+        }
+        return { opName: `${method.toLowerCase()} ${reqPath}`, timeoutMs: 5000 };
     }
 
     private parseModelRef(model?: string): { providerID: string; modelID: string } | undefined {
@@ -2146,7 +2325,7 @@ export class OpenCodeClient {
 
         const start = async () => {
             try {
-                const response = await this.serverFetch('/event', { method: 'GET', signal }, { opName: 'event', retry: false, timeoutMs: 0 });
+                const response = await this.serverFetch('/event', { method: 'GET', signal }, { opName: 'event', retry: false, noTimeout: true });
                 if (!response.ok || !response.body) {
                     throw new Error(`Event stream failed: ${response.status}`);
                 }
@@ -2362,6 +2541,17 @@ export class OpenCodeClient {
                     const assistantMsgId = resolvedId || part?.messageID;
                     events.push({ type: 'assistantMessageMeta', sessionId, assistantMsgId, lastText: statusText, tmpKey: this.getPendingAssistantTmpKey(sessionId) });
                 }
+                const toolName = typeof part?.tool === 'string' ? part.tool : '';
+                if (part?.state?.status === 'completed' && sessionId) {
+                    if (['apply_patch', 'edit', 'write'].includes(toolName)) {
+                        this.markTurnHasWrites(sessionId, `tool:${toolName}`);
+                    } else if (toolName === 'bash') {
+                        const command = part?.state?.input?.command;
+                        if (!this.isBashCommandReadOnly(command)) {
+                            this.markTurnHasWrites(sessionId, 'tool:bash');
+                        }
+                    }
+                }
                 if (part?.state?.status === 'completed') {
                     const files = this.extractFilesFromToolPart(part);
                     if (files.length) {
@@ -2404,6 +2594,12 @@ export class OpenCodeClient {
             if (props?.sessionID && this.canceledActiveTurnBySession.get(props.sessionID) === true) {
                 return events;
             }
+            const sessionId = props?.sessionID as string | undefined;
+            if (!sessionId) return events;
+            if (!this.hasActiveTurnWrites(sessionId) && !this.hasPendingTurnChanges(sessionId)) {
+                this.logUiDebug(`EXT: session.diff.skip | sessionId=${sessionId} | reason=no-turn-writes`);
+                return events;
+            }
             const files = props.diff.map((entry: any) => ({
                 filePath: entry.file,
                 before: entry.before,
@@ -2413,7 +2609,6 @@ export class OpenCodeClient {
             })) as FileSnapshot[];
             if (files.length) {
                 if (this.gitUndoAvailable && this.isSessionUndoEnabled(props?.sessionID) && props?.sessionID) {
-                    const sessionId = props.sessionID as string;
                     const turnState = this.turnStateBySession.get(sessionId);
                     const turnKey = turnState?.pendingUserLocalKey || sessionId;
                     const tmpKey = turnState?.pendingAssistantTmpKey;
