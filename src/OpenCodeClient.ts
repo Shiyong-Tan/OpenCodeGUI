@@ -116,6 +116,9 @@ export class OpenCodeClient {
     private serverBaseUrl?: string;
     private serverPort?: number;
     private serverStartPromise?: Promise<void>;
+    private serverReadyPromise?: Promise<void>;
+    private serverReadyResolve?: () => void;
+    private serverReadyReject?: (error: Error) => void;
     private workspaceRoot: string;
     private storage?: vscode.Memento;
     private serverPid?: number;
@@ -197,6 +200,9 @@ export class OpenCodeClient {
         this.serverPid = undefined;
         this.serverPassword = undefined;
         this.serverStartPromise = undefined;
+        this.serverReadyPromise = undefined;
+        this.serverReadyResolve = undefined;
+        this.serverReadyReject = undefined;
         this.eventStreamAbort?.abort();
         this.eventStreamActive = false;
     }
@@ -212,6 +218,10 @@ export class OpenCodeClient {
 
     public async ensureServer(): Promise<void> {
         if (this.serverBaseUrl) {
+            await this.waitForServerReady();
+            if (!this.eventStreamActive) {
+                this.connectEventStream();
+            }
             return;
         }
         if (!this.serverStartPromise) {
@@ -223,6 +233,7 @@ export class OpenCodeClient {
             this.serverStartPromise = undefined;
             throw error;
         }
+        await this.waitForServerReady();
         if (!this.eventStreamActive) {
             this.connectEventStream();
         }
@@ -1788,6 +1799,33 @@ export class OpenCodeClient {
         return `Basic ${Buffer.from(`opencode:${password}`).toString('base64')}`;
     }
 
+    private initServerReadyPromise(): void {
+        if (this.serverReadyPromise) return;
+        this.serverReadyPromise = new Promise((resolve, reject) => {
+            this.serverReadyResolve = resolve;
+            this.serverReadyReject = reject;
+        });
+    }
+
+    private markServerReady(): void {
+        this.serverReadyResolve?.();
+        this.serverReadyResolve = undefined;
+        this.serverReadyReject = undefined;
+    }
+
+    private failServerReady(error: Error): void {
+        this.serverReadyReject?.(error);
+        this.serverReadyResolve = undefined;
+        this.serverReadyReject = undefined;
+        this.serverReadyPromise = undefined;
+    }
+
+    private async waitForServerReady(): Promise<void> {
+        if (this.serverReadyPromise) {
+            await this.serverReadyPromise;
+        }
+    }
+
     private async serverFetchOnce(
         conn: { baseUrl: string; authHeader: string },
         reqPath: string,
@@ -1831,11 +1869,14 @@ export class OpenCodeClient {
     private async serverFetch(
         reqPath: string,
         init: RequestInit = {},
-        options?: { opName?: string; retry?: boolean; timeoutMs?: number; conn?: ServerConn }
+        options?: { opName?: string; retry?: boolean; timeoutMs?: number; conn?: ServerConn; skipReady?: boolean }
     ): Promise<Response> {
         const opName = options?.opName || 'fetch';
         const retry = options?.retry !== false;
         const timeoutMs = options?.timeoutMs ?? 2000;
+        if (!options?.skipReady) {
+            await this.waitForServerReady();
+        }
         const conn = options?.conn || await this.getServerConn();
         try {
             const response = await this.serverFetchOnce(conn, reqPath, init, opName, timeoutMs);
@@ -1862,7 +1903,7 @@ export class OpenCodeClient {
             lock: { workspaceRoot: this.workspaceRoot, port, password, updatedAt: new Date().toISOString() }
         };
         try {
-            const response = await this.serverFetch('/global/health', { method: 'GET' }, { opName: 'health', retry: false, timeoutMs, conn });
+            const response = await this.serverFetch('/global/health', { method: 'GET' }, { opName: 'health', retry: false, timeoutMs, conn, skipReady: true });
             if (response.status === 200) return 'ok';
             if (response.status === 401) return 'unauthorized';
             return 'unreachable';
@@ -1888,6 +1929,8 @@ export class OpenCodeClient {
             this.serverPort = lock.port;
             this.serverPassword = lock.password;
             this.updateServerLockCache(lock, mtimeMs);
+            this.initServerReadyPromise();
+            this.markServerReady();
             this.logUiDebug(`EXT: server.reuse | port=${lock.port}`);
             return;
         }
@@ -1940,6 +1983,7 @@ export class OpenCodeClient {
 
     private async startServerWithLock(lock: ServerLock): Promise<void> {
         const port = lock.port;
+        this.initServerReadyPromise();
         const spawnSpec = await this.buildServeSpawn(['serve', '--port', String(port), '--hostname', '127.0.0.1']);
         this.serverProcess = cp.spawn(spawnSpec.command, spawnSpec.args, {
             cwd: this.workspaceRoot,
@@ -1954,6 +1998,7 @@ export class OpenCodeClient {
 
         try {
             await this.waitForServerHealthy(port, lock.password);
+            this.markServerReady();
         } catch (error) {
             const health = await this.checkServerHealth(port, lock.password, 1000);
             if (health === 'unauthorized') {
@@ -1964,6 +2009,7 @@ export class OpenCodeClient {
             this.serverPort = undefined;
             this.serverPid = undefined;
             this.serverPassword = undefined;
+            this.failServerReady(error as Error);
             throw error;
         }
     }
@@ -2025,6 +2071,9 @@ export class OpenCodeClient {
         this.serverPid = undefined;
         this.serverPassword = undefined;
         this.serverStartPromise = undefined;
+        this.serverReadyPromise = undefined;
+        this.serverReadyResolve = undefined;
+        this.serverReadyReject = undefined;
         this.eventStreamAbort?.abort();
         this.eventStreamActive = false;
     }

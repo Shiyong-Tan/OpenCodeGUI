@@ -38,6 +38,10 @@ OpenCode GUI is a powerful Visual Studio Code extension that brings the capabili
 3. Review changes in the diff view that automatically opens when OpenCode proposes modifications.
 4. Manage your sessions and settings (model, variant, mode) directly in the sidebar.
 
+## Disclaimer
+
+OpenCode GUI is provided "AS IS" without warranty of any kind. Always review changes, run tests, and use version control (Git) before applying or merging AI-generated modifications.
+
 ## Server Reuse (Per Workspace)
 
 OpenCode GUI manages the OpenCode background server per workspace using a lock file.

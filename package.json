@@ -1,9 +1,14 @@
 {
   "name": "opencode-gui",
-  "displayName": "OpenCode GUI",
-  "publisher": "shiyong-tan",
+  "displayName": "OpenCode UI",
+  "publisher": "TanShiyong",
   "description": "Antigravity extension for OpenCode CLI",
-  "version": "0.0.1",
+  "version": "1.0.0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Shiyong-Tan/OpenCodeGUI.git"
+  },
   "engines": {
     "vscode": "^1.80.0"
   },
