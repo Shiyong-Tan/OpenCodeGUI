@@ -38,6 +38,19 @@ OpenCode GUI is a powerful Visual Studio Code extension that brings the capabili
 3. Review changes in the diff view that automatically opens when OpenCode proposes modifications.
 4. Manage your sessions and settings (model, variant, mode) directly in the sidebar.
 
+## Server Reuse (Per Workspace)
+
+OpenCode GUI manages the OpenCode background server per workspace using a lock file.
+
+- Lock path: `.opencode/server.lock.json` in the workspace root.
+- Stores: workspace-specific `port` and `password`.
+- Reuses an existing server when the health check succeeds with Basic Auth.
+- If the lock port is occupied by a different server, OpenCode GUI migrates to a new port and updates the lock file.
+
+## Troubleshooting
+
+- If model or variant is not shown after loading the extension, run `Developer: Reload Window` once and wait for initialization to complete.
+
 ## How Undo/Restore Works
 
 OpenCode GUI uses Git to track and manage code changes:
