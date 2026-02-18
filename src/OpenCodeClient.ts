@@ -23,8 +23,39 @@ export type SessionInfo = {
     updated: string;
 };
 
+export type QuestionOverlayOption = {
+    id: string;
+    label: string;
+};
+
+export type QuestionOverlayPayload = {
+    callId: string;
+    requestId?: string;
+    title: string;
+    prompt: string;
+    options: QuestionOverlayOption[];
+    questions?: Array<{
+        title: string;
+        prompt: string;
+        options: QuestionOverlayOption[];
+        multiple?: boolean;
+    }>;
+};
+
+export type PermissionReply = 'once' | 'always' | 'reject';
+
+export type PermissionOverlayPayload = {
+    sessionId: string;
+    permissionId: string;
+    requestId?: string;
+    permission: string;
+    patterns: string[];
+    metadata?: any;
+    toolCallId?: string;
+};
+
 export type ChatEvent = {
-    type: 'text' | 'session' | 'raw' | 'permission' | 'diff' | 'message' | 'error' | 'toolPatch' | 'files' | 'assistantMessageMeta';
+    type: 'text' | 'session' | 'raw' | 'permission' | 'diff' | 'message' | 'error' | 'toolPatch' | 'files' | 'assistantMessageMeta' | 'questionOverlay' | 'permissionRequest' | 'permissionReplied';
     text?: string;
     sessionId?: string;
     files?: FileSnapshot[];
@@ -33,6 +64,63 @@ export type ChatEvent = {
     lastText?: string;
     assistantMsgId?: string;
     tmpKey?: string;
+    callId?: string;
+    requestId?: string;
+    title?: string;
+    prompt?: string;
+    options?: QuestionOverlayOption[];
+    questions?: Array<{
+        title: string;
+        prompt: string;
+        options: QuestionOverlayOption[];
+        multiple?: boolean;
+    }>;
+    permissionId?: string;
+    permission?: string;
+    patterns?: string[];
+    response?: PermissionReply;
+    metadata?: any;
+};
+
+type PendingQuestionControl = {
+    callId: string;
+    requestId?: string;
+    title: string;
+    prompt: string;
+    options: QuestionOverlayOption[];
+    questions: Array<{
+        title: string;
+        prompt: string;
+        options: QuestionOverlayOption[];
+        multiple?: boolean;
+    }>;
+};
+
+type QuestionListItem = {
+    id: string;
+    sessionID: string;
+    questions: Array<{
+        header: string;
+        question: string;
+        options: Array<{ label: string; description?: string }>;
+        multiple?: boolean;
+    }>;
+    tool?: {
+        messageID: string;
+        callID: string;
+    };
+};
+
+type PermissionListItem = {
+    id: string;
+    sessionID: string;
+    permission?: string;
+    patterns?: string[];
+    metadata?: any;
+    tool?: {
+        messageID?: string;
+        callID?: string;
+    };
 };
 
 export type FileSnapshot = {
@@ -93,6 +181,9 @@ type RevertedSegment = {
     undoTargetCommit?: string;
     fileSet?: string[];
 };
+
+type EventSource = 'sse' | 'resync';
+type ServerStatus = 'connected' | 'reconnecting' | 'error';
 
 type ServerLock = {
     workspaceRoot: string;
@@ -158,6 +249,27 @@ export class OpenCodeClient {
     private activeTurnOpIdBySession = new Map<string, string>();
     private pendingUserMsgIdBySession = new Map<string, string>();
     private pendingAssistantMsgIdBySession = new Map<string, string>();
+    private currentTurnUserMsgIdBySession = new Map<string, string>();
+    private currentTurnAssistantMsgIdBySession = new Map<string, string>();
+    private currentTurnStartedAtBySession = new Map<string, number>();
+    private lastSseAtBySession = new Map<string, number>();
+    private silenceTimerBySession = new Map<string, NodeJS.Timeout>();
+    private resyncInFlightBySession = new Map<string, Promise<void>>();
+    private resyncCooldownUntilBySession = new Map<string, number>();
+    private finalMetaSeenKeysBySession = new Map<string, Set<string>>();
+    private questionOverlaySeen = new Set<string>();
+    private pendingQuestionsBySession = new Map<string, Map<string, PendingQuestionControl>>();
+    private readonly resyncCooldownMs = 500;
+    private readonly silenceWindowMs = 1800;
+    private serverStatus: ServerStatus = 'connected';
+    private serverStatusHandler?: (status: ServerStatus, reason?: string) => void;
+    private eventStreamFailCount = 0;
+    private eventStreamFailureInFlight = false;
+    private lastRestartAt = 0;
+    private restartWindowStart = 0;
+    private restartAttemptCount = 0;
+    private readonly restartCooldownMs = 60000;
+    private readonly maxRestartsPerWindow = 3;
 
     public resetSessionState(): void {
         this.currentSessionId = undefined;
@@ -179,6 +291,16 @@ export class OpenCodeClient {
         this.activeTurnOpIdBySession.clear();
         this.pendingUserMsgIdBySession.clear();
         this.pendingAssistantMsgIdBySession.clear();
+        this.currentTurnUserMsgIdBySession.clear();
+        this.currentTurnAssistantMsgIdBySession.clear();
+        this.currentTurnStartedAtBySession.clear();
+        this.lastSseAtBySession.clear();
+        this.clearSilenceTimers();
+        this.resyncInFlightBySession.clear();
+        this.resyncCooldownUntilBySession.clear();
+        this.finalMetaSeenKeysBySession.clear();
+        this.questionOverlaySeen.clear();
+        this.pendingQuestionsBySession.clear();
     }
 
     constructor() {
@@ -308,9 +430,40 @@ export class OpenCodeClient {
         }
     }
 
+    public setServerStatusHandler(handler: (status: ServerStatus, reason?: string) => void): void {
+        this.serverStatusHandler = handler;
+        handler(this.serverStatus, 'init');
+    }
+
+    private updateServerStatus(status: ServerStatus, reason?: string): void {
+        if (this.serverStatus === status) return;
+        this.serverStatus = status;
+        this.serverStatusHandler?.(status, reason);
+    }
+
+    private clearSilenceTimer(sessionId: string): void {
+        const timer = this.silenceTimerBySession.get(sessionId);
+        if (timer) {
+            clearTimeout(timer);
+            this.silenceTimerBySession.delete(sessionId);
+        }
+    }
+
+    private clearSilenceTimers(): void {
+        for (const timer of this.silenceTimerBySession.values()) {
+            clearTimeout(timer);
+        }
+        this.silenceTimerBySession.clear();
+    }
+
     public startTurn(sessionId: string, pendingUserLocalKey: string): void {
         if (!sessionId) return;
         this.canceledActiveTurnBySession.set(sessionId, false);
+        this.currentTurnUserMsgIdBySession.delete(sessionId);
+        this.currentTurnAssistantMsgIdBySession.delete(sessionId);
+        const now = Date.now();
+        this.currentTurnStartedAtBySession.set(sessionId, now);
+        this.lastSseAtBySession.set(sessionId, now);
         const pending = this.pendingTurnChangesBySession.get(sessionId);
         if (pending?.changes?.length) {
             // this.logUiDebug(`[DBG_TURN_START] session=${sessionId} pendingChanges=${pending.changes.length} cleared=true`);
@@ -328,6 +481,7 @@ export class OpenCodeClient {
             turnMessageIds: existing?.turnMessageIds ?? new Set()
         });
         this.turnWriteStateBySession.set(sessionId, { turnKey: pendingUserLocalKey, hasWrites: false });
+        this.scheduleSilenceResync(sessionId);
         // this.logUiDebug(`[DBG_TURN_START] session=${sessionId} userLocal=${pendingUserLocalKey || 'null'}`);
     }
 
@@ -358,6 +512,11 @@ export class OpenCodeClient {
         this.canceledActiveTurnBySession.delete(sessionId);
         this.pendingUserMsgIdBySession.delete(sessionId);
         this.pendingAssistantMsgIdBySession.delete(sessionId);
+        this.currentTurnUserMsgIdBySession.delete(sessionId);
+        this.currentTurnAssistantMsgIdBySession.delete(sessionId);
+        this.currentTurnStartedAtBySession.delete(sessionId);
+        this.lastSseAtBySession.delete(sessionId);
+        this.clearSilenceTimer(sessionId);
         // this.logUiDebug(`[DBG_TURN_END] session=${sessionId}`);
     }
 
@@ -465,6 +624,55 @@ export class OpenCodeClient {
             state.turnMessageIds = new Set();
         }
         state.turnMessageIds.add(messageId);
+    }
+
+    public setCurrentTurnUserMsgId(sessionId: string, userMsgId: string, reason = 'unknown'): void {
+        if (!sessionId || !userMsgId || !userMsgId.startsWith('msg_')) return;
+        const existing = this.currentTurnUserMsgIdBySession.get(sessionId);
+        if (existing && existing === userMsgId) return;
+        this.currentTurnUserMsgIdBySession.set(sessionId, userMsgId);
+        if (!this.currentTurnStartedAtBySession.has(sessionId)) {
+            this.currentTurnStartedAtBySession.set(sessionId, Date.now());
+        }
+        this.logUiDebug(`EXT: turn.anchor.user | sessionId=${sessionId} | userMsgId=${userMsgId} | reason=${reason}`);
+    }
+
+    public setCurrentTurnAssistantMsgId(sessionId: string, assistantMsgId: string, reason = 'unknown'): void {
+        if (!sessionId || !assistantMsgId || !assistantMsgId.startsWith('msg_')) return;
+        const existing = this.currentTurnAssistantMsgIdBySession.get(sessionId);
+        if (existing && existing === assistantMsgId) return;
+        this.currentTurnAssistantMsgIdBySession.set(sessionId, assistantMsgId);
+        this.logUiDebug(`EXT: turn.anchor.assistant | sessionId=${sessionId} | assistantMsgId=${assistantMsgId} | reason=${reason}`);
+    }
+
+    private hasSeenFinalForAssistant(sessionId: string, assistantMsgId: string): boolean {
+        const seen = this.finalMetaSeenKeysBySession.get(sessionId) || new Set<string>();
+        const needle = `|${assistantMsgId}|`;
+        for (const key of seen) {
+            if (key.includes(needle)) return true;
+        }
+        return false;
+    }
+
+    private isTurnMissingFinal(sessionId: string): boolean {
+        const userMsgId = this.currentTurnUserMsgIdBySession.get(sessionId);
+        if (!userMsgId) return false;
+        const assistantMsgId = this.currentTurnAssistantMsgIdBySession.get(sessionId);
+        if (!assistantMsgId) return true;
+        return !this.hasSeenFinalForAssistant(sessionId, assistantMsgId);
+    }
+
+    private scheduleSilenceResync(sessionId: string): void {
+        if (!sessionId) return;
+        this.clearSilenceTimer(sessionId);
+        const timer = setTimeout(() => {
+            const lastSseAt = this.lastSseAtBySession.get(sessionId) || 0;
+            const silentForMs = Date.now() - lastSseAt;
+            if (silentForMs < this.silenceWindowMs) return;
+            if (!this.isTurnMissingFinal(sessionId)) return;
+            this.scheduleSessionResyncLimited(sessionId, 'silence-window');
+        }, this.silenceWindowMs);
+        this.silenceTimerBySession.set(sessionId, timer);
     }
 
 
@@ -2281,8 +2489,8 @@ export class OpenCodeClient {
         retryOnAbort?: boolean;
         retryTimeoutMs?: number;
     } {
-        const messageMatch = /\/session\/[^/]+\/message$/.test(reqPath);
-        const sessionInfoMatch = /\/session\/[^/]+$/.test(reqPath);
+        const messageMatch = /\/session\/[^/]+\/message(?:\?.*)?$/.test(reqPath);
+        const sessionInfoMatch = /\/session\/[^/?]+(?:\?.*)?$/.test(reqPath);
         if (reqPath === '/global/health') {
             return { opName: 'health', timeoutMs: 1000 };
         }
@@ -2329,6 +2537,8 @@ export class OpenCodeClient {
                 if (!response.ok || !response.body) {
                     throw new Error(`Event stream failed: ${response.status}`);
                 }
+                this.eventStreamFailCount = 0;
+                this.updateServerStatus('connected', 'event-stream-open');
                 this.eventStreamBackoffMs = 1000;
                 const reader = response.body.getReader();
                 let buffer = '';
@@ -2347,6 +2557,12 @@ export class OpenCodeClient {
                 }
             } catch (error) {
                 if ((error as Error).name === 'AbortError') return;
+                this.eventStreamFailCount += 1;
+                this.updateServerStatus('reconnecting', 'event-stream-error');
+                this.logUiDebug(`EXT: event.fail | count=${this.eventStreamFailCount}`);
+                if (this.eventStreamFailCount >= 3) {
+                    void this.handleEventStreamFailure();
+                }
             }
 
             this.eventStreamActive = false;
@@ -2365,7 +2581,112 @@ export class OpenCodeClient {
         }
     }
 
-    private handleServerEvent(payload: string): void {
+    private async handleEventStreamFailure(): Promise<void> {
+        if (this.eventStreamFailureInFlight) return;
+        this.eventStreamFailureInFlight = true;
+        try {
+            const conn = await this.getServerConn(true);
+            const health = await this.checkServerHealth(conn.lock.port, conn.lock.password, 1000);
+            this.logUiDebug(`EXT: event.fail.health | result=${health}`);
+            if (health === 'ok') {
+                if (this.currentSessionId) {
+                    this.scheduleSessionResyncLimited(this.currentSessionId, 'event-stream-fail');
+                }
+                return;
+            }
+            await this.restartServerFromEventFailure(`health=${health}`);
+        } catch (error) {
+            this.logUiDebug(`EXT: event.fail.handler | err=${String(error)}`);
+            this.updateServerStatus('error', 'event-stream-fail');
+        } finally {
+            this.eventStreamFailureInFlight = false;
+        }
+    }
+
+    private async restartServerFromEventFailure(reason: string): Promise<void> {
+        const now = Date.now();
+        if (now - this.restartWindowStart > 5 * 60 * 1000) {
+            this.restartWindowStart = now;
+            this.restartAttemptCount = 0;
+        }
+        if (now - this.lastRestartAt < this.restartCooldownMs) {
+            this.logUiDebug(`EXT: server.restart.skip | reason=cooldown | detail=${reason}`);
+            this.updateServerStatus('error', 'restart-cooldown');
+            return;
+        }
+        if (this.restartAttemptCount >= this.maxRestartsPerWindow) {
+            this.logUiDebug(`EXT: server.restart.skip | reason=limit | detail=${reason}`);
+            this.updateServerStatus('error', 'restart-limit');
+            return;
+        }
+        this.restartAttemptCount += 1;
+        this.lastRestartAt = now;
+        this.updateServerStatus('reconnecting', 'restart');
+        this.logUiDebug(`EXT: server.restart | reason=${reason}`);
+        await this.shutdownServer();
+        await this.ensureServer();
+        this.updateServerStatus('connected', 'restart-success');
+        if (this.currentSessionId) {
+            this.scheduleSessionResyncLimited(this.currentSessionId, 'event-stream-restart');
+        }
+    }
+
+    private emitChatEvents(events: ChatEvent[]): void {
+        if (!events.length) return;
+        for (const event of events) {
+            for (const listener of this.eventListeners) {
+                listener(event);
+            }
+        }
+    }
+
+    private makeFinalMetaDedupeKey(sessionId: string | undefined, messageId: string, completedAt: unknown, finish: unknown): string {
+        const completedPart = typeof completedAt === 'number' ? String(completedAt) : '';
+        const finishPart = typeof finish === 'string' ? finish : '';
+        return `${sessionId || ''}|${messageId}|${completedPart}|${finishPart}`;
+    }
+
+    private shouldEmitFinalMeta(
+        sessionId: string | undefined,
+        messageId: string,
+        completedAt: unknown,
+        finish: unknown,
+        source: EventSource
+    ): boolean {
+        if (!messageId) return false;
+        const key = this.makeFinalMetaDedupeKey(sessionId, messageId, completedAt, finish);
+        const bucketKey = sessionId || '__global__';
+        const seen = this.finalMetaSeenKeysBySession.get(bucketKey) || new Set<string>();
+        if (seen.has(key)) {
+            this.logUiDebug(`EXT: meta.drop.dup | key=${key} | source=${source}`);
+            return false;
+        }
+        seen.add(key);
+        if (seen.size > 1200) {
+            seen.clear();
+            seen.add(key);
+        }
+        this.finalMetaSeenKeysBySession.set(bucketKey, seen);
+        return true;
+    }
+
+    private getSessionIdFromEvent(type: string, props: any): string | undefined {
+        if (type === 'message.updated') {
+            const sessionId = props?.info?.sessionID;
+            return typeof sessionId === 'string' ? sessionId : undefined;
+        }
+        if (type === 'message.part.updated') {
+            const sessionId = props?.part?.sessionID;
+            return typeof sessionId === 'string' ? sessionId : undefined;
+        }
+        if (type === 'session.status' || type === 'session.diff' || type === 'session.error') {
+            const sessionId = props?.sessionID;
+            return typeof sessionId === 'string' ? sessionId : undefined;
+        }
+        return undefined;
+    }
+
+    private handleServerEvent(payload: string, source: EventSource = 'sse'): void {
         let parsed: any;
         try {
             parsed = JSON.parse(payload);
@@ -2374,7 +2695,13 @@ export class OpenCodeClient {
         }
         const type = parsed?.type as string;
         const props = parsed?.properties || {};
-        if (this.shouldLogAssistantSse(type, props)) {
+        if (source === 'sse') {
+            const sessionId = this.getSessionIdFromEvent(type, props);
+            if (sessionId) {
+                this.lastSseAtBySession.set(sessionId, Date.now());
+            }
+        }
+        if (source === 'sse' && this.shouldLogAssistantSse(type, props)) {
             OpenCodeClient.outputChannel.appendLine(`[SSE_ASSIST] ${payload}`);
         }
         if (type === 'session.status' && props?.sessionID && props?.status?.type === 'idle') {
@@ -2383,13 +2710,8 @@ export class OpenCodeClient {
                 waiters.splice(0).forEach((resolve) => resolve());
             }
         }
-        const events = this.mapServerEventToChatEvents(type, props);
-        if (!events.length) return;
-        for (const event of events) {
-            for (const listener of this.eventListeners) {
-                listener(event);
-            }
-        }
+        const events = this.mapServerEventToChatEvents(type, props, source);
+        this.emitChatEvents(events);
     }
 
     private formatToolStatus(part: any): string | null {
@@ -2428,11 +2750,47 @@ export class OpenCodeClient {
         return false;
     }
 
-    private mapServerEventToChatEvents(type: string, props: any): ChatEvent[] {
+    private mapServerEventToChatEvents(type: string, props: any, source: EventSource = 'sse'): ChatEvent[] {
         const events: ChatEvent[] = [];
         if (type === 'session.created' || type === 'session.updated') {
             if (props?.info?.id) {
                 events.push({ type: 'session', sessionId: props.info.id });
+            }
+            return events;
+        }
+        if (type === 'permission.asked') {
+            const permissionId = typeof props?.id === 'string' ? props.id : '';
+            const sessionId = typeof props?.sessionID === 'string' ? props.sessionID : '';
+            const permission = typeof props?.permission === 'string' ? props.permission : '';
+            const patterns = Array.isArray(props?.patterns)
+                ? props.patterns.filter((value: any) => typeof value === 'string' && value.length > 0)
+                : [];
+            if (sessionId && permissionId) {
+                events.push({
+                    type: 'permissionRequest',
+                    sessionId,
+                    permissionId,
+                    requestId: permissionId,
+                    permission,
+                    patterns,
+                    metadata: props?.metadata,
+                    callId: typeof props?.tool?.callID === 'string' ? props.tool.callID : undefined
+                });
+            }
+            return events;
+        }
+        if (type === 'permission.replied') {
+            const sessionId = typeof props?.sessionID === 'string' ? props.sessionID : '';
+            const requestId = typeof props?.requestID === 'string' ? props.requestID : '';
+            const reply = typeof props?.reply === 'string' ? props.reply : '';
+            if (sessionId && requestId) {
+                events.push({
+                    type: 'permissionReplied',
+                    sessionId,
+                    permissionId: requestId,
+                    requestId,
+                    response: reply === 'always' || reply === 'reject' ? reply : 'once'
+                });
             }
             return events;
         }
@@ -2450,6 +2808,11 @@ export class OpenCodeClient {
                     this.pendingUserMsgIdBySession.set(sessionId, info.parentID);
                 }
             }
+            if (sessionId && role === 'user' && typeof messageId === 'string' && source === 'sse') {
+                if (this.turnStateBySession.has(sessionId)) {
+                    this.setCurrentTurnUserMsgId(sessionId, messageId, 'sse-user-message');
+                }
+            }
             const cwd = info?.path?.cwd;
             if (sessionId && typeof cwd === 'string' && cwd) {
                 this.lastCwdBySession.set(sessionId, cwd);
@@ -2460,23 +2823,32 @@ export class OpenCodeClient {
                     this.messageRoleById.set(messageId, role);
                 }
             }
-            if (role === 'user' && messageId) {
+            if (role === 'user' && messageId && source === 'sse') {
                 events.push({ type: 'message', text: messageId, sessionId });
             }
             if (role === 'assistant' && messageId) {
+                if (sessionId && typeof info?.parentID === 'string') {
+                    const currentUser = this.currentTurnUserMsgIdBySession.get(sessionId);
+                    if (currentUser && info.parentID === currentUser) {
+                        this.setCurrentTurnAssistantMsgId(sessionId, messageId, 'assistant-parent-match');
+                    }
+                }
                 const completedAt = info?.time?.completed;
                 const isFinal = Boolean(info?.finish) || typeof completedAt === 'number';
                 if (isFinal) {
                     const messageIndex = this.registerMessage(messageId);
                     this.recordAssistantMsgId(sessionId, messageId);
-                    events.push({
-                        type: 'assistantMessageMeta',
-                        sessionId,
-                        assistantMsgId: messageId,
-                        messageId,
-                        messageIndex,
-                        tmpKey: this.getPendingAssistantTmpKey(sessionId)
-                    });
+                    const shouldEmit = source === 'sse' && this.shouldEmitFinalMeta(sessionId, messageId, completedAt, info?.finish, source);
+                    if (shouldEmit) {
+                        events.push({
+                            type: 'assistantMessageMeta',
+                            sessionId,
+                            assistantMsgId: messageId,
+                            messageId,
+                            messageIndex,
+                            tmpKey: this.getPendingAssistantTmpKey(sessionId)
+                        });
+                    }
                 }
             }
             return events;
@@ -2486,6 +2858,28 @@ export class OpenCodeClient {
             const sessionId = part?.sessionID;
             if (sessionId && this.canceledActiveTurnBySession.get(sessionId) === true) {
                 return events;
+            }
+            const questionOverlay = this.extractQuestionOverlayPart(part);
+            if (questionOverlay && sessionId) {
+                const key = `${sessionId}|${questionOverlay.callId}|running`;
+                if (!this.questionOverlaySeen.has(key)) {
+                    this.rememberPendingQuestion(sessionId, questionOverlay);
+                    this.questionOverlaySeen.add(key);
+                    if (this.questionOverlaySeen.size > 2000) {
+                        this.questionOverlaySeen.clear();
+                        this.questionOverlaySeen.add(key);
+                    }
+                    events.push({
+                        type: 'questionOverlay',
+                        sessionId,
+                        callId: questionOverlay.callId,
+                        requestId: questionOverlay.requestId,
+                        title: questionOverlay.title,
+                        prompt: questionOverlay.prompt,
+                        options: questionOverlay.options,
+                        questions: questionOverlay.questions
+                    });
+                }
             }
             if (part?.type === 'text') {
                 const msgId = typeof part?.messageID === 'string' ? part.messageID : '';
@@ -2535,27 +2929,34 @@ export class OpenCodeClient {
                 events.push({ type: 'text', text: chunk, sessionId, assistantMsgId: part?.messageID, tmpKey: this.getPendingAssistantTmpKey(sessionId) });
             }
             if (part?.type === 'tool') {
+                const toolCallId = this.extractToolCallId(part);
+                const toolStatus = part?.state?.status;
+                if (sessionId && toolCallId && (toolStatus === 'completed' || toolStatus === 'failed' || toolStatus === 'cancelled' || toolStatus === 'canceled')) {
+                    this.clearPendingQuestion(sessionId, toolCallId);
+                }
                 const statusText = this.formatToolStatus(part);
-                if (statusText) {
+                if (statusText && source !== 'resync') {
                     const resolvedId = this.getTurnAssistantMsgId(sessionId);
                     const assistantMsgId = resolvedId || part?.messageID;
                     events.push({ type: 'assistantMessageMeta', sessionId, assistantMsgId, lastText: statusText, tmpKey: this.getPendingAssistantTmpKey(sessionId) });
                 }
                 const toolName = typeof part?.tool === 'string' ? part.tool : '';
                 if (part?.state?.status === 'completed' && sessionId) {
-                    if (['apply_patch', 'edit', 'write'].includes(toolName)) {
-                        this.markTurnHasWrites(sessionId, `tool:${toolName}`);
-                    } else if (toolName === 'bash') {
-                        const command = part?.state?.input?.command;
-                        if (!this.isBashCommandReadOnly(command)) {
-                            this.markTurnHasWrites(sessionId, 'tool:bash');
+                    if (source !== 'resync') {
+                        if (['apply_patch', 'edit', 'write'].includes(toolName)) {
+                            this.markTurnHasWrites(sessionId, `tool:${toolName}`);
+                        } else if (toolName === 'bash') {
+                            const command = part?.state?.input?.command;
+                            if (!this.isBashCommandReadOnly(command)) {
+                                this.markTurnHasWrites(sessionId, 'tool:bash');
+                            }
                         }
                     }
                 }
                 if (part?.state?.status === 'completed') {
                     const files = this.extractFilesFromToolPart(part);
                     if (files.length) {
-                        if (this.gitUndoAvailable && this.isSessionUndoEnabled(sessionId) && sessionId) {
+                        if (source !== 'resync' && this.gitUndoAvailable && this.isSessionUndoEnabled(sessionId) && sessionId) {
                             const turnState = this.turnStateBySession.get(sessionId);
                             const turnKey = turnState?.pendingUserLocalKey || sessionId;
                             const tmpKey = turnState?.pendingAssistantTmpKey;
@@ -2569,12 +2970,14 @@ export class OpenCodeClient {
                         const cwd = this.lastCwdBySession.get(sessionId);
                         const deletePaths = this.extractDeletedPathsFromCommand(command, cwd);
                         if (deletePaths.length) {
-                            const turnState = this.turnStateBySession.get(sessionId);
-                            const turnKey = turnState?.pendingUserLocalKey || sessionId;
-                            const tmpKey = turnState?.pendingAssistantTmpKey;
-                            const assistantId = turnState?.assistantMsgId || turnState?.lastResolvedAssistantMsgId;
-                            const changeSpecs = deletePaths.map((filePath: string) => ({ type: 'delete', path: filePath } as FileChangeSpec));
-                            this.queueTurnChanges(sessionId, turnKey, tmpKey, assistantId, changeSpecs);
+                            if (source !== 'resync') {
+                                const turnState = this.turnStateBySession.get(sessionId);
+                                const turnKey = turnState?.pendingUserLocalKey || sessionId;
+                                const tmpKey = turnState?.pendingAssistantTmpKey;
+                                const assistantId = turnState?.assistantMsgId || turnState?.lastResolvedAssistantMsgId;
+                                const changeSpecs = deletePaths.map((filePath: string) => ({ type: 'delete', path: filePath } as FileChangeSpec));
+                                this.queueTurnChanges(sessionId, turnKey, tmpKey, assistantId, changeSpecs);
+                            }
                         }
                     }
                 }
@@ -2624,7 +3027,7 @@ export class OpenCodeClient {
             if (this.canceledActiveTurnBySession.get(props.sessionID) === true) {
                 return events;
             }
-            this.scheduleSessionResync(props.sessionID);
+            this.scheduleSessionResyncLimited(props.sessionID, 'idle');
         }
         if (type === 'session.error') {
             const errorName = props?.error?.name || props?.error?.data?.name;
@@ -2665,17 +3068,275 @@ export class OpenCodeClient {
     }
 
     private scheduleSessionResync(sessionId: string): void {
-        void this.requestJson<any[]>( 'GET', `/session/${sessionId}/message`)
-            .then((messages) => {
-                if (!Array.isArray(messages)) return;
-                for (const item of messages) {
-                    const info = item?.info || {};
-                    const messageId = info?.id;
-                    if (!messageId) continue;
-                    this.handleServerEvent(JSON.stringify({ type: 'message.updated', properties: { info } }));
-                }
+        this.scheduleSessionResyncLimited(sessionId, 'idle');
+    }
+
+    private extractToolCallId(part: any): string | null {
+        const callId = part?.callID || part?.callId || part?.call_id || part?.call?.id || part?.call?.callID || part?.id;
+        if (typeof callId === 'string' && callId.trim().length) return callId.trim();
+        return null;
+    }
+
+    private extractToolRequestId(part: any): string | undefined {
+        const raw =
+            part?.requestID
+            ?? part?.requestId
+            ?? part?.controlID
+            ?? part?.controlId
+            ?? part?.state?.input?.requestID
+            ?? part?.state?.input?.requestId
+            ?? part?.state?.input?.controlID
+            ?? part?.state?.input?.controlId
+            ?? part?.metadata?.requestID
+            ?? part?.metadata?.requestId
+            ?? part?.metadata?.openai?.itemId;
+        if (typeof raw !== 'string') return undefined;
+        const trimmed = raw.trim();
+        return trimmed || undefined;
+    }
+
+    private normalizeQuestionText(value: any): string | null {
+        if (typeof value !== 'string') return null;
+        const trimmed = value.trim();
+        return trimmed.length ? trimmed : null;
+    }
+
+    private normalizeQuestionOptions(rawOptions: any): QuestionOverlayOption[] {
+        if (!Array.isArray(rawOptions)) return [];
+        const options: QuestionOverlayOption[] = [];
+        for (const option of rawOptions) {
+            if (!option || typeof option !== 'object') continue;
+            const rawId = option.id ?? option.value ?? option.key ?? option.label ?? option.text;
+            const rawLabel = option.label ?? option.text ?? option.title ?? option.value ?? option.id;
+            const id = this.normalizeQuestionText(rawId);
+            const label = this.normalizeQuestionText(rawLabel);
+            if (!id || !label) continue;
+            options.push({ id, label });
+        }
+        return options;
+    }
+
+    private extractQuestionOverlayPart(part: any): QuestionOverlayPayload | null {
+        const toolName = typeof part?.toolName === 'string'
+            ? part.toolName
+            : (typeof part?.tool === 'string'
+                ? part.tool
+                : (typeof part?.name === 'string' ? part.name : ''));
+        if (toolName !== 'question') return null;
+
+        const status = part?.status ?? part?.state?.status ?? part?.state;
+        if (status !== 'running') return null;
+
+        const callId = this.extractToolCallId(part);
+        if (!callId) return null;
+
+        const input = part?.state?.input ?? part?.input ?? {};
+        const candidates = Array.isArray(input?.questions)
+            ? input.questions
+            : (input?.question ? [input.question] : (Array.isArray(part?.questions) ? part.questions : (part?.question ? [part.question] : [])));
+
+        const normalizedQuestions: Array<{ title: string; prompt: string; options: QuestionOverlayOption[]; multiple?: boolean }> = [];
+        for (const question of candidates) {
+            const title = this.normalizeQuestionText(
+                question?.title
+                ?? question?.header
+                ?? question?.name
+                ?? question?.label
+            );
+            const prompt = this.normalizeQuestionText(
+                question?.prompt
+                ?? question?.question
+                ?? question?.text
+                ?? question?.description
+            );
+            const rawOptions = question?.options ?? question?.choices;
+            const options = this.normalizeQuestionOptions(rawOptions);
+            if (!title || !prompt || !options.length) continue;
+            const multiple = question?.multiple === true;
+            normalizedQuestions.push({ title, prompt, options, multiple });
+        }
+
+        if (!normalizedQuestions.length) {
+            const fallbackTitle = this.normalizeQuestionText(part?.header ?? part?.title);
+            const fallbackPrompt = this.normalizeQuestionText(part?.questionText ?? part?.prompt ?? part?.text);
+            const fallbackOptions = this.normalizeQuestionOptions(input?.options ?? input?.choices ?? part?.options ?? part?.choices);
+            if (!fallbackTitle || !fallbackPrompt || !fallbackOptions.length) return null;
+            normalizedQuestions.push({ title: fallbackTitle, prompt: fallbackPrompt, options: fallbackOptions, multiple: false });
+        }
+
+        const first = normalizedQuestions[0];
+        const title = first.title;
+        const prompt = first.prompt;
+        const options = first.options;
+
+        const requestId = this.extractToolRequestId(part);
+        return { callId, requestId, title, prompt, options, questions: normalizedQuestions };
+    }
+
+    private rememberPendingQuestion(sessionId: string, payload: QuestionOverlayPayload): void {
+        const bucket = this.pendingQuestionsBySession.get(sessionId) || new Map<string, PendingQuestionControl>();
+        bucket.set(payload.callId, {
+            callId: payload.callId,
+            requestId: payload.requestId,
+            title: payload.title,
+            prompt: payload.prompt,
+            options: payload.options,
+            questions: Array.isArray(payload.questions) && payload.questions.length
+                ? payload.questions
+                : [{ title: payload.title, prompt: payload.prompt, options: payload.options, multiple: false }]
+        });
+        if (bucket.size > 200) {
+            const firstKey = bucket.keys().next().value;
+            if (firstKey) bucket.delete(firstKey);
+        }
+        this.pendingQuestionsBySession.set(sessionId, bucket);
+    }
+
+    private getPendingQuestion(sessionId: string, callId: string): PendingQuestionControl | undefined {
+        return this.pendingQuestionsBySession.get(sessionId)?.get(callId);
+    }
+
+    private clearPendingQuestion(sessionId: string, callId: string): void {
+        const bucket = this.pendingQuestionsBySession.get(sessionId);
+        if (!bucket) return;
+        bucket.delete(callId);
+        if (!bucket.size) {
+            this.pendingQuestionsBySession.delete(sessionId);
+        }
+    }
+
+    private scheduleSessionResyncLimited(sessionId: string, reason: string): void {
+        const now = Date.now();
+        const cooldownUntil = this.resyncCooldownUntilBySession.get(sessionId) || 0;
+        if (now < cooldownUntil) {
+            this.logUiDebug(`EXT: resyncLimited.skip | reason=cooldown | sessionId=${sessionId}`);
+            return;
+        }
+        if (this.resyncInFlightBySession.has(sessionId)) {
+            this.logUiDebug(`EXT: resyncLimited.skip | reason=inflight | sessionId=${sessionId}`);
+            return;
+        }
+
+        const startedAt = Date.now();
+        this.logUiDebug(`EXT: resyncLimited.start | sessionId=${sessionId} | reason=${reason}`);
+        const task = this.resyncLimited(sessionId)
+            .then((summary) => {
+                const elapsedMs = Date.now() - startedAt;
+                this.logUiDebug(
+                    `EXT: resyncLimited.done | sessionId=${sessionId} | replayedFinal=${summary.replayedFinal} | replayedTools=${summary.replayedTools} | elapsedMs=${elapsedMs}`
+                );
             })
-            .catch(() => undefined);
+            .catch((error) => {
+                this.logUiDebug(`EXT: resyncLimited.fail | sessionId=${sessionId} | err=${String(error)}`);
+            })
+            .finally(() => {
+                this.resyncInFlightBySession.delete(sessionId);
+                this.resyncCooldownUntilBySession.set(sessionId, Date.now() + this.resyncCooldownMs);
+            });
+
+        this.resyncInFlightBySession.set(sessionId, task);
+    }
+
+    private shouldReplayResyncMessage(sessionId: string, info: any): boolean {
+        if (!sessionId || !info) return false;
+        const userMsgId = this.currentTurnUserMsgIdBySession.get(sessionId);
+        const assistantMsgId = this.currentTurnAssistantMsgIdBySession.get(sessionId);
+        const msgId = info?.id;
+        const parentId = info?.parentID;
+        const createdAt = info?.time?.created;
+        if (userMsgId && parentId === userMsgId) return true;
+        if (assistantMsgId && msgId === assistantMsgId) return true;
+        const startedAt = this.currentTurnStartedAtBySession.get(sessionId);
+        if (typeof startedAt === 'number' && typeof createdAt === 'number') {
+            if (createdAt >= startedAt - 2000 && info?.role === 'assistant') {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private getExportTextParts(message: any): Array<{ text: string }> {
+        const parts = Array.isArray(message?.parts) ? message.parts : [];
+        const textParts = parts.filter((part: any) => part?.type === 'text' && typeof part.text === 'string');
+        if (textParts.length) return textParts;
+        if (typeof message?.text === 'string' && message.text.length) {
+            return [{ text: message.text }];
+        }
+        if (typeof message?.content?.text === 'string' && message.content.text.length) {
+            return [{ text: message.content.text }];
+        }
+        return [];
+    }
+
+    private async resyncLimited(sessionId: string): Promise<{ replayedFinal: number; replayedTools: number }> {
+        const result = { replayedFinal: 0, replayedTools: 0 };
+        const messages = await this.requestJson<any[]>('GET', `/session/${sessionId}/message`);
+        const list = Array.isArray(messages) ? messages : [];
+        for (const item of list) {
+            const info = item?.info || {};
+            if (!this.shouldReplayResyncMessage(sessionId, info)) continue;
+            const messageId = info?.id;
+            const role = info?.role;
+            if (role === 'assistant' && typeof messageId === 'string') {
+                if (typeof info?.parentID === 'string' && info.parentID.length) {
+                    const turnUser = this.currentTurnUserMsgIdBySession.get(sessionId);
+                    if (turnUser && info.parentID === turnUser) {
+                        this.setCurrentTurnAssistantMsgId(sessionId, messageId, 'resync-limited');
+                    }
+                }
+            }
+
+            const parts = Array.isArray(item?.parts) ? item.parts : [];
+            if (parts.length) {
+                for (const part of parts) {
+                    const normalizedPart = {
+                        ...part,
+                        sessionID: part?.sessionID || sessionId,
+                        messageID: part?.messageID || messageId
+                    };
+                    const events = this.mapServerEventToChatEvents('message.part.updated', { part: normalizedPart }, 'resync');
+                    if (events.length) {
+                        if (events.some((event) => event.type === 'files' || event.type === 'toolPatch' || event.type === 'diff')) {
+                            result.replayedTools += 1;
+                        }
+                        this.emitChatEvents(events);
+                    }
+                }
+            } else if (role === 'assistant' && typeof messageId === 'string') {
+                const textParts = this.getExportTextParts(item);
+                for (const part of textParts) {
+                    const events = this.mapServerEventToChatEvents(
+                        'message.part.updated',
+                        { part: { type: 'text', text: part.text, sessionID: sessionId, messageID: messageId } },
+                        'resync'
+                    );
+                    if (events.length) {
+                        this.emitChatEvents(events);
+                    }
+                }
+            }
+
+            if (role === 'assistant' && typeof messageId === 'string') {
+                const completedAt = info?.time?.completed;
+                const isFinal = Boolean(info?.finish) || typeof completedAt === 'number';
+                if (isFinal && this.shouldEmitFinalMeta(sessionId, messageId, completedAt, info?.finish, 'resync')) {
+                    const messageIndex = this.registerMessage(messageId);
+                    this.recordAssistantMsgId(sessionId, messageId);
+                    this.emitChatEvents([
+                        {
+                            type: 'assistantMessageMeta',
+                            sessionId,
+                            assistantMsgId: messageId,
+                            messageId,
+                            messageIndex,
+                            tmpKey: this.getPendingAssistantTmpKey(sessionId)
+                        }
+                    ]);
+                    result.replayedFinal += 1;
+                }
+            }
+        }
+        return result;
     }
 
     public async checkVersion(): Promise<string> {
@@ -2717,6 +3378,7 @@ export class OpenCodeClient {
 
         await this.requestJson('POST', `/session/${sessionId}/prompt_async`, payload);
         await this.waitForSessionIdle(sessionId);
+        this.scheduleSessionResyncLimited(sessionId, 'chat-resolve');
         if (listener) {
             const resolvedAssistant = this.getTurnAssistantMsgId(sessionId);
             if (!resolvedAssistant) {
@@ -2724,6 +3386,312 @@ export class OpenCodeClient {
             }
             this.eventListeners.delete(listener);
         }
+    }
+
+    private toBodyPreview(value: unknown, maxLen = 500): string {
+        let text = '';
+        if (typeof value === 'string') {
+            text = value;
+        } else {
+            try {
+                text = JSON.stringify(value);
+            } catch {
+                text = String(value);
+            }
+        }
+        if (!text) return '';
+        return text.length > maxLen ? `${text.slice(0, maxLen)}...` : text;
+    }
+
+    private getBaseUrlForLog(): string {
+        const base = this.serverBaseUrl || '';
+        return base.replace(/\/$/, '');
+    }
+
+    private getQuestionDirectory(sessionId: string): string {
+        return this.lastCwdBySession.get(sessionId) || this.workspaceRoot;
+    }
+
+    private getPermissionDirectory(sessionId: string): string {
+        return this.lastCwdBySession.get(sessionId) || this.workspaceRoot;
+    }
+
+    private buildQuestionListPath(sessionId: string): string {
+        const directory = this.getQuestionDirectory(sessionId);
+        return `/question?directory=${encodeURIComponent(directory)}`;
+    }
+
+    private buildQuestionReplyPath(sessionId: string, requestId: string): string {
+        const directory = this.getQuestionDirectory(sessionId);
+        return `/question/${encodeURIComponent(requestId)}/reply?directory=${encodeURIComponent(directory)}`;
+    }
+
+    private buildPermissionListPath(sessionId: string): string {
+        const directory = this.getPermissionDirectory(sessionId);
+        return `/permission?directory=${encodeURIComponent(directory)}`;
+    }
+
+    private buildPermissionReplyPath(sessionId: string, requestId: string): string {
+        const directory = this.getPermissionDirectory(sessionId);
+        return `/permission/${encodeURIComponent(requestId)}/reply?directory=${encodeURIComponent(directory)}`;
+    }
+
+    private buildSessionPermissionRespondPath(sessionId: string, permissionId: string): string {
+        const directory = this.getPermissionDirectory(sessionId);
+        return `/session/${encodeURIComponent(sessionId)}/permissions/${encodeURIComponent(permissionId)}?directory=${encodeURIComponent(directory)}`;
+    }
+
+    private async listQuestions(sessionId: string): Promise<QuestionListItem[]> {
+        const reqPath = this.buildQuestionListPath(sessionId);
+        const response = await this.serverFetch(reqPath, { method: 'GET' }, {
+            opName: 'question.list',
+            timeoutMs: 5000,
+            retry: false
+        });
+        const contentType = response.headers.get('content-type') || '';
+        const rawText = await response.text();
+        const bodyPreview = this.toBodyPreview(rawText, 300);
+        this.logUiDebug(`EXT: question.list | status=${response.status} | contentType=${contentType || 'unknown'} | bodyPreview=${bodyPreview || 'empty'}`);
+        if (response.status >= 400) {
+            return [];
+        }
+        if (!contentType.toLowerCase().includes('application/json')) {
+            return [];
+        }
+        try {
+            const parsed = rawText ? JSON.parse(rawText) : [];
+            return Array.isArray(parsed) ? parsed as QuestionListItem[] : [];
+        } catch {
+            return [];
+        }
+    }
+
+    private async listPermissions(sessionId: string): Promise<PermissionListItem[]> {
+        const reqPath = this.buildPermissionListPath(sessionId);
+        const response = await this.serverFetch(reqPath, { method: 'GET' }, {
+            opName: 'permission.list',
+            timeoutMs: 5000,
+            retry: false
+        });
+        const contentType = response.headers.get('content-type') || '';
+        const rawText = await response.text();
+        const bodyPreview = this.toBodyPreview(rawText, 300);
+        this.logUiDebug(`EXT: permission.list | status=${response.status} | contentType=${contentType || 'unknown'} | bodyPreview=${bodyPreview || 'empty'}`);
+        if (response.status >= 400) {
+            return [];
+        }
+        if (!contentType.toLowerCase().includes('application/json')) {
+            return [];
+        }
+        try {
+            const parsed = rawText ? JSON.parse(rawText) : [];
+            return Array.isArray(parsed) ? parsed as PermissionListItem[] : [];
+        } catch {
+            return [];
+        }
+    }
+
+    private extractSelection(result: any): { selectedId?: string; selectedLabel?: string } {
+        if (!result || typeof result !== 'object') return {};
+        const selectedId = typeof result.selectedId === 'string' && result.selectedId.trim().length
+            ? result.selectedId.trim()
+            : undefined;
+        const selectedLabel = typeof result.selectedLabel === 'string' && result.selectedLabel.trim().length
+            ? result.selectedLabel.trim()
+            : undefined;
+        return { selectedId, selectedLabel };
+    }
+
+    private extractMatrixAnswers(result: any): string[][] {
+        if (!result || typeof result !== 'object' || !Array.isArray(result.answers)) return [];
+        const matrix: string[][] = [];
+        for (const row of result.answers) {
+            if (!Array.isArray(row)) return [];
+            const normalized = row
+                .filter((value) => typeof value === 'string')
+                .map((value) => value.trim())
+                .filter((value) => value.length > 0);
+            if (!normalized.length) return [];
+            matrix.push(normalized);
+        }
+        return matrix;
+    }
+
+    private async resolveQuestionRequestId(sessionId: string, callId: string, requestId?: string): Promise<string | undefined> {
+        const questions = await this.listQuestions(sessionId);
+        let match: QuestionListItem | undefined;
+        if (requestId) {
+            match = questions.find((item) => item?.id === requestId);
+        }
+        if (!match) {
+            match = questions.find((item) => item?.sessionID === sessionId && item?.tool?.callID === callId);
+        }
+        this.logUiDebug(`EXT: question.match | callId=${callId} | requestId=${requestId || 'none'} | matched=${String(Boolean(match))} | count=${questions.length}`);
+        return match?.id;
+    }
+
+    private buildQuestionAnswers(selection: { selectedId?: string; selectedLabel?: string }, pending?: PendingQuestionControl, directAnswers?: string[][]): string[][] {
+        if (Array.isArray(directAnswers) && directAnswers.length) {
+            return directAnswers;
+        }
+        const direct = selection.selectedLabel || selection.selectedId || '';
+        if (!direct) return [];
+        if (!pending?.options?.length) return [[direct]];
+        const found = pending.options.find((option) => option.id === selection.selectedId || option.label === selection.selectedLabel);
+        return [[found?.label || direct]];
+    }
+
+    private async postQuestionReply(sessionId: string, requestId: string, answers: string[][]): Promise<void> {
+        const reqPath = this.buildQuestionReplyPath(sessionId, requestId);
+        const url = `${this.getBaseUrlForLog()}${reqPath.startsWith('/') ? reqPath : `/${reqPath}`}`;
+        const response = await this.serverFetch(
+            reqPath,
+            { method: 'POST', body: JSON.stringify({ answers }), headers: { 'Content-Type': 'application/json' } },
+            { opName: 'question.reply', timeoutMs: 5000, retry: false }
+        );
+        const contentType = response.headers.get('content-type') || '';
+        this.logUiDebug(`EXT: toolResult.post | url | ${url} | status | ${response.status} | contentType | ${contentType || 'unknown'}`);
+
+        if (response.status >= 400 || contentType.toLowerCase().includes('text/html')) {
+            const text = await response.text();
+            const preview = this.toBodyPreview(text, 200);
+            this.logUiDebug(`EXT: toolResult.post.body | preview=${preview || 'empty'}`);
+            throw new Error(`Question reply rejected: status=${response.status} contentType=${contentType || 'unknown'}`);
+        }
+
+        if (contentType.toLowerCase().includes('application/json')) {
+            const text = await response.text();
+            if (!text.trim()) return;
+            try {
+                const parsed = JSON.parse(text);
+                if (parsed === false) {
+                    throw new Error('Question reply returned false');
+                }
+            } catch (error) {
+                throw new Error(`Question reply parse failed: ${String(error)}`);
+            }
+        }
+    }
+
+    public async sendToolResult(payload: {
+        sessionId?: string;
+        callId: string;
+        requestId?: string;
+        result: unknown;
+    }): Promise<void> {
+        await this.ensureServer();
+        const sessionId = payload.sessionId || this.currentSessionId;
+        if (!sessionId) {
+            throw new Error('Missing session ID for tool result.');
+        }
+
+        const pending = this.getPendingQuestion(sessionId, payload.callId);
+        const matrixAnswers = this.extractMatrixAnswers(payload.result);
+        const selection = this.extractSelection(payload.result);
+        if (!matrixAnswers.length && !selection.selectedId && !selection.selectedLabel) {
+            throw new Error('Missing selected option payload');
+        }
+
+        const resolvedRequestId = await this.resolveQuestionRequestId(sessionId, payload.callId, payload.requestId);
+        if (!resolvedRequestId) {
+            throw new Error('No matching question request found for callId');
+        }
+        const answers = this.buildQuestionAnswers(selection, pending, matrixAnswers);
+        if (!answers.length) {
+            throw new Error('Invalid question answer payload');
+        }
+        await this.postQuestionReply(sessionId, resolvedRequestId, answers);
+        this.clearPendingQuestion(sessionId, payload.callId);
+    }
+
+    public async respondPermission(payload: {
+        sessionId?: string;
+        permissionId?: string;
+        requestId?: string;
+        response: PermissionReply;
+    }): Promise<void> {
+        await this.ensureServer();
+        const sessionId = payload.sessionId || this.currentSessionId;
+        if (!sessionId) {
+            throw new Error('Missing session ID for permission response.');
+        }
+        const responseValue: PermissionReply = payload.response === 'always' || payload.response === 'reject'
+            ? payload.response
+            : 'once';
+        const permissionId = typeof payload.permissionId === 'string' && payload.permissionId.length
+            ? payload.permissionId
+            : (typeof payload.requestId === 'string' ? payload.requestId : '');
+
+        if (permissionId) {
+            const reqPath = this.buildSessionPermissionRespondPath(sessionId, permissionId);
+            try {
+                const result = await this.requestJson<any>('POST', reqPath, { response: responseValue });
+                if (result === false) {
+                    throw new Error('Permission respond returned false');
+                }
+                return;
+            } catch (error) {
+                this.logUiDebug(`EXT: permission.respond.fail | sessionId=${sessionId} | permissionId=${permissionId} | err=${String(error)}`);
+            }
+        }
+
+        let resolvedRequestId = typeof payload.requestId === 'string' && payload.requestId.length
+            ? payload.requestId
+            : '';
+        if (!resolvedRequestId && permissionId) {
+            resolvedRequestId = permissionId;
+        }
+        if (!resolvedRequestId) {
+            const pending = await this.listPermissions(sessionId);
+            const matched = pending.find((item) => item?.sessionID === sessionId);
+            resolvedRequestId = matched?.id || '';
+        }
+        if (!resolvedRequestId) {
+            throw new Error('No permission request ID available');
+        }
+
+        const reqPath = this.buildPermissionReplyPath(sessionId, resolvedRequestId);
+        const result = await this.requestJson<any>('POST', reqPath, { reply: responseValue });
+        if (result === false) {
+            throw new Error('Permission reply returned false');
+        }
+    }
+
+    public async getTuiControlResponseSchemaSummary(): Promise<string> {
+        await this.ensureServer();
+        const response = await this.serverFetch('/doc', { method: 'GET' }, { opName: 'doc.fetch', timeoutMs: 5000 });
+        const text = await response.text();
+        if (!response.ok) {
+            throw new Error(`Failed to fetch /doc: ${response.status}`);
+        }
+        let parsed: any;
+        try {
+            parsed = JSON.parse(text);
+        } catch (error) {
+            throw new Error(`Invalid /doc JSON: ${String(error)}`);
+        }
+
+        const paths = parsed?.paths || {};
+        const postResp = paths?.['/tui/control/response']?.post;
+        const getNext = paths?.['/tui/control/next']?.get;
+        const getQuestion = paths?.['/question']?.get;
+        const postQuestionReply = paths?.['/question/{requestID}/reply']?.post;
+        const responseSchema = postResp?.requestBody?.content?.['application/json']?.schema || {};
+        const nextSchema = getNext?.responses?.['200']?.content?.['application/json']?.schema || {};
+        const questionListSchema = getQuestion?.responses?.['200']?.content?.['application/json']?.schema || {};
+        const questionReplySchema = postQuestionReply?.requestBody?.content?.['application/json']?.schema || {};
+
+        const lines = [
+            `operationId(/tui/control/response): ${postResp?.operationId || 'missing'}`,
+            `requestSchema(/tui/control/response): ${JSON.stringify(responseSchema)}`,
+            `operationId(/tui/control/next): ${getNext?.operationId || 'missing'}`,
+            `responseSchema(/tui/control/next): ${JSON.stringify(nextSchema)}`,
+            `operationId(/question): ${getQuestion?.operationId || 'missing'}`,
+            `responseSchema(/question): ${JSON.stringify(questionListSchema)}`,
+            `operationId(/question/{requestID}/reply): ${postQuestionReply?.operationId || 'missing'}`,
+            `requestSchema(/question/{requestID}/reply): ${JSON.stringify(questionReplySchema)}`
+        ];
+        return lines.join('\n');
     }
 
     public async listModels(): Promise<ModelInfo[]> {
@@ -2786,9 +3754,33 @@ export class OpenCodeClient {
         return this.requestJson<any>('GET', `/session/${sessionId}`);
     }
 
+    public async getSessionChildren(sessionId: string): Promise<any[]> {
+        await this.ensureServer();
+        const directory = encodeURIComponent(this.workspaceRoot || '.');
+        const reqPath = `/session/${encodeURIComponent(sessionId)}/children?directory=${directory}`;
+        const children = await this.requestJson<any[]>('GET', reqPath);
+        return Array.isArray(children) ? children : [];
+    }
+
+    public async deleteSession(sessionId: string): Promise<boolean> {
+        await this.ensureServer();
+        const directory = encodeURIComponent(this.workspaceRoot || '.');
+        const reqPath = `/session/${encodeURIComponent(sessionId)}?directory=${directory}`;
+        const result = await this.requestJson<any>('DELETE', reqPath);
+        return Boolean(result);
+    }
+
     public async exportSession(sessionId: string): Promise<any> {
         await this.ensureServer();
         const messages = await this.requestJson<any[]>( 'GET', `/session/${sessionId}/message`);
+        const info = await this.requestJson<any>('GET', `/session/${sessionId}`);
+        return { session: info, messages };
+    }
+
+    public async exportSessionRecent(sessionId: string, limit = 200): Promise<any> {
+        await this.ensureServer();
+        const safeLimit = Math.max(1, Math.floor(Number.isFinite(limit) ? limit : 200));
+        const messages = await this.requestJson<any[]>('GET', `/session/${sessionId}/message?limit=${safeLimit}`);
         const info = await this.requestJson<any>('GET', `/session/${sessionId}`);
         return { session: info, messages };
     }

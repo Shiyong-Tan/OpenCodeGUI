@@ -39,10 +39,20 @@ let modelDropdownOutsideHandler = null;
 let simpleDropdownHandlers = new Map();
 let conflictCardEl = null;
 let lastConflictPayload = null;
+let questionOverlayEl = null;
+let questionOverlayTimer = null;
+let questionOverlayState = null;
+const shownQuestionCallIds = new Set();
+const sentQuestionCallIds = new Set();
+const questionOverlayQueue = [];
+let permissionOverlayEl = null;
+let permissionOverlayState = null;
 let isSwitchingSession = false;
 let pendingRefreshRequestId = null;
 let hydratedSessions = new Set();
 let allowedDiscardKeys = new Set();
+const pendingDeleteSessionOpBySession = new Map();
+let armedDeleteSessionId = '';
 
 const sessionsById = new Map();
 let gitUndoEnabled = false;
@@ -52,6 +62,7 @@ let baselineMessage = null;
 let sendButtonEl = null;
 let inputEl = null;
 const pendingUiPrompts = [];
+let pendingContextItems = [];
 const agentTimeoutBySession = new Map();
 const agentTimeoutNoticeBySession = new Map();
 const agentTimeoutOpBySession = new Map();
@@ -150,11 +161,11 @@ function startAgentTimeout(sessionId, opId) {
             payload: ['WV: agentTimeout.fire', `sessionId=${sessionId}`, `opId=${opId || 'null'}`]
         });
         window.__oc?.renderFromState?.();
-    }, 30000);
+    }, 60000);
     agentTimeoutBySession.set(sessionId, timer);
     vscode.postMessage({
         type: 'ui-debug',
-        payload: ['WV: agentTimeout.start', `sessionId=${sessionId}`, `opId=${opId || 'null'}`, 'delay=30000']
+        payload: ['WV: agentTimeout.start', `sessionId=${sessionId}`, `opId=${opId || 'null'}`, 'delay=60000']
     });
 }
 
@@ -1494,7 +1505,175 @@ function handleToggleSegment(sessionId, segmentId) {
     assertInvariants(sessionId, 'toggleSegment');
 }
 
-function renderMarkdownInto(element, text) {
+const FILE_REF_RE = /([A-Za-z0-9_./-]+\.[A-Za-z0-9]+):(\d{1,6})(?::(\d{1,6}))?/g;
+const FILE_REF_CODE_RE = /([A-Za-z0-9_./-]+\.[A-Za-z0-9]+):(\d{1,6})(?::(\d{1,6}))?/g;
+const FILE_REF_QUICK_RE = /([A-Za-z0-9_./-]+\.[A-Za-z0-9]+):(\d{1,6})(?::(\d{1,6}))?/;
+const FILE_ONLY_RE = /(?<![A-Za-z0-9_./-])((?:\.{1,2}\/)?(?:[A-Za-z0-9_-]+\/)+[A-Za-z0-9_-]+\.[A-Za-z][A-Za-z0-9]{0,9})(?![A-Za-z0-9_./-])/g;
+const FILE_ONLY_QUICK_RE = /(?<![A-Za-z0-9_./-])((?:\.{1,2}\/)?(?:[A-Za-z0-9_-]+\/)+[A-Za-z0-9_-]+\.[A-Za-z][A-Za-z0-9]{0,9})(?![A-Za-z0-9_./-])/;
+const ALLOWED_EXTS = null;
+
+function isAllowedFileExt(filePath) {
+    if (!Array.isArray(ALLOWED_EXTS) || !ALLOWED_EXTS.length) return true;
+    const dot = filePath.lastIndexOf('.');
+    if (dot === -1 || dot >= filePath.length - 1) return false;
+    const ext = filePath.slice(dot + 1).toLowerCase();
+    return ALLOWED_EXTS.includes(ext);
+}
+
+function isInsideNoLinkifyTags(node, rootEl) {
+    let current = node?.parentElement || null;
+    while (current && current !== rootEl) {
+        const tag = current.tagName;
+        if (tag === 'A' || tag === 'PRE') return true;
+        current = current.parentElement;
+    }
+    return false;
+}
+
+function isInsideCodeTag(node, rootEl) {
+    let current = node?.parentElement || null;
+    while (current && current !== rootEl) {
+        const tag = current.tagName;
+        if (tag === 'CODE') return true;
+        current = current.parentElement;
+    }
+    return false;
+}
+
+function appendLinkifiedText(target, text, regex, buildLink) {
+    if (!text) return 0;
+    regex.lastIndex = 0;
+    let last = 0;
+    let count = 0;
+    let match = regex.exec(text);
+    while (match) {
+        const full = match[0];
+        const start = match.index;
+        if (start > last) {
+            target.appendChild(document.createTextNode(text.slice(last, start)));
+        }
+        const built = buildLink(match, full);
+        if (built) {
+            target.appendChild(built);
+            count += 1;
+        } else {
+            target.appendChild(document.createTextNode(full));
+        }
+        last = start + full.length;
+        match = regex.exec(text);
+    }
+    if (last < text.length) {
+        target.appendChild(document.createTextNode(text.slice(last)));
+    }
+    return count;
+}
+
+function linkifyFileRefs(rootEl) {
+    if (!rootEl || typeof rootEl.querySelectorAll !== 'function') return;
+    const walker = document.createTreeWalker(rootEl, NodeFilter.SHOW_TEXT);
+    const textNodes = [];
+    let node = walker.nextNode();
+    while (node) {
+        if (typeof node.nodeValue === 'string' && node.nodeValue.length > 0) {
+            textNodes.push(node);
+        }
+        node = walker.nextNode();
+    }
+
+    let matches = 0;
+    for (const textNode of textNodes) {
+        const parent = textNode.parentNode;
+        const source = textNode.nodeValue || '';
+        if (!parent || !source) continue;
+        if (isInsideNoLinkifyTags(textNode, rootEl)) continue;
+        const inCode = isInsideCodeTag(textNode, rootEl);
+        const shouldMatchLineRefs = FILE_REF_QUICK_RE.test(source);
+        const shouldMatchFileOnly = FILE_ONLY_QUICK_RE.test(source);
+        if (!shouldMatchLineRefs && !shouldMatchFileOnly) continue;
+
+        const frag = document.createDocumentFragment();
+        let changed = false;
+        const linkLineRef = (match, full) => {
+            const filePath = match[1];
+            if (!isAllowedFileExt(filePath)) return null;
+            const line = match[2];
+            const col = match[3] || '1';
+            const link = document.createElement('a');
+            link.href = `ocfile://open?path=${encodeURIComponent(filePath)}&line=${line}&col=${col}`;
+            link.textContent = full;
+            return link;
+        };
+        const linkFileOnly = (match, full) => {
+            const filePath = match[1];
+            if (!isAllowedFileExt(filePath)) return null;
+            const link = document.createElement('a');
+            link.href = `ocfile://open?path=${encodeURIComponent(filePath)}`;
+            link.textContent = full;
+            return link;
+        };
+
+        if (shouldMatchLineRefs) {
+            const lineRefRe = inCode ? FILE_REF_CODE_RE : FILE_REF_RE;
+            const intermediate = document.createDocumentFragment();
+            const lineCount = appendLinkifiedText(intermediate, source, lineRefRe, linkLineRef);
+            matches += lineCount;
+            changed = changed || lineCount > 0;
+
+            if (shouldMatchFileOnly) {
+                const nodes = Array.from(intermediate.childNodes);
+                for (const child of nodes) {
+                    if (child.nodeType === Node.TEXT_NODE) {
+                        const text = child.nodeValue || '';
+                        if (!text || !FILE_ONLY_QUICK_RE.test(text)) {
+                            frag.appendChild(child);
+                            continue;
+                        }
+                        const nested = document.createDocumentFragment();
+                        const fileCount = appendLinkifiedText(nested, text, FILE_ONLY_RE, linkFileOnly);
+                        matches += fileCount;
+                        changed = changed || fileCount > 0;
+                        frag.appendChild(nested);
+                    } else {
+                        frag.appendChild(child);
+                    }
+                }
+            } else {
+                frag.appendChild(intermediate);
+            }
+        } else if (shouldMatchFileOnly) {
+            const fileCount = appendLinkifiedText(frag, source, FILE_ONLY_RE, linkFileOnly);
+            matches += fileCount;
+            changed = changed || fileCount > 0;
+        }
+
+        if (!changed) continue;
+        parent.replaceChild(frag, textNode);
+    }
+
+    vscode.postMessage({ type: 'ui-debug', payload: ['WV: linkify.refs', `matches=${matches}`] });
+}
+
+function shouldLinkifyAssistantMessage(message) {
+    return Boolean(message?.role === 'assistant' && message?.meta?.isThinking !== true);
+}
+
+function renderAssistantMarkdown(content, message) {
+    const text = typeof message?.text === 'string' ? message.text : '';
+    const linkifyRefs = shouldLinkifyAssistantMessage(message);
+    const signature = `${linkifyRefs ? '1' : '0'}:${text}`;
+    if (message && message._renderSignature === signature && typeof message._renderHtml === 'string') {
+        content.innerHTML = message._renderHtml;
+        return;
+    }
+    renderMarkdownInto(content, text, { linkifyRefs });
+    if (message && typeof message === 'object') {
+        message._renderSignature = signature;
+        message._renderHtml = content.innerHTML;
+    }
+}
+
+function renderMarkdownInto(element, text, options = {}) {
+    delete element.dataset.linkified;
     const unwrapped = escapeSystemReminderTags(text || '');
     const normalized = normalizeLists(normalizeInlineMath(normalizeBlockMath(unwrapped)));
     const raw = md.render(normalized);
@@ -1519,6 +1698,10 @@ function renderMarkdownInto(element, text) {
     }
     wrapTables(element);
     enhanceCodeBlocksWithCopyButtons(element);
+    if (options.linkifyRefs === true && element.dataset.linkified !== '1') {
+        linkifyFileRefs(element);
+        element.dataset.linkified = '1';
+    }
 }
 
 function enhanceCodeBlocksWithCopyButtons(root) {
@@ -1718,9 +1901,37 @@ document.addEventListener('DOMContentLoaded', () => {
     const sessionPanel = document.getElementById('session-panel');
     const sessionList = document.getElementById('session-list');
     const attachmentList = document.getElementById('attachment-list');
+    const inputTokenList = document.getElementById('input-token-list');
+    const serverStatusDot = document.getElementById('server-status-dot');
     const panelBackdrop = document.getElementById('panel-backdrop');
     const refreshSessionsBtn = document.getElementById('refresh-sessions');
     const closeSessionsBtn = document.getElementById('close-sessions');
+
+    if (chatContainer) {
+        chatContainer.addEventListener('click', (event) => {
+            const target = event.target;
+            if (!(target instanceof Element)) return;
+            const anchor = target.closest('a[href^="ocfile://open"]');
+            if (!(anchor instanceof HTMLAnchorElement)) return;
+            event.preventDefault();
+            try {
+                const url = new URL(anchor.href);
+                const filePath = url.searchParams.get('path') || '';
+                const line = Number(url.searchParams.get('line') || '1');
+                const col = Number(url.searchParams.get('col') || '1');
+                if (!filePath) return;
+                vscode.postMessage({
+                    type: 'openFileAtLocation',
+                    path: filePath,
+                    line,
+                    col,
+                    sessionId: activeSessionId || null
+                });
+            } catch {
+                // ignore malformed link
+            }
+        });
+    }
 
     const webviewInstanceId = `wv-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     vscode.postMessage({ type: 'ui-debug', payload: ['WV', 'webviewReady', 'id', webviewInstanceId] });
@@ -1732,6 +1943,26 @@ document.addEventListener('DOMContentLoaded', () => {
         sendBtn.innerHTML = isBusy ? stopIcon : sendIcon;
         sendBtn.classList.toggle('is-busy', isBusy);
     }
+
+    function setServerStatus(status, reason) {
+        if (!serverStatusDot) return;
+        serverStatusDot.classList.remove('status-connected', 'status-reconnecting', 'status-error');
+        if (status === 'reconnecting') {
+            serverStatusDot.classList.add('status-reconnecting');
+            serverStatusDot.title = 'Reconnecting to OpenCode server...';
+        } else if (status === 'error') {
+            serverStatusDot.classList.add('status-error');
+            serverStatusDot.title = 'Server unreachable.';
+        } else {
+            serverStatusDot.classList.add('status-connected');
+            serverStatusDot.title = 'Connected';
+        }
+        if (reason) {
+            vscode.postMessage({ type: 'ui-debug', payload: ['serverStatus', status, reason] });
+        }
+    }
+
+    setServerStatus('connected', 'default');
 
     function getSessionOrNull(sessionId) {
         return getSessionState(sessionId, false);
@@ -1792,7 +2023,7 @@ document.addEventListener('DOMContentLoaded', () => {
             pre.appendChild(code);
             content.appendChild(pre);
         } else if (message.role === 'assistant') {
-            renderMarkdownInto(content, message.text || '');
+            renderAssistantMarkdown(content, message);
         } else {
             const rawText = message.text || '';
             const trimmedText = isUser ? rawText.replace(/^(\r?\n)+/, '') : rawText;
@@ -1853,6 +2084,21 @@ function renderMessageElement(message, renderedSet) {
         const list = document.createElement('div');
         list.className = 'conflict-card-list';
 
+        let maxStatDigits = 1;
+        for (const rawPath of files) {
+            if (typeof rawPath !== 'string' || !rawPath.length) continue;
+            const normalized = rawPath.replace(/\\/g, '/');
+            const stats = statsByPath[normalized];
+            if (!stats) continue;
+            const candidates = [stats.additions, stats.deletions];
+            for (const value of candidates) {
+                if (!Number.isFinite(value)) continue;
+                const digits = Math.max(1, String(Math.abs(value)).length);
+                if (digits > maxStatDigits) maxStatDigits = digits;
+            }
+        }
+        list.style.setProperty('--delta-col-width', `${maxStatDigits + 1}ch`);
+
         for (const rawPath of files) {
             if (typeof rawPath !== 'string' || !rawPath.length) continue;
             const normalized = rawPath.replace(/\\/g, '/');
@@ -1867,13 +2113,24 @@ function renderMessageElement(message, renderedSet) {
             summary.style.textAlign = 'left';
             summary.addEventListener('click', () => postOpenGitDiff(normalized, activeSessionId, commitHead, commitBase));
 
+            const baseSpan = document.createElement('span');
+            baseSpan.className = 'conflict-card-file';
+            baseSpan.textContent = base;
+
             const dirSpan = document.createElement('span');
             dirSpan.className = 'conflict-card-path';
             dirSpan.textContent = dir;
 
-            const baseSpan = document.createElement('span');
-            baseSpan.className = 'conflict-card-file';
-            baseSpan.textContent = base;
+            const nameWrap = document.createElement('span');
+            nameWrap.className = 'conflict-card-name';
+            nameWrap.appendChild(baseSpan);
+            if (dir) {
+                const pathSep = document.createElement('span');
+                pathSep.className = 'conflict-card-path-sep';
+                pathSep.textContent = '|';
+                nameWrap.appendChild(pathSep);
+                nameWrap.appendChild(dirSpan);
+            }
 
             const stats = statsByPath[normalized];
             const showStats = stats && (Number.isFinite(stats.additions) || Number.isFinite(stats.deletions));
@@ -1882,29 +2139,28 @@ function renderMessageElement(message, renderedSet) {
                 statsWrap = document.createElement('span');
                 statsWrap.className = 'change-list-stats';
 
-                if (Number.isFinite(stats.additions)) {
-                    const addSpan = document.createElement('span');
-                    addSpan.className = 'change-list-add';
-                    addSpan.textContent = `+${stats.additions}`;
-                    statsWrap.appendChild(addSpan);
-                }
+                const deltaWrap = document.createElement('span');
+                deltaWrap.className = 'change-delta';
 
-                if (Number.isFinite(stats.deletions)) {
-                    if (statsWrap.childNodes.length) {
-                        const sep = document.createElement('span');
-                        sep.className = 'change-list-sep';
-                        sep.textContent = ' | ';
-                        statsWrap.appendChild(sep);
-                    }
-                    const delSpan = document.createElement('span');
-                    delSpan.className = 'change-list-del';
-                    delSpan.textContent = `-${stats.deletions}`;
-                    statsWrap.appendChild(delSpan);
-                }
+                const addSpan = document.createElement('span');
+                addSpan.className = 'delta plus';
+                addSpan.textContent = Number.isFinite(stats.additions) ? `+${stats.additions}` : '';
+                deltaWrap.appendChild(addSpan);
+
+                const sep = document.createElement('span');
+                sep.className = 'sep';
+                sep.textContent = '|';
+                deltaWrap.appendChild(sep);
+
+                const delSpan = document.createElement('span');
+                delSpan.className = 'delta minus';
+                delSpan.textContent = Number.isFinite(stats.deletions) ? `-${stats.deletions}` : '';
+                deltaWrap.appendChild(delSpan);
+
+                statsWrap.appendChild(deltaWrap);
             }
 
-            summary.appendChild(dirSpan);
-            summary.appendChild(baseSpan);
+            summary.appendChild(nameWrap);
             if (statsWrap) {
                 summary.appendChild(statsWrap);
             }
@@ -2055,7 +2311,7 @@ function renderMessageElement(message, renderedSet) {
             pre.appendChild(code);
             content.appendChild(pre);
         } else if (message.role === 'assistant') {
-            renderMarkdownInto(content, message.text || '');
+            renderAssistantMarkdown(content, message);
         } else {
             const raw = message.text || '';
             const sanitized = message.role === 'user' ? stripAttachmentManifest(raw) : raw;
@@ -2075,6 +2331,15 @@ function renderMessageElement(message, renderedSet) {
                 imageWrap.appendChild(img);
             }
             div.appendChild(imageWrap);
+        }
+
+        if (message.role === 'assistant' && message.meta?.isThinking !== true) {
+            const text = (content.textContent || '').trim();
+            const hasStructured = Boolean(content.querySelector('pre, code, table, img, video, audio, ul, ol, blockquote, a, hr, .md-table-wrap'));
+            const hasImages = Array.isArray(message.meta?.images) && message.meta.images.length > 0;
+            if (!text && !hasStructured && !hasImages) {
+                return;
+            }
         }
 
         if (message.role === 'user') {
@@ -2244,7 +2509,7 @@ function renderMessageElement(message, renderedSet) {
                 const content = document.createElement('div');
                 content.className = 'message-content';
                 if (msg.role === 'assistant') {
-                    renderMarkdownInto(content, msg.text || '');
+                    renderAssistantMarkdown(content, msg);
                 } else {
                     const rawText = msg.text || '';
                     const trimmedText = isUser ? rawText.replace(/^(\r?\n)+/, '') : rawText;
@@ -2266,6 +2531,36 @@ function renderMessageElement(message, renderedSet) {
         pendingEl.classList.add('hidden');
     }
 
+    let renderScheduled = false;
+    let renderNeedsAnother = false;
+    let queuedRenderReason = '';
+    function scheduleRenderFromState(reason = 'unknown') {
+        if (renderScheduled) {
+            renderNeedsAnother = true;
+            queuedRenderReason = reason || queuedRenderReason || 'queued';
+            vscode.postMessage({ type: 'ui-debug', payload: ['WV: render.skip', `reason=${reason}`, 'pending=1'] });
+            return;
+        }
+        renderScheduled = true;
+        vscode.postMessage({ type: 'ui-debug', payload: ['WV: render.scheduled', `reason=${reason}`] });
+        requestAnimationFrame(() => {
+            renderScheduled = false;
+            renderFromState();
+            if (renderNeedsAnother) {
+                const nextReason = queuedRenderReason || 'queued-flush';
+                renderNeedsAnother = false;
+                queuedRenderReason = '';
+                scheduleRenderFromState(nextReason);
+            }
+        });
+    }
+
+    function forceQuestionOverlayRender(reason = 'question-overlay-force') {
+        requestAnimationFrame(() => {
+            scheduleRenderFromState(reason);
+        });
+    }
+
     function renderFromState() {
         renderPendingCount();
         if (!chatContainer) {
@@ -2279,6 +2574,7 @@ function renderMessageElement(message, renderedSet) {
         const session = getSessionOrNull(activeSessionId);
         if (!session || !session.timeline.length) {
             setDefaultGreeting();
+            renderQuestionCardInTimeline();
             return;
         }
 
@@ -2333,6 +2629,8 @@ function renderMessageElement(message, renderedSet) {
             div.appendChild(content);
             chatContainer.appendChild(div);
         }
+
+        renderQuestionCardInTimeline();
 
         enhanceCodeBlocksWithCopyButtons(chatContainer);
 
@@ -2410,7 +2708,7 @@ function renderMessageElement(message, renderedSet) {
     }
 
     window.__oc = window.__oc || {};
-    window.__oc.renderFromState = renderFromState;
+    window.__oc.renderFromState = scheduleRenderFromState;
 
     function renderModelSelect() {
         vscode.postMessage({
@@ -2818,15 +3116,25 @@ function renderMessageElement(message, renderedSet) {
     function renderSessionList() {
         sessionList.innerHTML = '';
         if (!sessions.length) {
+            armedDeleteSessionId = '';
             const empty = document.createElement('div');
             empty.className = 'session-empty';
             empty.textContent = 'No sessions found.';
             sessionList.appendChild(empty);
             return;
         }
+        if (armedDeleteSessionId && !sessions.some((item) => item?.id === armedDeleteSessionId)) {
+            armedDeleteSessionId = '';
+        }
         for (const item of sessions) {
+            const row = document.createElement('div');
+            row.className = 'session-item session-item-row';
+            if (armedDeleteSessionId === item.id) {
+                row.classList.add('is-delete-armed');
+            }
+
             const button = document.createElement('button');
-            button.className = 'session-item';
+            button.className = 'session-item-main';
             button.type = 'button';
 
             const title = document.createElement('span');
@@ -2840,9 +3148,67 @@ function renderMessageElement(message, renderedSet) {
             button.appendChild(title);
             button.appendChild(meta);
             button.addEventListener('click', () => {
+                armedDeleteSessionId = '';
                 vscode.postMessage({ type: 'selectSession', sessionId: item.id });
             });
-            sessionList.appendChild(button);
+
+            const actions = document.createElement('div');
+            actions.className = 'session-item-actions';
+            const pendingDeleteOpId = pendingDeleteSessionOpBySession.get(item.id);
+            if (pendingDeleteOpId) {
+                const waitBtn = document.createElement('button');
+                waitBtn.type = 'button';
+                waitBtn.className = 'session-item-delete';
+                waitBtn.textContent = '...';
+                waitBtn.disabled = true;
+                actions.appendChild(waitBtn);
+            } else if (armedDeleteSessionId === item.id) {
+                const confirmBtn = document.createElement('button');
+                confirmBtn.type = 'button';
+                confirmBtn.className = 'session-item-delete session-item-delete-confirm';
+                confirmBtn.textContent = 'delete';
+                confirmBtn.addEventListener('click', (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const opId = `del-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+                    pendingDeleteSessionOpBySession.set(item.id, opId);
+                    armedDeleteSessionId = '';
+                    renderSessionList();
+                    vscode.postMessage({ type: 'deleteSession', sessionId: item.id, opId });
+                });
+
+                const cancelBtn = document.createElement('button');
+                cancelBtn.type = 'button';
+                cancelBtn.className = 'session-item-delete session-item-delete-cancel';
+                cancelBtn.textContent = 'cancel';
+                cancelBtn.addEventListener('click', (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    armedDeleteSessionId = '';
+                    renderSessionList();
+                });
+
+                actions.appendChild(confirmBtn);
+                actions.appendChild(cancelBtn);
+            } else {
+                const removeBtn = document.createElement('button');
+                removeBtn.type = 'button';
+                removeBtn.className = 'session-item-delete session-item-delete-icon';
+                removeBtn.setAttribute('aria-label', 'Delete session');
+                removeBtn.setAttribute('title', 'Delete session');
+                removeBtn.textContent = '×';
+                removeBtn.addEventListener('click', (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    armedDeleteSessionId = item.id;
+                    renderSessionList();
+                });
+                actions.appendChild(removeBtn);
+            }
+
+            row.appendChild(button);
+            row.appendChild(actions);
+            sessionList.appendChild(row);
         }
     }
 
@@ -2931,6 +3297,24 @@ function renderMessageElement(message, renderedSet) {
         }
     }
 
+    function renderContextTokens() {
+        if (!inputTokenList) return;
+        inputTokenList.innerHTML = '';
+        for (const item of pendingContextItems) {
+            if (!item || !item.displayText) continue;
+            const chip = document.createElement('span');
+            chip.className = 'input-token';
+            chip.textContent = item.displayText;
+            inputTokenList.appendChild(chip);
+        }
+    }
+
+    function addContextItem(displayText, payload) {
+        if (!displayText || !payload || typeof payload.text !== 'string') return;
+        pendingContextItems.push({ displayText, ...payload });
+        renderContextTokens();
+    }
+
     function openSessionPanel() {
         sessionPanel.classList.add('open');
         panelBackdrop.classList.add('open');
@@ -2941,6 +3325,7 @@ function renderMessageElement(message, renderedSet) {
     }
 
     function closeSessionPanel() {
+        armedDeleteSessionId = '';
         sessionPanel.classList.remove('open');
         panelBackdrop.classList.remove('open');
         sessionPanel.classList.add('hidden');
@@ -3044,7 +3429,13 @@ function applyPromptToSession(sessionId, payload) {
         let targetId = session.currentTurnAssistantKey || session.thinkingId;
 
         if (!targetId && msgId && session.messagesById.has(msgId)) {
-            targetId = msgId;
+            if (isBusy && (!session.currentTurnAssistantKey || session.currentTurnAssistantKey === msgId)) {
+                targetId = msgId;
+                session.currentTurnAssistantKey = msgId;
+            } else {
+                vscode.postMessage({ type: 'ui-debug', payload: ['handleAssistantMeta', 'drop-historical-msg', msgId] });
+                return;
+            }
         }
 
         if (!targetId && msgId) {
@@ -3067,6 +3458,12 @@ function applyPromptToSession(sessionId, payload) {
 
         const target = session.messagesById.get(targetId);
         if (target) {
+            const activeTargetId = session.currentTurnAssistantKey || session.thinkingId || null;
+            const isActiveTarget = Boolean(activeTargetId && targetId === activeTargetId);
+            if (!isActiveTarget && target.meta?.isThinking !== true) {
+                vscode.postMessage({ type: 'ui-debug', payload: ['handleAssistantMeta', 'drop-finalized-target', targetId] });
+                return;
+            }
             const nextText = typeof message.lastText === 'string' ? message.lastText : target.text;
             const normalized = typeof nextText === 'string' ? nextText.trim() : '';
             const hasStatusChange = normalized.length > 0 && normalized !== 'Thinking...';
@@ -3112,7 +3509,13 @@ function applyPromptToSession(sessionId, payload) {
         let targetId = session.currentTurnAssistantKey || session.thinkingId;
 
         if (!targetId && msgId && session.messagesById.has(msgId)) {
-            targetId = msgId;
+            if (isBusy && (!session.currentTurnAssistantKey || session.currentTurnAssistantKey === msgId)) {
+                targetId = msgId;
+                session.currentTurnAssistantKey = msgId;
+            } else {
+                vscode.postMessage({ type: 'ui-debug', payload: ['handleChatChunk', 'drop-historical-msg', msgId] });
+                return;
+            }
         }
 
         if (!targetId) {
@@ -3122,6 +3525,12 @@ function applyPromptToSession(sessionId, payload) {
 
         const target = session.messagesById.get(targetId);
         if (target) {
+            const activeTargetId = session.currentTurnAssistantKey || session.thinkingId || null;
+            const isActiveTarget = Boolean(activeTargetId && targetId === activeTargetId);
+            if (!isActiveTarget && target.meta?.isThinking !== true) {
+                vscode.postMessage({ type: 'ui-debug', payload: ['handleChatChunk', 'drop-finalized-target', targetId] });
+                return;
+            }
             if (target.meta?.isThinking === true && target.text === 'Thinking...') {
                 target.text = chunkText;
             } else {
@@ -3207,11 +3616,16 @@ function applyPromptToSession(sessionId, payload) {
         });
         // applyTurnStartFreeze removed - segments no longer have freeze state
         const text = input.value.trim();
-        if ((!text && !attachments.length) || isBusy) return;
+        const hasContext = pendingContextItems.length > 0;
+        if ((!text && !attachments.length && !hasContext) || isBusy) return;
 
         const hasNonImage = attachments.some((item) => !isImageAttachment(item));
         const fallbackText = hasNonImage ? 'Attachment added.' : 'Image attached.';
-        const messageText = text || fallbackText;
+        const contextDisplay = pendingContextItems.map((item) => item.displayText).filter(Boolean).join(' ');
+        const baseText = contextDisplay
+            ? (text ? `${contextDisplay}\n${text}` : contextDisplay)
+            : text;
+        const messageText = baseText || fallbackText;
         const clientMessageId = `local-${Date.now()}-${messageCounter++}`;
         const opId = `op-${Date.now()}-${messageCounter}`;
         const messageImages = attachments
@@ -3230,6 +3644,13 @@ function applyPromptToSession(sessionId, payload) {
                 tempPath: typeof item?.filePath === 'string' ? item.filePath : undefined
             };
         });
+        const contextPayload = pendingContextItems.map((item) => ({
+            displayText: item.displayText,
+            text: item.text,
+            source: item.source,
+            filePath: item.filePath,
+            range: item.range
+        }));
 
         setBusy(true);
         if (!activeSessionId) {
@@ -3239,7 +3660,8 @@ function applyPromptToSession(sessionId, payload) {
                 clientMessageId,
                 opId,
                 mode: selectedMode,
-                images: messageImages
+                images: messageImages,
+                contextItems: contextPayload
             });
         } else {
             applyPromptToSession(activeSessionId, {
@@ -3247,7 +3669,8 @@ function applyPromptToSession(sessionId, payload) {
                 clientMessageId,
                 opId,
                 mode: selectedMode,
-                images: messageImages
+                images: messageImages,
+                contextItems: contextPayload
             });
             const session = getSessionState(activeSessionId);
             const tmpKey = session?.thinkingId || null;
@@ -3273,9 +3696,20 @@ function applyPromptToSession(sessionId, payload) {
                 payload: ['[WV][SEG_DISCARD_SKIP]', `reason=not-build`, `mode=${mode}`, `sessionId=${activeSessionId || 'null'}`]
             });
         }
-        vscode.postMessage({ type: 'sendMessage', value: messageText, attachments: attachmentsPayload, clientMessageId, sessionId: activeSessionId || undefined, tmpKey, opId });
+        vscode.postMessage({
+            type: 'sendMessage',
+            value: messageText,
+            attachments: attachmentsPayload,
+            contextItems: contextPayload,
+            clientMessageId,
+            sessionId: activeSessionId || undefined,
+            tmpKey,
+            opId
+        });
         attachments = [];
         renderAttachments();
+        pendingContextItems = [];
+        renderContextTokens();
         input.value = '';
     });
 
@@ -3334,6 +3768,8 @@ function applyPromptToSession(sessionId, payload) {
         sessionTitle.textContent = 'OpenCode: Chat';
         attachments = [];
         renderAttachments();
+        pendingContextItems = [];
+        renderContextTokens();
         isSwitchingSession = true;
         vscode.postMessage({ type: 'newSession' });
         window.__oc?.renderFromState?.();
@@ -3448,6 +3884,11 @@ window.addEventListener('message', (event) => {
                 vscode.postMessage({ type: 'ui-debug', payload: ['webview', 'ready', Date.now()] });
                 break;
             }
+            case 'serverStatus': {
+                const status = typeof message.status === 'string' ? message.status : 'connected';
+                setServerStatus(status, message.reason || null);
+                break;
+            }
             case 'resetUiState': {
                 const incomingSessionId = message.sessionId || message.sessionID || '';
                 const hydrated = Boolean(activeSessionId && incomingSessionId && activeSessionId === incomingSessionId && hydratedSessions.has(activeSessionId));
@@ -3461,6 +3902,8 @@ window.addEventListener('message', (event) => {
                     break;
                 }
                 activeSessionId = incomingSessionId || activeSessionId || '';
+                pendingContextItems = [];
+                renderContextTokens();
                 window.__oc?.renderFromState?.();
                 logSegmentState(activeSessionId, 'after-reset');
                 break;
@@ -3491,12 +3934,74 @@ window.addEventListener('message', (event) => {
 
                 pendingRefreshRequestId = null;
                 sessions = Array.isArray(message.sessions) ? message.sessions : [];
+                const sessionIds = new Set(sessions.map((item) => item?.id).filter((id) => typeof id === 'string'));
+                for (const pendingId of Array.from(pendingDeleteSessionOpBySession.keys())) {
+                    if (!sessionIds.has(pendingId)) {
+                        pendingDeleteSessionOpBySession.delete(pendingId);
+                    }
+                }
+                if (armedDeleteSessionId && !sessionIds.has(armedDeleteSessionId)) {
+                    armedDeleteSessionId = '';
+                }
 
                 vscode.postMessage({
                     type: 'ui-debug',
                     payload: ['WV', 'sessionsList', 'applied', 'requestId', effectiveRequestId, 'count', sessions.length, 'top', topSession?.id || 'none']
                 });
 
+                renderSessionList();
+                break;
+            }
+            case 'sessionDeleteStarted': {
+                const sessionId = typeof message.sessionId === 'string' ? message.sessionId : '';
+                const opId = typeof message.opId === 'string' ? message.opId : '';
+                if (!sessionId || !opId) {
+                    break;
+                }
+                pendingDeleteSessionOpBySession.set(sessionId, opId);
+                renderSessionList();
+                break;
+            }
+            case 'sessionDeleted': {
+                const sessionId = typeof message.sessionId === 'string' ? message.sessionId : '';
+                const opId = typeof message.opId === 'string' ? message.opId : '';
+                if (!sessionId) {
+                    break;
+                }
+                const pendingOp = pendingDeleteSessionOpBySession.get(sessionId);
+                if (pendingOp && opId && pendingOp !== opId) {
+                    vscode.postMessage({
+                        type: 'ui-debug',
+                        payload: ['WV', 'sessionDelete', 'stale-drop', 'sessionId', sessionId, 'opId', opId, 'expected', pendingOp]
+                    });
+                    break;
+                }
+                pendingDeleteSessionOpBySession.delete(sessionId);
+                if (armedDeleteSessionId === sessionId) {
+                    armedDeleteSessionId = '';
+                }
+                sessions = sessions.filter((item) => item?.id !== sessionId);
+                renderSessionList();
+                break;
+            }
+            case 'sessionDeleteFailed': {
+                const sessionId = typeof message.sessionId === 'string' ? message.sessionId : '';
+                const opId = typeof message.opId === 'string' ? message.opId : '';
+                if (!sessionId) {
+                    break;
+                }
+                const pendingOp = pendingDeleteSessionOpBySession.get(sessionId);
+                if (pendingOp && opId && pendingOp !== opId) {
+                    vscode.postMessage({
+                        type: 'ui-debug',
+                        payload: ['WV', 'sessionDelete', 'fail-stale-drop', 'sessionId', sessionId, 'opId', opId, 'expected', pendingOp]
+                    });
+                    break;
+                }
+                pendingDeleteSessionOpBySession.delete(sessionId);
+                if (armedDeleteSessionId === sessionId) {
+                    armedDeleteSessionId = '';
+                }
                 renderSessionList();
                 break;
             }
@@ -3728,7 +4233,12 @@ window.addEventListener('message', (event) => {
             case 'sessionId': {
                 const sessionId = getEventSessionId(message, 'sessionId');
                 if (!sessionId) break;
+                const prevSessionId = activeSessionId;
                 activeSessionId = sessionId;
+                if (prevSessionId && prevSessionId !== sessionId) {
+                    clearQuestionOverlay('session-change');
+                    clearPermissionOverlay('session-change');
+                }
                 if (isSwitchingSession) {
                     isSwitchingSession = false;
                     while (pendingUiPrompts.length) {
@@ -3741,6 +4251,12 @@ window.addEventListener('message', (event) => {
                     window.__oc?.renderFromState?.();
                     logSessionState(sessionId, 'flushPendingPrompts');
                 }
+                break;
+            }
+            case 'prefillInput': {
+                const displayText = typeof message.displayText === 'string' ? message.displayText : '';
+                const payload = message.payload && typeof message.payload === 'object' ? message.payload : null;
+                addContextItem(displayText, payload);
                 break;
             }
             case 'messageIdMap': {
@@ -4884,6 +5400,35 @@ window.addEventListener('message', (event) => {
                 }
                 break;
             }
+            case 'questionOverlay': {
+                showQuestionOverlay(message);
+                break;
+            }
+            case 'questionOverlayClose': {
+                clearQuestionOverlay('external-close');
+                scheduleRenderFromState('question-overlay-close');
+                break;
+            }
+            case 'permissionOverlay': {
+                showPermissionOverlay(message);
+                break;
+            }
+            case 'permissionOverlayClose': {
+                clearPermissionOverlay('external-close');
+                break;
+            }
+            case 'permissionResultAck': {
+                clearPermissionOverlay('result-ack');
+                break;
+            }
+            case 'permissionResultFailed': {
+                if (permissionOverlayState) {
+                    permissionOverlayState.pending = false;
+                    permissionOverlayState.error = typeof message.reason === 'string' ? message.reason : 'Permission response failed.';
+                    renderPermissionOverlayModal();
+                }
+                break;
+            }
             case 'conflictCard': {
                 lastConflictPayload = message;
                 window.__oc?.renderFromState?.();
@@ -4892,6 +5437,8 @@ window.addEventListener('message', (event) => {
             }
             case 'newSession': {
                 activeSessionId = message.sessionId || '';
+                clearQuestionOverlay('new-session');
+                clearPermissionOverlay('new-session');
                 sessionTitle.textContent = 'OpenCode: Chat';
                 isSwitchingSession = true;
                 updateUndoStatusDisplay(activeSessionId);
@@ -5064,4 +5611,399 @@ function renderConflictCard(payload) {
     chatContainer.appendChild(container);
     conflictCardEl = container;
     chatContainer.scrollTop = chatContainer.scrollHeight;
+}
+
+function commitCurrentQuestionAnswers(answersForCurrent) {
+    if (!questionOverlayState) return;
+    const stepIndex = questionOverlayState.stepIndex || 0;
+    const questions = Array.isArray(questionOverlayState.questions) ? questionOverlayState.questions : [];
+    const nextAnswers = Array.isArray(questionOverlayState.answers) ? questionOverlayState.answers.slice() : [];
+    nextAnswers[stepIndex] = Array.isArray(answersForCurrent) ? answersForCurrent.slice() : [];
+    if (stepIndex + 1 < questions.length) {
+        questionOverlayState.stepIndex = stepIndex + 1;
+        questionOverlayState.answers = nextAnswers;
+        questionOverlayState.selected = [];
+        renderQuestionOverlayModal();
+        return;
+    }
+    const callId = questionOverlayState.callId;
+    const requestId = questionOverlayState.requestId;
+    const sessionId = questionOverlayState.sessionId;
+    if (!callId || sentQuestionCallIds.has(callId)) return;
+    sentQuestionCallIds.add(callId);
+    const allAnswers = nextAnswers.map((entry) => Array.isArray(entry) ? entry : []);
+    vscode.postMessage({
+        type: 'toolResult',
+        sessionId,
+        callId,
+        requestId: requestId || undefined,
+        toolName: 'question',
+        result: {
+            selectedId: allAnswers[0]?.[0] || undefined,
+            selectedLabel: allAnswers[0]?.[0] || undefined,
+            answers: allAnswers
+        }
+    });
+    clearQuestionOverlay('selected', true);
+}
+
+function renderQuestionCardInTimeline() {
+    // Intentionally empty: question card now uses centered modal overlay.
+}
+
+function applyQuestionOptionWidth(actionsEl, options) {
+    if (!actionsEl) return;
+    const labels = Array.isArray(options) ? options.map((opt) => (typeof opt?.label === 'string' ? opt.label : '')) : [];
+    const longest = labels.reduce((max, label) => Math.max(max, label.length), 0);
+    const widthCh = Math.max(12, longest + 4);
+    actionsEl.style.setProperty('--question-option-width', `${widthCh}ch`);
+}
+
+function renderQuestionOverlayModal() {
+    if (!questionOverlayState) return;
+    const state = questionOverlayState;
+    if (state.sessionId && activeSessionId && state.sessionId !== activeSessionId) return;
+    const questions = Array.isArray(state.questions) ? state.questions : [];
+    const stepIndex = Number.isFinite(state.stepIndex) ? state.stepIndex : 0;
+    const current = questions[stepIndex];
+    if (!current) {
+        clearQuestionOverlay('invalid-state', true);
+        return;
+    }
+
+    if (questionOverlayEl && questionOverlayEl.parentElement) {
+        questionOverlayEl.parentElement.removeChild(questionOverlayEl);
+    }
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'question-overlay';
+
+    const backdrop = document.createElement('div');
+    backdrop.className = 'question-overlay-backdrop';
+    wrapper.appendChild(backdrop);
+
+    const card = document.createElement('div');
+    card.className = 'conflict-card question-card question-overlay-card';
+
+    const header = document.createElement('div');
+    header.className = 'conflict-card-header';
+    header.textContent = current.title;
+    card.appendChild(header);
+
+    const prompt = document.createElement('div');
+    prompt.className = 'question-card-question';
+    prompt.textContent = current.prompt;
+    card.appendChild(prompt);
+
+    const actions = document.createElement('div');
+    actions.className = 'question-card-actions';
+    applyQuestionOptionWidth(actions, current.options || []);
+
+    const selected = new Set(Array.isArray(state.selected) ? state.selected : []);
+    for (const option of current.options || []) {
+        const optionLabel = typeof option?.label === 'string' ? option.label : '';
+        if (!optionLabel) continue;
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'conflict-card-btn question-card-btn';
+        if (selected.has(optionLabel)) {
+            button.classList.add('active');
+        }
+        button.textContent = optionLabel;
+        button.addEventListener('click', () => {
+            if (current.multiple) {
+                const currentSelected = new Set(Array.isArray(questionOverlayState?.selected) ? questionOverlayState.selected : []);
+                if (currentSelected.has(optionLabel)) {
+                    currentSelected.delete(optionLabel);
+                } else {
+                    currentSelected.add(optionLabel);
+                }
+                if (questionOverlayState) {
+                    questionOverlayState.selected = Array.from(currentSelected);
+                }
+                renderQuestionOverlayModal();
+                return;
+            }
+            const buttons = card.querySelectorAll('button.question-card-btn,button.question-card-submit');
+            for (const btn of buttons) btn.disabled = true;
+            commitCurrentQuestionAnswers([optionLabel]);
+        });
+        actions.appendChild(button);
+    }
+
+    if (current.multiple) {
+        const submit = document.createElement('button');
+        submit.type = 'button';
+        submit.className = 'conflict-card-btn question-card-btn question-card-submit';
+        submit.textContent = 'Submit';
+        if (!selected.size) {
+            submit.disabled = true;
+        }
+        submit.addEventListener('click', () => {
+            const currentSelected = Array.isArray(questionOverlayState?.selected) ? questionOverlayState.selected : [];
+            if (!currentSelected.length) return;
+            const buttons = card.querySelectorAll('button.question-card-btn,button.question-card-submit');
+            for (const btn of buttons) btn.disabled = true;
+            commitCurrentQuestionAnswers(currentSelected);
+        });
+        actions.appendChild(submit);
+    }
+
+    card.appendChild(actions);
+    wrapper.appendChild(card);
+    document.body.appendChild(wrapper);
+    questionOverlayEl = wrapper;
+}
+
+function renderPermissionOverlayModal() {
+    if (!permissionOverlayState) return;
+    const state = permissionOverlayState;
+    if (state.sessionId && activeSessionId && state.sessionId !== activeSessionId) return;
+
+    if (permissionOverlayEl && permissionOverlayEl.parentElement) {
+        permissionOverlayEl.parentElement.removeChild(permissionOverlayEl);
+    }
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'question-overlay';
+
+    const backdrop = document.createElement('div');
+    backdrop.className = 'question-overlay-backdrop';
+    wrapper.appendChild(backdrop);
+
+    const card = document.createElement('div');
+    card.className = 'conflict-card question-card question-overlay-card';
+
+    const header = document.createElement('div');
+    header.className = 'conflict-card-header';
+    header.textContent = 'Permission required';
+    card.appendChild(header);
+
+    const prompt = document.createElement('div');
+    prompt.className = 'question-card-question';
+    const permissionText = typeof state.permission === 'string' && state.permission.length
+        ? state.permission
+        : 'The agent requests permission to continue.';
+    prompt.textContent = permissionText;
+    card.appendChild(prompt);
+
+    if (Array.isArray(state.patterns) && state.patterns.length) {
+        const detail = document.createElement('div');
+        detail.className = 'question-card-question';
+        detail.textContent = `Patterns: ${state.patterns.join(', ')}`;
+        card.appendChild(detail);
+    }
+
+    if (typeof state.error === 'string' && state.error.length) {
+        const errorText = document.createElement('div');
+        errorText.className = 'question-card-question';
+        errorText.style.color = '#ff6b6b';
+        errorText.textContent = state.error;
+        card.appendChild(errorText);
+    }
+
+    const actions = document.createElement('div');
+    actions.className = 'question-card-actions';
+    const options = [
+        { label: 'once', value: 'once' },
+        { label: 'always', value: 'always' },
+        { label: 'reject', value: 'reject' }
+    ];
+    applyQuestionOptionWidth(actions, options);
+
+    for (const option of options) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'conflict-card-btn question-card-btn';
+        button.textContent = option.label;
+        if (state.pending) {
+            button.disabled = true;
+        }
+        button.addEventListener('click', () => {
+            if (!permissionOverlayState || permissionOverlayState.pending) return;
+            permissionOverlayState.pending = true;
+            permissionOverlayState.error = '';
+            renderPermissionOverlayModal();
+            vscode.postMessage({
+                type: 'permissionResult',
+                sessionId: state.sessionId,
+                permissionId: state.permissionId,
+                requestId: state.requestId,
+                response: option.value
+            });
+        });
+        actions.appendChild(button);
+    }
+
+    card.appendChild(actions);
+    wrapper.appendChild(card);
+    document.body.appendChild(wrapper);
+    permissionOverlayEl = wrapper;
+}
+
+function clearQuestionOverlay(reason, advanceQueue = false) {
+    if (questionOverlayTimer) {
+        clearTimeout(questionOverlayTimer);
+        questionOverlayTimer = null;
+    }
+    if (questionOverlayEl && questionOverlayEl.parentElement) {
+        questionOverlayEl.parentElement.removeChild(questionOverlayEl);
+    }
+    questionOverlayEl = null;
+    questionOverlayState = null;
+    if (reason === 'session-change' || reason === 'new-session' || reason === 'external-close') {
+        questionOverlayQueue.length = 0;
+    }
+    if (advanceQueue && questionOverlayQueue.length) {
+        const nextPayload = questionOverlayQueue.shift();
+        if (nextPayload) {
+            questionOverlayState = {
+                sessionId: nextPayload.sessionId,
+                callId: nextPayload.callId,
+                requestId: nextPayload.requestId || undefined,
+                questions: nextPayload.questions,
+                stepIndex: 0,
+                answers: [],
+                selected: []
+            };
+            renderQuestionOverlayModal();
+        }
+    }
+}
+
+function clearPermissionOverlay(reason) {
+    if (permissionOverlayEl && permissionOverlayEl.parentElement) {
+        permissionOverlayEl.parentElement.removeChild(permissionOverlayEl);
+    }
+    permissionOverlayEl = null;
+    permissionOverlayState = null;
+}
+
+function logQuestionDebug(...parts) {
+    vscode.postMessage({ type: 'ui-debug', payload: ['question', ...parts] });
+}
+
+function normalizeQuestionItems(payload) {
+    const raw = Array.isArray(payload?.questions) && payload.questions.length
+        ? payload.questions
+        : [{ title: payload?.title, prompt: payload?.prompt, options: payload?.options, multiple: false }];
+    const normalized = [];
+    for (const item of raw) {
+        const title = typeof item?.title === 'string' ? item.title : '';
+        const prompt = typeof item?.prompt === 'string' ? item.prompt : '';
+        const options = Array.isArray(item?.options) ? item.options : [];
+        const multiple = item?.multiple === true;
+        if (!title || !prompt || !options.length) continue;
+        const normalizedOptions = [];
+        for (const option of options) {
+            const id = typeof option?.id === 'string' ? option.id : '';
+            const label = typeof option?.label === 'string' ? option.label : '';
+            if (!id || !label) continue;
+            normalizedOptions.push({ id, label });
+        }
+        if (!normalizedOptions.length) continue;
+        normalized.push({ title, prompt, options: normalizedOptions, multiple });
+    }
+    return normalized;
+}
+
+function showQuestionOverlay(payload) {
+    if (!payload || typeof payload !== 'object') {
+        logQuestionDebug('show.skip', 'reason=bad-payload');
+        return;
+    }
+    const sessionId = payload.sessionId || activeSessionId || '';
+    if (payload.sessionId && activeSessionId && payload.sessionId !== activeSessionId) {
+        logQuestionDebug('show.skip', `reason=session-mismatch payload=${payload.sessionId} active=${activeSessionId}`);
+        return;
+    }
+    const callId = typeof payload.callId === 'string' ? payload.callId : '';
+    const requestId = typeof payload.requestId === 'string' ? payload.requestId : '';
+    const questionItems = normalizeQuestionItems(payload);
+    if (!sessionId || !callId || !questionItems.length) {
+        logQuestionDebug('show.skip', `reason=missing-fields session=${sessionId || 'none'} callId=${callId || 'none'} questions=${questionItems.length}`);
+        return;
+    }
+    const dedupeKey = `${sessionId}|${callId}`;
+    if (shownQuestionCallIds.has(dedupeKey)) {
+        logQuestionDebug('show.skip', `reason=dedupe key=${dedupeKey}`);
+        return;
+    }
+    if (shownQuestionCallIds.size > 2000) {
+        shownQuestionCallIds.clear();
+    }
+    if (sentQuestionCallIds.size > 2000) {
+        sentQuestionCallIds.clear();
+    }
+
+    const normalizedPayload = {
+        ...payload,
+        sessionId,
+        callId,
+        requestId: requestId || undefined,
+        questions: questionItems
+    };
+
+    if (questionOverlayState) {
+        if (questionOverlayQueue.some((item) => item && item.callId === callId && item.sessionId === sessionId) || (questionOverlayState.callId === callId && questionOverlayState.sessionId === sessionId)) {
+            logQuestionDebug('show.skip', `reason=already-present callId=${callId}`);
+            return;
+        }
+        questionOverlayQueue.push(normalizedPayload);
+        logQuestionDebug('show.queued', `callId=${callId}`, `queueSize=${questionOverlayQueue.length}`);
+        return;
+    }
+
+    clearQuestionOverlay('replace');
+    shownQuestionCallIds.add(dedupeKey);
+    questionOverlayState = {
+        sessionId,
+        callId,
+        requestId: requestId || undefined,
+        questions: questionItems,
+        stepIndex: 0,
+        answers: [],
+        selected: []
+    };
+    logQuestionDebug('show.active', `callId=${callId}`, `questions=${questionItems.length}`);
+    renderQuestionOverlayModal();
+}
+
+function showPermissionOverlay(payload) {
+    if (!payload || typeof payload !== 'object') {
+        return;
+    }
+    const sessionId = payload.sessionId || activeSessionId || '';
+    if (payload.sessionId && activeSessionId && payload.sessionId !== activeSessionId) {
+        return;
+    }
+    const permissionId = typeof payload.permissionId === 'string' ? payload.permissionId : '';
+    const requestId = typeof payload.requestId === 'string' ? payload.requestId : '';
+    const permission = typeof payload.permission === 'string' ? payload.permission : '';
+    const patterns = Array.isArray(payload.patterns)
+        ? payload.patterns.filter((value) => typeof value === 'string' && value.length > 0)
+        : [];
+    if (!sessionId || !(permissionId || requestId)) {
+        return;
+    }
+
+    if (
+        permissionOverlayState
+        && permissionOverlayState.sessionId === sessionId
+        && permissionOverlayState.permissionId === (permissionId || requestId)
+    ) {
+        return;
+    }
+
+    clearPermissionOverlay('replace');
+    permissionOverlayState = {
+        sessionId,
+        permissionId: permissionId || requestId,
+        requestId: requestId || permissionId || '',
+        permission,
+        patterns,
+        pending: false,
+        error: ''
+    };
+    renderPermissionOverlayModal();
 }

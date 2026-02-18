@@ -20,9 +20,54 @@ OpenCode GUI is a powerful Visual Studio Code extension that brings the capabili
 
 ### Prerequisites
 
-- [OpenCode CLI](https://github.com/Shiyong-Tan/OpenCodeCLI) must be installed and available in your `PATH`.
+- [OpenCode CLI installation guide](https://opencode.ai/docs#install). After install, ensure `opencode` is available in your `PATH`.
 - **Git 2.30.0 or higher** must be installed and available in your `PATH`. The extension uses Git to track and manage code changes.
 - VS Code version 1.80.0 or higher.
+
+### PowerShell execution policy restrictions
+
+If you see an error like "running scripts is disabled on this system", use one of these options:
+
+- **Temporary (current terminal session only, recommended first):**
+  ```powershell
+  Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+  ```
+
+- **Persistent for current user:**
+  ```powershell
+  Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+  ```
+
+Then reopen the terminal and retry `opencode --version`.
+
+### Configure `opencode` PATH
+
+If the extension cannot find OpenCode CLI, add the folder that contains `opencode` (or `opencode.exe`) to your `PATH`, then restart VS Code.
+
+- **Windows (PowerShell)**:
+  1. Locate the executable path:
+     ```powershell
+     where opencode
+     ```
+     Use the parent folder of the returned `opencode.exe` path as your PATH entry.
+  2. Add it to User PATH (example):
+     ```powershell
+     [Environment]::SetEnvironmentVariable(
+       "Path",
+       $env:Path + ";C:\\path\\to\\opencode\\bin",
+       "User"
+     )
+     ```
+  3. Close and reopen VS Code.
+
+- **macOS/Linux**:
+  1. Add the OpenCode bin directory to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.):
+     ```bash
+     export PATH="$PATH:/path/to/opencode/bin"
+     ```
+  2. Reload shell profile and reopen VS Code.
+
+Tip: In VS Code integrated terminal, run `opencode --version` to verify PATH is correct.
 
 ### From VSIX
 

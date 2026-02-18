@@ -2,9 +2,9 @@
   "name": "opencode-gui",
   "displayName": "OpenCode UI",
   "publisher": "TanShiyong",
-  "description": "Antigravity extension for OpenCode CLI",
+  "description": "VSCode extension for OpenCode CLI",
   "icon": "media/marketplace-icon.png",
-  "version": "1.0.7",
+  "version": "1.0.26",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -49,8 +49,32 @@
       {
         "command": "opencode.clearAttachmentsCache",
         "title": "OpenCode: Clear Attachments Cache"
+      },
+      {
+        "command": "opencode.sendSelectionToChat",
+        "title": "OpenCode: Send Selection to UI"
+      },
+      {
+        "command": "opencode.sendOutputSelectionToChat",
+        "title": "OpenCode: Send Output Selection to UI"
+      },
+      {
+        "command": "opencode.debugTuiControlSchema",
+        "title": "OpenCode: Debug TUI Control Schema"
       }
-    ]
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "opencode.sendSelectionToChat",
+          "when": "editorTextFocus && editorHasSelection"
+        },
+        {
+          "command": "opencode.sendOutputSelectionToChat",
+          "when": "resourceScheme == 'output' && editorHasSelection"
+        }
+      ]
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",

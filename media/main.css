@@ -32,10 +32,32 @@ body {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    max-width: 68%;
+    max-width: 60%;
     min-width: 0;
-    flex: 1 1 auto;
+    flex: 0 1 60%;
     cursor: pointer;
+}
+
+.server-status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #22c55e;
+    display: inline-block;
+    margin-left: 8px;
+    flex: 0 0 auto;
+}
+
+.server-status-dot.status-connected {
+    background: #22c55e;
+}
+
+.server-status-dot.status-reconnecting {
+    background: #f59e0b;
+}
+
+.server-status-dot.status-error {
+    background: #ef4444;
 }
 
 .pending-indicator {
@@ -118,31 +140,151 @@ body {
     gap: 6px;
 }
 
+.session-item-row {
+    --session-action-width: 44px;
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    padding: 0;
+    overflow: hidden;
+    min-height: 60px;
+}
+
 .session-item {
     text-align: left;
     border: 1px solid var(--vscode-widget-border);
     background: var(--vscode-sideBar-background);
     color: var(--vscode-foreground);
     border-radius: 6px;
-    padding: 8px;
+    padding: 0;
     cursor: pointer;
+}
+
+.session-item-row.is-delete-armed {
+    --session-action-width: 72px;
+}
+
+.session-item-main {
+    flex: 1;
+    width: 100%;
+    min-width: 0;
+    border: none;
+    background: transparent;
+    color: var(--vscode-foreground);
+    text-align: left;
+    padding: 0;
+    margin: 0;
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    justify-content: center;
+    gap: 6px;
+    padding: 12px;
+    min-height: 56px;
+    box-sizing: border-box;
+    overflow: hidden;
+    cursor: pointer;
+}
+
+.session-item-actions {
+    flex: 0 0 var(--session-action-width);
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    border-left: 1px solid transparent;
+    background: var(--vscode-sideBar-background);
+}
+
+.session-item-row:hover .session-item-actions,
+.session-item-row:focus-within .session-item-actions,
+.session-item-row.is-delete-armed .session-item-actions {
+    border-left-color: var(--vscode-widget-border);
+}
+
+.session-item-row.is-delete-armed .session-item-actions {
+    flex-direction: column;
 }
 
 .session-item:hover {
     background: var(--vscode-list-hoverBackground);
 }
 
-.session-item-title {
-    font-size: 0.9em;
+.session-item-delete {
+    flex: 1;
+    min-width: 0;
+    border: none;
+    background: transparent;
+    color: var(--vscode-descriptionForeground);
+    border-radius: 0;
+    cursor: pointer;
+    padding: 0 10px;
+    font-size: 0.82em;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 120ms ease;
+}
+
+.session-item-row.is-delete-armed .session-item-delete {
+    padding: 0 4px;
+    line-height: 1;
+}
+
+.session-item-row:hover .session-item-delete,
+.session-item-row:focus-within .session-item-delete,
+.session-item-row.is-delete-armed .session-item-delete {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.session-item-delete-confirm {
+    background: #d91d1d;
+    color: #ffffff;
+}
+
+.session-item-delete:hover:not(:disabled) {
+    background: #e01717;
+    color: #ffffff;
+}
+
+.session-item-delete-cancel:hover:not(:disabled) {
+    background: #3f9727;
+    color: #ffffff;
+}
+
+.session-item-delete-cancel {
+    background: #47a32c;
+    color: #ffffff;
+}
+
+.session-item-delete-icon {
+    font-size: 1.64em;
+    line-height: 1;
     font-weight: 500;
 }
 
+.session-item-delete:disabled {
+    opacity: 1;
+    pointer-events: none;
+    cursor: wait;
+}
+
+.session-item-title {
+    font-size: 0.9em;
+    font-weight: 500;
+    line-height: 1.36;
+    color: var(--vscode-foreground);
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+    white-space: normal;
+    word-break: break-word;
+}
+
 .session-item-meta {
+    display: block;
     font-size: 0.75em;
     color: var(--vscode-descriptionForeground);
+    line-height: 1.2;
 }
 
 .session-empty {
@@ -322,6 +464,26 @@ body {
     overflow: visible;
 }
 
+.input-token-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 8px 10px 0 10px;
+}
+
+.input-token-list:empty {
+    display: none;
+}
+
+.input-token {
+    background: #000000;
+    color: #3b82f6;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.8em;
+    white-space: nowrap;
+}
+
 .reverted-segment {
     border: 1px solid var(--vscode-widget-border);
     border-radius: 10px;
@@ -461,6 +623,50 @@ body {
     box-shadow: 0 1px 2px rgba(0,0,0,0.12);
 }
 
+.question-inline-host {
+    width: 100%;
+    box-sizing: border-box;
+    margin-top: 10px;
+    margin-right: 8px;
+}
+
+.question-overlay {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 30;
+    pointer-events: none;
+}
+
+.question-overlay-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.25);
+}
+
+.question-overlay-card {
+    position: relative;
+    pointer-events: auto;
+    width: min(92vw, 760px);
+    max-width: 760px;
+}
+
+.question-card {
+    width: min(100%, 760px);
+    box-sizing: border-box;
+    background: var(--vscode-editor-inactiveSelectionBackground);
+    border: 1px solid var(--vscode-focusBorder);
+}
+
+.question-card-question {
+    font-size: var(--card-header-size);
+    font-weight: 400;
+    margin-bottom: 10px;
+    color: var(--vscode-foreground);
+}
+
 .change-list-card {
     width: 100%;
     box-sizing: border-box;
@@ -498,11 +704,40 @@ body {
     display: flex;
     align-items: center;
     gap: 6px;
+    min-width: 0;
+    --change-sep-width: 2.2ch;
+}
+
+.conflict-card-name {
+    display: grid;
+    grid-template-columns: max-content var(--change-sep-width) minmax(0, 1fr);
+    align-items: baseline;
+    min-width: 0;
+    flex: 1 1 auto;
+    overflow: hidden;
+}
+
+.conflict-card-file {
+    flex: 0 0 auto;
+}
+
+.conflict-card-path-sep {
+    color: var(--vscode-descriptionForeground);
+    display: inline-block;
+    width: var(--change-sep-width);
+    text-align: center;
+    white-space: nowrap;
+    flex: 0 0 auto;
 }
 
 .conflict-card-path {
     color: var(--vscode-descriptionForeground);
-    margin-right: -6px;
+    font-style: italic;
+    min-width: 0;
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .conflict-card-item summary::marker {
@@ -528,20 +763,50 @@ body {
     font-size: 0.85em;
     white-space: nowrap;
     color: var(--vscode-descriptionForeground);
+    display: grid;
+    column-gap: 0;
+    align-items: baseline;
+    font-variant-numeric: tabular-nums;
+    flex: 0 0 auto;
 }
 
-.change-list-add {
+.change-delta {
+    display: inline-grid;
+    grid-auto-flow: column;
+    grid-template-columns: var(--delta-col-width, 4ch) var(--change-sep-width, 2.2ch) var(--delta-col-width, 4ch);
+    align-items: center;
+    font-variant-numeric: tabular-nums;
+}
+
+.change-delta .delta {
+    display: inline-flex;
+    justify-content: center;
+    width: 100%;
+    padding: 0;
+    margin: 0;
+    white-space: nowrap;
+}
+
+.change-delta .sep {
+    display: inline-flex;
+    justify-content: center;
+    width: 100%;
+    padding: 0;
+    margin: 0;
+}
+
+.change-delta .plus {
     color: #2ea043;
     font-weight: 600;
+    justify-content: flex-end;
+    text-align: right;
 }
 
-.change-list-del {
+.change-delta .minus {
     color: #d1242f;
     font-weight: 600;
-}
-
-.change-list-sep {
-    color: var(--vscode-descriptionForeground);
+    justify-content: flex-start;
+    text-align: left;
 }
 
 .conflict-card-meta {
@@ -555,6 +820,31 @@ body {
     display: flex;
     gap: 6px;
     justify-content: flex-end;
+}
+
+.question-card-actions {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: flex-start;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.question-card-btn {
+    width: min(95%, var(--question-option-width, 100%));
+    text-align: left;
+    white-space: normal;
+    line-height: 1.3;
+}
+
+.question-card-btn.active {
+    background: #2ea043;
+    color: #ffffff;
+}
+
+.question-card-submit {
+    margin-left: 0;
 }
 
 .conflict-card-btn {

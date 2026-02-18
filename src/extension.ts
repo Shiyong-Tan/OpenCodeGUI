@@ -83,6 +83,24 @@ export function activate(context: vscode.ExtensionContext) {
 	);
 
 	context.subscriptions.push(
+		vscode.commands.registerCommand('opencode.sendSelectionToChat', async () => {
+			await sidebarProvider.sendEditorSelectionToChat();
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('opencode.sendOutputSelectionToChat', async () => {
+			await sidebarProvider.sendOutputSelectionToChat();
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('opencode.debugTuiControlSchema', async () => {
+			await sidebarProvider.debugPrintTuiControlSchema();
+		})
+	);
+
+	context.subscriptions.push(
 		new vscode.Disposable(() => {
 			void sidebarProvider.shutdownServer();
 		})
