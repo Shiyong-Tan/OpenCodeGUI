@@ -1,5 +1,8 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "plugin": [
+    "opencode-working-memory"
+  ],
   "permission": {
     "bash": "ask"
   },

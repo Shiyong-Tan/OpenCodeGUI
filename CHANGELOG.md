@@ -2,6 +2,142 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.1.7
+
+- Security hotfix: removed hardcoded Google OAuth `client_id`/`client_secret` from source and switched Google quota token refresh to runtime-loaded credentials.
+- Added memory-only runtime credential resolution for Antigravity quota: prefer `opencode-antigravity-auth/dist/src/constants.js`, then optional environment fallback; no extension-managed secret persistence.
+- Kept OpenAI/Copilot quota auth flow unchanged (read from OpenCode runtime auth), and skip Antigravity quota safely when runtime constants are unavailable.
+
+## 1.1.6
+
+- Added resync stall auto-recovery for takeover mode: when no progress is detected for `>= 5` epochs and `>= 100s` (with tools complete and no interactive blocker), the client now sends a hidden rescue prompt (`[OC_UI_AUTORESUME v1]`) to continue the same user request.
+- Added staged stall safety UX: after `3min` of no progress a non-timeline warning notice is shown, and if the same no-progress trigger happens again after the first auto-resume, the current turn is cancelled and a stuck card is shown with a one-click `Reload Window` action.
+- Added webview/system bridging for stall events (`systemNotice`, `systemNoticeClear`, `stallCard`) plus hidden rendering of auto-resume synthetic user messages so timeline content stays user-focused.
+
+## 1.1.5
+
+- Fixed finalize binding race by reordering turn-finalization pipeline to commit turn file changes before export-based message ID binding, so `tmp -> commit -> finalMsgId` mapping is available when `finalizeBinding` runs.
+- Added finalize-order diagnostics to verify runtime ordering (`commit-start/commit-done/upgrade-start/upgrade-done`) and simplify field debugging.
+- Hardened undo completion flow for no-op/missing-commit cases by emitting an explicit undo ack payload (`revertedSegment` with `applied=false`) so pending undo state is cleared instead of timing out.
+- Added structured undo failure reasons (`missing-startCommit`, `missing-headCommit`, conflict classes, etc.) from engine to bridge/UI and updated user-facing messaging to avoid false "Undo applied" responses.
+
+## 1.1.3
+
+- Optimized post-final ID reconciliation by using a lightweight recent-session export path first (`exportSessionRecent`) instead of always fetching full session history.
+- Added automatic fallback to full export only when recent data is insufficient to safely resolve user/assistant bindings, preserving correctness while reducing average wait time.
+- Added debug visibility for export resolution path selection (`EXT: export.resolve.path`) to make performance behavior and fallback decisions observable.
+- Updated resync to use lightweight recent message fetch first (`/session/:id/message?limit=200`) and only fallback to full history when the prior observed anchor message is not found.
+- Added per-session resync anchor tracking (`lastObservedMsgId`) from SSE/resync streams to validate recent-window continuity before deciding full fallback.
+- Improved cold-start behavior: when no anchor exists yet, resync now accepts recent results directly and initializes anchor from the newest observed `msg_*`, avoiding unnecessary first-pass full fetches.
+- Added resync fetch-path diagnostics (`EXT: resync.fetch.path`) with source/anchor hit counters for clearer performance and correctness tracing.
+
+## 1.1.2
+
+- Fixed cross-turn assistant overlay races by making tmp-key resolution turn-scoped (`localKey -> tmpKey`) instead of relying only on session-level tmp-key state.
+- Added extension-side single-turn in-flight guarding to prevent overlapping sends in the same session while previous turn-finalization/upgrade cleanup is still running.
+- Synced frontend send-button gating with backend turn-in-flight state via a new `turnInFlight` bridge event so button visuals and send behavior stay consistent.
+- Updated blocked-send UX: disabled button now uses a clear gray style, and a system notice is shown while blocked (`Please wait while the previous response finishes.`), then cleared automatically when sending is available.
+
+## 1.1.1
+
+- Fixed a webview initialization regression where send-button scope mismatch could break UI startup and prevent sessions/models from rendering.
+- Added send gating to block new prompts while a turn is still unresolved (`thinking`, pending assistant upgrade, or final-map binding in progress), reducing cross-turn overlay races.
+- Added early final index delivery (`messageIndexMapDelta`) so webview can bind `tmp -> final msgId` sooner, while keeping existing post-`chatDone` full `messageIndexMap` reconciliation.
+- Hardened final-bind cleanup paths so gate state is released on successful binding, cancellation, and session rehydrate/reset.
+
+## 1.1.0
+
+- Reworked resync takeover behavior for both final and non-final phases so SSE recovery can immediately abort stale resync runs and return to live streaming.
+- Added per-session resync recovery mode/epoch guards to prevent stale resync replay from re-appending old content and to reduce duplicate final handling races.
+- Updated rescue scheduling to a 20s SSE-driven timer model with immediate recovery on stream close/error/reconnect-fail, while preserving interactive blocker pause/resume behavior.
+- Fixed final settle deadlock where rescue timer resets could cancel pending `sse-drain` checks, causing `finalizing` to loop indefinitely.
+- Improved resync replay filtering for long tool chains by prioritizing user-parent and turn-time-window matching (and excluding compaction-summary messages), reducing cases where final replies were missed.
+
+## 1.0.39
+
+- Switched summary/final filtering to structured SSE metadata checks only: messages flagged with `summary: true`, `mode: "compaction"`, or `agent: "compaction"` are no longer eligible as turn finals.
+- Ignored compaction-summary assistant messages entirely in chat event mapping so they do not render in UI, do not enter upgrade chains, and do not interfere with final settle.
+- Added per-session tracking for ignored summary message IDs and dropped their subsequent `message.part.updated` payloads.
+- Removed text-pattern summary fallback logic, relying exclusively on structured compaction/summary markers for final-gate decisions.
+
+## 1.0.38
+
+- Hardened turn-boundary state initialization by clearing inherited assistant/tmp linkage on each new turn to prevent stale carry-over across turns.
+- Tightened final-meta emission so `assistantMessageMeta` for final candidates is only emitted when final acceptance checks pass (including parent-match constraints).
+- Applied the same accepted-final gate to resync final-meta replay, reducing cross-turn assistant ID pollution in upgrade paths.
+
+## 1.0.37
+
+- Disabled non-essential resync triggers from `silence-window` and `session.status=idle` to reduce unnecessary cross-turn synchronization pressure.
+- Removed the extra post-final `resyncForChatResolve()` call at the end of `chat()` to avoid redundant heavy fetches after final completion.
+- Kept the primary settle strategy intact (`sse-drain` + pass2 + 10s non-final keepalive) while reducing opportunities for abort-prone overlap.
+
+## 1.0.36
+
+- Tuned request timeout policy to reduce false `AbortError` failures under heavy load.
+- Added dedicated `prompt_async` timeout/retry settings (`60s` + abort retry with `90s` retry timeout) instead of using the default `/session/*` timeout.
+- Adjusted `session.message` timeout/retry window to `20s` / `30s` and `session.info` to `10s` / `15s` with abort retry enabled.
+- Kept post-settle idle-resync suppression and existing settle safeguards intact while improving request resilience.
+
+## 1.0.35
+
+- Reduced finalization latency by ensuring `sse-drain` / `sse-drain-pass2` settle checks do not block on synchronous resync.
+- Kept final completion robust with two-stage settle (`sse-drain` + 1s pass2) and existing no-delta fallback behavior.
+- Added idle-resync suppression after clean settle (`idle-post-settle-clean`) to avoid post-final empty resync runs.
+- Preserved non-final recovery via existing silence/hard-timeout resync paths while minimizing unnecessary idle resync.
+- Enforced diff visibility gating for write turns only; non-write turns now consistently skip code diff display.
+- Improved change-list reliability by union-merging repeated file-list updates and stats to avoid omissions.
+- Continued final dedupe guarantees so repeated SSE/resync accepts do not duplicate final UI completion.
+- Kept `chatDone` assistant IDs and message-index reconciliation improvements for more reliable tmp-key upgrades.
+
+## 1.0.32
+
+- Prevented summary-style messages (Goal/Instructions/Discoveries/Accomplished/Remaining headings) from being accepted as final completions, avoiding premature turn completion.
+- Expanded assistant text tracking to support summary detection and finalization filtering.
+- Refined quota tooltip visuals: enlarged title icon, tightened row spacing, and aligned percentage column numerals.
+- Fixed quota provider matching so Copilot Codex models no longer use OpenAI quota.
+- Rendered free models as 100% quota rings (Copilot 0x models and OpenCode models with "free" in the name).
+- Tightened final settle behavior to prioritize SSE-drain checks, add 1s pass-2 confirmation, and fall back to no-delta completion when SSE stays silent.
+- Added duplicate-final guards so repeated SSE/resync accepts for the same final message are ignored.
+- Included `assistantMsgId`/`lastAssistantMsgId` in `chatDone` messages to improve tmp-key to final-message reconciliation speed.
+- Added a second post-upgrade `messageIndexMap` publish to reduce tmp-key upgrade races after turn completion.
+- Enabled resync diff replay with per-turn text-hash dedupe in webview so recovery can show missing diffs without duplicate popups.
+- Removed resync blocking from SSE-drain/pass2 settle checks so final completion can resolve quickly without waiting on slow resync requests.
+- Added diff/toolPatch display gating to write turns only, preventing non-write turns from showing code diffs.
+- Merged repeated change-list updates by unioning file paths and stats to avoid missing files during recovery updates.
+
+## 1.0.31
+
+- Tightened final message locking so `finalizing` only accepts `finish=stop` candidates whose `parentID` matches the current turn user message, preventing summary/compaction messages from hijacking settle.
+- Consolidated finalize/rescue cleanup into a shared session cleanup path to reduce state drift between `startTurn` and `finishTurn`.
+- Tuned rescue cadence for long-running tools: when tool status is `pending/running`, settle checks back off to 60s and trigger an immediate confirm when tools transition to terminal states.
+
+
+## 1.0.30
+
+- Reworked final-response settling to avoid hanging on `Finalizing the response...` when `resync` sees `finish=stop` before late SSE text arrives.
+- Updated rescue confirmation flow to prefer SSE drain (`800ms` quiet window) and use `10s` interval resync checks with capped fallback to current text after max attempts.
+- Added interactive-card blocking for settle/resync rescue: question and permission prompts now pause rescue checks until all pending cards are answered, then auto-resume.
+- Fixed hydrated undo-segment rendering after reload by preventing placeholder rebuild from clearing `hiddenSet` and leaking folded messages into the main timeline.
+
+## 1.0.29
+
+- Updated chat completion to wait for completion-final assistant messages (excluding `tool-calls`) with unified SSE/resync acceptance and safe user-anchor backfill to avoid stuck tool-only states.
+- Added rescue-mode resync watchdog with 10s silence threshold and progress-based reset so missing SSE tails still resolve and file changes are queued for commit.
+
+## 1.0.28
+
+- Fixed reverted-segment message count display to use currently available timeline messages instead of historical total IDs, eliminating misleading `total > visible` card counts.
+- Stabilized undo-segment rendering by recalculating `memberMsgIds` from timeline ranges and normalizing hydrated IDs against current timeline presence.
+- Added dual-set segment persistence support (`memberMsgIds` for UI rendering, `operationMsgIds` for restore/cleanup), so restore correctness is preserved without inflating folded UI counts.
+- Updated restore requests to prefer `operationMsgIds` (with safe fallback), improving consistency between UI collapse display and backend restore scope.
+- Improved undo/restore commit resolution by adding missing-commit fallback search in `GitUndoEngine` (`undo`: forward search from anchor candidates, `restore`: backward search from end candidates) to avoid false failures when target messages have no direct commit mapping.
+
+## 1.0.27
+
+- Updated permission-card actions to a single-row layout (`once / always / reject`) while keeping question-card options in their original vertical layout.
+- Adjusted card visual styling with a green border accent and corrected question/permission action-class mapping regressions.
+
 ## 1.0.26
 
 - Added structured permission handling pipeline: mapped `permission.asked` / `permission.replied` SSE events to chat events and forwarded them to webview overlays.

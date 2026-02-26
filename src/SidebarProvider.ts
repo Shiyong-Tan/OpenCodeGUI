@@ -116,7 +116,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private undoSegmentsBySession: Map<string, Map<string, SegmentState>> = new Map();
     private readonly UNDO_SEGMENTS_KEY = 'opencode.undoSegmentsBySession.v1';
     private pendingAssistantTmpKeyBySession = new Map<string, string>();
+    private pendingAssistantTmpKeyByLocalKey = new Map<string, string>();
+    private pendingLocalKeyBySession = new Map<string, string>();
     private pendingAssistantMessageIdBySession = new Map<string, string>();
+    private sendInFlightBySession = new Set<string>();
     private gitUndoEnabled = false;
     private gitUndoReason?: string;
     private pendingBaselineTurnKey?: string;
@@ -128,6 +131,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private attachmentCleanupTimer?: NodeJS.Timeout;
     private attachmentCleanupInFlight = false;
     private lastKnownModels: ModelInfo[] = [];
+    private modelQuotaInFlight?: Promise<void>;
     private workspaceSwitchInFlight = false;
     private currentWorkspaceKey = '';
     private initPosted = false;
@@ -888,9 +892,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         return;
                     }
 
+                    if (this.currentSessionId && this.sendInFlightBySession.has(this.currentSessionId)) {
+                        this.uiDebugChannel.appendLine(`EXT: send.blocked | sessionId=${this.currentSessionId} | reason=turn-in-flight`);
+                        const liveWebview = this._view?.webview || activeWebview;
+                        liveWebview.postMessage({ type: 'turnInFlight', sessionId: this.currentSessionId, inFlight: true });
+                        return;
+                    }
+
                     // this.uiDebugChannel.appendLine(`[EXT][SEND_START] sessionId=${this.currentSessionId} attachments=${data.attachments?.length || 0}`);
 
                     const reqId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+                    let activeSendSessionId: string | undefined;
                     try {
                         const attachments = Array.isArray(data.attachments) ? data.attachments as AttachmentPayload[] : [];
                         const attachKeys = attachments.length ? Object.keys(attachments[0] || {}).join(',') : '';
@@ -908,11 +920,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         this.pendingClientMessageId = clientMessageId;
                         const opId = typeof data.opId === 'string' ? data.opId : undefined;
                         if (this.currentSessionId) {
+                            activeSendSessionId = this.currentSessionId;
+                            this.sendInFlightBySession.add(this.currentSessionId);
+                            this.pendingLocalKeyBySession.set(this.currentSessionId, clientMessageId);
+                            const liveWebview = this._view?.webview || activeWebview;
+                            liveWebview.postMessage({ type: 'turnInFlight', sessionId: this.currentSessionId, inFlight: true });
                             this.client.startTurnWithOp(this.currentSessionId, clientMessageId, opId);
                             this.assistantTextBufferBySession.set(this.currentSessionId, '');
                         }
                         if (typeof data.tmpKey === 'string' && data.tmpKey.startsWith('tmp:') && this.currentSessionId) {
                             this.pendingAssistantTmpKeyBySession.set(this.currentSessionId, data.tmpKey);
+                            this.pendingAssistantTmpKeyByLocalKey.set(clientMessageId, data.tmpKey);
                             this.client.setPendingAssistantTmpKey(this.currentSessionId, data.tmpKey);
                         }
 
@@ -1000,18 +1018,32 @@ ${attachmentLines.join('\n')}`
                         if (this.currentSessionId) {
                             this.flushAssistantBufferToWebview(this.currentSessionId, liveWebview);
                         }
-                        liveWebview.postMessage({ type: 'chatDone', sessionId: this.currentSessionId });
+                        const doneAssistantMsgId = this.currentSessionId
+                            ? this.client.getTurnAssistantMsgId(this.currentSessionId)
+                            : undefined;
+                        liveWebview.postMessage({
+                            type: 'chatDone',
+                            sessionId: this.currentSessionId,
+                            assistantMsgId: doneAssistantMsgId,
+                            lastAssistantMsgId: doneAssistantMsgId
+                        });
+                        this.postMessageIndexMap(liveWebview);
                         if (this.currentSessionId) {
+                            this.uiDebugChannel.appendLine(`EXT: finalize.order | sessionId=${this.currentSessionId} | phase=commit-start`);
                             await this.client.commitPendingTurnChanges(this.currentSessionId);
+                            this.uiDebugChannel.appendLine(`EXT: finalize.order | sessionId=${this.currentSessionId} | phase=commit-done`);
                         }
+                        this.uiDebugChannel.appendLine(`EXT: finalize.order | sessionId=${this.currentSessionId || 'null'} | phase=upgrade-start`);
                         await this.resolvePendingUserUpgrade(this.currentSessionId, liveWebview);
+                        this.uiDebugChannel.appendLine(`EXT: finalize.order | sessionId=${this.currentSessionId || 'null'} | phase=upgrade-done`);
+                        this.postMessageIndexMap(liveWebview);
                         if (this.currentSessionId) {
                             await this.emitDiffFileList(this.currentSessionId, liveWebview);
                         }
                         if (this.currentSessionId) {
                             this.client.finishTurn(this.currentSessionId);
                         }
-                        this.postMessageIndexMap(liveWebview);
+                        await this.postModelQuota(liveWebview, 'chat-done');
                         if (this.pendingClientMessageId) {
                             await this.handleAbortedMessage(this.pendingClientMessageId, liveWebview);
                             this.pendingClientMessageId = undefined;
@@ -1031,7 +1063,15 @@ ${attachmentLines.join('\n')}`
                         OpenCodeClient.outputChannel.appendLine(`[BRIDGE] Error: ${error}`);
                         vscode.window.showErrorMessage(`OpenCode Error: ${error}`);
                         this.postAddResponse(activeWebview, `Error: ${error}`);
-                        activeWebview.postMessage({ type: 'chatDone', sessionId: this.currentSessionId });
+                        const doneAssistantMsgId = this.currentSessionId
+                            ? this.client.getTurnAssistantMsgId(this.currentSessionId)
+                            : undefined;
+                        activeWebview.postMessage({
+                            type: 'chatDone',
+                            sessionId: this.currentSessionId,
+                            assistantMsgId: doneAssistantMsgId,
+                            lastAssistantMsgId: doneAssistantMsgId
+                        });
                         if (this.currentSessionId) {
                             await this.client.commitPendingTurnChanges(this.currentSessionId);
                         }
@@ -1046,12 +1086,21 @@ ${attachmentLines.join('\n')}`
                         if (this.currentSessionId) {
                             this.assistantTextBufferBySession.delete(this.currentSessionId);
                         }
+                        await this.postModelQuota(activeWebview, 'chat-error');
+                    } finally {
+                        if (activeSendSessionId) {
+                            this.sendInFlightBySession.delete(activeSendSessionId);
+                            this.pendingLocalKeyBySession.delete(activeSendSessionId);
+                            const liveWebview = this._view?.webview || activeWebview;
+                            liveWebview.postMessage({ type: 'turnInFlight', sessionId: activeSendSessionId, inFlight: false });
+                        }
                     }
                     break;
                 }
                 case "setModel": {
                     this.selectedModel = data.value || undefined;
                     await this._context.globalState.update('opencode.model', this.selectedModel);
+                    await this.postModelQuota(activeWebview, 'model-change');
                     break;
                 }
                 case "setMode": {
@@ -1078,10 +1127,19 @@ ${attachmentLines.join('\n')}`
                     liveWebview.postMessage({ type: 'pong', ts: data.ts });
                     break;
                 }
+                case "reloadWindow": {
+                    this.uiDebugChannel.appendLine('EXT: reloadWindow.requested');
+                    await vscode.commands.executeCommand('workbench.action.reloadWindow');
+                    break;
+                }
                 case "registerTmpKey": {
                     if (typeof data.sessionId !== 'string' || typeof data.tmpKey !== 'string') break;
                     if (!data.tmpKey.startsWith('tmp:')) break;
                     this.pendingAssistantTmpKeyBySession.set(data.sessionId, data.tmpKey);
+                    const pendingLocalKey = this.pendingLocalKeyBySession.get(data.sessionId);
+                    if (pendingLocalKey && pendingLocalKey.startsWith('local-')) {
+                        this.pendingAssistantTmpKeyByLocalKey.set(pendingLocalKey, data.tmpKey);
+                    }
                     this.client.setPendingAssistantTmpKey(data.sessionId, data.tmpKey);
                     break;
                 }
@@ -1637,7 +1695,7 @@ ${attachmentLines.join('\n')}`
                         const previousSegment = this.client.getRevertedSegment();
                             const result = await this.client.undoFromMessage(resolvedMessageId);
                         const currentSegment = this.client.getRevertedSegment();
-                        this.uiDebugChannel.appendLine(`[EXT][UNDO_RESULT] applied=${result.applied} conflicts=${result.conflicts.length} touched=${result.touchedFiles.length} segmentStart=${currentSegment?.startMessageId || 'null'} segmentEnd=${currentSegment?.endMessageId || 'null'}`);
+                        this.uiDebugChannel.appendLine(`[EXT][UNDO_RESULT] applied=${result.applied} conflicts=${result.conflicts.length} touched=${result.touchedFiles.length} reason=${result.reason || 'null'} segmentStart=${currentSegment?.startMessageId || 'null'} segmentEnd=${currentSegment?.endMessageId || 'null'}`);
                         this.uiDebugChannel.appendLine(`[EXT][UNDO_DONE] applied=${result.applied} conflicts=${result.conflicts.length} sessionId=${sessionId || 'null'}`);
                             if (!result.applied && result.conflicts.length) {
                                 this.pendingConflict = { kind: 'undo', startMessageId: resolvedMessageId, operationId };
@@ -1656,7 +1714,34 @@ ${attachmentLines.join('\n')}`
                                 break;
                             }
                         if (!result.applied && !result.conflicts.length) {
-                            this.postAddResponse(activeWebview, 'Undo applied. No tracked file changes were available to revert.', { operationId });
+                            this.uiDebugChannel.appendLine(`[EXT][UNDO_CLASSIFY] kind=noop-or-missing reason=${result.reason || 'unknown'} anchor=${resolvedMessageId}`);
+                            const liveWebview = this._view?.webview || activeWebview;
+                            const finalSessionId = sessionId || this.currentSessionId;
+                            this.uiDebugChannel.appendLine(`[EXT][UNDO_TX] type=revertedSegment sessionId=${finalSessionId || 'null'} anchorMsgId=${resolvedMessageId} endMsgId=${resolvedMessageId} applied=false opId=${operationId || 'null'} reason=missing-startCommit-or-noop`);
+                            liveWebview.postMessage({
+                                type: 'revertedSegment',
+                                conflicts: [],
+                                segment: {
+                                    isActive: false,
+                                    startMessageId: resolvedMessageId,
+                                    startMessageIndex: -1,
+                                    endMessageId: resolvedMessageId,
+                                    endMessageIndex: -1,
+                                    collapsed: true,
+                                    messageIds: [resolvedMessageId],
+                                    operationId,
+                                    applied: false
+                                },
+                                sessionId: finalSessionId,
+                                operationId,
+                                noticeKey
+                            });
+                            const reasonText = result.reason === 'missing-startCommit'
+                                ? 'Undo failed: commit mapping for the selected message was not found.'
+                                : result.reason === 'missing-headCommit'
+                                    ? 'Undo failed: repository head commit is unavailable.'
+                                    : 'Undo could not be applied for the selected range.';
+                            this.postAddResponse(activeWebview, reasonText, { operationId });
                             break;
                         }
                         this.postMessageIndexMap(activeWebview);
@@ -1803,7 +1888,15 @@ ${attachmentLines.join('\n')}`
                             payload: { ...this.lastDraft }
                         });
                     }
-                    activeWebview.postMessage({ type: 'chatDone', sessionId: this.currentSessionId });
+                    const doneAssistantMsgId = this.currentSessionId
+                        ? this.client.getTurnAssistantMsgId(this.currentSessionId)
+                        : undefined;
+                    activeWebview.postMessage({
+                        type: 'chatDone',
+                        sessionId: this.currentSessionId,
+                        assistantMsgId: doneAssistantMsgId,
+                        lastAssistantMsgId: doneAssistantMsgId
+                    });
                     if (this.currentSessionId) {
                         await this.client.commitPendingTurnChanges(this.currentSessionId);
                     }
@@ -2338,6 +2431,15 @@ ${attachmentLines.join('\n')}`
                 currentSessionId: initSessionId,
                 sessionId: initSessionId
             });
+            if (initSessionId) {
+                liveWebview.postMessage({
+                    type: 'turnInFlight',
+                    sessionId: initSessionId,
+                    inFlight: this.sendInFlightBySession.has(initSessionId)
+                });
+            }
+
+            await this.postModelQuota(liveWebview, 'init');
 
             liveWebview.postMessage({
                 type: 'gitUndoAvailability',
@@ -3017,7 +3119,8 @@ ${attachmentLines.join('\n')}`
             }
             
             // Also update assistant message ID mapping if we have a tmpKey
-            const tmpKey = this.pendingAssistantTmpKeyBySession.get(sessionId);
+            const tmpKeyFromLocal = result.localKey ? this.pendingAssistantTmpKeyByLocalKey.get(result.localKey) : undefined;
+            const tmpKey = tmpKeyFromLocal || this.pendingAssistantTmpKeyBySession.get(sessionId);
             if (tmpKey && tmpKey.startsWith('tmp:') && result.assistantMsgId && result.assistantMsgId.startsWith('msg_')) {
                 this.clientMessageIdMap.set(tmpKey, result.assistantMsgId);
                 const assistantOk = this.client.upgradeMessageId(tmpKey, result.assistantMsgId);
@@ -3025,6 +3128,9 @@ ${attachmentLines.join('\n')}`
                 this.client.setCurrentTurnAssistantMsgId(sessionId, result.assistantMsgId, 'export-assistant-upgrade');
                 // Clear the pending tmpKey since we've resolved it
                 this.pendingAssistantTmpKeyBySession.delete(sessionId);
+                if (result.localKey) {
+                    this.pendingAssistantTmpKeyByLocalKey.delete(result.localKey);
+                }
             }
             
             webview.postMessage({
@@ -3042,7 +3148,8 @@ ${attachmentLines.join('\n')}`
             return;
         }
 
-        const tmpKey = this.pendingAssistantTmpKeyBySession.get(sessionId);
+        const tmpKeyFromLocal = result.localKey ? this.pendingAssistantTmpKeyByLocalKey.get(result.localKey) : undefined;
+        const tmpKey = tmpKeyFromLocal || this.pendingAssistantTmpKeyBySession.get(sessionId);
         if (result.userMsgId && result.userMsgId.startsWith('msg_')) {
             const pendingPayload = {
                 type: 'userMessageUpgrade',
@@ -3172,10 +3279,56 @@ ${attachmentLines.join('\n')}`
             return;
         }
 
+        if (event.type === 'autoResumeStallWarn' && event.sessionId) {
+            const liveWebview = this._view?.webview || webview;
+            liveWebview.postMessage({
+                type: 'systemNotice',
+                sessionId: event.sessionId,
+                level: 'warn',
+                message: event.text || 'This session may be stuck. Please reload the extension and continue.'
+            });
+            return;
+        }
+
+        if (event.type === 'autoResumeStallClear' && event.sessionId) {
+            const liveWebview = this._view?.webview || webview;
+            liveWebview.postMessage({
+                type: 'systemNoticeClear',
+                sessionId: event.sessionId
+            });
+            return;
+        }
+
+        if (event.type === 'autoResumeHardStop' && event.sessionId) {
+            const liveWebview = this._view?.webview || webview;
+            this.uiDebugChannel.appendLine(`EXT: autoresume.hardstop | sessionId=${event.sessionId} | action=cancel+reload-card`);
+            this.client.cancel();
+            this.client.cancelTurn(event.sessionId);
+            this.sendInFlightBySession.delete(event.sessionId);
+            liveWebview.postMessage({ type: 'turnInFlight', sessionId: event.sessionId, inFlight: false });
+            liveWebview.postMessage({
+                type: 'stallCard',
+                sessionId: event.sessionId,
+                title: event.title || 'Session may be stuck',
+                message: event.text || 'This session appears to be unresponsive. Please reload the extension and continue.',
+                actionLabel: event.actionLabel || 'Reload Window'
+            });
+            return;
+        }
+
         if (event.type === 'assistantMessageMeta' && (event.messageId || event.assistantMsgId)) {
             const liveWebview = this._view?.webview || webview;
             const sessionId = event.sessionId || this.currentSessionId;
-            const tmpKey = sessionId ? this.pendingAssistantTmpKeyBySession.get(sessionId) : undefined;
+            const eventTmpKey = typeof (event as any).tmpKey === 'string' ? (event as any).tmpKey : undefined;
+            const sessionTmpKey = sessionId ? this.pendingAssistantTmpKeyBySession.get(sessionId) : undefined;
+            const tmpKey = eventTmpKey || sessionTmpKey;
+            if (sessionId && tmpKey && tmpKey.startsWith('tmp:')) {
+                this.pendingAssistantTmpKeyBySession.set(sessionId, tmpKey);
+                const pendingLocalKey = this.pendingLocalKeyBySession.get(sessionId);
+                if (pendingLocalKey && pendingLocalKey.startsWith('local-')) {
+                    this.pendingAssistantTmpKeyByLocalKey.set(pendingLocalKey, tmpKey);
+                }
+            }
             if (event.assistantMsgId && sessionId) {
                 this.uiDebugChannel.appendLine(`[DBG_ASSIST_ID] session=${sessionId} assistantMsgId=${event.assistantMsgId} tmpKey=${tmpKey || 'null'}`);
             }
@@ -3184,10 +3337,19 @@ ${attachmentLines.join('\n')}`
                 messageId: event.messageId,
                 messageIndex: event.messageIndex,
                 lastText: event.lastText,
-                sessionId: this.currentSessionId,
+                sessionId,
                 assistantMsgId: event.assistantMsgId,
                 tmpKey
             });
+            if (sessionId && typeof event.assistantMsgId === 'string' && typeof event.messageIndex === 'number') {
+                liveWebview.postMessage({
+                    type: 'messageIndexMapDelta',
+                    sessionId,
+                    messageId: event.assistantMsgId,
+                    messageIndex: event.messageIndex,
+                    phase: 'final-early'
+                });
+            }
             return;
         }
 
@@ -3202,7 +3364,15 @@ ${attachmentLines.join('\n')}`
         if (event.type === 'error' && event.text) {
             const liveWebview = this._view?.webview || webview;
             liveWebview.postMessage({ type: 'addResponse', value: `Error: ${event.text}`, sessionId: this.currentSessionId });
-            liveWebview.postMessage({ type: 'chatDone', sessionId: this.currentSessionId });
+            const doneAssistantMsgId = this.currentSessionId
+                ? this.client.getTurnAssistantMsgId(this.currentSessionId)
+                : undefined;
+            liveWebview.postMessage({
+                type: 'chatDone',
+                sessionId: this.currentSessionId,
+                assistantMsgId: doneAssistantMsgId,
+                lastAssistantMsgId: doneAssistantMsgId
+            });
             return;
         }
 
@@ -3302,11 +3472,47 @@ ${attachmentLines.join('\n')}`
                 this.lastKnownModels = models;
             }
             webview.postMessage({ type: 'models', models, sessionId: this.currentSessionId });
+            await this.postModelQuota(webview, 'refresh-models');
             return models;
         } catch (error) {
             this.postAddResponse(webview, `Failed to refresh models: ${error}`);
         }
         return [];
+    }
+
+    private async postModelQuota(webview: vscode.Webview, reason: string): Promise<void> {
+        if (this.modelQuotaInFlight) {
+            await this.modelQuotaInFlight;
+        }
+        const modelId = this.selectedModel;
+        if (!modelId) return;
+        const model = this.lastKnownModels.find((item) => item.fullId === modelId);
+        if (!model) return;
+        this.modelQuotaInFlight = (async () => {
+            try {
+                const quota = await this.client.fetchModelQuota(model);
+                webview.postMessage({
+                    type: 'ui-debug',
+                    payload: [
+                        'quota.fetch.ok',
+                        `provider=${model.providerId}`,
+                        `summary=${quota?.summaryRemainingPercent ?? 'null'}`,
+                        `rows=${quota?.rows?.length ?? 0}`
+                    ]
+                });
+                webview.postMessage({
+                    type: 'modelQuota',
+                    modelId: model.fullId,
+                    providerId: model.providerId,
+                    quota,
+                    reason
+                });
+            } catch (error) {
+                this.uiDebugChannel.appendLine(`EXT: quota.fetch.fail | reason=${reason} | err=${String(error)}`);
+            }
+        })();
+        await this.modelQuotaInFlight;
+        this.modelQuotaInFlight = undefined;
     }
 
     private async refreshSessions(webview: vscode.Webview, requestId: string): Promise<void> {
@@ -3745,7 +3951,10 @@ ${attachmentLines.join('\n')}`
         this.diffHashes.clear();
         this.assistantTextBufferBySession.clear();
         this.pendingAssistantTmpKeyBySession.clear();
+        this.pendingAssistantTmpKeyByLocalKey.clear();
+        this.pendingLocalKeyBySession.clear();
         this.pendingAssistantMessageIdBySession.clear();
+        this.sendInFlightBySession.clear();
     }
 
     private resetUiState(): void {
@@ -3758,6 +3967,7 @@ ${attachmentLines.join('\n')}`
     private async handleAbortedMessage(messageId: string, webview: vscode.Webview): Promise<void> {
         this.client.removeMessageId(messageId);
         this.clientMessageIdMap.delete(messageId);
+        this.pendingAssistantTmpKeyByLocalKey.delete(messageId);
         if (this.currentSessionId) {
             const tmpKey = this.pendingAssistantTmpKeyBySession.get(this.currentSessionId);
             if (tmpKey === messageId) {

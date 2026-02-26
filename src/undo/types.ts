@@ -62,6 +62,7 @@ export type UndoResult = {
     conflicts: ConflictInfo[];
     touchedFiles: string[];
     applied: boolean;
+    reason?: string;
     startCommit?: string;
     startCommits?: string[];
     restoreCommit?: string;

@@ -1,8 +1,10 @@
 import * as cp from 'child_process';
 import * as fs from 'fs';
 import * as net from 'net';
+import * as https from 'https';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import * as os from 'os';
 import * as vscode from 'vscode';
 import { GitUndoEngine } from './undo/GitUndoEngine';
 import { normalizeTouchedFiles } from './undo/GitPathUtils';
@@ -15,6 +17,20 @@ export type ModelInfo = {
     fullId: string;
     variants: string[];
     speedMultiplier?: string;
+};
+
+export type ModelQuotaRow = {
+    label: string;
+    remainingPercent: number;
+    resetText?: string;
+};
+
+export type ModelQuota = {
+    providerId: string;
+    modelId: string;
+    summaryRemainingPercent: number;
+    rows: ModelQuotaRow[];
+    fetchedAt: number;
 };
 
 export type SessionInfo = {
@@ -55,7 +71,7 @@ export type PermissionOverlayPayload = {
 };
 
 export type ChatEvent = {
-    type: 'text' | 'session' | 'raw' | 'permission' | 'diff' | 'message' | 'error' | 'toolPatch' | 'files' | 'assistantMessageMeta' | 'questionOverlay' | 'permissionRequest' | 'permissionReplied';
+    type: 'text' | 'session' | 'raw' | 'permission' | 'diff' | 'message' | 'error' | 'toolPatch' | 'files' | 'assistantMessageMeta' | 'questionOverlay' | 'permissionRequest' | 'permissionReplied' | 'autoResumeStallWarn' | 'autoResumeStallClear' | 'autoResumeHardStop';
     text?: string;
     sessionId?: string;
     files?: FileSnapshot[];
@@ -80,6 +96,7 @@ export type ChatEvent = {
     patterns?: string[];
     response?: PermissionReply;
     metadata?: any;
+    actionLabel?: string;
 };
 
 type PendingQuestionControl = {
@@ -200,6 +217,11 @@ type ServerConn = {
     lock: ServerLock;
 };
 
+type AntigravityOAuthConstants = {
+    clientId: string;
+    clientSecret: string;
+};
+
 export class OpenCodeClient {
     public static outputChannel = vscode.window.createOutputChannel("OpenCode CLI");
     private currentChild?: cp.ChildProcess;
@@ -219,7 +241,6 @@ export class OpenCodeClient {
     private eventStreamActive = false;
     private eventStreamBackoffMs = 1000;
     private readonly eventListeners = new Set<(event: ChatEvent) => void>();
-    private readonly sessionIdleWaiters = new Map<string, Array<() => void>>();
     private readonly serverLockDir = '.opencode';
     private readonly serverLockFile = 'server.lock.json';
     private readonly serverPortBase = 42000;
@@ -241,6 +262,7 @@ export class OpenCodeClient {
     private gitUndoAvailable = false;
     private sessionUndoEnabled = new Map<string, boolean>();
     private assistantTextLengths = new Map<string, number>();
+    private assistantTextById = new Map<string, string>();
     private assistantHasDelta = new Set<string>();
     private assistantStatusCleared = new Set<string>();
     private messageRoleById = new Map<string, string>();
@@ -253,14 +275,63 @@ export class OpenCodeClient {
     private currentTurnAssistantMsgIdBySession = new Map<string, string>();
     private currentTurnStartedAtBySession = new Map<string, number>();
     private lastSseAtBySession = new Map<string, number>();
+    private lastObservedMsgIdBySession = new Map<string, string>();
+    private lastProgressAtBySession = new Map<string, number>();
+    private lastProgressKeyBySession = new Map<string, string>();
+    private noProgressEpochsBySession = new Map<string, number>();
+    private noProgressSinceBySession = new Map<string, number>();
+    private autoResumeCountBySession = new Map<string, number>();
+    private stallWarnedBySession = new Set<string>();
+    private awaitingAutoResumeUserAnchorBySession = new Set<string>();
     private silenceTimerBySession = new Map<string, NodeJS.Timeout>();
+    private turnFinalAtBySession = new Map<string, number>();
+    private turnFinalMsgIdBySession = new Map<string, string>();
+    private finalizingMsgIdBySession = new Map<string, string>();
+    private turnFinalQuietTimersBySession = new Map<string, NodeJS.Timeout>();
+    private turnFinalWaitersBySession = new Map<string, Array<() => void>>();
+    private turnFinalResolvedBySession = new Set<string>();
+    private turnFinalSourceBySession = new Map<string, EventSource>();
+    private turnRescueTimerBySession = new Map<string, NodeJS.Timeout>();
+    private turnRescueRunIdBySession = new Map<string, number>();
+    private turnResyncLoopTimerBySession = new Map<string, NodeJS.Timeout>();
+    private turnSseDrainTimerBySession = new Map<string, NodeJS.Timeout>();
+    private turnSseTextAtBySession = new Map<string, number>();
+    private turnSettleAttemptsBySession = new Map<string, number>();
+    private turnSettleLastLenBySession = new Map<string, number>();
+    private turnSettleStableCountBySession = new Map<string, number>();
+    private turnSettleLastFingerprintBySession = new Map<string, string>();
+    private turnSettleNoDeltaCountBySession = new Map<string, number>();
+    private rescueResumeAtBySession = new Map<string, number>();
+    private turnRecoveryModeBySession = new Map<string, 'sse' | 'resync'>();
+    private turnResyncEpochBySession = new Map<string, number>();
+    private toolRunningByMessageId = new Map<string, number>();
+    private toolStatusBySession = new Map<string, Map<string, string>>();
+    private modelQuotaInFlight = new Map<string, Promise<ModelQuota | null>>();
+    private modelQuotaCache = new Map<string, { ts: number; quota: ModelQuota | null }>();
+    private antigravityOAuthConstantsPromise?: Promise<AntigravityOAuthConstants | null>;
     private resyncInFlightBySession = new Map<string, Promise<void>>();
     private resyncCooldownUntilBySession = new Map<string, number>();
     private finalMetaSeenKeysBySession = new Map<string, Set<string>>();
     private questionOverlaySeen = new Set<string>();
     private pendingQuestionsBySession = new Map<string, Map<string, PendingQuestionControl>>();
+    private pendingQuestionCallIdsBySession = new Map<string, Set<string>>();
+    private pendingPermissionIdsBySession = new Map<string, Set<string>>();
+    private ignoredSummaryMessageIdsBySession = new Map<string, Set<string>>();
     private readonly resyncCooldownMs = 500;
     private readonly silenceWindowMs = 1800;
+    private readonly finalQuietWindowMs = 300;
+    private readonly finalBackfillDeltaMs = 500;
+    private readonly rescueStartDelayMs = 20000;
+    private readonly resyncLoopDelayMs = 20000;
+    private readonly sseDrainQuietMs = 800;
+    private readonly sseDrainPass2DelayMs = 1000;
+    private readonly settleNoDeltaThreshold = 3;
+    private readonly autoResumePrompt = '[OC_UI_AUTORESUME v1]\nRe-read the last user request and finish the remaining steps.';
+    private readonly autoResumeEpochThreshold = 5;
+    private readonly autoResumeStallMs = 100000;
+    private readonly autoResumeWarnMs = 180000;
+    private readonly quotaCacheTtlMs = 15000;
+    private readonly assistantTextCacheMax = 4000;
     private serverStatus: ServerStatus = 'connected';
     private serverStatusHandler?: (status: ServerStatus, reason?: string) => void;
     private eventStreamFailCount = 0;
@@ -283,6 +354,7 @@ export class OpenCodeClient {
         this.pendingTurnChangesBySession.clear();
         this.sessionUndoEnabled.clear();
         this.assistantTextLengths.clear();
+        this.assistantTextById.clear();
         this.assistantHasDelta.clear();
         this.assistantStatusCleared.clear();
         this.messageRoleById.clear();
@@ -295,12 +367,40 @@ export class OpenCodeClient {
         this.currentTurnAssistantMsgIdBySession.clear();
         this.currentTurnStartedAtBySession.clear();
         this.lastSseAtBySession.clear();
+        this.lastObservedMsgIdBySession.clear();
+        this.lastProgressAtBySession.clear();
+        this.lastProgressKeyBySession.clear();
+        this.noProgressEpochsBySession.clear();
+        this.noProgressSinceBySession.clear();
+        this.autoResumeCountBySession.clear();
+        this.stallWarnedBySession.clear();
+        this.awaitingAutoResumeUserAnchorBySession.clear();
         this.clearSilenceTimers();
+        this.clearTurnFinals();
+        this.turnFinalResolvedBySession.clear();
+        this.turnFinalSourceBySession.clear();
+        this.clearRescueTimers();
+        this.clearResyncLoopTimers();
+        this.clearSseDrainTimers();
+        this.turnSseTextAtBySession.clear();
+        this.turnSettleAttemptsBySession.clear();
+        this.turnSettleLastLenBySession.clear();
+        this.turnSettleStableCountBySession.clear();
+        this.turnSettleLastFingerprintBySession.clear();
+        this.turnSettleNoDeltaCountBySession.clear();
+        this.rescueResumeAtBySession.clear();
+        this.turnRecoveryModeBySession.clear();
+        this.turnResyncEpochBySession.clear();
+        this.toolRunningByMessageId.clear();
+        this.toolStatusBySession.clear();
         this.resyncInFlightBySession.clear();
         this.resyncCooldownUntilBySession.clear();
         this.finalMetaSeenKeysBySession.clear();
         this.questionOverlaySeen.clear();
         this.pendingQuestionsBySession.clear();
+        this.pendingQuestionCallIdsBySession.clear();
+        this.pendingPermissionIdsBySession.clear();
+        this.ignoredSummaryMessageIdsBySession.clear();
     }
 
     constructor() {
@@ -456,14 +556,98 @@ export class OpenCodeClient {
         this.silenceTimerBySession.clear();
     }
 
+    private clearTurnFinals(): void {
+        for (const timer of this.turnFinalQuietTimersBySession.values()) {
+            clearTimeout(timer);
+        }
+        this.turnFinalQuietTimersBySession.clear();
+        this.turnFinalAtBySession.clear();
+        this.turnFinalMsgIdBySession.clear();
+        this.finalizingMsgIdBySession.clear();
+        this.turnFinalWaitersBySession.clear();
+    }
+
+    private clearRescueTimers(): void {
+        for (const timer of this.turnRescueTimerBySession.values()) {
+            clearTimeout(timer);
+        }
+        this.turnRescueTimerBySession.clear();
+        this.turnRescueRunIdBySession.clear();
+    }
+
+    private clearResyncLoopTimers(): void {
+        for (const timer of this.turnResyncLoopTimerBySession.values()) {
+            clearTimeout(timer);
+        }
+        this.turnResyncLoopTimerBySession.clear();
+    }
+
+    private clearSseDrainTimers(): void {
+        for (const timer of this.turnSseDrainTimerBySession.values()) {
+            clearTimeout(timer);
+        }
+        this.turnSseDrainTimerBySession.clear();
+    }
+
+    private clearFinalizeSessionState(sessionId: string, reason: 'turn-start' | 'turn-finish'): void {
+        this.turnFinalAtBySession.delete(sessionId);
+        this.turnFinalMsgIdBySession.delete(sessionId);
+        this.finalizingMsgIdBySession.delete(sessionId);
+        this.turnFinalResolvedBySession.delete(sessionId);
+        this.turnFinalSourceBySession.delete(sessionId);
+        this.turnSseTextAtBySession.delete(sessionId);
+        this.turnSettleAttemptsBySession.delete(sessionId);
+        this.turnSettleLastLenBySession.delete(sessionId);
+        this.turnSettleStableCountBySession.delete(sessionId);
+        this.turnSettleLastFingerprintBySession.delete(sessionId);
+        this.turnSettleNoDeltaCountBySession.delete(sessionId);
+        this.rescueResumeAtBySession.delete(sessionId);
+        this.turnRecoveryModeBySession.delete(sessionId);
+        this.turnResyncEpochBySession.delete(sessionId);
+        this.lastProgressAtBySession.delete(sessionId);
+        this.lastProgressKeyBySession.delete(sessionId);
+        this.noProgressEpochsBySession.delete(sessionId);
+        this.noProgressSinceBySession.delete(sessionId);
+        this.autoResumeCountBySession.delete(sessionId);
+        this.stallWarnedBySession.delete(sessionId);
+        this.awaitingAutoResumeUserAnchorBySession.delete(sessionId);
+        this.stopNonFinalResyncLoop(sessionId, `clear:${reason}`);
+
+        const finalTimer = this.turnFinalQuietTimersBySession.get(sessionId);
+        if (finalTimer) {
+            clearTimeout(finalTimer);
+            this.turnFinalQuietTimersBySession.delete(sessionId);
+        }
+        const sseDrain = this.turnSseDrainTimerBySession.get(sessionId);
+        if (sseDrain) {
+            clearTimeout(sseDrain);
+            this.turnSseDrainTimerBySession.delete(sessionId);
+        }
+        this.turnFinalWaitersBySession.delete(sessionId);
+        this.stopRescueWatchdog(sessionId, reason);
+
+        this.pendingQuestionCallIdsBySession.delete(sessionId);
+        this.pendingPermissionIdsBySession.delete(sessionId);
+        this.toolStatusBySession.delete(sessionId);
+    }
+
     public startTurn(sessionId: string, pendingUserLocalKey: string): void {
         if (!sessionId) return;
         this.canceledActiveTurnBySession.set(sessionId, false);
         this.currentTurnUserMsgIdBySession.delete(sessionId);
         this.currentTurnAssistantMsgIdBySession.delete(sessionId);
+        this.clearFinalizeSessionState(sessionId, 'turn-start');
         const now = Date.now();
         this.currentTurnStartedAtBySession.set(sessionId, now);
         this.lastSseAtBySession.set(sessionId, now);
+        this.lastProgressAtBySession.set(sessionId, now);
+        this.lastProgressKeyBySession.delete(sessionId);
+        this.noProgressEpochsBySession.set(sessionId, 0);
+        this.noProgressSinceBySession.delete(sessionId);
+        this.autoResumeCountBySession.set(sessionId, 0);
+        this.stallWarnedBySession.delete(sessionId);
+        this.turnRecoveryModeBySession.set(sessionId, 'sse');
+        this.turnResyncEpochBySession.set(sessionId, 0);
         const pending = this.pendingTurnChangesBySession.get(sessionId);
         if (pending?.changes?.length) {
             // this.logUiDebug(`[DBG_TURN_START] session=${sessionId} pendingChanges=${pending.changes.length} cleared=true`);
@@ -472,13 +656,13 @@ export class OpenCodeClient {
         const existing = this.turnStateBySession.get(sessionId);
         this.turnStateBySession.set(sessionId, {
             pendingUserLocalKey,
-            pendingAssistantTmpKey: existing?.pendingAssistantTmpKey,
-            assistantMsgId: existing?.assistantMsgId,
+            pendingAssistantTmpKey: undefined,
+            assistantMsgId: undefined,
             exportInFlight: false,
             exportResolved: false,
             resolvedUserMsgId: undefined,
             lastResolvedAssistantMsgId: undefined,
-            turnMessageIds: existing?.turnMessageIds ?? new Set()
+            turnMessageIds: new Set()
         });
         this.turnWriteStateBySession.set(sessionId, { turnKey: pendingUserLocalKey, hasWrites: false });
         this.scheduleSilenceResync(sessionId);
@@ -517,6 +701,7 @@ export class OpenCodeClient {
         this.currentTurnStartedAtBySession.delete(sessionId);
         this.lastSseAtBySession.delete(sessionId);
         this.clearSilenceTimer(sessionId);
+        this.clearFinalizeSessionState(sessionId, 'turn-finish');
         // this.logUiDebug(`[DBG_TURN_END] session=${sessionId}`);
     }
 
@@ -553,6 +738,17 @@ export class OpenCodeClient {
         if (!sessionId) return false;
         const pending = this.pendingTurnChangesBySession.get(sessionId);
         return Boolean(pending?.changes?.length);
+    }
+
+    private shouldQueueTurnChanges(sessionId: string | undefined, source: EventSource, messageId?: string): boolean {
+        if (!sessionId) return false;
+        if (!this.gitUndoAvailable || !this.isSessionUndoEnabled(sessionId)) return false;
+        if (source !== 'resync') return true;
+        const state = this.turnStateBySession.get(sessionId);
+        if (!state) return false;
+        const turnIds = state.turnMessageIds;
+        if (messageId && turnIds && turnIds.size > 0 && !turnIds.has(messageId)) return false;
+        return true;
     }
 
     private isBashCommandReadOnly(command: string | undefined): boolean {
@@ -663,16 +859,346 @@ export class OpenCodeClient {
     }
 
     private scheduleSilenceResync(sessionId: string): void {
-        if (!sessionId) return;
-        this.clearSilenceTimer(sessionId);
+        // Disabled: non-final silence-window resync trigger.
+        // Keep non-final recovery on 10s rescue timer only.
+        return;
+    }
+
+    private scheduleTurnFinalQuiet(sessionId: string): void {
+        const existing = this.turnFinalQuietTimersBySession.get(sessionId);
+        if (existing) {
+            clearTimeout(existing);
+        }
         const timer = setTimeout(() => {
-            const lastSseAt = this.lastSseAtBySession.get(sessionId) || 0;
-            const silentForMs = Date.now() - lastSseAt;
-            if (silentForMs < this.silenceWindowMs) return;
-            if (!this.isTurnMissingFinal(sessionId)) return;
-            this.scheduleSessionResyncLimited(sessionId, 'silence-window');
-        }, this.silenceWindowMs);
-        this.silenceTimerBySession.set(sessionId, timer);
+            this.turnFinalQuietTimersBySession.delete(sessionId);
+            const lastTextAt = this.turnSseTextAtBySession.get(sessionId) || 0;
+            const idleFor = Date.now() - lastTextAt;
+            if (lastTextAt > 0 && idleFor < this.sseDrainQuietMs) {
+                this.scheduleSseDrainConfirm(sessionId);
+                return;
+            }
+            this.scheduleSseDrainConfirm(sessionId);
+        }, this.finalQuietWindowMs);
+        this.turnFinalQuietTimersBySession.set(sessionId, timer);
+    }
+
+    private markTurnFinal(sessionId: string, assistantMsgId?: string, source: EventSource = 'sse'): void {
+        if (!sessionId) return;
+        if (!this.turnStateBySession.has(sessionId)) return;
+        if (this.turnFinalResolvedBySession.has(sessionId)) return;
+        const lockedMsgId = this.finalizingMsgIdBySession.get(sessionId);
+        if (lockedMsgId && assistantMsgId && assistantMsgId === lockedMsgId) {
+            this.logUiDebug(`EXT: turn.final.skip | sessionId=${sessionId} | msgId=${assistantMsgId} | reason=duplicate-final | source=${source}`);
+            return;
+        }
+        if (!lockedMsgId && assistantMsgId) {
+            this.finalizingMsgIdBySession.set(sessionId, assistantMsgId);
+            this.logUiDebug(`EXT: finalizing.lock | sessionId=${sessionId} | msgId=${assistantMsgId}`);
+        }
+        const targetMsgId = this.finalizingMsgIdBySession.get(sessionId) || assistantMsgId;
+        if (lockedMsgId && assistantMsgId && assistantMsgId !== lockedMsgId) {
+            this.logUiDebug(`EXT: finalizing.ignore | sessionId=${sessionId} | msgId=${assistantMsgId} | reason=not-locked`);
+        }
+        const prevMsgId = this.turnFinalMsgIdBySession.get(sessionId);
+        this.turnFinalAtBySession.set(sessionId, Date.now());
+        if (targetMsgId) {
+            this.turnFinalMsgIdBySession.set(sessionId, targetMsgId);
+        }
+        this.turnFinalSourceBySession.set(sessionId, source);
+        if (!prevMsgId || (targetMsgId && targetMsgId !== prevMsgId)) {
+            this.turnSettleAttemptsBySession.set(sessionId, 0);
+            this.turnSettleLastLenBySession.delete(sessionId);
+            this.turnSettleStableCountBySession.set(sessionId, 0);
+            this.turnSettleLastFingerprintBySession.delete(sessionId);
+            this.turnSettleNoDeltaCountBySession.set(sessionId, 0);
+        }
+        this.scheduleTurnFinalQuiet(sessionId);
+    }
+
+    private waitForTurnCompletionFinal(sessionId: string): Promise<EventSource> {
+        return new Promise((resolve) => {
+            if (!sessionId) {
+                resolve('sse');
+                return;
+            }
+            if (this.turnFinalResolvedBySession.has(sessionId)) {
+                resolve(this.turnFinalSourceBySession.get(sessionId) || 'sse');
+                return;
+            }
+            const list = this.turnFinalWaitersBySession.get(sessionId) || [];
+            list.push(() => {
+                resolve(this.turnFinalSourceBySession.get(sessionId) || 'sse');
+            });
+            this.turnFinalWaitersBySession.set(sessionId, list);
+            if (this.turnFinalAtBySession.has(sessionId)) {
+                this.scheduleTurnFinalQuiet(sessionId);
+            }
+            this.startRescueTimer(sessionId);
+        });
+    }
+
+    private isSessionAwaitingFinal(sessionId: string): boolean {
+        if (!sessionId) return false;
+        if (this.turnFinalResolvedBySession.has(sessionId)) return false;
+        if (!this.turnFinalWaitersBySession.has(sessionId)) return false;
+        return this.turnStateBySession.has(sessionId);
+    }
+
+    private isNonFinalResyncTakeover(sessionId: string): boolean {
+        if (!sessionId) return false;
+        if (this.turnFinalResolvedBySession.has(sessionId)) return false;
+        if (!this.turnStateBySession.has(sessionId)) return false;
+        if ((this.turnRecoveryModeBySession.get(sessionId) || 'sse') !== 'resync') return false;
+        if (this.turnFinalAtBySession.has(sessionId)) return false;
+        return true;
+    }
+
+    private stopNonFinalResyncLoop(sessionId: string, reason: string): void {
+        if (!sessionId) return;
+        const timer = this.turnResyncLoopTimerBySession.get(sessionId);
+        if (timer) {
+            clearTimeout(timer);
+            this.turnResyncLoopTimerBySession.delete(sessionId);
+            this.logUiDebug(`EXT: resync.loop.stop | sessionId=${sessionId} | reason=${reason}`);
+        }
+    }
+
+    private armNonFinalResyncLoop(sessionId: string, reason: string): void {
+        if (!this.isNonFinalResyncTakeover(sessionId)) return;
+        if (this.turnFinalWaitersBySession.has(sessionId)) return;
+        if (this.hasInteractiveBlocker(sessionId)) {
+            this.logUiDebug(`EXT: resync.loop.pause | sessionId=${sessionId} | reason=interactive-blocker`);
+            return;
+        }
+        const existing = this.turnResyncLoopTimerBySession.get(sessionId);
+        if (existing) {
+            clearTimeout(existing);
+        }
+        const timer = setTimeout(() => {
+            this.turnResyncLoopTimerBySession.delete(sessionId);
+            if (!this.isNonFinalResyncTakeover(sessionId)) return;
+            if (this.hasInteractiveBlocker(sessionId)) {
+                this.logUiDebug(`EXT: resync.loop.pause | sessionId=${sessionId} | reason=interactive-blocker`);
+                return;
+            }
+            this.logUiDebug(`EXT: resync.loop.fire | sessionId=${sessionId}`);
+            void this.resyncForChatResolve(sessionId, 'loop-non-final');
+        }, this.resyncLoopDelayMs);
+        this.turnResyncLoopTimerBySession.set(sessionId, timer);
+        this.logUiDebug(`EXT: resync.loop.arm | sessionId=${sessionId} | delayMs=${this.resyncLoopDelayMs} | reason=${reason}`);
+    }
+
+    private beginResyncRecovery(sessionId: string, reason: string): number {
+        this.stopNonFinalResyncLoop(sessionId, `begin:${reason}`);
+        const nextEpoch = (this.turnResyncEpochBySession.get(sessionId) || 0) + 1;
+        this.turnResyncEpochBySession.set(sessionId, nextEpoch);
+        this.turnRecoveryModeBySession.set(sessionId, 'resync');
+        this.logUiDebug(`EXT: resync.mode | sessionId=${sessionId} | mode=resync | epoch=${nextEpoch} | reason=${reason}`);
+        return nextEpoch;
+    }
+
+    private isResyncRunActive(sessionId: string, epoch: number): boolean {
+        if (!sessionId) return false;
+        if (this.turnFinalResolvedBySession.has(sessionId)) return false;
+        const mode = this.turnRecoveryModeBySession.get(sessionId) || 'sse';
+        if (mode !== 'resync') return false;
+        return (this.turnResyncEpochBySession.get(sessionId) || 0) === epoch;
+    }
+
+    private maybeRecoverSseFromResync(sessionId: string | undefined, msgId: string | undefined, reason: string): void {
+        if (!sessionId || !msgId) return;
+        if (!this.isSessionAwaitingFinal(sessionId)) return;
+        if ((this.turnRecoveryModeBySession.get(sessionId) || 'sse') !== 'resync') return;
+        const finalMsgId = this.getFinalizingMsgId(sessionId);
+        if (finalMsgId && finalMsgId !== msgId) return;
+        const nextEpoch = (this.turnResyncEpochBySession.get(sessionId) || 0) + 1;
+        this.turnResyncEpochBySession.set(sessionId, nextEpoch);
+        this.turnRecoveryModeBySession.set(sessionId, 'sse');
+        this.stopNonFinalResyncLoop(sessionId, `sse-recover-final:${reason}`);
+        this.logUiDebug(`EXT: resync.abort.by-sse | sessionId=${sessionId} | msgId=${msgId} | epoch=${nextEpoch} | reason=${reason}`);
+        this.startRescueTimer(sessionId);
+    }
+
+    private maybeRecoverSseFromResyncBySessionEvent(sessionId: string | undefined, reason: string): void {
+        if (!sessionId) return;
+        if ((this.turnRecoveryModeBySession.get(sessionId) || 'sse') !== 'resync') return;
+        if (!this.turnStateBySession.has(sessionId)) return;
+        if (this.turnFinalAtBySession.has(sessionId)) return;
+        const nextEpoch = (this.turnResyncEpochBySession.get(sessionId) || 0) + 1;
+        this.turnResyncEpochBySession.set(sessionId, nextEpoch);
+        this.turnRecoveryModeBySession.set(sessionId, 'sse');
+        this.stopNonFinalResyncLoop(sessionId, `sse-recover-event:${reason}`);
+        this.logUiDebug(`EXT: resync.abort.by-sse | sessionId=${sessionId} | epoch=${nextEpoch} | reason=${reason}`);
+        this.startRescueTimer(sessionId);
+    }
+
+    private triggerImmediateResyncForAwaitingFinals(reason: string): void {
+        const sessions = Array.from(this.turnFinalWaitersBySession.keys());
+        for (const sessionId of sessions) {
+            if (!this.isSessionAwaitingFinal(sessionId)) continue;
+            this.logUiDebug(`EXT: rescue.immediate | sessionId=${sessionId} | reason=${reason}`);
+            void this.resyncForChatResolve(sessionId, `immediate:${reason}`);
+        }
+    }
+
+    private resolveTurnFinal(sessionId: string, reason: string): void {
+        if (!sessionId) return;
+        if (this.turnFinalResolvedBySession.has(sessionId)) return;
+        this.turnFinalResolvedBySession.add(sessionId);
+        this.stopNonFinalResyncLoop(sessionId, `resolved:${reason}`);
+        this.stopRescueWatchdog(sessionId, reason);
+        const waiters = this.turnFinalWaitersBySession.get(sessionId);
+        if (waiters && waiters.length) {
+            waiters.splice(0).forEach((fn) => fn());
+        }
+    }
+
+    private scheduleSseDrainConfirm(sessionId: string): void {
+        if (!sessionId) return;
+        if (this.turnFinalResolvedBySession.has(sessionId)) return;
+        if (!this.turnFinalAtBySession.has(sessionId)) return;
+        const runId = this.turnRescueRunIdBySession.get(sessionId) || 0;
+        const existing = this.turnSseDrainTimerBySession.get(sessionId);
+        if (existing) {
+            clearTimeout(existing);
+        }
+        this.stopRescueWatchdog(sessionId, 'sse-active');
+        this.turnRescueRunIdBySession.set(sessionId, runId);
+        const timer = setTimeout(() => {
+            this.turnSseDrainTimerBySession.delete(sessionId);
+            void this.runResyncSettleCheck(sessionId, 'sse-drain');
+        }, this.sseDrainQuietMs);
+        this.turnSseDrainTimerBySession.set(sessionId, timer);
+    }
+
+    private async runResyncSettleCheck(sessionId: string, reason: string): Promise<void> {
+        if (!sessionId) return;
+        if (this.turnFinalResolvedBySession.has(sessionId)) return;
+        if (this.hasInteractiveBlocker(sessionId)) {
+            this.logUiDebug(`EXT: rescue.pause | sessionId=${sessionId} | reason=interactive-blocker`);
+            return;
+        }
+        const inFastPath = reason === 'sse-drain' || reason === 'sse-drain-pass2' || reason === 'tool-terminal';
+        if (!inFastPath) {
+            await this.resyncForChatResolve(sessionId, `settle:${reason}`);
+        }
+        if (this.turnFinalResolvedBySession.has(sessionId)) return;
+        const finalMsgId = this.getFinalizingMsgId(sessionId);
+        if (!finalMsgId) {
+            this.startRescueTimer(sessionId);
+            return;
+        }
+        const attempts = (this.turnSettleAttemptsBySession.get(sessionId) || 0) + 1;
+        this.turnSettleAttemptsBySession.set(sessionId, attempts);
+        const len = this.assistantTextLengths.get(finalMsgId) || 0;
+        const prevLen = this.turnSettleLastLenBySession.get(sessionId);
+        let stable = this.turnSettleStableCountBySession.get(sessionId) || 0;
+        if (len > 0) {
+            if (prevLen === len) {
+                stable += 1;
+            } else {
+                stable = 1;
+                this.turnSettleLastLenBySession.set(sessionId, len);
+            }
+        }
+        this.turnSettleStableCountBySession.set(sessionId, stable);
+        const fingerprint = this.getAssistantFingerprint(finalMsgId);
+        const prevFingerprint = this.turnSettleLastFingerprintBySession.get(sessionId);
+        let noDeltaCount = this.turnSettleNoDeltaCountBySession.get(sessionId) || 0;
+        if (prevFingerprint === fingerprint) {
+            noDeltaCount += 1;
+        } else {
+            noDeltaCount = 0;
+            this.turnSettleLastFingerprintBySession.set(sessionId, fingerprint);
+        }
+        this.turnSettleNoDeltaCountBySession.set(sessionId, noDeltaCount);
+        const lastSseAppliedAt = this.lastSseAtBySession.get(sessionId) || 0;
+        const sseSilent = !lastSseAppliedAt || (Date.now() - lastSseAppliedAt >= this.rescueStartDelayMs);
+        const complete = inFastPath
+            ? (len > 0 && stable >= 2)
+            : (noDeltaCount >= this.settleNoDeltaThreshold && sseSilent);
+        this.logUiDebug(`EXT: settle.check | sessionId=${sessionId} | reason=${reason} | msgId=${finalMsgId} | len=${len} | stable=${stable} | attempts=${attempts} | noDelta=${noDeltaCount} | sseSilent=${String(sseSilent)} | complete=${complete}`);
+        if (complete) {
+            const reasonLabel = noDeltaCount >= this.settleNoDeltaThreshold && sseSilent
+                ? 'settle-no-delta'
+                : 'settle-complete';
+            this.resolveTurnFinal(sessionId, reasonLabel);
+            return;
+        }
+        if (reason === 'sse-drain' && len > 0 && stable === 1 && !this.hasPendingOrRunningTools(sessionId)) {
+            const existing = this.turnSseDrainTimerBySession.get(sessionId);
+            if (existing) {
+                clearTimeout(existing);
+            }
+            const timer = setTimeout(() => {
+                this.turnSseDrainTimerBySession.delete(sessionId);
+                void this.runResyncSettleCheck(sessionId, 'sse-drain-pass2');
+            }, this.sseDrainPass2DelayMs);
+            this.turnSseDrainTimerBySession.set(sessionId, timer);
+            this.logUiDebug(`EXT: settle.pass2.schedule | sessionId=${sessionId} | delayMs=${this.sseDrainPass2DelayMs} | msgId=${finalMsgId}`);
+            return;
+        }
+        this.startRescueTimer(sessionId);
+    }
+
+    private startRescueTimer(sessionId: string): void {
+        if (!sessionId) return;
+        if (this.turnFinalResolvedBySession.has(sessionId)) return;
+        if (!this.turnFinalWaitersBySession.has(sessionId)) return;
+        if (this.hasInteractiveBlocker(sessionId)) {
+            this.logUiDebug(`EXT: rescue.pause | sessionId=${sessionId} | reason=interactive-blocker`);
+            return;
+        }
+        const existing = this.turnRescueTimerBySession.get(sessionId);
+        if (existing) {
+            clearTimeout(existing);
+        }
+        const delayMs = this.rescueStartDelayMs;
+        const timer = setTimeout(() => {
+            this.startRescueWatchdog(sessionId);
+        }, delayMs);
+        this.turnRescueTimerBySession.set(sessionId, timer);
+        this.logUiDebug(`EXT: wait.final.start | sessionId=${sessionId} | rescueDelayMs=${delayMs}`);
+    }
+
+    private resetRescueTimer(sessionId: string): void {
+        if (!sessionId) return;
+        if (!this.turnFinalWaitersBySession.has(sessionId)) return;
+        if (this.turnFinalResolvedBySession.has(sessionId)) return;
+        if (this.turnSseDrainTimerBySession.has(sessionId)) return;
+        this.startRescueTimer(sessionId);
+        this.logUiDebug(`EXT: wait.final.reset | sessionId=${sessionId}`);
+    }
+
+    private startRescueWatchdog(sessionId: string): void {
+        if (!sessionId) return;
+        if (this.turnFinalResolvedBySession.has(sessionId)) return;
+        if (!this.turnFinalWaitersBySession.has(sessionId)) return;
+        if (this.hasInteractiveBlocker(sessionId)) {
+            this.logUiDebug(`EXT: rescue.pause | sessionId=${sessionId} | reason=interactive-blocker`);
+            return;
+        }
+        const runId = Date.now();
+        this.turnRescueRunIdBySession.set(sessionId, runId);
+        this.logUiDebug(`EXT: watchdog.start | sessionId=${sessionId}`);
+        void this.resyncForChatResolve(sessionId, 'watchdog-timeout');
+        this.startRescueTimer(sessionId);
+    }
+
+    private stopRescueWatchdog(sessionId: string, reason: string): void {
+        if (!sessionId) return;
+        const existing = this.turnRescueTimerBySession.get(sessionId);
+        if (existing) {
+            clearTimeout(existing);
+        }
+        this.turnRescueTimerBySession.delete(sessionId);
+        this.turnRescueRunIdBySession.delete(sessionId);
+        const drain = this.turnSseDrainTimerBySession.get(sessionId);
+        if (drain) {
+            clearTimeout(drain);
+            this.turnSseDrainTimerBySession.delete(sessionId);
+        }
+        this.logUiDebug(`EXT: watchdog.stop | sessionId=${sessionId} | reason=${reason}`);
     }
 
 
@@ -775,41 +1301,68 @@ export class OpenCodeClient {
         state.exportInFlight = true;
 
         try {
-            const exportData = await this.exportSession(sessionId);
-            const rawMessages = Array.isArray(exportData?.messages) ? exportData.messages : [];
-            const assistantMatches = rawMessages.filter((message: any) =>
-                message?.info?.id === assistantMsgId &&
-                message?.info?.role === 'assistant'
-            );
+            const parseExportForUpgrade = (data: any):
+                | { ok: true; userMsgId: string; resolved: any; rawMessages: any[] }
+                | { ok: false; reason: string; userMsgId: string | null; rawMessages: any[] } => {
+                const rawMessages = Array.isArray(data?.messages) ? data.messages : [];
+                const assistantMatches = rawMessages.filter((message: any) =>
+                    message?.info?.id === assistantMsgId &&
+                    message?.info?.role === 'assistant'
+                );
 
-            if (assistantMatches.length !== 1) {
-                const tail = rawMessages.slice(-5).map((message: any) => {
-                    const id = message?.info?.id || 'null';
-                    const role = message?.info?.role || 'null';
-                    const parentID = message?.info?.parentID || 'null';
-                    const finish = message?.info?.finish || 'null';
-                    return `{id=${id} role=${role} parentID=${parentID} finish=${finish}}`;
-                });
-                // this.logUiDebug(`[DBG_EXPORT_FOUND] assistantMatches=${assistantMatches.length} parentID=null tail=${tail.join(' ')}`);
-                return { status: 'pending', localKey, userMsgId: state.resolvedUserMsgId || null, awaitingAssistantIdFromExport: true, reason: 'assistant-match-count' };
+                if (assistantMatches.length !== 1) {
+                    return {
+                        ok: false,
+                        reason: 'assistant-match-count',
+                        userMsgId: state.resolvedUserMsgId || null,
+                        rawMessages
+                    };
+                }
+
+                const parentId = assistantMatches[0]?.info?.parentID;
+                const userMsgId = typeof parentId === 'string' ? parentId : null;
+                if (!userMsgId || !userMsgId.startsWith('msg_')) {
+                    return { ok: false, reason: 'invalid-user-parent', userMsgId: null, rawMessages };
+                }
+
+                if (state.resolvedUserMsgId && state.resolvedUserMsgId !== userMsgId) {
+                    return {
+                        ok: false,
+                        reason: 'stale-parent-mismatch',
+                        userMsgId: state.resolvedUserMsgId,
+                        rawMessages
+                    };
+                }
+
+                const resolved = this.resolveFinalAssistantFromExport(data, userMsgId);
+                return { ok: true, userMsgId, resolved, rawMessages };
+            };
+
+            const fallbackReasons = new Set(['assistant-match-count', 'invalid-user-parent', 'stale-parent-mismatch']);
+            let exportSource: 'recent' | 'full' = 'recent';
+            let exportData = await this.exportSessionRecent(sessionId, 120);
+            let parsed = parseExportForUpgrade(exportData);
+
+            if (!parsed.ok && fallbackReasons.has(parsed.reason)) {
+                exportSource = 'full';
+                exportData = await this.exportSession(sessionId);
+                parsed = parseExportForUpgrade(exportData);
             }
 
-            const parentId = assistantMatches[0]?.info?.parentID;
-            const userMsgId = typeof parentId === 'string' ? parentId : null;
-            // this.logUiDebug(`[DBG_EXPORT_FOUND] assistantMatches=1 parentID=${userMsgId || 'null'}`);
+            this.logUiDebug(`EXT: export.resolve.path | sessionId=${sessionId} | source=${exportSource} | ok=${String(parsed.ok)}${parsed.ok ? '' : ` | reason=${parsed.reason}`}`);
 
-            if (!userMsgId || !userMsgId.startsWith('msg_')) {
-                return { status: 'pending', localKey, userMsgId: null, awaitingAssistantIdFromExport: true, reason: 'invalid-user-parent' };
+            if (!parsed.ok) {
+                return {
+                    status: 'pending',
+                    localKey,
+                    userMsgId: parsed.userMsgId,
+                    awaitingAssistantIdFromExport: true,
+                    reason: parsed.reason
+                };
             }
 
-            if (state.resolvedUserMsgId && state.resolvedUserMsgId !== userMsgId) {
-                // this.logUiDebug(`[DBG_EXPORT_STALE] session=${sessionId} resolvedUserMsgId=${state.resolvedUserMsgId} newParentID=${userMsgId} assistantMsgId=${assistantMsgId}`);
-                return { status: 'pending', localKey, userMsgId: state.resolvedUserMsgId, awaitingAssistantIdFromExport: true, reason: 'stale-parent-mismatch' };
-            }
-
+            const { userMsgId, resolved, rawMessages } = parsed;
             state.resolvedUserMsgId = userMsgId;
-
-            const resolved = this.resolveFinalAssistantFromExport(exportData, userMsgId);
             // this.logUiDebug(`[DBG_EXPORT_FINAL] userMsgId=${resolved.userMsgId} assistantMsgIdsAll=[${resolved.assistantMsgIdsAll.join(', ')}] chosen=${resolved.assistantMsgId || 'null'} finish=${resolved.chosenFinish || 'null'} completed=${resolved.chosenTimeCompleted ?? 'null'} created=${resolved.chosenTimeCreated ?? 'null'}`);
 
             if (!resolved.assistantMsgIdsAll.length) {
@@ -1684,7 +2237,7 @@ export class OpenCodeClient {
         this.revertedSegment = segment;
     }
 
-    public async undoFromMessage(startMessageId: string, options?: { force?: boolean }): Promise<{ conflicts: ConflictDetail[]; touchedFiles: string[]; applied: boolean }> {
+    public async undoFromMessage(startMessageId: string, options?: { force?: boolean }): Promise<{ conflicts: ConflictDetail[]; touchedFiles: string[]; applied: boolean; reason?: string }> {
         const force = options?.force === true;
         const startIndex = this.messageIndexById.get(startMessageId);
         this.logUiDebug(`EXT: undo.enter | startMessageId | ${startMessageId || 'null'} | force | ${String(force)} | hasSession | ${String(Boolean(this.currentSessionId))} | messageOrderLen | ${this.messageOrder.length}`);
@@ -1716,16 +2269,16 @@ export class OpenCodeClient {
         const sessionId = this.currentSessionId;
         const touchedFiles: string[] = [];
         if (!sessionId) {
-            return { conflicts: [], touchedFiles, applied: false };
+            return { conflicts: [], touchedFiles, applied: false, reason: 'missing-session' };
         }
         if (!this.gitUndoAvailable) {
             this.logUiDebug(`EXT: undo.disabled | reason=git-unavailable`);
-            return { conflicts: [], touchedFiles, applied: false };
+            return { conflicts: [], touchedFiles, applied: false, reason: 'git-unavailable' };
         }
 
         if (effectiveEndIndex < startIndex) {
             this.logUiDebug(`EXT: undo.noop | reason | effectiveEndIndex<startIndex | startIndex | ${startIndex} | effectiveEndIndex | ${effectiveEndIndex}`);
-            return { conflicts: [], touchedFiles: [], applied: true };
+            return { conflicts: [], touchedFiles: [], applied: true, reason: 'empty-range' };
         }
 
         const messageIds = this.getMessageIdsInRange(startIndex, effectiveEndIndex);
@@ -1736,7 +2289,7 @@ export class OpenCodeClient {
         // OpenCodeClient.outputChannel.appendLine(`[UNDO] messageIdsInRange=${messageIds.length}`);
 
         if (this.gitUndoAvailable && this.gitUndo) {
-            const result = await this.gitUndo.undoFromMessage(sessionId, startMessageId, force);
+            const result = await this.gitUndo.undoFromMessage(sessionId, startMessageId, messageIds, force);
             if (result.conflicts.length) {
                 const conflicts = result.conflicts.map((conflict) => ({
                     path: conflict.path,
@@ -1744,7 +2297,7 @@ export class OpenCodeClient {
                     currentExists: conflict.currentExists !== undefined ? conflict.currentExists : true,
                     diffText: conflict.diffText || ''
                 }));
-                return { conflicts, touchedFiles, applied: false };
+                return { conflicts, touchedFiles, applied: false, reason: result.reason || 'conflict' };
             }
 
             let mergedEndIndex = effectiveEndIndex;
@@ -1791,9 +2344,9 @@ export class OpenCodeClient {
                 fileSet: result.fileSet
             };
             this.logUiDebug(`EXT: undo.segment.merged | startIndex | ${startIndex} | endIndex | ${mergedEndIndex} | startId | ${startMessageId} | endId | ${mergedEndId} | messageIds | ${mergedMessageIds.length}`);
-            return { conflicts: [], touchedFiles: result.touchedFiles, applied: result.applied };
+            return { conflicts: [], touchedFiles: result.touchedFiles, applied: result.applied, reason: result.reason };
         }
-        return { conflicts: [], touchedFiles, applied: false };
+        return { conflicts: [], touchedFiles, applied: false, reason: 'git-undo-unavailable' };
     }
 
     public async restoreAll(options?: { force?: boolean }): Promise<{ conflicts: ConflictDetail[]; touchedFiles: string[]; applied: boolean }> {
@@ -1880,6 +2433,47 @@ export class OpenCodeClient {
     public removeMessageId(messageId: string): void {
         this.messageIndexById.delete(messageId);
         this.messageOrder = this.messageOrder.filter((id) => id !== messageId);
+        this.assistantTextById.delete(messageId);
+        for (const set of this.ignoredSummaryMessageIdsBySession.values()) {
+            set.delete(messageId);
+        }
+    }
+
+    private appendAssistantText(msgId: string, chunk: string): void {
+        if (!msgId || !chunk) return;
+        const existing = this.assistantTextById.get(msgId) || '';
+        if (existing.length >= this.assistantTextCacheMax) return;
+        const next = (existing + chunk).slice(0, this.assistantTextCacheMax);
+        this.assistantTextById.set(msgId, next);
+    }
+
+    private isCompactionSummaryInfo(info: any): boolean {
+        if (!info || typeof info !== 'object') return false;
+        if (info.summary === true) return true;
+        const mode = typeof info.mode === 'string' ? info.mode.toLowerCase() : '';
+        const agent = typeof info.agent === 'string' ? info.agent.toLowerCase() : '';
+        return mode === 'compaction' || agent === 'compaction';
+    }
+
+    private rememberIgnoredSummaryMessage(sessionId: string | undefined, messageId: string | undefined): void {
+        if (!sessionId || !messageId) return;
+        const existing = this.ignoredSummaryMessageIdsBySession.get(sessionId) || new Set<string>();
+        existing.add(messageId);
+        this.ignoredSummaryMessageIdsBySession.set(sessionId, existing);
+    }
+
+    private isIgnoredSummaryMessage(sessionId: string | undefined, messageId: string | undefined): boolean {
+        if (!sessionId || !messageId) return false;
+        return this.ignoredSummaryMessageIdsBySession.get(sessionId)?.has(messageId) === true;
+    }
+
+    private getAssistantFingerprint(msgId: string): string {
+        const text = this.assistantTextById.get(msgId) || '';
+        let hash = 0;
+        for (let i = 0; i < text.length; i++) {
+            hash = ((hash * 31) + text.charCodeAt(i)) >>> 0;
+        }
+        return `${text.length}:${hash.toString(16)}`;
     }
 
 
@@ -2490,6 +3084,7 @@ export class OpenCodeClient {
         retryTimeoutMs?: number;
     } {
         const messageMatch = /\/session\/[^/]+\/message(?:\?.*)?$/.test(reqPath);
+        const promptAsyncMatch = /\/session\/[^/]+\/prompt_async(?:\?.*)?$/.test(reqPath);
         const sessionInfoMatch = /\/session\/[^/?]+(?:\?.*)?$/.test(reqPath);
         if (reqPath === '/global/health') {
             return { opName: 'health', timeoutMs: 1000 };
@@ -2503,13 +3098,21 @@ export class OpenCodeClient {
         if (messageMatch) {
             return {
                 opName: 'session.message',
-                timeoutMs: 30000,
+                timeoutMs: 20000,
                 retryOnAbort: true,
-                retryTimeoutMs: 45000
+                retryTimeoutMs: 30000
+            };
+        }
+        if (promptAsyncMatch) {
+            return {
+                opName: 'session.post',
+                timeoutMs: 60000,
+                retryOnAbort: true,
+                retryTimeoutMs: 90000
             };
         }
         if (sessionInfoMatch) {
-            return { opName: 'session.info', timeoutMs: 5000 };
+            return { opName: 'session.info', timeoutMs: 10000, retryOnAbort: true, retryTimeoutMs: 15000 };
         }
         if (reqPath.startsWith('/session/')) {
             return { opName: `session.${method.toLowerCase()}`, timeoutMs: 5000 };
@@ -2542,9 +3145,13 @@ export class OpenCodeClient {
                 this.eventStreamBackoffMs = 1000;
                 const reader = response.body.getReader();
                 let buffer = '';
+                let streamClosed = false;
                 while (true) {
                     const { value, done } = await reader.read();
-                    if (done) break;
+                    if (done) {
+                        streamClosed = true;
+                        break;
+                    }
                     buffer += new TextDecoder('utf-8').decode(value, { stream: true });
                     const lines = buffer.split(/\r?\n/);
                     buffer = lines.pop() || '';
@@ -2555,11 +3162,16 @@ export class OpenCodeClient {
                         this.handleServerEvent(payload);
                     }
                 }
+                if (streamClosed) {
+                    this.logUiDebug('EXT: event.closed');
+                    this.triggerImmediateResyncForAwaitingFinals('event-stream-close');
+                }
             } catch (error) {
                 if ((error as Error).name === 'AbortError') return;
                 this.eventStreamFailCount += 1;
                 this.updateServerStatus('reconnecting', 'event-stream-error');
                 this.logUiDebug(`EXT: event.fail | count=${this.eventStreamFailCount}`);
+                this.triggerImmediateResyncForAwaitingFinals('event-stream-error');
                 if (this.eventStreamFailCount >= 3) {
                     void this.handleEventStreamFailure();
                 }
@@ -2594,10 +3206,12 @@ export class OpenCodeClient {
                 }
                 return;
             }
+            this.triggerImmediateResyncForAwaitingFinals('event-stream-reconnect-fail');
             await this.restartServerFromEventFailure(`health=${health}`);
         } catch (error) {
             this.logUiDebug(`EXT: event.fail.handler | err=${String(error)}`);
             this.updateServerStatus('error', 'event-stream-fail');
+            this.triggerImmediateResyncForAwaitingFinals('event-stream-reconnect-fail');
         } finally {
             this.eventStreamFailureInFlight = false;
         }
@@ -2641,9 +3255,9 @@ export class OpenCodeClient {
     }
 
     private makeFinalMetaDedupeKey(sessionId: string | undefined, messageId: string, completedAt: unknown, finish: unknown): string {
-        const completedPart = typeof completedAt === 'number' ? String(completedAt) : '';
-        const finishPart = typeof finish === 'string' ? finish : '';
-        return `${sessionId || ''}|${messageId}|${completedPart}|${finishPart}`;
+        void completedAt;
+        void finish;
+        return `${sessionId || ''}|${messageId}|final`;
     }
 
     private shouldEmitFinalMeta(
@@ -2667,6 +3281,463 @@ export class OpenCodeClient {
             seen.add(key);
         }
         this.finalMetaSeenKeysBySession.set(bucketKey, seen);
+        return true;
+    }
+
+    private isCompletionFinal(info: any): boolean {
+        const finish = info?.finish;
+        if (typeof finish === 'string') {
+            return finish === 'stop';
+        }
+        return false;
+    }
+
+    private hasRunningToolsForMessage(messageId: string | undefined): boolean {
+        if (!messageId) return false;
+        const count = this.toolRunningByMessageId.get(messageId) || 0;
+        return count > 0;
+    }
+
+    private getFinalizingMsgId(sessionId: string | undefined): string | undefined {
+        if (!sessionId) return undefined;
+        return this.finalizingMsgIdBySession.get(sessionId) || this.turnFinalMsgIdBySession.get(sessionId);
+    }
+
+    private updateToolStatus(sessionId: string | undefined, callId: string | null, status: string | undefined): { becameTerminal: boolean; hadActiveBefore: boolean; hasActiveAfter: boolean } {
+        if (!sessionId || !callId || !status) {
+            return { becameTerminal: false, hadActiveBefore: false, hasActiveAfter: false };
+        }
+        const bucket = this.toolStatusBySession.get(sessionId) || new Map<string, string>();
+        const prev = bucket.get(callId);
+        const wasActive = prev === 'pending' || prev === 'running';
+        const isActive = status === 'pending' || status === 'running';
+        const isTerminal = status === 'completed' || status === 'failed' || status === 'cancelled' || status === 'canceled';
+        if (isTerminal) {
+            bucket.delete(callId);
+        } else {
+            bucket.set(callId, status);
+        }
+        if (bucket.size > 0) {
+            this.toolStatusBySession.set(sessionId, bucket);
+        } else {
+            this.toolStatusBySession.delete(sessionId);
+        }
+        const hasActiveAfter = Array.from(bucket.values()).some((value) => value === 'pending' || value === 'running');
+        return { becameTerminal: isTerminal && wasActive, hadActiveBefore: wasActive, hasActiveAfter };
+    }
+
+    private hasPendingOrRunningTools(sessionId: string | undefined): boolean {
+        if (!sessionId) return false;
+        const bucket = this.toolStatusBySession.get(sessionId);
+        if (!bucket || bucket.size === 0) return false;
+        for (const status of bucket.values()) {
+            if (status === 'pending' || status === 'running') return true;
+        }
+        return false;
+    }
+
+    private getOpencodeDataDirCandidates(): string[] {
+        const env = process.env;
+        const home = os.homedir();
+        const dataBase = (env.XDG_DATA_HOME && env.XDG_DATA_HOME.trim()) || path.join(home, '.local', 'share');
+        const dirs = [path.join(dataBase, 'opencode')];
+        if (process.platform === 'win32') {
+            const appData = (env.APPDATA && env.APPDATA.trim()) || path.join(home, 'AppData', 'Roaming');
+            const localAppData = (env.LOCALAPPDATA && env.LOCALAPPDATA.trim()) || path.join(home, 'AppData', 'Local');
+            dirs.push(path.join(appData, 'opencode'));
+            dirs.push(path.join(localAppData, 'opencode'));
+        }
+        return Array.from(new Set(dirs));
+    }
+
+    private async readAuthJson(): Promise<any | null> {
+        const candidates = this.getOpencodeDataDirCandidates().map((dir) => path.join(dir, 'auth.json'));
+        for (const candidate of candidates) {
+            try {
+                const raw = await fs.promises.readFile(candidate, 'utf8');
+                return JSON.parse(raw);
+            } catch {
+                continue;
+            }
+        }
+        return null;
+    }
+
+    private async httpsJson(url: string, options: { method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<any> {
+        const method = options.method || 'GET';
+        return new Promise((resolve, reject) => {
+            const req = https.request(url, { method, headers: options.headers }, (res) => {
+                const chunks: Buffer[] = [];
+                res.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+                res.on('end', () => {
+                    const raw = Buffer.concat(chunks).toString('utf8');
+                    if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+                        reject(new Error(`HTTP ${res.statusCode} ${res.statusMessage || ''}`.trim()));
+                        return;
+                    }
+                    try {
+                        resolve(JSON.parse(raw));
+                    } catch (error) {
+                        reject(new Error(`Failed to parse JSON: ${String(error)}`));
+                    }
+                });
+            });
+            req.on('error', reject);
+            if (options.body) {
+                req.write(options.body);
+            }
+            req.end();
+        });
+    }
+
+    private formatReset(resetAt?: number, resetAfterSeconds?: number): string | undefined {
+        if (typeof resetAt === 'number' && Number.isFinite(resetAt) && resetAt > 0) {
+            const dt = new Date(resetAt * 1000);
+            const now = Date.now();
+            if (dt.getTime() - now < 24 * 60 * 60 * 1000) {
+                return `resets at ${dt.toLocaleTimeString()}`;
+            }
+            return `resets on ${dt.toLocaleDateString()}`;
+        }
+        if (typeof resetAfterSeconds === 'number' && Number.isFinite(resetAfterSeconds) && resetAfterSeconds > 0) {
+            const minutes = Math.round(resetAfterSeconds / 60);
+            if (minutes >= 60) {
+                const hours = Math.floor(minutes / 60);
+                const rem = minutes % 60;
+                return rem ? `resets in ${hours}h ${rem}m` : `resets in ${hours}h`;
+            }
+            return `resets in ${minutes}m`;
+        }
+        return undefined;
+    }
+
+    private async fetchOpenAIQuota(): Promise<ModelQuota | null> {
+        const auth = await this.readAuthJson();
+        const openai = auth?.openai || auth?.codex || auth?.chatgpt || auth?.opencode;
+        const access = openai?.access;
+        if (!access) return null;
+        const headers: Record<string, string> = {
+            Authorization: `Bearer ${access}`,
+            'User-Agent': 'OpenCode-Quota/1.0'
+        };
+        if (openai?.accountId) {
+            headers['ChatGPT-Account-Id'] = openai.accountId;
+        }
+        let data: any;
+        try {
+            data = await this.httpsJson('https://chatgpt.com/backend-api/wham/usage', { headers });
+        } catch {
+            return null;
+        }
+        const rate = data?.rate_limit || {};
+        const primary = rate?.primary_window || {};
+        const secondary = rate?.secondary_window || {};
+        const primaryRemain = typeof primary.used_percent === 'number' ? Math.max(0, 100 - primary.used_percent) : null;
+        const secondaryRemain = typeof secondary.used_percent === 'number' ? Math.max(0, 100 - secondary.used_percent) : null;
+        const rows: ModelQuotaRow[] = [];
+        if (primaryRemain !== null) {
+            rows.push({
+                label: '5h',
+                remainingPercent: Math.round(primaryRemain),
+                resetText: this.formatReset(primary.reset_at, primary.reset_after_seconds)
+            });
+        }
+        if (secondaryRemain !== null) {
+            rows.push({
+                label: 'Weekly',
+                remainingPercent: Math.round(secondaryRemain),
+                resetText: this.formatReset(secondary.reset_at, secondary.reset_after_seconds)
+            });
+        }
+        if (!rows.length) return null;
+        const summary = Math.min(...rows.map((r) => r.remainingPercent));
+        return {
+            providerId: 'openai',
+            modelId: 'openai',
+            summaryRemainingPercent: summary,
+            rows,
+            fetchedAt: Date.now()
+        };
+    }
+
+    private async fetchCopilotQuota(): Promise<ModelQuota | null> {
+        const auth = await this.readAuthJson();
+        const copilot = auth?.['github-copilot'] || auth?.github;
+        const token = copilot?.access || copilot?.refresh;
+        if (!token) return null;
+        let data: any;
+        try {
+            data = await this.httpsJson('https://api.github.com/copilot_internal/user', {
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                    Accept: 'application/json',
+                    'User-Agent': 'GitHubCopilotChat/0.35.0',
+                    'Editor-Version': 'vscode/1.107.0',
+                    'Editor-Plugin-Version': 'copilot-chat/0.35.0',
+                    'Copilot-Integration-Id': 'vscode-chat'
+                }
+            });
+        } catch {
+            return null;
+        }
+        const premium = data?.quota_snapshots?.premium_interactions;
+        if (!premium) return null;
+        const remaining = typeof premium.percent_remaining === 'number'
+            ? Math.max(0, Math.min(100, Math.round(premium.percent_remaining)))
+            : null;
+        if (remaining === null) return null;
+        return {
+            providerId: 'github-copilot',
+            modelId: 'copilot',
+            summaryRemainingPercent: remaining,
+            rows: [{
+                label: 'Monthly',
+                remainingPercent: remaining,
+                resetText: data?.quota_reset_date ? `resets on ${new Date(data.quota_reset_date).toLocaleDateString()}` : undefined
+            }],
+            fetchedAt: Date.now()
+        };
+    }
+
+    private async fetchAntigravityQuota(modelFullId: string): Promise<ModelQuota | null> {
+        const env = process.env;
+        const home = os.homedir();
+        const configBase = (env.XDG_CONFIG_HOME && env.XDG_CONFIG_HOME.trim()) || path.join(home, '.config');
+        const candidates = [path.join(configBase, 'opencode', 'antigravity-accounts.json')];
+        if (process.platform === 'win32') {
+            const appData = (env.APPDATA && env.APPDATA.trim()) || path.join(home, 'AppData', 'Roaming');
+            candidates.push(path.join(appData, 'opencode', 'antigravity-accounts.json'));
+        }
+        let accounts: any = null;
+        for (const candidate of candidates) {
+            try {
+                const raw = await fs.promises.readFile(candidate, 'utf8');
+                accounts = JSON.parse(raw);
+                break;
+            } catch {
+                continue;
+            }
+        }
+        const account = accounts?.accounts?.[accounts.activeIndex ?? 0];
+        const refresh = account?.refreshToken;
+        if (!refresh) return null;
+
+        const oauth = await this.getAntigravityOAuthConstants();
+        if (!oauth) {
+            this.logUiDebug('EXT: quota.antigravity.skip | reason=missing-oauth-constants');
+            return null;
+        }
+
+        let tokenData: any;
+        try {
+            tokenData = await this.httpsJson('https://oauth2.googleapis.com/token', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams({
+                    client_id: oauth.clientId,
+                    client_secret: oauth.clientSecret,
+                    refresh_token: refresh,
+                    grant_type: 'refresh_token'
+                }).toString()
+            });
+        } catch {
+            return null;
+        }
+        const accessToken = tokenData?.access_token;
+        if (!accessToken) return null;
+
+        const headers: Record<string, string> = {
+            'Content-Type': 'application/json',
+            'User-Agent': 'antigravity/1.11.5 windows/amd64',
+            'X-Goog-Api-Client': 'google-cloud-sdk vscode_cloudshelleditor/0.1',
+            'Client-Metadata': '{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}',
+            Authorization: `Bearer ${accessToken}`
+        };
+        const endpoints = [
+            'https://daily-cloudcode-pa.sandbox.googleapis.com',
+            'https://autopush-cloudcode-pa.sandbox.googleapis.com',
+            'https://cloudcode-pa.googleapis.com'
+        ];
+        let models: any = null;
+        for (const endpoint of endpoints) {
+            try {
+                const json = await this.httpsJson(`${endpoint}/v1internal:fetchAvailableModels`, {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify(account?.projectId ? { project: account.projectId } : {})
+                });
+                models = json?.models || null;
+                if (models) break;
+            } catch {
+                continue;
+            }
+        }
+        if (!models) return null;
+        const target = modelFullId.toLowerCase();
+        let best: { label: string; remainingFraction: number; resetTime?: string } | null = null;
+        for (const key of Object.keys(models)) {
+            const info = models[key];
+            const quota = info?.quotaInfo;
+            if (!quota || typeof quota.remainingFraction !== 'number') continue;
+            const label = (info.displayName || info.model || key || '').toString();
+            const labelKey = label.toLowerCase();
+            const modelKey = (info.model || key || '').toString().toLowerCase();
+            if (target.includes(labelKey) || target.includes(modelKey)) {
+                best = { label, remainingFraction: quota.remainingFraction, resetTime: quota.resetTime };
+                break;
+            }
+            if (!best) {
+                best = { label, remainingFraction: quota.remainingFraction, resetTime: quota.resetTime };
+            }
+        }
+        if (!best) return null;
+        const remaining = Math.round(best.remainingFraction * 100);
+        return {
+            providerId: 'google-antigravity',
+            modelId: modelFullId,
+            summaryRemainingPercent: remaining,
+            rows: [{
+                label: best.label,
+                remainingPercent: remaining,
+                resetText: best.resetTime ? `resets on ${new Date(best.resetTime).toLocaleDateString()}` : undefined
+            }],
+            fetchedAt: Date.now()
+        };
+    }
+
+    private async getAntigravityOAuthConstants(): Promise<AntigravityOAuthConstants | null> {
+        if (!this.antigravityOAuthConstantsPromise) {
+            this.antigravityOAuthConstantsPromise = this.resolveAntigravityOAuthConstants();
+        }
+        return this.antigravityOAuthConstantsPromise;
+    }
+
+    private async resolveAntigravityOAuthConstants(): Promise<AntigravityOAuthConstants | null> {
+        try {
+            const loaded = require('opencode-antigravity-auth/dist/src/constants.js') as Record<string, unknown>;
+            const clientId = typeof loaded.ANTIGRAVITY_CLIENT_ID === 'string' ? loaded.ANTIGRAVITY_CLIENT_ID.trim() : '';
+            const clientSecret = typeof loaded.ANTIGRAVITY_CLIENT_SECRET === 'string' ? loaded.ANTIGRAVITY_CLIENT_SECRET.trim() : '';
+            if (clientId && clientSecret) {
+                this.logUiDebug('EXT: quota.antigravity.auth-source | source=opencode-antigravity-auth');
+                return { clientId, clientSecret };
+            }
+        } catch {
+            // Fallback to env vars only when runtime package is unavailable.
+        }
+
+        const env = process.env;
+        const clientId = String(
+            env.ANTIGRAVITY_CLIENT_ID
+            || env.OPENCODE_ANTIGRAVITY_CLIENT_ID
+            || ''
+        ).trim();
+        const clientSecret = String(
+            env.ANTIGRAVITY_CLIENT_SECRET
+            || env.OPENCODE_ANTIGRAVITY_CLIENT_SECRET
+            || ''
+        ).trim();
+        if (clientId && clientSecret) {
+            this.logUiDebug('EXT: quota.antigravity.auth-source | source=env');
+            return { clientId, clientSecret };
+        }
+        return null;
+    }
+
+    public async fetchModelQuota(model: ModelInfo): Promise<ModelQuota | null> {
+        const key = model.fullId;
+        const cached = this.modelQuotaCache.get(key);
+        if (cached && Date.now() - cached.ts < this.quotaCacheTtlMs) {
+            return cached.quota;
+        }
+        const inflight = this.modelQuotaInFlight.get(key);
+        if (inflight) return inflight;
+        const task = (async () => {
+            let quota: ModelQuota | null = null;
+            const provider = (model.providerId || '').toLowerCase();
+            const fullId = (model.fullId || '').toLowerCase();
+            const isCopilot = provider.includes('github') || provider.includes('copilot') || fullId.includes('copilot');
+            const isOpenAI = provider.includes('openai') || provider.includes('chatgpt') ||
+                fullId.includes('openai') || fullId.includes('chatgpt');
+            if (isCopilot) {
+                quota = await this.fetchCopilotQuota();
+            } else if (isOpenAI) {
+                quota = await this.fetchOpenAIQuota();
+            } else if (provider.includes('antigravity') || provider.includes('google') || fullId.includes('antigravity') || fullId.includes('gemini')) {
+                quota = await this.fetchAntigravityQuota(model.fullId);
+            }
+            if (quota) {
+                quota = { ...quota, providerId: model.providerId, modelId: model.fullId };
+            }
+            this.modelQuotaCache.set(key, { ts: Date.now(), quota });
+            return quota;
+        })();
+        this.modelQuotaInFlight.set(key, task);
+        try {
+            return await task;
+        } finally {
+            this.modelQuotaInFlight.delete(key);
+        }
+    }
+
+    private shouldAcceptTurnCompletionFinal(sessionId: string | undefined, info: any): boolean {
+        if (!sessionId || !info) return false;
+        if (!this.turnStateBySession.has(sessionId)) return false;
+        if (this.isCompactionSummaryInfo(info)) {
+            this.logUiDebug(`EXT: finalizing.ignore | sessionId=${sessionId} | msgId=${String(info?.id || 'null')} | reason=summary-compaction`);
+            return false;
+        }
+        if (!this.isCompletionFinal(info)) return false;
+        const parentId = info?.parentID;
+        const msgId = info?.id;
+        const acceptedMsgId = this.turnFinalMsgIdBySession.get(sessionId);
+        if (acceptedMsgId && msgId && acceptedMsgId === msgId) {
+            this.logUiDebug(`EXT: turn.final.skip | sessionId=${sessionId} | msgId=${msgId} | reason=duplicate-final | source=accept-check`);
+            return false;
+        }
+        const lockedMsgId = this.finalizingMsgIdBySession.get(sessionId);
+        const currentUser = this.currentTurnUserMsgIdBySession.get(sessionId);
+        if (lockedMsgId && msgId && msgId !== lockedMsgId) {
+            this.logUiDebug(`EXT: finalizing.ignore | sessionId=${sessionId} | msgId=${msgId} | reason=not-locked`);
+            return false;
+        }
+        if (!lockedMsgId) {
+            if (!(typeof parentId === 'string' && typeof currentUser === 'string' && parentId === currentUser)) {
+                this.logUiDebug(`EXT: finalizing.ignore | sessionId=${sessionId} | msgId=${msgId || 'null'} | reason=parent-mismatch`);
+                return false;
+            }
+        }
+        if (this.hasRunningToolsForMessage(msgId)) return false;
+        return true;
+    }
+
+    private maybeBackfillTurnUserAnchor(sessionId: string | undefined, info: any): boolean {
+        if (!sessionId || !info) return false;
+        if (!this.turnStateBySession.has(sessionId)) return false;
+        if (!this.isCompletionFinal(info)) return false;
+        const parentId = info?.parentID;
+        if (typeof parentId !== 'string' || !parentId.startsWith('msg_')) return false;
+        const currentUser = this.currentTurnUserMsgIdBySession.get(sessionId);
+        if (currentUser) {
+            if (currentUser !== parentId) {
+                this.logUiDebug(`EXT: turn.anchor.backfill.skip | reason=conflict | sessionId=${sessionId} | current=${currentUser} | parent=${parentId}`);
+            }
+            return false;
+        }
+        const pendingUser = this.pendingUserMsgIdBySession.get(sessionId);
+        if (pendingUser && pendingUser !== parentId) {
+            this.logUiDebug(`EXT: turn.anchor.backfill.skip | reason=pending-mismatch | sessionId=${sessionId} | pending=${pendingUser} | parent=${parentId}`);
+            return false;
+        }
+        const createdAt = info?.time?.created;
+        const startedAt = this.currentTurnStartedAtBySession.get(sessionId);
+        if (typeof startedAt === 'number' && typeof createdAt === 'number') {
+            if (createdAt < startedAt - this.finalBackfillDeltaMs) {
+                this.logUiDebug(`EXT: turn.anchor.backfill.skip | reason=too-early | sessionId=${sessionId} | createdAt=${createdAt} | startedAt=${startedAt}`);
+                return false;
+            }
+        }
+        this.setCurrentTurnUserMsgId(sessionId, parentId, 'final-backfill');
+        this.logUiDebug(`EXT: turn.anchor.backfill.accept | sessionId=${sessionId} | parent=${parentId}`);
         return true;
     }
 
@@ -2699,16 +3770,12 @@ export class OpenCodeClient {
             const sessionId = this.getSessionIdFromEvent(type, props);
             if (sessionId) {
                 this.lastSseAtBySession.set(sessionId, Date.now());
+                this.maybeRecoverSseFromResyncBySessionEvent(sessionId, `event:${type}`);
+                this.resetRescueTimer(sessionId);
             }
         }
         if (source === 'sse' && this.shouldLogAssistantSse(type, props)) {
             OpenCodeClient.outputChannel.appendLine(`[SSE_ASSIST] ${payload}`);
-        }
-        if (type === 'session.status' && props?.sessionID && props?.status?.type === 'idle') {
-            const waiters = this.sessionIdleWaiters.get(props.sessionID);
-            if (waiters && waiters.length) {
-                waiters.splice(0).forEach((resolve) => resolve());
-            }
         }
         const events = this.mapServerEventToChatEvents(type, props, source);
         this.emitChatEvents(events);
@@ -2766,6 +3833,7 @@ export class OpenCodeClient {
                 ? props.patterns.filter((value: any) => typeof value === 'string' && value.length > 0)
                 : [];
             if (sessionId && permissionId) {
+                this.rememberPendingPermission(sessionId, permissionId);
                 events.push({
                     type: 'permissionRequest',
                     sessionId,
@@ -2784,6 +3852,7 @@ export class OpenCodeClient {
             const requestId = typeof props?.requestID === 'string' ? props.requestID : '';
             const reply = typeof props?.reply === 'string' ? props.reply : '';
             if (sessionId && requestId) {
+                this.clearPendingPermission(sessionId, requestId);
                 events.push({
                     type: 'permissionReplied',
                     sessionId,
@@ -2799,7 +3868,17 @@ export class OpenCodeClient {
             const messageId = info?.id;
             const sessionId = info?.sessionID;
             const role = info?.role;
+            if (source === 'sse' && typeof sessionId === 'string' && typeof messageId === 'string' && messageId.startsWith('msg_')) {
+                this.lastObservedMsgIdBySession.set(sessionId, messageId);
+                this.markSessionProgress(sessionId, 'sse-message-updated', messageId);
+            }
             if (sessionId && this.canceledActiveTurnBySession.get(sessionId) === true) {
+                return events;
+            }
+            const isCompactionSummary = role === 'assistant' && this.isCompactionSummaryInfo(info);
+            if (isCompactionSummary && typeof messageId === 'string') {
+                this.rememberIgnoredSummaryMessage(sessionId, messageId);
+                this.logUiDebug(`EXT: message.ignore | sessionId=${sessionId || 'null'} | msgId=${messageId} | reason=summary-compaction`);
                 return events;
             }
             if (sessionId && role === 'assistant' && typeof messageId === 'string') {
@@ -2811,6 +3890,11 @@ export class OpenCodeClient {
             if (sessionId && role === 'user' && typeof messageId === 'string' && source === 'sse') {
                 if (this.turnStateBySession.has(sessionId)) {
                     this.setCurrentTurnUserMsgId(sessionId, messageId, 'sse-user-message');
+                }
+                if (this.awaitingAutoResumeUserAnchorBySession.has(sessionId)) {
+                    this.setCurrentTurnUserMsgId(sessionId, messageId, 'autoresume-user-anchor');
+                    this.awaitingAutoResumeUserAnchorBySession.delete(sessionId);
+                    this.markSessionProgress(sessionId, 'autoresume-user-anchor', messageId);
                 }
             }
             const cwd = info?.path?.cwd;
@@ -2838,7 +3922,18 @@ export class OpenCodeClient {
                 if (isFinal) {
                     const messageIndex = this.registerMessage(messageId);
                     this.recordAssistantMsgId(sessionId, messageId);
-                    const shouldEmit = source === 'sse' && this.shouldEmitFinalMeta(sessionId, messageId, completedAt, info?.finish, source);
+                    let acceptedFinal = false;
+                    if (sessionId) {
+                        this.maybeBackfillTurnUserAnchor(sessionId, info);
+                        if (this.shouldAcceptTurnCompletionFinal(sessionId, info)) {
+                            this.logUiDebug(`EXT: turn.final.accept | sessionId=${sessionId} | msgId=${messageId} | finish=${String(info?.finish || '')} | source=${source}`);
+                            this.markTurnFinal(sessionId, messageId, source);
+                            acceptedFinal = true;
+                        } else {
+                            this.logUiDebug(`EXT: turn.final.skip | sessionId=${sessionId} | msgId=${messageId} | finish=${String(info?.finish || '')} | source=${source}`);
+                        }
+                    }
+                    const shouldEmit = source === 'sse' && acceptedFinal && this.shouldEmitFinalMeta(sessionId, messageId, completedAt, info?.finish, source);
                     if (shouldEmit) {
                         events.push({
                             type: 'assistantMessageMeta',
@@ -2857,6 +3952,13 @@ export class OpenCodeClient {
             const part = props?.part || {};
             const sessionId = part?.sessionID;
             if (sessionId && this.canceledActiveTurnBySession.get(sessionId) === true) {
+                return events;
+            }
+            const messageId = typeof part?.messageID === 'string' ? part.messageID : '';
+            if (source === 'sse' && typeof sessionId === 'string' && messageId.startsWith('msg_')) {
+                this.lastObservedMsgIdBySession.set(sessionId, messageId);
+            }
+            if (this.isIgnoredSummaryMessage(sessionId, messageId)) {
                 return events;
             }
             const questionOverlay = this.extractQuestionOverlayPart(part);
@@ -2883,6 +3985,11 @@ export class OpenCodeClient {
             }
             if (part?.type === 'text') {
                 const msgId = typeof part?.messageID === 'string' ? part.messageID : '';
+                const knownLenBefore = msgId ? (this.assistantTextLengths.get(msgId) || 0) : 0;
+                if (source === 'sse' && sessionId && msgId && this.messageRoleById.get(msgId) === 'user' && this.isAutoResumePromptText(part?.text)) {
+                    this.setCurrentTurnUserMsgId(sessionId, msgId, 'autoresume-user');
+                    this.markSessionProgress(sessionId, 'autoresume-user-seen', msgId);
+                }
                 if (sessionId && msgId) {
                     const assistantId = this.pendingAssistantMsgIdBySession.get(sessionId);
                     if (!assistantId || assistantId !== msgId) {
@@ -2893,6 +4000,12 @@ export class OpenCodeClient {
                     const role = this.messageRoleById.get(msgId);
                     if (role && role !== 'assistant') {
                         return events;
+                    }
+                }
+                if (source === 'sse' && sessionId && msgId) {
+                    const finalMsgId = this.getFinalizingMsgId(sessionId);
+                    if (finalMsgId && finalMsgId === msgId && typeof part?.text === 'string' && part.text.length >= knownLenBefore) {
+                        this.maybeRecoverSseFromResync(sessionId, msgId, 'text-len-gte');
                     }
                 }
                 let chunk = '';
@@ -2916,6 +4029,22 @@ export class OpenCodeClient {
                     }
                 }
                 if (!chunk) return events;
+                if (msgId) {
+                    this.appendAssistantText(msgId, chunk);
+                }
+                if (source === 'sse' && sessionId) {
+                    this.markSessionProgress(sessionId, 'sse-text-chunk', msgId || undefined);
+                }
+                if (source === 'sse' && sessionId && msgId) {
+                    this.maybeRecoverSseFromResync(sessionId, msgId, 'text-growth');
+                }
+                if (source === 'sse' && sessionId && msgId) {
+                    const finalMsgId = this.getFinalizingMsgId(sessionId);
+                    if (finalMsgId && finalMsgId === msgId) {
+                        this.turnSseTextAtBySession.set(sessionId, Date.now());
+                        this.scheduleSseDrainConfirm(sessionId);
+                    }
+                }
                 if (msgId && !this.assistantStatusCleared.has(msgId)) {
                     events.push({
                         type: 'assistantMessageMeta',
@@ -2929,10 +4058,28 @@ export class OpenCodeClient {
                 events.push({ type: 'text', text: chunk, sessionId, assistantMsgId: part?.messageID, tmpKey: this.getPendingAssistantTmpKey(sessionId) });
             }
             if (part?.type === 'tool') {
+                const messageId = typeof part?.messageID === 'string' ? part.messageID : undefined;
+                if (source === 'sse' && sessionId) {
+                    this.markSessionProgress(sessionId, 'sse-tool-part', messageId);
+                }
                 const toolCallId = this.extractToolCallId(part);
                 const toolStatus = part?.state?.status;
+                const toolState = this.updateToolStatus(sessionId, toolCallId, toolStatus);
                 if (sessionId && toolCallId && (toolStatus === 'completed' || toolStatus === 'failed' || toolStatus === 'cancelled' || toolStatus === 'canceled')) {
                     this.clearPendingQuestion(sessionId, toolCallId);
+                }
+                if (messageId && toolStatus) {
+                    const current = this.toolRunningByMessageId.get(messageId) || 0;
+                    if (toolStatus === 'running') {
+                        this.toolRunningByMessageId.set(messageId, current + 1);
+                    } else if (toolStatus === 'completed' || toolStatus === 'failed' || toolStatus === 'cancelled' || toolStatus === 'canceled') {
+                        const next = Math.max(0, current - 1);
+                        if (next === 0) {
+                            this.toolRunningByMessageId.delete(messageId);
+                        } else {
+                            this.toolRunningByMessageId.set(messageId, next);
+                        }
+                    }
                 }
                 const statusText = this.formatToolStatus(part);
                 if (statusText && source !== 'resync') {
@@ -2953,10 +4100,13 @@ export class OpenCodeClient {
                         }
                     }
                 }
+                if (source === 'sse' && sessionId && toolState.becameTerminal && !this.hasPendingOrRunningTools(sessionId) && !this.turnFinalResolvedBySession.has(sessionId)) {
+                    void this.runResyncSettleCheck(sessionId, 'tool-terminal');
+                }
                 if (part?.state?.status === 'completed') {
                     const files = this.extractFilesFromToolPart(part);
                     if (files.length) {
-                        if (source !== 'resync' && this.gitUndoAvailable && this.isSessionUndoEnabled(sessionId) && sessionId) {
+                        if (this.shouldQueueTurnChanges(sessionId, source, part?.messageID)) {
                             const turnState = this.turnStateBySession.get(sessionId);
                             const turnKey = turnState?.pendingUserLocalKey || sessionId;
                             const tmpKey = turnState?.pendingAssistantTmpKey;
@@ -2970,7 +4120,7 @@ export class OpenCodeClient {
                         const cwd = this.lastCwdBySession.get(sessionId);
                         const deletePaths = this.extractDeletedPathsFromCommand(command, cwd);
                         if (deletePaths.length) {
-                            if (source !== 'resync') {
+                            if (this.shouldQueueTurnChanges(sessionId, source, part?.messageID)) {
                                 const turnState = this.turnStateBySession.get(sessionId);
                                 const turnKey = turnState?.pendingUserLocalKey || sessionId;
                                 const tmpKey = turnState?.pendingAssistantTmpKey;
@@ -2984,12 +4134,20 @@ export class OpenCodeClient {
             }
             if (part?.type === 'tool' && part?.tool === 'apply_patch') {
                 const patchText = part?.state?.input?.patchText || part?.state?.input?.patch;
-                if (patchText) {
+                const allowDiff = Boolean(sessionId && (this.hasActiveTurnWrites(sessionId) || this.hasPendingTurnChanges(sessionId)));
+                if (patchText && allowDiff) {
                     events.push({ type: 'toolPatch', text: patchText, sessionId });
                 }
             }
             if ((part?.type === 'diff' || part?.type === 'patch') && typeof part?.text === 'string') {
-                events.push({ type: 'diff', text: part.text, sessionId });
+                const diffMessageId = typeof part?.messageID === 'string' ? part.messageID : undefined;
+                if (source === 'sse' && sessionId) {
+                    this.markSessionProgress(sessionId, 'sse-diff-part', diffMessageId);
+                }
+                const allowDiff = Boolean(sessionId && (this.hasActiveTurnWrites(sessionId) || this.hasPendingTurnChanges(sessionId)));
+                if (allowDiff) {
+                    events.push({ type: 'diff', text: part.text, sessionId });
+                }
             }
             return events;
         }
@@ -3027,7 +4185,7 @@ export class OpenCodeClient {
             if (this.canceledActiveTurnBySession.get(props.sessionID) === true) {
                 return events;
             }
-            this.scheduleSessionResyncLimited(props.sessionID, 'idle');
+            return events;
         }
         if (type === 'session.error') {
             const errorName = props?.error?.name || props?.error?.data?.name;
@@ -3041,25 +4199,6 @@ export class OpenCodeClient {
             return events;
         }
         return events;
-    }
-
-    private waitForSessionIdle(sessionId: string): Promise<void> {
-        return new Promise((resolve) => {
-            const list = this.sessionIdleWaiters.get(sessionId) || [];
-            list.push(resolve);
-            this.sessionIdleWaiters.set(sessionId, list);
-            void this.requestJson('GET', `/session/${sessionId}`)
-                .then((info: any) => {
-                    const status = info?.status?.type;
-                    if (status === 'idle') {
-                        const waiters = this.sessionIdleWaiters.get(sessionId);
-                        if (waiters && waiters.length) {
-                            waiters.splice(0).forEach((fn) => fn());
-                        }
-                    }
-                })
-                .catch(() => undefined);
-        });
     }
 
     private getPendingAssistantTmpKey(sessionId: string | undefined): string | undefined {
@@ -3190,6 +4329,17 @@ export class OpenCodeClient {
             if (firstKey) bucket.delete(firstKey);
         }
         this.pendingQuestionsBySession.set(sessionId, bucket);
+        const pendingIds = this.pendingQuestionCallIdsBySession.get(sessionId) || new Set<string>();
+        pendingIds.add(payload.callId);
+        this.pendingQuestionCallIdsBySession.set(sessionId, pendingIds);
+        if (this.isNonFinalResyncTakeover(sessionId)) {
+            this.logUiDebug(`EXT: resync.loop.pause | sessionId=${sessionId} | reason=interactive-question`);
+            this.stopNonFinalResyncLoop(sessionId, 'interactive-question');
+        }
+        if (this.turnFinalAtBySession.has(sessionId) && !this.turnFinalResolvedBySession.has(sessionId)) {
+            this.logUiDebug(`EXT: rescue.pause | sessionId=${sessionId} | reason=interactive-question`);
+            this.stopRescueWatchdog(sessionId, 'interactive-question');
+        }
     }
 
     private getPendingQuestion(sessionId: string, callId: string): PendingQuestionControl | undefined {
@@ -3197,15 +4347,243 @@ export class OpenCodeClient {
     }
 
     private clearPendingQuestion(sessionId: string, callId: string): void {
+        const hadBlocker = this.hasInteractiveBlocker(sessionId);
+        let removed = false;
         const bucket = this.pendingQuestionsBySession.get(sessionId);
-        if (!bucket) return;
-        bucket.delete(callId);
-        if (!bucket.size) {
-            this.pendingQuestionsBySession.delete(sessionId);
+        if (bucket) {
+            removed = bucket.delete(callId) || removed;
+            if (!bucket.size) {
+                this.pendingQuestionsBySession.delete(sessionId);
+            }
+        }
+        const pendingIds = this.pendingQuestionCallIdsBySession.get(sessionId);
+        if (pendingIds) {
+            removed = pendingIds.delete(callId) || removed;
+            if (!pendingIds.size) {
+                this.pendingQuestionCallIdsBySession.delete(sessionId);
+            }
+        }
+        if (removed && hadBlocker && !this.hasInteractiveBlocker(sessionId)) {
+            this.resumeRescueIfInteractiveCleared(sessionId, 'question-cleared');
+        }
+    }
+
+    private rememberPendingPermission(sessionId: string, permissionId: string): void {
+        if (!sessionId || !permissionId) return;
+        const pending = this.pendingPermissionIdsBySession.get(sessionId) || new Set<string>();
+        pending.add(permissionId);
+        this.pendingPermissionIdsBySession.set(sessionId, pending);
+        if (this.isNonFinalResyncTakeover(sessionId)) {
+            this.logUiDebug(`EXT: resync.loop.pause | sessionId=${sessionId} | reason=interactive-permission`);
+            this.stopNonFinalResyncLoop(sessionId, 'interactive-permission');
+        }
+        if (this.turnFinalAtBySession.has(sessionId) && !this.turnFinalResolvedBySession.has(sessionId)) {
+            this.logUiDebug(`EXT: rescue.pause | sessionId=${sessionId} | reason=interactive-permission`);
+            this.stopRescueWatchdog(sessionId, 'interactive-permission');
+        }
+    }
+
+    private clearPendingPermission(sessionId: string, permissionId: string): void {
+        if (!sessionId || !permissionId) return;
+        const hadBlocker = this.hasInteractiveBlocker(sessionId);
+        const pending = this.pendingPermissionIdsBySession.get(sessionId);
+        if (!pending) return;
+        const removed = pending.delete(permissionId);
+        if (!pending.size) {
+            this.pendingPermissionIdsBySession.delete(sessionId);
+        }
+        if (removed && hadBlocker && !this.hasInteractiveBlocker(sessionId)) {
+            this.resumeRescueIfInteractiveCleared(sessionId, 'permission-cleared');
+        }
+    }
+
+    private hasInteractiveBlocker(sessionId: string): boolean {
+        if (!sessionId) return false;
+        const questionCount = this.pendingQuestionCallIdsBySession.get(sessionId)?.size || 0;
+        const permissionCount = this.pendingPermissionIdsBySession.get(sessionId)?.size || 0;
+        return questionCount > 0 || permissionCount > 0;
+    }
+
+    private resumeRescueIfInteractiveCleared(sessionId: string, reason: string): void {
+        if (!sessionId) return;
+        if (this.hasInteractiveBlocker(sessionId)) return;
+        if (this.isNonFinalResyncTakeover(sessionId)) {
+            this.logUiDebug(`EXT: resync.loop.resume | sessionId=${sessionId} | reason=${reason}`);
+            this.armNonFinalResyncLoop(sessionId, `resume:${reason}`);
+        }
+        if (this.turnFinalResolvedBySession.has(sessionId)) return;
+        if (!this.turnFinalAtBySession.has(sessionId)) return;
+        const now = Date.now();
+        const last = this.rescueResumeAtBySession.get(sessionId) || 0;
+        if (now - last < 500) return;
+        this.rescueResumeAtBySession.set(sessionId, now);
+        this.logUiDebug(`EXT: rescue.resume | sessionId=${sessionId} | reason=${reason}`);
+        this.startRescueTimer(sessionId);
+    }
+
+    private isAutoResumePromptText(text: unknown): boolean {
+        if (typeof text !== 'string') return false;
+        return text.trimStart().startsWith('[OC_UI_AUTORESUME');
+    }
+
+    private buildProgressKey(sessionId: string, newestObservedMsgId?: string): string {
+        const observed = newestObservedMsgId || this.lastObservedMsgIdBySession.get(sessionId) || '';
+        const finalMsgId = this.getFinalizingMsgId(sessionId) || this.currentTurnAssistantMsgIdBySession.get(sessionId) || '';
+        const finalLen = finalMsgId ? (this.assistantTextLengths.get(finalMsgId) || 0) : 0;
+        return `${observed}|${finalMsgId}|${finalLen}`;
+    }
+
+    private markSessionProgress(sessionId: string | undefined, reason: string, newestObservedMsgId?: string): void {
+        if (!sessionId) return;
+        const now = Date.now();
+        const key = this.buildProgressKey(sessionId, newestObservedMsgId);
+        const prev = this.lastProgressKeyBySession.get(sessionId);
+        if (prev && prev === key) return;
+        const hadWarn = this.stallWarnedBySession.has(sessionId);
+        this.lastProgressKeyBySession.set(sessionId, key);
+        this.lastProgressAtBySession.set(sessionId, now);
+        this.noProgressEpochsBySession.set(sessionId, 0);
+        this.noProgressSinceBySession.delete(sessionId);
+        this.stallWarnedBySession.delete(sessionId);
+        if (hadWarn) {
+            this.emitChatEvents([{ type: 'autoResumeStallClear', sessionId }]);
+        }
+        this.logUiDebug(`EXT: progress.mark | sessionId=${sessionId} | reason=${reason} | key=${key}`);
+    }
+
+    private pauseResyncStallTracking(sessionId: string, reason: string, progressKey?: string): void {
+        if (!sessionId) return;
+        const now = Date.now();
+        const hadWarn = this.stallWarnedBySession.has(sessionId);
+        if (progressKey) {
+            this.lastProgressKeyBySession.set(sessionId, progressKey);
+        }
+        this.lastProgressAtBySession.set(sessionId, now);
+        this.noProgressEpochsBySession.set(sessionId, 0);
+        this.noProgressSinceBySession.delete(sessionId);
+        this.stallWarnedBySession.delete(sessionId);
+        if (hadWarn) {
+            this.emitChatEvents([{ type: 'autoResumeStallClear', sessionId }]);
+        }
+        this.logUiDebug(`EXT: stall.pause | sessionId=${sessionId} | reason=${reason}`);
+    }
+
+    private async sendAutoResumePrompt(sessionId: string): Promise<boolean> {
+        if (!sessionId) return false;
+        try {
+            const payload: any = {
+                parts: [{ type: 'text', text: this.autoResumePrompt }],
+                agent: 'plan'
+            };
+            await this.requestJson('POST', `/session/${sessionId}/prompt_async`, payload);
+            this.awaitingAutoResumeUserAnchorBySession.add(sessionId);
+            this.logUiDebug(`EXT: autoresume.sent | sessionId=${sessionId}`);
+            return true;
+        } catch (error) {
+            this.logUiDebug(`EXT: autoresume.result | sessionId=${sessionId} | success=false | err=${String(error)}`);
+            return false;
+        }
+    }
+
+    private async updateResyncStallState(
+        sessionId: string,
+        summary: { replayedFinal: number; replayedTools: number; newestObservedMsgId?: string },
+        reason: string
+    ): Promise<void> {
+        if (!sessionId) return;
+        if (!this.turnStateBySession.has(sessionId)) return;
+        if ((this.turnRecoveryModeBySession.get(sessionId) || 'sse') !== 'resync') return;
+        if (this.turnFinalResolvedBySession.has(sessionId)) return;
+
+        const newestObserved = summary.newestObservedMsgId || this.lastObservedMsgIdBySession.get(sessionId) || '';
+        const progressKey = this.buildProgressKey(sessionId, newestObserved);
+        const prevKey = this.lastProgressKeyBySession.get(sessionId);
+        const progressedByReplay = summary.replayedFinal > 0 || summary.replayedTools > 0;
+        const progressedByKey = !!prevKey && prevKey !== progressKey;
+        if (progressedByReplay || progressedByKey) {
+            this.markSessionProgress(sessionId, `resync:${reason}`, newestObserved);
+            return;
+        }
+
+        const hasRunningTools = this.hasPendingOrRunningTools(sessionId);
+        const hasBlocker = this.hasInteractiveBlocker(sessionId);
+        if (hasRunningTools || hasBlocker) {
+            const pauseReason = hasBlocker
+                ? (hasRunningTools ? 'interactive-blocker+tool-running' : 'interactive-blocker')
+                : 'tool-running';
+            this.pauseResyncStallTracking(sessionId, pauseReason, progressKey);
+            return;
+        }
+
+        const now = Date.now();
+        if (!this.noProgressSinceBySession.has(sessionId)) {
+            this.noProgressSinceBySession.set(sessionId, now);
+        }
+        const epochs = (this.noProgressEpochsBySession.get(sessionId) || 0) + 1;
+        this.noProgressEpochsBySession.set(sessionId, epochs);
+        if (!this.lastProgressAtBySession.has(sessionId)) {
+            this.lastProgressAtBySession.set(sessionId, now);
+        }
+        if (!this.lastProgressKeyBySession.has(sessionId)) {
+            this.lastProgressKeyBySession.set(sessionId, progressKey);
+        }
+
+        const lastProgressAt = this.lastProgressAtBySession.get(sessionId) || now;
+        const stallMs = now - lastProgressAt;
+
+        if (stallMs >= this.autoResumeWarnMs && !this.stallWarnedBySession.has(sessionId)) {
+            this.stallWarnedBySession.add(sessionId);
+            this.emitChatEvents([
+                {
+                    type: 'autoResumeStallWarn',
+                    sessionId,
+                    text: 'This session may be stuck. Please reload the extension and continue.'
+                }
+            ]);
+            this.logUiDebug(`EXT: stall.warn | sessionId=${sessionId} | stallMs=${stallMs}`);
+        }
+
+        if (epochs < this.autoResumeEpochThreshold || stallMs < this.autoResumeStallMs) {
+            return;
+        }
+
+        const autoresumeCount = this.autoResumeCountBySession.get(sessionId) || 0;
+        if (autoresumeCount >= 1) {
+            if (autoresumeCount >= 2) return;
+            this.autoResumeCountBySession.set(sessionId, 2);
+            this.emitChatEvents([
+                {
+                    type: 'autoResumeHardStop',
+                    sessionId,
+                    title: 'Session may be stuck',
+                    text: 'This session appears to be unresponsive. Please reload the extension and continue.',
+                    actionLabel: 'Reload Window'
+                }
+            ]);
+            this.logUiDebug(`EXT: autoresume.hardstop | sessionId=${sessionId} | action=cancel+reload-card | epochs=${epochs} | stallMs=${stallMs}`);
+            return;
+        }
+
+        this.logUiDebug(`EXT: autoresume.trigger | sessionId=${sessionId} | reason=no-progress | epochs=${epochs} | stallMs=${stallMs}`);
+        const sent = await this.sendAutoResumePrompt(sessionId);
+        if (sent) {
+            this.autoResumeCountBySession.set(sessionId, 1);
+            this.logUiDebug(`EXT: autoresume.result | sessionId=${sessionId} | success=true`);
         }
     }
 
     private scheduleSessionResyncLimited(sessionId: string, reason: string): void {
+        if (reason === 'idle') {
+            const turnSettled = this.turnFinalResolvedBySession.has(sessionId);
+            const cleanState = !this.hasPendingOrRunningTools(sessionId)
+                && !this.hasInteractiveBlocker(sessionId)
+                && !this.hasPendingTurnChanges(sessionId)
+                && !this.hasActiveTurnWrites(sessionId);
+            if (turnSettled && cleanState) {
+                this.logUiDebug(`EXT: resyncLimited.skip | reason=idle-post-settle-clean | sessionId=${sessionId}`);
+                return;
+            }
+        }
         const now = Date.now();
         const cooldownUntil = this.resyncCooldownUntilBySession.get(sessionId) || 0;
         if (now < cooldownUntil) {
@@ -3218,34 +4596,68 @@ export class OpenCodeClient {
         }
 
         const startedAt = Date.now();
-        this.logUiDebug(`EXT: resyncLimited.start | sessionId=${sessionId} | reason=${reason}`);
-        const task = this.resyncLimited(sessionId)
-            .then((summary) => {
+        const resyncEpoch = this.turnStateBySession.has(sessionId)
+            ? this.beginResyncRecovery(sessionId, `limited:${reason}`)
+            : undefined;
+        this.logUiDebug(`EXT: resyncLimited.start | sessionId=${sessionId} | reason=${reason}${typeof resyncEpoch === 'number' ? ` | epoch=${resyncEpoch}` : ''}`);
+        const task = this.resyncLimited(sessionId, resyncEpoch)
+            .then(async (summary) => {
                 const elapsedMs = Date.now() - startedAt;
                 this.logUiDebug(
-                    `EXT: resyncLimited.done | sessionId=${sessionId} | replayedFinal=${summary.replayedFinal} | replayedTools=${summary.replayedTools} | elapsedMs=${elapsedMs}`
+                    `EXT: resyncLimited.done | sessionId=${sessionId}${typeof resyncEpoch === 'number' ? ` | epoch=${resyncEpoch}` : ''} | replayedFinal=${summary.replayedFinal} | replayedTools=${summary.replayedTools} | elapsedMs=${elapsedMs}`
                 );
+                await this.updateResyncStallState(sessionId, summary, `limited:${reason}`);
             })
             .catch((error) => {
-                this.logUiDebug(`EXT: resyncLimited.fail | sessionId=${sessionId} | err=${String(error)}`);
+                this.logUiDebug(`EXT: resyncLimited.fail | sessionId=${sessionId}${typeof resyncEpoch === 'number' ? ` | epoch=${resyncEpoch}` : ''} | err=${String(error)}`);
             })
             .finally(() => {
                 this.resyncInFlightBySession.delete(sessionId);
                 this.resyncCooldownUntilBySession.set(sessionId, Date.now() + this.resyncCooldownMs);
+                this.armNonFinalResyncLoop(sessionId, `post-limited:${reason}`);
             });
 
         this.resyncInFlightBySession.set(sessionId, task);
     }
 
+    private async resyncForChatResolve(sessionId: string, reason = 'resolve'): Promise<void> {
+        if (!sessionId) return;
+        const inflight = this.resyncInFlightBySession.get(sessionId);
+        if (inflight) {
+            await inflight.catch(() => undefined);
+            return;
+        }
+        const resyncEpoch = this.beginResyncRecovery(sessionId, reason);
+        const startedAt = Date.now();
+        this.logUiDebug(`EXT: resyncResolve.start | sessionId=${sessionId} | epoch=${resyncEpoch}`);
+        const task = this.resyncLimited(sessionId, resyncEpoch)
+            .then(async (summary) => {
+                const elapsedMs = Date.now() - startedAt;
+                this.logUiDebug(
+                    `EXT: resyncResolve.done | sessionId=${sessionId} | epoch=${resyncEpoch} | replayedFinal=${summary.replayedFinal} | replayedTools=${summary.replayedTools} | elapsedMs=${elapsedMs}`
+                );
+                await this.updateResyncStallState(sessionId, summary, reason);
+            })
+            .catch((error) => {
+                this.logUiDebug(`EXT: resyncResolve.fail | sessionId=${sessionId} | epoch=${resyncEpoch} | err=${String(error)}`);
+            })
+            .finally(() => {
+                this.resyncInFlightBySession.delete(sessionId);
+                this.resyncCooldownUntilBySession.set(sessionId, Date.now() + this.resyncCooldownMs);
+                this.armNonFinalResyncLoop(sessionId, `post-resolve:${reason}`);
+            });
+
+        this.resyncInFlightBySession.set(sessionId, task);
+        await task;
+    }
+
     private shouldReplayResyncMessage(sessionId: string, info: any): boolean {
         if (!sessionId || !info) return false;
         const userMsgId = this.currentTurnUserMsgIdBySession.get(sessionId);
-        const assistantMsgId = this.currentTurnAssistantMsgIdBySession.get(sessionId);
-        const msgId = info?.id;
         const parentId = info?.parentID;
         const createdAt = info?.time?.created;
         if (userMsgId && parentId === userMsgId) return true;
-        if (assistantMsgId && msgId === assistantMsgId) return true;
+        if (this.isCompactionSummaryInfo(info)) return false;
         const startedAt = this.currentTurnStartedAtBySession.get(sessionId);
         if (typeof startedAt === 'number' && typeof createdAt === 'number') {
             if (createdAt >= startedAt - 2000 && info?.role === 'assistant') {
@@ -3268,11 +4680,38 @@ export class OpenCodeClient {
         return [];
     }
 
-    private async resyncLimited(sessionId: string): Promise<{ replayedFinal: number; replayedTools: number }> {
-        const result = { replayedFinal: 0, replayedTools: 0 };
-        const messages = await this.requestJson<any[]>('GET', `/session/${sessionId}/message`);
-        const list = Array.isArray(messages) ? messages : [];
+    private async resyncLimited(sessionId: string, resyncEpoch?: number): Promise<{ replayedFinal: number; replayedTools: number; newestObservedMsgId?: string }> {
+        const result: { replayedFinal: number; replayedTools: number; newestObservedMsgId?: string } = { replayedFinal: 0, replayedTools: 0 };
+        const recentLimit = 200;
+        const anchorMsgId = this.lastObservedMsgIdBySession.get(sessionId);
+        let list: any[] = [];
+        let source: 'recent' | 'full' = 'recent';
+
+        const recentMessages = await this.requestJson<any[]>('GET', `/session/${sessionId}/message?limit=${recentLimit}`);
+        const recentList = Array.isArray(recentMessages) ? recentMessages : [];
+        const hasAnchor = typeof anchorMsgId === 'string' && anchorMsgId.length > 0;
+        const anchorHit = hasAnchor && recentList.some((item) => item?.info?.id === anchorMsgId);
+
+        if (!hasAnchor || anchorHit) {
+            list = recentList;
+            source = 'recent';
+        } else {
+            const fullMessages = await this.requestJson<any[]>('GET', `/session/${sessionId}/message`);
+            list = Array.isArray(fullMessages) ? fullMessages : [];
+            source = 'full';
+        }
+        const newestObserved = [...list].reverse().find((item) => typeof item?.info?.id === 'string' && item.info.id.startsWith('msg_'))?.info?.id;
+        if (typeof newestObserved === 'string') {
+            this.lastObservedMsgIdBySession.set(sessionId, newestObserved);
+            result.newestObservedMsgId = newestObserved;
+        }
+        this.logUiDebug(`EXT: resync.fetch.path | sessionId=${sessionId} | source=${source} | anchor=${anchorMsgId || 'null'} | anchorHit=${String(anchorHit)} | recentCount=${recentList.length} | usedCount=${list.length}`);
+
         for (const item of list) {
+            if (typeof resyncEpoch === 'number' && !this.isResyncRunActive(sessionId, resyncEpoch)) {
+                this.logUiDebug(`EXT: resync.drop.stale | sessionId=${sessionId} | epoch=${resyncEpoch} | stage=scan`);
+                return result;
+            }
             const info = item?.info || {};
             if (!this.shouldReplayResyncMessage(sessionId, info)) continue;
             const messageId = info?.id;
@@ -3289,6 +4728,10 @@ export class OpenCodeClient {
             const parts = Array.isArray(item?.parts) ? item.parts : [];
             if (parts.length) {
                 for (const part of parts) {
+                    if (typeof resyncEpoch === 'number' && !this.isResyncRunActive(sessionId, resyncEpoch)) {
+                        this.logUiDebug(`EXT: resync.drop.stale | sessionId=${sessionId} | epoch=${resyncEpoch} | stage=parts`);
+                        return result;
+                    }
                     const normalizedPart = {
                         ...part,
                         sessionID: part?.sessionID || sessionId,
@@ -3296,15 +4739,22 @@ export class OpenCodeClient {
                     };
                     const events = this.mapServerEventToChatEvents('message.part.updated', { part: normalizedPart }, 'resync');
                     if (events.length) {
-                        if (events.some((event) => event.type === 'files' || event.type === 'toolPatch' || event.type === 'diff')) {
+                        const filtered = events;
+                        if (filtered.some((event) => event.type === 'files')) {
                             result.replayedTools += 1;
                         }
-                        this.emitChatEvents(events);
+                        if (filtered.length) {
+                            this.emitChatEvents(filtered);
+                        }
                     }
                 }
             } else if (role === 'assistant' && typeof messageId === 'string') {
                 const textParts = this.getExportTextParts(item);
                 for (const part of textParts) {
+                    if (typeof resyncEpoch === 'number' && !this.isResyncRunActive(sessionId, resyncEpoch)) {
+                        this.logUiDebug(`EXT: resync.drop.stale | sessionId=${sessionId} | epoch=${resyncEpoch} | stage=textparts`);
+                        return result;
+                    }
                     const events = this.mapServerEventToChatEvents(
                         'message.part.updated',
                         { part: { type: 'text', text: part.text, sessionID: sessionId, messageID: messageId } },
@@ -3319,7 +4769,18 @@ export class OpenCodeClient {
             if (role === 'assistant' && typeof messageId === 'string') {
                 const completedAt = info?.time?.completed;
                 const isFinal = Boolean(info?.finish) || typeof completedAt === 'number';
-                if (isFinal && this.shouldEmitFinalMeta(sessionId, messageId, completedAt, info?.finish, 'resync')) {
+                let acceptedFinal = false;
+                if (isFinal) {
+                    this.maybeBackfillTurnUserAnchor(sessionId, info);
+                    if (this.shouldAcceptTurnCompletionFinal(sessionId, info)) {
+                        this.logUiDebug(`EXT: turn.final.accept | sessionId=${sessionId} | msgId=${messageId} | finish=${String(info?.finish || '')} | source=resync`);
+                        this.markTurnFinal(sessionId, messageId, 'resync');
+                        acceptedFinal = true;
+                    } else {
+                        this.logUiDebug(`EXT: turn.final.skip | sessionId=${sessionId} | msgId=${messageId} | finish=${String(info?.finish || '')} | source=resync`);
+                    }
+                }
+                if (isFinal && acceptedFinal && this.shouldEmitFinalMeta(sessionId, messageId, completedAt, info?.finish, 'resync')) {
                     const messageIndex = this.registerMessage(messageId);
                     this.recordAssistantMsgId(sessionId, messageId);
                     this.emitChatEvents([
@@ -3377,8 +4838,7 @@ export class OpenCodeClient {
         }
 
         await this.requestJson('POST', `/session/${sessionId}/prompt_async`, payload);
-        await this.waitForSessionIdle(sessionId);
-        this.scheduleSessionResyncLimited(sessionId, 'chat-resolve');
+        await this.waitForTurnCompletionFinal(sessionId);
         if (listener) {
             const resolvedAssistant = this.getTurnAssistantMsgId(sessionId);
             if (!resolvedAssistant) {
@@ -3629,6 +5089,7 @@ export class OpenCodeClient {
                 if (result === false) {
                     throw new Error('Permission respond returned false');
                 }
+                this.clearPendingPermission(sessionId, permissionId);
                 return;
             } catch (error) {
                 this.logUiDebug(`EXT: permission.respond.fail | sessionId=${sessionId} | permissionId=${permissionId} | err=${String(error)}`);
@@ -3655,6 +5116,7 @@ export class OpenCodeClient {
         if (result === false) {
             throw new Error('Permission reply returned false');
         }
+        this.clearPendingPermission(sessionId, resolvedRequestId);
     }
 
     public async getTuiControlResponseSchemaSummary(): Promise<string> {

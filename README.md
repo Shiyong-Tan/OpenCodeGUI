@@ -2,6 +2,26 @@
 
 OpenCode GUI is a powerful Visual Studio Code extension that brings the capabilities of the OpenCode CLI directly into your editor through a sleek, interactive sidebar.
 
+## Preview
+
+<p align="left"><strong>1) Real-Time Change Tracking</strong><br/>Track edits live as the assistant updates code, with side-by-side diffs for immediate review and safer decision-making.</p>
+
+<p align="center">
+  <img src="assets/preview-main-1-annotated.png" alt="OpenCode GUI preview - real-time change tracking" width="96%" style="border: 1px solid #2f333d; border-radius: 10px;" />
+</p>
+
+<p align="left"><strong>2) Change List Summary + Model Usage</strong><br/>Get a concise changed-files summary and model usage visibility in the same flow, so progress and cost stay transparent during long sessions.</p>
+
+<p align="center">
+  <img src="assets/preview-main-2-annotated.png" alt="OpenCode GUI preview - change list summary and model usage" width="96%" style="border: 1px solid #2f333d; border-radius: 10px;" />
+</p>
+
+<p align="left"><strong>3) Undo / Restore Workflow</strong><br/>Revert a message segment safely and restore it when needed, with clear segment boundaries and explicit reversible actions.</p>
+
+<p align="center">
+  <img src="assets/preview-undo-annotated.png" alt="OpenCode GUI preview - undo restore workflow" width="70%" style="border: 1px solid #2f333d; border-radius: 10px;" />
+</p>
+
 ## Features
 
 - **Interactive AI Chat**: Communicate with OpenCode directly from the VS Code sidebar.

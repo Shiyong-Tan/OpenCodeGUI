@@ -38,6 +38,7 @@ let collapsedProviders = new Set();
 let modelDropdownOutsideHandler = null;
 let simpleDropdownHandlers = new Map();
 let conflictCardEl = null;
+let stallCardEl = null;
 let lastConflictPayload = null;
 let questionOverlayEl = null;
 let questionOverlayTimer = null;
@@ -59,13 +60,100 @@ let gitUndoEnabled = false;
 let gitUndoReason = null;
 let baselineReady = true;
 let baselineMessage = null;
+let sendBtn = null;
 let sendButtonEl = null;
+let currentModelQuota = null;
+let quotaTooltipEl = null;
 let inputEl = null;
+let freeModelIds = new Set();
 const pendingUiPrompts = [];
 let pendingContextItems = [];
-const agentTimeoutBySession = new Map();
-const agentTimeoutNoticeBySession = new Map();
-const agentTimeoutOpBySession = new Map();
+let sendBlockedNotice = '';
+let systemNoticeText = '';
+
+const SEND_BLOCK_NOTICE = 'Please wait while the previous response finishes.';
+
+function setSendBlockedNotice(text) {
+    sendBlockedNotice = typeof text === 'string' ? text : '';
+    const pendingEl = document.getElementById('pending-indicator');
+    if (!pendingEl) return;
+    if (sendBlockedNotice) {
+        pendingEl.textContent = sendBlockedNotice;
+        pendingEl.classList.remove('hidden');
+    } else {
+        if (systemNoticeText) {
+            pendingEl.textContent = systemNoticeText;
+            pendingEl.classList.remove('hidden');
+        } else {
+            pendingEl.textContent = '';
+            pendingEl.classList.add('hidden');
+        }
+    }
+}
+
+function setSystemNotice(text) {
+    systemNoticeText = typeof text === 'string' ? text : '';
+    const pendingEl = document.getElementById('pending-indicator');
+    if (!pendingEl) return;
+    if (sendBlockedNotice) {
+        pendingEl.textContent = sendBlockedNotice;
+        pendingEl.classList.remove('hidden');
+        return;
+    }
+    if (systemNoticeText) {
+        pendingEl.textContent = systemNoticeText;
+        pendingEl.classList.remove('hidden');
+        return;
+    }
+    pendingEl.textContent = '';
+    pendingEl.classList.add('hidden');
+}
+
+function closeStallCard() {
+    if (stallCardEl && stallCardEl.parentElement) {
+        stallCardEl.parentElement.removeChild(stallCardEl);
+    }
+    stallCardEl = null;
+}
+
+function showStallCard(payload) {
+    closeStallCard();
+    const wrapper = document.createElement('div');
+    wrapper.className = 'question-overlay';
+
+    const backdrop = document.createElement('div');
+    backdrop.className = 'question-overlay-backdrop';
+
+    const card = document.createElement('div');
+    card.className = 'conflict-card question-card question-overlay-card';
+
+    const title = document.createElement('h3');
+    title.className = 'question-card-title';
+    title.textContent = payload?.title || 'Session may be stuck';
+
+    const prompt = document.createElement('p');
+    prompt.className = 'question-card-question';
+    prompt.textContent = payload?.message || 'This session appears to be unresponsive. Please reload the extension and continue.';
+
+    const actions = document.createElement('div');
+    actions.className = 'question-card-actions';
+
+    const button = document.createElement('button');
+    button.className = 'conflict-card-btn question-card-btn question-card-submit';
+    button.textContent = payload?.actionLabel || 'Reload Window';
+    button.addEventListener('click', () => {
+        vscode.postMessage({ type: 'reloadWindow', sessionId: activeSessionId });
+    });
+
+    actions.appendChild(button);
+    card.appendChild(title);
+    card.appendChild(prompt);
+    card.appendChild(actions);
+    wrapper.appendChild(backdrop);
+    wrapper.appendChild(card);
+    document.body.appendChild(wrapper);
+    stallCardEl = wrapper;
+}
 
 function formatList(values, max = 20) {
     if (!Array.isArray(values)) return '[]';
@@ -117,57 +205,6 @@ function timelineCounts(timeline) {
     return { msg, tmp, local };
 }
 
-function isThinkingActive(sessionId) {
-    const session = getSessionState(sessionId);
-    if (!session || !session.thinkingId) return false;
-    const msg = session.messagesById.get(session.thinkingId);
-    if (!msg) return false;
-    if (msg.meta?.isThinking === true) return true;
-    const text = typeof msg.text === 'string' ? msg.text.trim() : '';
-    return text === 'Thinking...';
-}
-
-function clearAgentTimeout(sessionId, reason, removeNotice = false) {
-    if (!sessionId) return;
-    const timer = agentTimeoutBySession.get(sessionId);
-    if (timer) {
-        clearTimeout(timer);
-        agentTimeoutBySession.delete(sessionId);
-    }
-    agentTimeoutOpBySession.delete(sessionId);
-    if (removeNotice) {
-        agentTimeoutNoticeBySession.delete(sessionId);
-        window.__oc?.renderFromState?.();
-    }
-    if (timer) {
-        vscode.postMessage({
-            type: 'ui-debug',
-            payload: ['WV: agentTimeout.cancel', `sessionId=${sessionId}`, `reason=${reason || 'unknown'}`]
-        });
-    }
-}
-
-function startAgentTimeout(sessionId, opId) {
-    if (!sessionId) return;
-    clearAgentTimeout(sessionId, 'restart', true);
-    agentTimeoutOpBySession.set(sessionId, opId || null);
-    const timer = setTimeout(() => {
-        const currentOp = agentTimeoutOpBySession.get(sessionId);
-        if ((opId || null) !== currentOp) return;
-        if (!isThinkingActive(sessionId)) return;
-        agentTimeoutNoticeBySession.set(sessionId, 'The agent is not responding, probably due to the usage limit.');
-        vscode.postMessage({
-            type: 'ui-debug',
-            payload: ['WV: agentTimeout.fire', `sessionId=${sessionId}`, `opId=${opId || 'null'}`]
-        });
-        window.__oc?.renderFromState?.();
-    }, 60000);
-    agentTimeoutBySession.set(sessionId, timer);
-    vscode.postMessage({
-        type: 'ui-debug',
-        payload: ['WV: agentTimeout.start', `sessionId=${sessionId}`, `opId=${opId || 'null'}`, 'delay=60000']
-    });
-}
 
 function logTimelineSnapshot(action, timeline, details) {
     const counts = timelineCounts(timeline);
@@ -253,7 +290,10 @@ function createSessionState() {
         cancelledTurn: false,
         canceledActiveTurn: false,
         activeTurnOpId: null,
+        backendTurnInFlight: false,
         pendingAssistantUpgrade: null,
+        awaitingFinalMapBind: false,
+        seenDiffKeys: new Set(),
         nextOrder: 0,
         serverIdToKey: new Map(),
         clientKeyToServerId: new Map(),
@@ -312,10 +352,13 @@ function removeMessageFromSession(session, messageId) {
     session.cancelledTurn = true;
     session.canceledActiveTurn = true;
     session.pendingAssistantUpgrade = null;
+    session.awaitingFinalMapBind = false;
+    session.backendTurnInFlight = false;
     session.currentTurnAssistantKey = null;
     session.currentTurnAssistantMsgId = null;
     session.activeTurnOpId = null;
     window.__oc?.renderFromState?.();
+    updateSendGate();
 }
 
 function getEventSessionId(message, eventName) {
@@ -341,6 +384,39 @@ function getEventMessageId(message) {
         message?.metadata?.openai?.itemId ||
         ''
     );
+}
+
+function isSendBlockedByPendingState(session) {
+    if (!session) return false;
+    if (session.backendTurnInFlight === true) return true;
+    if (session.thinkingId) return true;
+    if (session.pendingAssistantUpgrade) return true;
+    if (session.awaitingFinalMapBind === true) return true;
+    return false;
+}
+
+function updateSendGate() {
+    if (!sendBtn) return;
+    if (isBusy) {
+        sendBtn.disabled = false;
+        setSendBlockedNotice('');
+        return;
+    }
+    if (models.length === 0) {
+        sendBtn.disabled = true;
+        setSendBlockedNotice('');
+        return;
+    }
+    const session = getSessionState(activeSessionId);
+    const blocked = isSendBlockedByPendingState(session);
+    sendBtn.disabled = blocked;
+    if (blocked) {
+        sendBtn.title = SEND_BLOCK_NOTICE;
+        setSendBlockedNotice(SEND_BLOCK_NOTICE);
+    } else if (sendBtn.title === SEND_BLOCK_NOTICE) {
+        sendBtn.title = '';
+        setSendBlockedNotice('');
+    }
 }
 
 function getEventChunkText(message) {
@@ -480,7 +556,7 @@ function computeMemberMsgIdsFromTimeline(session, anchorMsgId, endMsgId) {
                 `anchorMsgId=${anchorMsgId}`, `endMsgId=${endMsgId || 'null'}`, 
                 'degrade-to-anchor-only']
         });
-        return [anchorMsgId];
+        return typeof anchorMsgId === 'string' && anchorMsgId.startsWith('msg_') ? [anchorMsgId] : [];
     }
     
     // Collect all msg_* in [anchorIdx, endIdx] closed interval
@@ -505,12 +581,50 @@ function computeMemberMsgIdsFromTimeline(session, anchorMsgId, endMsgId) {
 
 function resolveSegmentMessageId(session, messageId) {
     if (!messageId || typeof messageId !== 'string') return null;
+    const mappedServer = session.clientKeyToServerId?.get(messageId);
+    if (mappedServer && session.timeline.includes(mappedServer)) return mappedServer;
     if (session.timeline.includes(messageId)) return messageId;
     const mappedLocal = session.serverIdToClientKey?.get(messageId);
     if (mappedLocal && session.timeline.includes(mappedLocal)) return mappedLocal;
-    const mappedServer = session.clientKeyToServerId?.get(messageId);
-    if (mappedServer && session.timeline.includes(mappedServer)) return mappedServer;
     return null;
+}
+
+function normalizeSegmentMembersFromTimeline(session, anchorMsgId, endMsgId, candidateMsgIds, noticeKey) {
+    const resolvedAnchor = resolveSegmentMessageId(session, anchorMsgId);
+    if (!resolvedAnchor) {
+        return { anchorMsgId: null, endMsgId: null, memberMsgIds: [] };
+    }
+
+    const resolvedEnd = resolveSegmentMessageId(session, endMsgId) || resolvedAnchor;
+    let memberMsgIds = computeMemberMsgIdsFromTimeline(session, resolvedAnchor, resolvedEnd);
+    if (memberMsgIds.length === 0 && typeof resolvedAnchor === 'string' && resolvedAnchor.startsWith('msg_')) {
+        memberMsgIds = [resolvedAnchor];
+    }
+
+    if (Array.isArray(candidateMsgIds) && candidateMsgIds.length) {
+        const candidateSet = new Set(candidateMsgIds.filter((id) => typeof id === 'string' && id.startsWith('msg_')));
+        const normalizedSet = new Set(memberMsgIds);
+        let dropped = 0;
+        for (const id of candidateSet) {
+            if (!normalizedSet.has(id)) dropped++;
+        }
+        if (dropped > 0) {
+            vscode.postMessage({
+                type: 'ui-debug',
+                payload: ['[WV][SEG_NORMALIZE_DROP]',
+                    `noticeKey=${noticeKey || 'null'}`,
+                    `dropped=${dropped}`,
+                    `anchor=${resolvedAnchor}`,
+                    `end=${resolvedEnd}`]
+            });
+        }
+    }
+
+    return {
+        anchorMsgId: resolvedAnchor,
+        endMsgId: resolvedEnd,
+        memberMsgIds
+    };
 }
 
 /**
@@ -534,27 +648,28 @@ function rebuildHiddenSetFromTimeline(session) {
         // Only process collapsed segments (always true in current impl)
         if (!segment.collapsed) continue;
         
-        // Use existing memberMsgIds when present (even if anchor missing from timeline)
-        let memberMsgIds = Array.isArray(segment.memberMsgIds) ? segment.memberMsgIds.slice() : [];
-        if (memberMsgIds.length === 0) {
-            const anchorIdx = session.timeline.indexOf(segment.anchorMsgId);
-            if (anchorIdx === -1) {
-                vscode.postMessage({
-                    type: 'ui-debug',
-                    payload: ['[WV][SEG_SKIP_ANCHOR_MISSING]', 
-                        `noticeKey=${noticeKey}`, 
-                        `anchorMsgId=${segment.anchorMsgId}`]
-                });
-                skippedCount++;
-                continue;  // Skip rendering this segment
-            }
-            memberMsgIds = computeMemberMsgIdsFromTimeline(
-                session, 
-                segment.anchorMsgId, 
-                segment.endMsgId
-            );
-            segment.memberMsgIds = memberMsgIds;
+        const normalized = normalizeSegmentMembersFromTimeline(
+            session,
+            segment.anchorMsgId,
+            segment.endMsgId,
+            segment.memberMsgIds,
+            noticeKey
+        );
+        if (!normalized.anchorMsgId) {
+            vscode.postMessage({
+                type: 'ui-debug',
+                payload: ['[WV][SEG_SKIP_ANCHOR_MISSING]',
+                    `noticeKey=${noticeKey}`,
+                    `anchorMsgId=${segment.anchorMsgId}`]
+            });
+            skippedCount++;
+            continue;
         }
+
+        segment.anchorMsgId = normalized.anchorMsgId;
+        segment.endMsgId = normalized.endMsgId || normalized.anchorMsgId;
+        const memberMsgIds = normalized.memberMsgIds;
+        segment.memberMsgIds = memberMsgIds;
         
         if (memberMsgIds.length === 0) {
             skippedCount++;
@@ -568,6 +683,15 @@ function rebuildHiddenSetFromTimeline(session) {
         }
         
         processedCount++;
+    }
+
+    for (const msgId of session.timeline) {
+        if (typeof msgId !== 'string') continue;
+        const message = session.messagesById.get(msgId);
+        if (!message || message.role !== 'user') continue;
+        if (typeof message.text === 'string' && message.text.trimStart().startsWith('[OC_UI_AUTORESUME')) {
+            session.hiddenSet.add(msgId);
+        }
     }
 
     for (const id of session.hiddenSet) {
@@ -733,12 +857,26 @@ function applyHydratedSegments(session, segments, hasSegments = true) {
             });
             continue;
         }
+        const normalized = normalizeSegmentMembersFromTimeline(
+            session,
+            seg.anchorMsgId,
+            seg.endMsgId || seg.anchorMsgId,
+            seg.memberMsgIds,
+            seg.noticeKey
+        );
+        if (!normalized.anchorMsgId) {
+            vscode.postMessage({
+                type: 'ui-debug',
+                payload: ['[WV][SEG_HYDRATE_SKIP]', 'anchor-not-in-timeline', `noticeKey=${seg.noticeKey}`]
+            });
+            continue;
+        }
         
         session.segmentsByNoticeKey.set(seg.noticeKey, {
             noticeKey: seg.noticeKey,
-            anchorMsgId: seg.anchorMsgId,
-            endMsgId: seg.endMsgId || seg.anchorMsgId,
-            memberMsgIds: seg.memberMsgIds || [],
+            anchorMsgId: normalized.anchorMsgId,
+            endMsgId: normalized.endMsgId || normalized.anchorMsgId,
+            memberMsgIds: normalized.memberMsgIds,
             restoreAllowed: seg.restoreAllowed === true,
             collapsed: true,  // Always collapsed (not persisted)
             createdAt: seg.createdAt || Date.now()
@@ -1069,23 +1207,21 @@ function applyRevertedSegmentPayload(sessionId, payload, noticeKeyFromCaller) {
         });
     }
     
-    // Compute memberMsgIds from timeline
-    let memberMsgIds = computeMemberMsgIdsFromTimeline(
-        session,
-        anchorMsgId,
-        endMsgId
-    );
-
     const payloadMemberMsgIds = Array.isArray(payload.messageIds)
         ? payload.messageIds.filter((id) => typeof id === 'string' && id.startsWith('msg_'))
         : [];
-    if (payloadMemberMsgIds.length) {
-        memberMsgIds = payloadMemberMsgIds;
-    }
 
-    if (memberMsgIds.length === 0 && anchorMsgId) {
-        memberMsgIds = [anchorMsgId];
-    }
+    // Compute memberMsgIds strictly from timeline range
+    const normalizedSegment = normalizeSegmentMembersFromTimeline(
+        session,
+        anchorMsgId,
+        endMsgId,
+        payloadMemberMsgIds,
+        noticeKey
+    );
+    const normalizedAnchorMsgId = normalizedSegment.anchorMsgId || anchorMsgId;
+    const normalizedEndMsgId = normalizedSegment.endMsgId || normalizedAnchorMsgId;
+    const memberMsgIds = normalizedSegment.memberMsgIds;
     
     if (memberMsgIds.length === 0) {
         vscode.postMessage({
@@ -1098,8 +1234,8 @@ function applyRevertedSegmentPayload(sessionId, payload, noticeKeyFromCaller) {
     // Store segment locally
     session.segmentsByNoticeKey.set(noticeKey, {
         noticeKey,
-        anchorMsgId,
-        endMsgId: endMsgId || anchorMsgId,
+        anchorMsgId: normalizedAnchorMsgId,
+        endMsgId: normalizedEndMsgId,
         memberMsgIds,
         collapsed: true,
         createdAt: Date.now()
@@ -1120,8 +1256,8 @@ function applyRevertedSegmentPayload(sessionId, payload, noticeKeyFromCaller) {
         sessionId,
         segment: {
             noticeKey,
-            anchorMsgId,
-            endMsgId: endMsgId || anchorMsgId,
+            anchorMsgId: normalizedAnchorMsgId,
+            endMsgId: normalizedEndMsgId,
             memberMsgIds,
             collapsed: true,
             updatedAt: Date.now()
@@ -1132,8 +1268,8 @@ function applyRevertedSegmentPayload(sessionId, payload, noticeKeyFromCaller) {
         type: 'ui-debug',
         payload: ['[WV][SEG_UPSERT]', 
             `noticeKey=${noticeKey}`,
-            `anchorMsgId=${anchorMsgId}`,
-            `endMsgId=${endMsgId || anchorMsgId}`,
+            `anchorMsgId=${normalizedAnchorMsgId}`,
+            `endMsgId=${normalizedEndMsgId}`,
             `memberCount=${memberMsgIds.length}`]
     });
     
@@ -1242,6 +1378,7 @@ function setSendEnabled(enabled) {
             inputEl.placeholder = baselineMessage;
         }
     }
+    updateSendGate();
 }
 
 function attemptAssistantUpgrade(sessionId, payload, source) {
@@ -1328,6 +1465,15 @@ function attemptAssistantUpgrade(sessionId, payload, source) {
         payload: ['ASSIST_UPGRADE', `curKey=${currentKey || 'null'}`, `newKey=${newKey}`, `curIndex=${curIndex === null ? 'null' : curIndex}`,
             `newIndex=${newIndex === null ? 'null' : newIndex}`, `replaced=${replaced}`, `reason=${reason}`, `tail=${tail}`]
     });
+
+    const bound = session.currentTurnAssistantKey === newKey;
+    if (bound) {
+        if (session.pendingAssistantUpgrade && session.pendingAssistantUpgrade.assistantMsgId === newKey) {
+            session.pendingAssistantUpgrade = null;
+        }
+        session.awaitingFinalMapBind = false;
+        updateSendGate();
+    }
 }
 
 const UNDO_TIMEOUT_MS = 10000;
@@ -1795,6 +1941,30 @@ function isCopilotProvider(providerId) {
     return providerId.toLowerCase().includes('copilot');
 }
 
+function isFreeModel(model) {
+    if (!model) return false;
+    const provider = String(model.providerId || '').toLowerCase();
+    const fullId = String(model.fullId || '').toLowerCase();
+    const name = String(model.name || '').toLowerCase();
+    const id = String(model.id || '').toLowerCase();
+    const speed = typeof model.speedMultiplier === 'string' ? model.speedMultiplier.trim().toLowerCase() : '';
+    const isCopilot = isCopilotProvider(provider) || fullId.includes('copilot');
+    if (isCopilot && speed === '0x') return true;
+    const isOpenCode = provider === 'opencode' || fullId.startsWith('opencode/');
+    const hasFree = name.includes('free') || fullId.includes('free') || id.includes('free');
+    return isOpenCode && hasFree;
+}
+
+function refreshFreeModelIds() {
+    const next = new Set();
+    for (const model of models) {
+        if (isFreeModel(model) && model.fullId) {
+            next.add(model.fullId);
+        }
+    }
+    freeModelIds = next;
+}
+
 function parseSpeedMultiplier(value) {
     if (!value || typeof value !== 'string') return Number.POSITIVE_INFINITY;
     const normalized = value.trim().toLowerCase().replace(/x$/, '');
@@ -1817,6 +1987,34 @@ function normalizeInlineMath(text) {
         const trimmed = inner.trim();
         return `$${trimmed}$`;
     });
+}
+
+function hashText(value) {
+    const text = String(value || '');
+    let hash = 0;
+    for (let i = 0; i < text.length; i++) {
+        hash = ((hash * 31) + text.charCodeAt(i)) >>> 0;
+    }
+    return `${text.length}:${hash.toString(16)}`;
+}
+
+function shouldRenderDiffChunk(session, message) {
+    if (!session) return false;
+    if (!(session.seenDiffKeys instanceof Set)) {
+        session.seenDiffKeys = new Set();
+    }
+    const value = typeof message?.value === 'string' ? message.value : '';
+    if (!value) return false;
+    const key = `diff:${hashText(value)}`;
+    if (session.seenDiffKeys.has(key)) {
+        return false;
+    }
+    session.seenDiffKeys.add(key);
+    if (session.seenDiffKeys.size > 200) {
+        const compact = new Set(Array.from(session.seenDiffKeys).slice(-120));
+        session.seenDiffKeys = compact;
+    }
+    return true;
 }
 
 function normalizeLists(text) {
@@ -1876,7 +2074,7 @@ function wrapTables(root) {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-    const sendBtn = document.getElementById('send-btn');
+    sendBtn = document.getElementById('send-btn');
     const sendIcon = `
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <line x1="5" y1="12" x2="19" y2="12" />
@@ -1942,6 +2140,114 @@ document.addEventListener('DOMContentLoaded', () => {
         isBusy = nextBusy;
         sendBtn.innerHTML = isBusy ? stopIcon : sendIcon;
         sendBtn.classList.toggle('is-busy', isBusy);
+        updateSendQuotaVisual();
+        updateSendGate();
+    }
+
+    function ensureQuotaTooltip() {
+        if (quotaTooltipEl) return;
+        const div = document.createElement('div');
+        div.className = 'quota-tooltip hidden';
+        document.body.appendChild(div);
+        quotaTooltipEl = div;
+    }
+
+    function normalizeResetText(resetText) {
+        if (!resetText || typeof resetText !== 'string') return '';
+        return resetText
+            .replace(/^resets\s+(at|on|in)\s+/i, '')
+            .trim();
+    }
+
+    function updateSendQuotaVisual() {
+        if (!sendBtn) return;
+        const isFree = freeModelIds.has(selectedModel);
+        if (isBusy || (!isFree && (!currentModelQuota || typeof currentModelQuota.summaryRemainingPercent !== 'number'))) {
+            sendBtn.classList.remove('has-quota');
+            sendBtn.style.removeProperty('--quota-remaining-deg');
+            sendBtn.style.removeProperty('--quota-remaining-color');
+            sendBtn.style.removeProperty('--quota-used-color');
+            vscode.postMessage({
+                type: 'ui-debug',
+                payload: [
+                    'quota.render.skip',
+                    `busy=${String(isBusy)}`,
+                    `summary=${currentModelQuota?.summaryRemainingPercent ?? 'null'}`
+                ]
+            });
+            return;
+        }
+        const remaining = isFree
+            ? 100
+            : Math.max(0, Math.min(100, Number(currentModelQuota.summaryRemainingPercent || 0)));
+        const used = Math.max(0, 100 - remaining);
+        const remainingDeg = Math.round(remaining * 3.6);
+        const usedDeg = 360 - remainingDeg;
+        let centerColor = 'var(--vscode-button-background)';
+        if (!isFree && remaining <= 0) {
+            sendBtn.style.setProperty('--quota-remaining-color', 'var(--quota-danger)');
+            sendBtn.style.setProperty('--quota-used-color', 'var(--quota-danger)');
+            centerColor = 'var(--quota-danger)';
+        } else if (!isFree && remaining < 10) {
+            sendBtn.style.setProperty('--quota-remaining-color', 'var(--quota-warning)');
+            sendBtn.style.setProperty('--quota-used-color', 'var(--quota-warning-light)');
+            centerColor = 'var(--quota-warning)';
+        } else {
+            sendBtn.style.removeProperty('--quota-remaining-color');
+            sendBtn.style.removeProperty('--quota-used-color');
+        }
+        sendBtn.style.setProperty('--quota-used-deg', `${usedDeg}deg`);
+        sendBtn.style.setProperty('--quota-remaining-deg', `${remainingDeg}deg`);
+        sendBtn.style.setProperty('--quota-center-color', centerColor);
+        sendBtn.classList.add('has-quota');
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: [
+                'quota.render.ok',
+                `remaining=${remaining}`,
+                `used=${used}`,
+                `hasQuota=${sendBtn.classList.contains('has-quota')}`
+            ]
+        });
+    }
+
+    function showQuotaTooltip() {
+        if (!sendBtn || !quotaTooltipEl || isBusy) return;
+        const rows = currentModelQuota && Array.isArray(currentModelQuota.rows) ? currentModelQuota.rows : [];
+        const body = rows.length
+            ? rows.map((row) => {
+                const reset = normalizeResetText(row.resetText);
+                return `<div class="quota-tooltip-row"><span class="quota-col-label">${row.label}</span><span class="quota-col-pct">${row.remainingPercent}%</span><span class="quota-col-reset">${reset}</span></div>`;
+            }).join('')
+            : '<div class="quota-tooltip-row">Quota unavailable</div>';
+        quotaTooltipEl.innerHTML = `
+            <div class="quota-tooltip-header">
+                <span class="quota-tooltip-title"><span class="quota-title-icon">◔</span>Rate limits remaining</span>
+            </div>
+            ${body}
+        `;
+        const rect = sendBtn.getBoundingClientRect();
+        quotaTooltipEl.classList.remove('hidden');
+        quotaTooltipEl.style.visibility = 'hidden';
+        const width = quotaTooltipEl.offsetWidth || 196;
+        const height = quotaTooltipEl.offsetHeight || 80;
+        const left = Math.min(window.innerWidth - width - 8, Math.max(8, rect.right - width));
+        quotaTooltipEl.style.left = `${left}px`;
+        quotaTooltipEl.style.top = `${Math.max(8, rect.top - height - 8)}px`;
+        quotaTooltipEl.style.visibility = 'visible';
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: [
+                'quota.tooltip.show',
+                `rows=${rows.length}`,
+                `busy=${String(isBusy)}`
+            ]
+        });
+    }
+
+    function hideQuotaTooltip() {
+        if (!quotaTooltipEl) return;
+        quotaTooltipEl.classList.add('hidden');
     }
 
     function setServerStatus(status, reason) {
@@ -2527,6 +2833,16 @@ function renderMessageElement(message, renderedSet) {
     function renderPendingCount() {
         const pendingEl = document.getElementById('pending-indicator');
         if (!pendingEl) return;
+        if (sendBlockedNotice) {
+            pendingEl.textContent = sendBlockedNotice;
+            pendingEl.classList.remove('hidden');
+            return;
+        }
+        if (systemNoticeText) {
+            pendingEl.textContent = systemNoticeText;
+            pendingEl.classList.remove('hidden');
+            return;
+        }
         // Removed: pendingSegments no longer used in new system
         pendingEl.classList.add('hidden');
     }
@@ -2619,16 +2935,6 @@ function renderMessageElement(message, renderedSet) {
             renderConflictCard(lastConflictPayload);
         }
 
-        const notice = activeSessionId ? agentTimeoutNoticeBySession.get(activeSessionId) : null;
-        if (notice) {
-            const div = document.createElement('div');
-            div.className = 'message system';
-            const content = document.createElement('div');
-            content.className = 'message-content';
-            content.textContent = notice;
-            div.appendChild(content);
-            chatContainer.appendChild(div);
-        }
 
         renderQuestionCardInTimeline();
 
@@ -2850,6 +3156,7 @@ function renderMessageElement(message, renderedSet) {
                     updateVariantOptions();
                     vscode.postMessage({ type: 'setModel', value: selectedModel });
                     updateLabel();
+                    updateSendQuotaVisual();
                     closeDropdown();
                 });
                 list.appendChild(option);
@@ -3377,6 +3684,12 @@ function applyPromptToSession(sessionId, payload) {
 
     session.currentTurnAssistantMsgId = null;
     session.currentTurnAssistantKey = null;
+    session.pendingAssistantUpgrade = null;
+    session.awaitingFinalMapBind = false;
+    session.backendTurnInFlight = false;
+    if (session.seenDiffKeys instanceof Set) {
+        session.seenDiffKeys.clear();
+    }
 
         if (!session.thinkingId) {
             const tempId = createTempAssistantId();
@@ -3392,7 +3705,8 @@ function applyPromptToSession(sessionId, payload) {
         }
 
         assertInvariants(sessionId, 'sendPrompt');
-        startAgentTimeout(sessionId, payload.opId || null);
+        updateSendGate();
+        // agent timeout notice removed
     }
 
     function handleAssistantMeta(sessionId, message) {
@@ -3418,6 +3732,7 @@ function applyPromptToSession(sessionId, payload) {
                 source: 'assistantMessageMeta',
                 ts: Date.now()
             };
+            updateSendGate();
             vscode.postMessage({
                 type: 'ui-debug',
                 payload: ['[DBG_PENDING_UPGRADE_SET]', 'sessionId', sessionId, 'tmpKey', message.tmpKey, 'assistantMsgId', msgId, 'source', 'assistantMessageMeta']
@@ -3468,7 +3783,7 @@ function applyPromptToSession(sessionId, payload) {
             const normalized = typeof nextText === 'string' ? nextText.trim() : '';
             const hasStatusChange = normalized.length > 0 && normalized !== 'Thinking...';
             if (hasStatusChange) {
-                clearAgentTimeout(sessionId, 'assistantMeta-status-change');
+                // agent timeout notice removed
             }
             target.text = nextText;
             target.meta = { ...target.meta, internalId: backendId, isThinking: true };
@@ -3480,7 +3795,7 @@ function applyPromptToSession(sessionId, payload) {
 
     function handleChatChunk(sessionId, message) {
         const session = getSessionState(sessionId, true);
-        clearAgentTimeout(sessionId, 'chatChunk');
+        // agent timeout notice removed
         const backendId = getEventMessageId(message);
         const chunkText = getEventChunkText(message);
 
@@ -3496,6 +3811,7 @@ function applyPromptToSession(sessionId, payload) {
                 source: 'chatChunk',
                 ts: Date.now()
             };
+            updateSendGate();
             vscode.postMessage({
                 type: 'ui-debug',
                 payload: ['[DBG_PENDING_UPGRADE_SET]', 'sessionId', sessionId, 'tmpKey', message.tmpKey, 'assistantMsgId', msgId, 'source', 'chatChunk']
@@ -3546,7 +3862,7 @@ function applyPromptToSession(sessionId, payload) {
     function handleChatDone(sessionId, message) {
         const session = getSessionState(sessionId);
         if (!session) return;
-        clearAgentTimeout(sessionId, 'chatDone');
+        // agent timeout notice removed
     if (session.thinkingId && session.messagesById.has(session.thinkingId)) {
         const msg = session.messagesById.get(session.thinkingId);
         msg.meta.isThinking = false;
@@ -3577,8 +3893,17 @@ function applyPromptToSession(sessionId, payload) {
             `match=${match}`, `replaced=${replaced}`]
     });
 
-    session.currentTurnAssistantMsgId = null;
-    session.currentTurnAssistantKey = null;
+    if (resolvedFinal && typeof resolvedFinal === 'string') {
+        if (!match) {
+            session.awaitingFinalMapBind = true;
+        } else {
+            session.awaitingFinalMapBind = false;
+            session.pendingAssistantUpgrade = null;
+        }
+        session.currentTurnAssistantMsgId = null;
+        session.currentTurnAssistantKey = null;
+    }
+    updateSendGate();
     assertInvariants(sessionId, 'chatDone');
 }
 
@@ -3595,11 +3920,16 @@ function applyPromptToSession(sessionId, payload) {
     sendBtn.addEventListener('click', () => {
         if (isBusy) {
             if (activeSessionId) {
-                clearAgentTimeout(activeSessionId, 'cancel', true);
+                // agent timeout notice removed
                 cancelLocalTurn(activeSessionId);
             }
             const activeOpId = activeSessionId ? getSessionState(activeSessionId)?.activeTurnOpId || null : null;
             vscode.postMessage({ type: 'cancel', sessionId: activeSessionId || undefined, opId: activeOpId || undefined });
+            return;
+        }
+        const gateSession = getSessionState(activeSessionId);
+        if (isSendBlockedByPendingState(gateSession)) {
+            updateSendGate();
             return;
         }
         logSegmentState(activeSessionId, 'before-turn');
@@ -3736,7 +4066,7 @@ function applyPromptToSession(sessionId, payload) {
         selectedModel = e.target.value;
         updateVariantOptions();
         if (activeSessionId) {
-            clearAgentTimeout(activeSessionId, 'modelChange', true);
+            // agent timeout notice removed
         }
         vscode.postMessage({ type: 'setModel', value: selectedModel });
     });
@@ -3756,13 +4086,6 @@ function applyPromptToSession(sessionId, payload) {
         openSessionPanel();
     });
 
-    const pendingIndicator = document.getElementById('pending-indicator');
-    if (pendingIndicator) {
-        pendingIndicator.addEventListener('click', () => {
-            vscode.postMessage({ type: 'retryReconcile', sessionId: activeSessionId });
-        });
-    }
-
     newSessionBtn.addEventListener('click', () => {
         activeSessionId = '';
         sessionTitle.textContent = 'OpenCode: Chat';
@@ -3774,6 +4097,18 @@ function applyPromptToSession(sessionId, payload) {
         vscode.postMessage({ type: 'newSession' });
         window.__oc?.renderFromState?.();
         scrollToBottom();
+    });
+
+    document.addEventListener('mouseover', (event) => {
+        const target = event.target instanceof Element ? event.target.closest('#send-btn') : null;
+        if (!target) return;
+        ensureQuotaTooltip();
+        showQuotaTooltip();
+    });
+    document.addEventListener('mouseout', (event) => {
+        const target = event.target instanceof Element ? event.target.closest('#send-btn') : null;
+        if (!target) return;
+        hideQuotaTooltip();
     });
 
     refreshSessionsBtn.addEventListener('click', () => {
@@ -3834,6 +4169,19 @@ window.addEventListener('message', (event) => {
                 });
                 break;
             }
+            case 'modelQuota': {
+                currentModelQuota = message.quota || null;
+                vscode.postMessage({
+                    type: 'ui-debug',
+                    payload: [
+                        'modelQuota.rx',
+                        `summary=${currentModelQuota?.summaryRemainingPercent ?? 'null'}`,
+                        `rows=${currentModelQuota?.rows?.length ?? 0}`
+                    ]
+                });
+                updateSendQuotaVisual();
+                break;
+            }
             case 'init': {
                 const incomingSessionId = message.currentSessionId || '';
                 const hydrated = Boolean(activeSessionId && incomingSessionId && activeSessionId === incomingSessionId && hydratedSessions.has(activeSessionId));
@@ -3843,6 +4191,7 @@ window.addEventListener('message', (event) => {
                 });
                 logSegmentState(activeSessionId, 'before-init');
                 models = Array.isArray(message.models) ? message.models : [];
+                refreshFreeModelIds();
                 sessions = Array.isArray(message.sessions) ? message.sessions : [];
                 selectedModel = message.selectedModel || (models[0] ? models[0].fullId : '');
                 selectedVariant = message.selectedVariant || '';
@@ -3864,8 +4213,8 @@ window.addEventListener('message', (event) => {
                     errorDiv.textContent = 'Error: No models available. Please check your OpenCode configuration.';
                     chatContainer.appendChild(errorDiv);
                 } else {
-                    sendBtn.disabled = false;
                     sendBtn.title = '';
+                    updateSendGate();
                 }
                 
                 if (!hydrated) {
@@ -3876,10 +4225,12 @@ window.addEventListener('message', (event) => {
                 renderModelSelect();
                 renderModeSelect();
                 updateVariantOptions();
+                updateSendQuotaVisual();
                 renderSessionList();
                 if (!hydrated) {
                     window.__oc?.renderFromState?.();
                 }
+                updateSendGate();
                 logSegmentState(activeSessionId, 'after-init');
                 vscode.postMessage({ type: 'ui-debug', payload: ['webview', 'ready', Date.now()] });
                 break;
@@ -3910,8 +4261,10 @@ window.addEventListener('message', (event) => {
             }
             case 'models': {
                 models = Array.isArray(message.models) ? message.models : [];
+                refreshFreeModelIds();
                 renderModelSelect();
                 updateVariantOptions();
+                updateSendQuotaVisual();
                 break;
             }
             case 'sessionsList': {
@@ -4053,6 +4406,9 @@ window.addEventListener('message', (event) => {
                         session.hiddenSet.clear();
                     }
                     session.thinkingId = null;
+                    session.pendingAssistantUpgrade = null;
+                    session.awaitingFinalMapBind = false;
+                    session.backendTurnInFlight = false;
                     session.nextOrder = 0;
                     
                     // Load messages into timeline
@@ -4182,7 +4538,6 @@ window.addEventListener('message', (event) => {
                         payload: ['[WV][HYDRATE_PLACEHOLDER_REBUILD]', `total=${session.segmentsByNoticeKey.size}`, `inserted=${inserted}`, `skipped=${skipped}`]
                     });
 
-                    rebuildHiddenSetFromTimeline(session);
                     window.__oc?.renderFromState?.();
                     
                     vscode.postMessage({
@@ -4197,6 +4552,7 @@ window.addEventListener('message', (event) => {
                     hydratedSessions.add(sessionId);
                     scrollToBottom();
                     closeSessionPanel();
+                    updateSendGate();
                     
                 } catch (err) {
                     vscode.postMessage({
@@ -4238,6 +4594,8 @@ window.addEventListener('message', (event) => {
                 if (prevSessionId && prevSessionId !== sessionId) {
                     clearQuestionOverlay('session-change');
                     clearPermissionOverlay('session-change');
+                    closeStallCard();
+                    setSystemNotice('');
                 }
                 if (isSwitchingSession) {
                     isSwitchingSession = false;
@@ -4251,6 +4609,7 @@ window.addEventListener('message', (event) => {
                     window.__oc?.renderFromState?.();
                     logSessionState(sessionId, 'flushPendingPrompts');
                 }
+                updateSendGate();
                 break;
             }
             case 'prefillInput': {
@@ -4270,6 +4629,53 @@ window.addEventListener('message', (event) => {
                         'payloadInternalKey', payloadInternalKey || 'null',
                         'payloadServerId', payloadServerId || 'null']
                 });
+                break;
+            }
+            case 'turnInFlight': {
+                const sessionId = getEventSessionId(message, 'turnInFlight');
+                if (!sessionId) break;
+                const session = getSessionState(sessionId, true);
+                session.backendTurnInFlight = Boolean(message?.inFlight);
+                updateSendGate();
+                break;
+            }
+            case 'systemNotice': {
+                const sessionId = getEventSessionId(message, 'systemNotice');
+                if (sessionId && sessionId !== activeSessionId) break;
+                const text = typeof message?.message === 'string' ? message.message : '';
+                setSystemNotice(text);
+                break;
+            }
+            case 'systemNoticeClear': {
+                const sessionId = getEventSessionId(message, 'systemNoticeClear');
+                if (sessionId && sessionId !== activeSessionId) break;
+                setSystemNotice('');
+                break;
+            }
+            case 'stallCard': {
+                const sessionId = getEventSessionId(message, 'stallCard');
+                if (sessionId && sessionId !== activeSessionId) break;
+                showStallCard(message);
+                break;
+            }
+            case 'messageIndexMapDelta': {
+                const sessionId = getEventSessionId(message, 'messageIndexMapDelta');
+                if (!sessionId) break;
+                const session = getSessionState(sessionId, true);
+                const messageId = typeof message?.messageId === 'string' ? message.messageId : '';
+                const messageIndex = typeof message?.messageIndex === 'number' ? message.messageIndex : null;
+                if (messageId && Number.isFinite(messageIndex)) {
+                    session.messageIndexMap.set(messageId, messageIndex);
+                    const tmpKey = session.pendingAssistantUpgrade?.tmpKey || session.thinkingId || null;
+                    attemptAssistantUpgrade(sessionId, { sessionId, tmpKey, assistantMsgId: messageId }, 'messageIndexMapDelta');
+                    if (session.currentTurnAssistantKey === messageId) {
+                        session.awaitingFinalMapBind = false;
+                        if (session.pendingAssistantUpgrade?.assistantMsgId === messageId) {
+                            session.pendingAssistantUpgrade = null;
+                        }
+                    }
+                }
+                updateSendGate();
                 break;
             }
             case 'messageIndexMap': {
@@ -4311,6 +4717,7 @@ window.addEventListener('message', (event) => {
                     const didReplace = session.currentTurnAssistantKey === pending.assistantMsgId;
                     if (didReplace) {
                         session.pendingAssistantUpgrade = null;
+                        session.awaitingFinalMapBind = false;
                         vscode.postMessage({ type: 'ui-debug', payload: ['[DBG_PENDING_UPGRADE_CLEAR]', 'sessionId', sessionId] });
                     }
                 }
@@ -4335,6 +4742,7 @@ window.addEventListener('message', (event) => {
                         payload: ['[DBG_RECONCILE]', `storedMap size=${session.messageIndexMap.size} first=[${storedSample.join(', ')}]`]
                     });
                 }
+                updateSendGate();
                 break;
             }
             case 'retryReconcile': {
@@ -4610,6 +5018,9 @@ window.addEventListener('message', (event) => {
                 const sessionId = getEventSessionId(message, 'diffChunk');
                 if (!sessionId) break;
                 const session = getSessionState(sessionId, true);
+                if (!shouldRenderDiffChunk(session, message)) {
+                    break;
+                }
                 upsertMessage(session, {
                     id: `diff:${Date.now()}`,
                     role: 'system',
@@ -4636,19 +5047,30 @@ window.addEventListener('message', (event) => {
                     ? message.statsByPath
                     : {};
                 const session = getSessionState(sessionId, true);
+                const existing = session.messagesById.get(changeListId);
+                let mergedFiles = files;
+                if (existing?.meta?.kind === 'changeList' && Array.isArray(existing.meta.files)) {
+                    const ordered = [...existing.meta.files, ...files]
+                        .filter((item) => typeof item === 'string' && item.length);
+                    mergedFiles = Array.from(new Set(ordered));
+                }
+                const mergedStats = {
+                    ...(existing?.meta?.statsByPath && typeof existing.meta.statsByPath === 'object' ? existing.meta.statsByPath : {}),
+                    ...statsByPath
+                };
                 upsertMessage(session, {
                     id: changeListId,
                     role: 'system',
                     text: '',
                     meta: {
                         kind: 'changeList',
-                        files,
+                        files: mergedFiles,
                         source: message.source || 'git',
                         scope: message.scope || 'turn',
                         commitHead: commitHead || undefined,
                         commitBase: commitBase || undefined,
                         reverted: message.reverted === true,
-                        statsByPath
+                        statsByPath: mergedStats
                     }
                 });
                 window.__oc?.renderFromState?.();
@@ -4737,6 +5159,9 @@ window.addEventListener('message', (event) => {
                 const sessionId = getEventSessionId(message, 'diffChunk');
                 if (!sessionId) break;
                 const session = getSessionState(sessionId, true);
+                if (!shouldRenderDiffChunk(session, message)) {
+                    break;
+                }
                 upsertMessage(session, {
                     id: `diff:${Date.now()}`,
                     role: 'system',
@@ -4911,18 +5336,24 @@ window.addEventListener('message', (event) => {
                     let endForUpsert = segPayload?.endMessageId || segPayload?.endMsgId || anchorForUpsert;
                     const applied = segPayload?.applied ?? true;
                     const shouldComputeMembers = Boolean(found && applied);
-                    const originalMemberMsgIds = shouldComputeMembers
-                        ? computeMemberMsgIdsFromTimeline(session, anchorForUpsert, endForUpsert)
-                        : [];
                     const payloadMemberMsgIds = Array.isArray(segPayload?.messageIds)
                         ? segPayload.messageIds.filter((id) => typeof id === 'string' && id.startsWith('msg_'))
                         : [];
-                    let memberMsgIds = payloadMemberMsgIds.length ? payloadMemberMsgIds : originalMemberMsgIds;
-                    const originalEndMsgId = endForUpsert;
+                    const normalizedUpsert = shouldComputeMembers
+                        ? normalizeSegmentMembersFromTimeline(session, anchorForUpsert, endForUpsert, payloadMemberMsgIds, upsertNoticeKey)
+                        : {
+                            anchorMsgId: resolveSegmentMessageId(session, anchorForUpsert),
+                            endMsgId: resolveSegmentMessageId(session, endForUpsert) || resolveSegmentMessageId(session, anchorForUpsert),
+                            memberMsgIds: []
+                        };
+                    const normalizedAnchorForUpsert = normalizedUpsert.anchorMsgId || anchorForUpsert;
+                    const normalizedEndForUpsert = normalizedUpsert.endMsgId || normalizedAnchorForUpsert;
+                    let memberMsgIds = normalizedUpsert.memberMsgIds;
+                    endForUpsert = normalizedEndForUpsert;
                     vscode.postMessage({
                         type: 'ui-debug',
                         payload: ['[WV][SEG_MEMBERS]',
-                            `anchor=${anchorForUpsert || 'null'}`,
+                            `anchor=${normalizedAnchorForUpsert || 'null'}`,
                             `end=${endForUpsert || 'null'}`,
                             `count=${memberMsgIds.length}`]
                     });
@@ -4943,7 +5374,7 @@ window.addEventListener('message', (event) => {
                         if (!id || typeof id !== 'string') return -1;
                         return msgTimelineIndex.get(id) ?? -1;
                     };
-                    const anchorIdx = anchorForUpsert ? getMsgTimelineIndex(anchorForUpsert) : -1;
+                    const anchorIdx = normalizedAnchorForUpsert ? getMsgTimelineIndex(normalizedAnchorForUpsert) : -1;
                     const newEndIdx = endForUpsert ? getMsgTimelineIndex(endForUpsert) : -1;
 
                     vscode.postMessage({
@@ -5088,14 +5519,14 @@ window.addEventListener('message', (event) => {
                         type: 'ui-debug',
                         payload: ['[WV][APPLY_SEGMENT_CALL]',
                             `noticeKey=${upsertNoticeKey}`,
-                            `anchor=${anchorForUpsert || 'null'}`,
+                            `anchor=${normalizedAnchorForUpsert || 'null'}`,
                             `end=${endForUpsert || 'null'}`]
                     });
                     const existingSegment = session.segmentsByNoticeKey.get(upsertNoticeKey);
                     const restoreAllowed = existingSegment?.restoreAllowed === false ? false : true;
                     session.segmentsByNoticeKey.set(upsertNoticeKey, {
                         noticeKey: upsertNoticeKey,
-                        anchorMsgId: anchorForUpsert,
+                        anchorMsgId: normalizedAnchorForUpsert,
                         endMsgId: endForUpsert,
                         memberMsgIds,
                         applied,
@@ -5109,7 +5540,7 @@ window.addEventListener('message', (event) => {
                         payload: ['[WV][SEG_PERSIST_TX]',
                             `sessionId=${sessionId || 'null'}`,
                             `noticeKey=${upsertNoticeKey}`,
-                            `anchor=${anchorForUpsert || 'null'}`,
+                            `anchor=${normalizedAnchorForUpsert || 'null'}`,
                             `end=${endForUpsert || 'null'}`,
                             `membersCount=${memberMsgIds.length}`]
                     });
@@ -5118,7 +5549,7 @@ window.addEventListener('message', (event) => {
                         sessionId,
                         segment: {
                             noticeKey: upsertNoticeKey,
-                            anchorMsgId: anchorForUpsert,
+                            anchorMsgId: normalizedAnchorForUpsert,
                             endMsgId: endForUpsert,
                             memberMsgIds,
                             applied,
@@ -5135,7 +5566,7 @@ window.addEventListener('message', (event) => {
                             `segmentsCount=${session.segmentsByNoticeKey.size}`,
                             `hiddenSetSize=${session.hiddenSet.size}`]
                     });
-                    const placeholderId = upsertUndoPlaceholder(session, upsertNoticeKey, anchorForUpsert, endForUpsert, applied);
+                    const placeholderId = upsertUndoPlaceholder(session, upsertNoticeKey, normalizedAnchorForUpsert, endForUpsert, applied);
                     vscode.postMessage({
                         type: 'ui-debug',
                         payload: ['[WV][ROOTS]',
@@ -5803,7 +6234,7 @@ function renderPermissionOverlayModal() {
     }
 
     const actions = document.createElement('div');
-    actions.className = 'question-card-actions';
+    actions.className = 'question-card-actions permission-card-actions';
     const options = [
         { label: 'once', value: 'once' },
         { label: 'always', value: 'always' },

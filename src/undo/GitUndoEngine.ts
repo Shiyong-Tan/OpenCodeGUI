@@ -617,44 +617,109 @@ export class GitUndoEngine {
         return tracked;
     }
 
-    public async undoFromMessage(sessionId: string, startMsgId: string, force = false): Promise<UndoResult> {
+    private resolveMappedMsgId(
+        map: { msgToCommit: Record<string, string> },
+        targetMsgId: string,
+        candidateMsgIds: string[],
+        direction: 'forward' | 'backward'
+    ): { msgId: string; commitHash: string } | null {
+        const directCommit = map.msgToCommit[targetMsgId];
+        if (directCommit) {
+            return { msgId: targetMsgId, commitHash: directCommit };
+        }
+
+        const normalizedCandidates = unique(
+            (Array.isArray(candidateMsgIds) ? candidateMsgIds : [])
+                .filter((id) => typeof id === 'string' && id.startsWith('msg_'))
+        );
+        if (!normalizedCandidates.length) {
+            return null;
+        }
+
+        const index = normalizedCandidates.indexOf(targetMsgId);
+        if (index >= 0) {
+            if (direction === 'forward') {
+                for (let i = index + 1; i < normalizedCandidates.length; i++) {
+                    const msgId = normalizedCandidates[i];
+                    const commitHash = map.msgToCommit[msgId];
+                    if (commitHash) {
+                        return { msgId, commitHash };
+                    }
+                }
+            } else {
+                for (let i = index - 1; i >= 0; i--) {
+                    const msgId = normalizedCandidates[i];
+                    const commitHash = map.msgToCommit[msgId];
+                    if (commitHash) {
+                        return { msgId, commitHash };
+                    }
+                }
+            }
+        }
+
+        const iterate = direction === 'forward'
+            ? normalizedCandidates
+            : [...normalizedCandidates].reverse();
+        for (const msgId of iterate) {
+            const commitHash = map.msgToCommit[msgId];
+            if (commitHash) {
+                return { msgId, commitHash };
+            }
+        }
+
+        return null;
+    }
+
+    public async undoFromMessage(sessionId: string, startMsgId: string, messageIds: string[] = [], force = false): Promise<UndoResult> {
         if (!this.isEnabled()) {
-            return { conflicts: [], touchedFiles: [], applied: false };
+            return { conflicts: [], touchedFiles: [], applied: false, reason: 'git-disabled' };
         }
         const repo = await this.repoManager.resolveRepo(sessionId, startMsgId);
         return this.lockManager.withRepoLock(repo, this.logger, async () => {
             this.logger(`undo.start | sessionId=${sessionId} startMsgId=${startMsgId}`);
             const map = await this.mapStore.loadSessionMap(sessionId, repo.repoId);
-            const startCommit = map.msgToCommit[startMsgId];
+            let startCommit = map.msgToCommit[startMsgId];
+            let effectiveStartMsgId = startMsgId;
+            if (!startCommit) {
+                const fallback = this.resolveMappedMsgId(map, startMsgId, messageIds, 'forward');
+                if (fallback) {
+                    startCommit = fallback.commitHash;
+                    effectiveStartMsgId = fallback.msgId;
+                    this.logger(
+                        `undo.fallback | reason=missing-startCommit sessionId=${sessionId} fromMsgId=${startMsgId} ` +
+                        `toMsgId=${effectiveStartMsgId} commit=${startCommit}`
+                    );
+                }
+            }
             if (!startCommit) {
                 this.logger(`undo.missing | reason=missing-startCommit sessionId=${sessionId} startMsgId=${startMsgId}`);
-                return { conflicts: [], touchedFiles: [], applied: false };
+                return { conflicts: [], touchedFiles: [], applied: false, reason: 'missing-startCommit' };
             }
             const headCommit = map.headCommit;
             if (!headCommit) {
                 this.logger(`undo.missing | reason=missing-headCommit sessionId=${sessionId}`);
-                return { conflicts: [], touchedFiles: [], applied: false };
+                return { conflicts: [], touchedFiles: [], applied: false, reason: 'missing-headCommit' };
             }
             const baseCommit = map.currentBaseCommit || headCommit;
             const parent = await this.getCommitParent(repo, startCommit);
             const targetCommit = parent || EMPTY_TREE_HASH;
             if (!parent) {
-                this.logger(`undo.target.no-parent | sessionId=${sessionId} startCommit=${startCommit}`);
+            this.logger(`undo.target.no-parent | sessionId=${sessionId} startCommit=${startCommit}`);
             }
             const touchedUnion = this.collectTouchedUnion(map, startCommit, headCommit);
             const fileSet = await this.computeFileSet(repo, targetCommit, headCommit, touchedUnion);
             this.logger(`fileSet.beforeApply | size=${fileSet.length}`);
             if (!fileSet.length) {
-                return { conflicts: [], touchedFiles: [], applied: true, startCommit, startCommits: [startCommit], restoreCommit: headCommit, undoTargetCommit: targetCommit, fileSet };
+                return { conflicts: [], touchedFiles: [], applied: true, reason: 'no-file-set', startCommit, startCommits: [startCommit], restoreCommit: headCommit, undoTargetCommit: targetCommit, fileSet };
             }
             const conflicts = force ? [] : await this.ensureWorkspaceMatchesCommit(repo, baseCommit, fileSet);
             this.logger(`precheck | commit=${baseCommit} fileSet=${fileSet.length} conflicts=${conflicts.length}`);
             if (conflicts.length) {
-                return { conflicts, touchedFiles: [], applied: false, startCommit, startCommits: [startCommit], restoreCommit: headCommit, undoTargetCommit: targetCommit, fileSet };
+                return { conflicts, touchedFiles: [], applied: false, reason: 'precheck-conflict', startCommit, startCommits: [startCommit], restoreCommit: headCommit, undoTargetCommit: targetCommit, fileSet };
             }
             const applyResult = await this.applyWorkspaceToTargetCommit(repo, fileSet, targetCommit, 'undo', { forceOverride: force });
             if (applyResult.conflicts.length) {
-                return { conflicts: applyResult.conflicts, touchedFiles: [], applied: false, startCommit, startCommits: [startCommit], restoreCommit: headCommit, undoTargetCommit: targetCommit, fileSet };
+                return { conflicts: applyResult.conflicts, touchedFiles: [], applied: false, reason: 'apply-conflict', startCommit, startCommits: [startCommit], restoreCommit: headCommit, undoTargetCommit: targetCommit, fileSet };
             }
             const updated = { ...map, currentBaseCommit: targetCommit };
             await this.mapStore.saveSessionMap(sessionId, updated);
@@ -662,6 +727,7 @@ export class GitUndoEngine {
                 conflicts: applyResult.conflicts,
                 touchedFiles: applyResult.touchedFiles,
                 applied: true,
+                reason: 'ok',
                 startCommit,
                 startCommits: [startCommit],
                 restoreCommit: headCommit,
@@ -702,7 +768,19 @@ export class GitUndoEngine {
         const repo = await this.repoManager.resolveRepo(sessionId, msgId);
         return this.lockManager.withRepoLock(repo, this.logger, async () => {
             const map = await this.mapStore.loadSessionMap(sessionId, repo.repoId);
-            const restoreCommit = map.msgToCommit[msgId];
+            let restoreCommit = map.msgToCommit[msgId];
+            let effectiveMsgId = msgId;
+            if (!restoreCommit) {
+                const fallback = this.resolveMappedMsgId(map, msgId, messageIds, 'backward');
+                if (fallback) {
+                    restoreCommit = fallback.commitHash;
+                    effectiveMsgId = fallback.msgId;
+                    this.logger(
+                        `restore.fallback | reason=missing-commit sessionId=${sessionId} fromMsgId=${msgId} ` +
+                        `toMsgId=${effectiveMsgId} commit=${restoreCommit}`
+                    );
+                }
+            }
             if (!restoreCommit) {
                 this.logger(`restore.missing | reason=missing-commit sessionId=${sessionId} msgId=${msgId}`);
                 return { conflicts: [], touchedFiles: [], applied: false };
