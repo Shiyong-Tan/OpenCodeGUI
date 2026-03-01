@@ -38,6 +38,10 @@ body {
     cursor: pointer;
 }
 
+.session-title.is-waiting {
+    color: var(--vscode-editorWarning-foreground, #cca700);
+}
+
 .server-status-dot {
     width: 8px;
     height: 8px;
@@ -1404,7 +1408,6 @@ select#mode-select {
 .model-dropdown .dropdown-panel {
     left: 0;
     right: auto;
-    width: 200%;
 }
 
 .dropdown-panel {
@@ -1413,7 +1416,7 @@ select#mode-select {
     top: auto;
     right: 0;
     left: auto;
-    width: calc(200%);
+    width: auto;
     max-height: 480px;
     overflow-y: auto;
     background: var(--vscode-dropdown-background);
@@ -1484,6 +1487,18 @@ select#mode-select {
     gap: 8px;
 }
 
+.simple-option {
+    width: 100%;
+    text-align: left;
+    border: none;
+    background: transparent;
+    color: var(--vscode-dropdown-foreground);
+    padding: 4px 8px;
+    cursor: pointer;
+    font-size: 0.85em;
+    display: block;
+}
+
 .model-option-label {
     flex: 1 1 auto;
     min-width: 0;
@@ -1512,6 +1527,12 @@ select#mode-select {
 
 .model-option:hover,
 .model-option.is-selected {
+    background: var(--vscode-list-activeSelectionBackground);
+    color: var(--vscode-list-activeSelectionForeground);
+}
+
+.simple-option:hover,
+.simple-option.is-selected {
     background: var(--vscode-list-activeSelectionBackground);
     color: var(--vscode-list-activeSelectionForeground);
 }

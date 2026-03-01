@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as pathModule from "path";
-import { OpenCodeClient, ChatEvent, ModelInfo, SessionInfo, FileSnapshot, ConflictDetail } from "./OpenCodeClient";
+import { OpenCodeClient, ChatEvent, ModelInfo, SessionInfo, FileSnapshot, ConflictDetail, AgentInfo } from "./OpenCodeClient";
 import { OpenCodeDiffProvider } from "./OpenCodeDiffProvider";
 import { GitRepoManager } from './undo/GitRepoManager';
 import { runGit } from './undo/GitRunner';
@@ -104,6 +104,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private selectedModel?: string;
     private selectedVariant?: string;
     private selectedMode?: string;
+    private availableModes: string[] = ['plan', 'build'];
     private pendingClientMessageId?: string;
     private lastDraft?: { text: string; attachments: string[]; model?: string; variant?: string; mode?: string };
     private currentDiffFilePath: string | null = null;
@@ -1104,7 +1105,11 @@ ${attachmentLines.join('\n')}`
                     break;
                 }
                 case "setMode": {
-                    this.selectedMode = data.value || undefined;
+                    const requestedMode = typeof data.value === 'string' ? data.value : '';
+                    const mode = this.availableModes.includes(requestedMode)
+                        ? requestedMode
+                        : (this.availableModes[0] || 'plan');
+                    this.selectedMode = mode || undefined;
                     await this._context.globalState.update('opencode.mode', this.selectedMode);
                     break;
                 }
@@ -1146,7 +1151,8 @@ ${attachmentLines.join('\n')}`
                 case "registerPendingUserLocal": {
                     if (typeof data.sessionId !== 'string' || typeof data.localKey !== 'string') break;
                     if (!data.localKey.startsWith('local-')) break;
-                    this.client.startTurn(data.sessionId, data.localKey);
+                    const isInFlight = this.sendInFlightBySession.has(data.sessionId);
+                    this.uiDebugChannel.appendLine(`EXT: registerPendingUserLocal | sessionId=${data.sessionId} | localKey=${data.localKey} | inFlight=${String(isInFlight)}`);
                     break;
                 }
                 case "undoSegmentUpsert": {
@@ -2316,6 +2322,7 @@ ${attachmentLines.join('\n')}`
 
     private async sendInit(webview: vscode.Webview): Promise<void> {
         let models: ModelInfo[] = [];
+        let agents: AgentInfo[] = [];
         let sessions: SessionInfo[] = [];
         try {
             models = await this.client.listModels();
@@ -2327,6 +2334,12 @@ ${attachmentLines.join('\n')}`
         }
 
         try {
+            agents = await this.client.listAgents();
+        } catch (error) {
+            this.uiDebugChannel.appendLine(`EXT: agents.load.fail | err=${String(error)}`);
+        }
+
+        try {
             sessions = await this.client.listSessions();
         } catch (error) {
             this.postAddResponse(webview, `Failed to load sessions: ${error}`);
@@ -2335,9 +2348,16 @@ ${attachmentLines.join('\n')}`
         const storedVariant = this._context.globalState.get<string>('opencode.variant');
         const storedMode = this._context.globalState.get<string>('opencode.mode');
 
-        const defaultMode = storedMode || 'build';
+        const primaryModes = agents
+            .filter((agent) => agent.mode === 'primary' && !agent.hidden)
+            .map((agent) => agent.id)
+            .filter((value, index, arr) => arr.indexOf(value) === index);
+        this.availableModes = primaryModes.length ? primaryModes : ['plan', 'build'];
+        const resolvedMode = (storedMode && this.availableModes.includes(storedMode))
+            ? storedMode
+            : (this.availableModes.includes('plan') ? 'plan' : this.availableModes[0]);
 
-        this.selectedMode = defaultMode;
+        this.selectedMode = resolvedMode;
 
         if (!models.length) {
             const refreshed = await this.refreshModels(webview);
@@ -2370,8 +2390,14 @@ ${attachmentLines.join('\n')}`
         if ((resolvedVariant || '') !== (storedVariant || '')) {
             await this._context.globalState.update('opencode.variant', resolvedVariant);
         }
+        if ((resolvedMode || '') !== (storedMode || '')) {
+            await this._context.globalState.update('opencode.mode', resolvedMode);
+        }
         this.uiDebugChannel.appendLine(
             `[EXT][INIT_MODEL_RESOLVE] models=${models.length} storedModel=${storedModel || 'null'} selectedModel=${resolvedModel || 'null'} storedVariant=${storedVariant || 'null'} selectedVariant=${resolvedVariant || 'null'}`
+        );
+        this.uiDebugChannel.appendLine(
+            `EXT: mode.init | stored=${storedMode || 'null'} | selected=${resolvedMode || 'null'} | available=${this.availableModes.join(',') || 'none'}`
         );
 
         const workspaceRoot = this.client.getWorkspaceRoot() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -2418,16 +2444,17 @@ ${attachmentLines.join('\n')}`
             const liveWebview = this._view?.webview || webview;
             this.uiDebugChannel.appendLine(
                 `[EXT][INIT_SEND] models=${models.length} sessions=${sessions.length} ` +
-                `currentSessionId=${initSessionId || 'null'} selectedModel=${this.selectedModel || 'NULL'}`
+                `currentSessionId=${initSessionId || 'null'} selectedModel=${this.selectedModel || 'NULL'} selectedMode=${resolvedMode || 'null'} modeCount=${this.availableModes.length}`
             );
 
             liveWebview.postMessage({
                 type: 'init',
                 models,
                 sessions,
+                modes: this.availableModes,
                 selectedModel: this.selectedModel,
                 selectedVariant: this.selectedVariant,
-                selectedMode: defaultMode,
+                selectedMode: resolvedMode,
                 currentSessionId: initSessionId,
                 sessionId: initSessionId
             });
@@ -3383,21 +3410,28 @@ ${attachmentLines.join('\n')}`
         }
 
         if (event.type === 'message' && event.text) {
-            if (this.pendingClientMessageId && this.currentSessionId) {
-                const mappedMessageIndex = this.client.getMessageIndex(this.pendingClientMessageId)
-                    ?? this.client.registerMessage(this.pendingClientMessageId);
-                this.client.aliasMessageId(this.pendingClientMessageId, event.text);
-                const internalId = this.clientMessageIdMap.get(this.pendingClientMessageId);
+            const sessionId = event.sessionId || this.currentSessionId;
+            const localKey = this.pendingClientMessageId
+                || (sessionId ? this.pendingLocalKeyBySession.get(sessionId) : undefined)
+                || null;
+            if (localKey && sessionId) {
+                const mappedMessageIndex = this.client.getMessageIndex(localKey)
+                    ?? this.client.registerMessage(localKey);
+                this.client.aliasMessageId(localKey, event.text);
+                const internalId = this.clientMessageIdMap.get(localKey);
                 if (internalId && internalId !== event.text) {
                     this.client.aliasMessageId(internalId, event.text);
                 }
-                const internalForPending = this.clientMessageIdMap.get(this.pendingClientMessageId);
+                const internalForPending = this.clientMessageIdMap.get(localKey);
                 if (internalForPending) {
                     this.client.aliasMessageId(event.text, internalForPending);
                 }
-                this.clientMessageIdMap.delete(this.pendingClientMessageId);
+                this.clientMessageIdMap.delete(localKey);
                 this.clientMessageIdMap.set(event.text, event.text);
-                this.pendingClientMessageId = undefined;
+                if (this.pendingClientMessageId === localKey) {
+                    this.pendingClientMessageId = undefined;
+                }
+                this.uiDebugChannel.appendLine(`EXT: user.ack.bind | sessionId=${sessionId} | localKey=${localKey} | msgId=${event.text}`);
             }
             return;
         }
@@ -3933,8 +3967,12 @@ ${attachmentLines.join('\n')}`
                 : [];
             const text = parts.map((part: any) => part.text).join('');
             if (!text) continue;
+            const mode = typeof message?.info?.mode === 'string' ? message.info.mode.toLowerCase() : '';
+            const agent = typeof message?.info?.agent === 'string' ? message.info.agent.toLowerCase() : '';
+            const isAutoResumeText = role === 'user' && text.trimStart().startsWith('[OC_UI_AUTORESUME');
+            const isSyntheticUser = role === 'user' && (isAutoResumeText || mode === 'compaction' || agent === 'compaction');
             const messageIndex = this.client.registerMessage(resolvedId);
-            messages.push({ role, text, id: resolvedId, messageIndex });
+            messages.push({ role, text, id: resolvedId, messageIndex, meta: isSyntheticUser ? { syntheticUser: true } : undefined });
         }
 
         return { title, messages };
@@ -4116,10 +4154,7 @@ ${attachmentLines.join('\n')}`
                         <div class="left-tools">
                             <button class="icon-btn" id="attachment-btn" title="Add attachment" aria-label="Add attachment">＋</button>
                             <div class="select-wrapper mode-wrapper">
-                                <select id="mode-select" title="Mode">
-                                    <option value="build">build</option>
-                                    <option value="plan">plan</option>
-                                </select>
+                                <select id="mode-select" title="Mode"></select>
                             </div>
 
                             <div class="select-wrapper model-wrapper">

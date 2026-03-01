@@ -27,9 +27,10 @@ const purify = window.DOMPurify;
 
 let models = [];
 let sessions = [];
+let modes = ['plan', 'build'];
 let selectedModel = '';
 let selectedVariant = '';
-let selectedMode = 'build';
+let selectedMode = 'plan';
 let activeSessionId = '';
 let isBusy = false;
 let attachments = [];
@@ -70,24 +71,84 @@ const pendingUiPrompts = [];
 let pendingContextItems = [];
 let sendBlockedNotice = '';
 let systemNoticeText = '';
+let baseSessionTitle = 'OpenCode: Chat';
+let headerStatusText = '';
+let textMeasureCanvas = null;
 
 const SEND_BLOCK_NOTICE = 'Please wait while the previous response finishes.';
 
+function renderHeaderTitle() {
+    const titleEl = document.getElementById('session-title');
+    if (!titleEl) return;
+    titleEl.textContent = headerStatusText || baseSessionTitle;
+}
+
+function setHeaderWaitingState(waiting) {
+    const titleEl = document.getElementById('session-title');
+    if (!titleEl) return;
+    titleEl.classList.toggle('is-waiting', Boolean(waiting));
+}
+
+function measureTextWidth(text, font) {
+    if (!textMeasureCanvas) {
+        textMeasureCanvas = document.createElement('canvas');
+    }
+    const ctx = textMeasureCanvas.getContext('2d');
+    if (!ctx) return 0;
+    ctx.font = font;
+    return ctx.measureText(String(text || '')).width;
+}
+
+function computeModelPanelWidthPx(wrapper, items) {
+    if (!wrapper) return 0;
+    const modelsList = Array.isArray(items) ? items : [];
+    if (!modelsList.length) {
+        return 0;
+    }
+    const computed = window.getComputedStyle(wrapper);
+    const baseSize = Number.parseFloat(computed.fontSize || '13') || 13;
+    const optionSize = Math.max(11, baseSize * 0.85);
+    const fontFamily = computed.fontFamily || 'sans-serif';
+    const font = `400 ${optionSize}px ${fontFamily}`;
+    const twoSpacesWidth = measureTextWidth('  ', font);
+
+    let maxTextWidth = 0;
+    for (const model of modelsList) {
+        const name = String(model?.name || model?.fullId || '').trim();
+        const speed = typeof model?.speedMultiplier === 'string' ? model.speedMultiplier.trim() : '';
+        const showSpeed = Boolean(speed && isCopilotProvider(model?.providerId || ''));
+        const nameWidth = measureTextWidth(name, font);
+        const speedWidth = showSpeed ? measureTextWidth(speed, font) : 0;
+        const width = nameWidth + (showSpeed ? (twoSpacesWidth + speedWidth) : 0);
+        if (width > maxTextWidth) {
+            maxTextWidth = width;
+        }
+    }
+
+    const optionPaddingLeftPx = 22;
+    const optionPaddingRightPx = 8;
+    const panelPaddingBorderPx = 10;
+    const scrollbarReservePx = 14;
+    const minWidthPx = 160;
+    const maxWidthPx = 320;
+    const target = Math.ceil(maxTextWidth + optionPaddingLeftPx + optionPaddingRightPx + panelPaddingBorderPx + scrollbarReservePx);
+    const widthPx = Math.max(minWidthPx, Math.min(maxWidthPx, target));
+    return widthPx;
+}
+
 function setSendBlockedNotice(text) {
     sendBlockedNotice = typeof text === 'string' ? text : '';
+    headerStatusText = sendBlockedNotice ? 'Waiting for previous response...' : '';
+    setHeaderWaitingState(Boolean(sendBlockedNotice));
+    renderHeaderTitle();
     const pendingEl = document.getElementById('pending-indicator');
     if (!pendingEl) return;
-    if (sendBlockedNotice) {
-        pendingEl.textContent = sendBlockedNotice;
+    if (systemNoticeText) {
+        pendingEl.textContent = systemNoticeText;
         pendingEl.classList.remove('hidden');
     } else {
-        if (systemNoticeText) {
-            pendingEl.textContent = systemNoticeText;
-            pendingEl.classList.remove('hidden');
-        } else {
-            pendingEl.textContent = '';
-            pendingEl.classList.add('hidden');
-        }
+        pendingEl.textContent = '';
+        pendingEl.classList.add('hidden');
     }
 }
 
@@ -95,11 +156,6 @@ function setSystemNotice(text) {
     systemNoticeText = typeof text === 'string' ? text : '';
     const pendingEl = document.getElementById('pending-indicator');
     if (!pendingEl) return;
-    if (sendBlockedNotice) {
-        pendingEl.textContent = sendBlockedNotice;
-        pendingEl.classList.remove('hidden');
-        return;
-    }
     if (systemNoticeText) {
         pendingEl.textContent = systemNoticeText;
         pendingEl.classList.remove('hidden');
@@ -689,6 +745,10 @@ function rebuildHiddenSetFromTimeline(session) {
         if (typeof msgId !== 'string') continue;
         const message = session.messagesById.get(msgId);
         if (!message || message.role !== 'user') continue;
+        if (message.meta?.syntheticUser === true) {
+            session.hiddenSet.add(msgId);
+            continue;
+        }
         if (typeof message.text === 'string' && message.text.trimStart().startsWith('[OC_UI_AUTORESUME')) {
             session.hiddenSet.add(msgId);
         }
@@ -2104,6 +2164,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const panelBackdrop = document.getElementById('panel-backdrop');
     const refreshSessionsBtn = document.getElementById('refresh-sessions');
     const closeSessionsBtn = document.getElementById('close-sessions');
+    baseSessionTitle = sessionTitle?.textContent || 'OpenCode: Chat';
+    renderHeaderTitle();
 
     if (chatContainer) {
         chatContainer.addEventListener('click', (event) => {
@@ -2833,11 +2895,6 @@ function renderMessageElement(message, renderedSet) {
     function renderPendingCount() {
         const pendingEl = document.getElementById('pending-indicator');
         if (!pendingEl) return;
-        if (sendBlockedNotice) {
-            pendingEl.textContent = sendBlockedNotice;
-            pendingEl.classList.remove('hidden');
-            return;
-        }
         if (systemNoticeText) {
             pendingEl.textContent = systemNoticeText;
             pendingEl.classList.remove('hidden');
@@ -3024,6 +3081,8 @@ function renderMessageElement(message, renderedSet) {
         
         const wrapper = modelSelect.parentElement;
         if (!wrapper) return;
+        wrapper.style.width = '';
+        wrapper.style.minWidth = '';
 
         modelSelect.innerHTML = '';
         for (const model of models) {
@@ -3167,6 +3226,10 @@ function renderMessageElement(message, renderedSet) {
             panel.appendChild(group);
         }
 
+        const panelWidthPx = computeModelPanelWidthPx(wrapper, models);
+        panel.style.width = panelWidthPx > 0 ? `${panelWidthPx}px` : '';
+        panel.style.minWidth = panel.style.width;
+
         dropdown.appendChild(toggle);
         dropdown.appendChild(panel);
         wrapper.appendChild(dropdown);
@@ -3211,6 +3274,17 @@ function renderMessageElement(message, renderedSet) {
     }
 
     function renderModeSelect() {
+        modeSelect.innerHTML = '';
+        const modeItems = Array.isArray(modes) && modes.length ? modes : ['plan', 'build'];
+        for (const mode of modeItems) {
+            const option = document.createElement('option');
+            option.value = mode;
+            option.textContent = mode;
+            if (mode === selectedMode) {
+                option.selected = true;
+            }
+            modeSelect.appendChild(option);
+        }
         renderSimpleSelect(modeSelect, {
             getValue: () => selectedMode,
             onSelect: (value) => {
@@ -3275,7 +3349,7 @@ function renderMessageElement(message, renderedSet) {
         for (const optionEl of options) {
             const option = document.createElement('button');
             option.type = 'button';
-            option.className = 'model-option';
+            option.className = 'simple-option';
             option.textContent = optionEl.textContent || optionEl.value;
             option.dataset.value = optionEl.value;
             if (optionEl.value === getValue()) {
@@ -3296,7 +3370,7 @@ function renderMessageElement(message, renderedSet) {
         function updateLabel() {
             const active = options.find((item) => item.value === getValue());
             label.textContent = active ? (active.textContent || active.value) : '';
-            for (const option of panel.querySelectorAll('.model-option')) {
+            for (const option of panel.querySelectorAll('.simple-option')) {
                 option.classList.toggle('is-selected', option.dataset.value === getValue());
             }
         }
@@ -4048,7 +4122,10 @@ function applyPromptToSession(sessionId, payload) {
     input.addEventListener('keydown', (e) => {
         if (e.key === 'Tab' && document.activeElement === input) {
             e.preventDefault();
-            const nextMode = modeSelect.value === 'plan' ? 'build' : 'plan';
+            const modeItems = Array.isArray(modes) && modes.length ? modes : ['plan', 'build'];
+            const currentIndex = modeItems.indexOf(modeSelect.value);
+            const nextIndex = currentIndex >= 0 ? ((currentIndex + 1) % modeItems.length) : 0;
+            const nextMode = modeItems[nextIndex] || 'plan';
             modeSelect.value = nextMode;
             selectedMode = nextMode;
             applyModeStyles(selectedMode);
@@ -4088,7 +4165,8 @@ function applyPromptToSession(sessionId, payload) {
 
     newSessionBtn.addEventListener('click', () => {
         activeSessionId = '';
-        sessionTitle.textContent = 'OpenCode: Chat';
+        baseSessionTitle = 'OpenCode: Chat';
+        renderHeaderTitle();
         attachments = [];
         renderAttachments();
         pendingContextItems = [];
@@ -4193,9 +4271,16 @@ window.addEventListener('message', (event) => {
                 models = Array.isArray(message.models) ? message.models : [];
                 refreshFreeModelIds();
                 sessions = Array.isArray(message.sessions) ? message.sessions : [];
+                const receivedModes = Array.isArray(message.modes)
+                    ? message.modes.filter((item, index, arr) => typeof item === 'string' && item.length > 0 && arr.indexOf(item) === index)
+                    : [];
+                modes = receivedModes.length ? receivedModes : ['plan', 'build'];
                 selectedModel = message.selectedModel || (models[0] ? models[0].fullId : '');
                 selectedVariant = message.selectedVariant || '';
-                selectedMode = message.selectedMode || 'build';
+                const incomingMode = typeof message.selectedMode === 'string' ? message.selectedMode : '';
+                selectedMode = modes.includes(incomingMode)
+                    ? incomingMode
+                    : (modes.includes('plan') ? 'plan' : (modes[0] || 'plan'));
                 
                 // Check for empty models and show error
                 if (models.length === 0) {
@@ -4392,7 +4477,8 @@ window.addEventListener('message', (event) => {
 
                 try {
                     activeSessionId = sessionId;
-                    sessionTitle.textContent = message.title || 'OpenCode: Chat';
+                    baseSessionTitle = message.title || 'OpenCode: Chat';
+                    renderHeaderTitle();
                     updateUndoStatusDisplay(sessionId);
                     
                     const session = getSessionState(sessionId, true);
@@ -4834,7 +4920,9 @@ window.addEventListener('message', (event) => {
                     variantSelect.value = selectedVariant;
                 }
                 if (typeof draft.mode === 'string') {
-                    selectedMode = draft.mode;
+                    selectedMode = modes.includes(draft.mode)
+                        ? draft.mode
+                        : (modes.includes('plan') ? 'plan' : (modes[0] || 'plan'));
                     modeSelect.value = selectedMode;
                     applyModeStyles(selectedMode);
                     renderModeSelect();
@@ -5870,7 +5958,8 @@ window.addEventListener('message', (event) => {
                 activeSessionId = message.sessionId || '';
                 clearQuestionOverlay('new-session');
                 clearPermissionOverlay('new-session');
-                sessionTitle.textContent = 'OpenCode: Chat';
+                baseSessionTitle = 'OpenCode: Chat';
+                renderHeaderTitle();
                 isSwitchingSession = true;
                 updateUndoStatusDisplay(activeSessionId);
                 window.__oc?.renderFromState?.();

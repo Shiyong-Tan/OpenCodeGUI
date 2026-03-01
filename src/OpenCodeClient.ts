@@ -19,6 +19,13 @@ export type ModelInfo = {
     speedMultiplier?: string;
 };
 
+export type AgentInfo = {
+    id: string;
+    mode: string;
+    hidden: boolean;
+    description?: string;
+};
+
 export type ModelQuotaRow = {
     label: string;
     remainingPercent: number;
@@ -97,6 +104,7 @@ export type ChatEvent = {
     response?: PermissionReply;
     metadata?: any;
     actionLabel?: string;
+    isSyntheticUser?: boolean;
 };
 
 type PendingQuestionControl = {
@@ -272,6 +280,7 @@ export class OpenCodeClient {
     private pendingUserMsgIdBySession = new Map<string, string>();
     private pendingAssistantMsgIdBySession = new Map<string, string>();
     private currentTurnUserMsgIdBySession = new Map<string, string>();
+    private displayTurnUserMsgIdBySession = new Map<string, string>();
     private currentTurnAssistantMsgIdBySession = new Map<string, string>();
     private currentTurnStartedAtBySession = new Map<string, number>();
     private lastSseAtBySession = new Map<string, number>();
@@ -364,6 +373,7 @@ export class OpenCodeClient {
         this.pendingUserMsgIdBySession.clear();
         this.pendingAssistantMsgIdBySession.clear();
         this.currentTurnUserMsgIdBySession.clear();
+        this.displayTurnUserMsgIdBySession.clear();
         this.currentTurnAssistantMsgIdBySession.clear();
         this.currentTurnStartedAtBySession.clear();
         this.lastSseAtBySession.clear();
@@ -635,6 +645,7 @@ export class OpenCodeClient {
         if (!sessionId) return;
         this.canceledActiveTurnBySession.set(sessionId, false);
         this.currentTurnUserMsgIdBySession.delete(sessionId);
+        this.displayTurnUserMsgIdBySession.delete(sessionId);
         this.currentTurnAssistantMsgIdBySession.delete(sessionId);
         this.clearFinalizeSessionState(sessionId, 'turn-start');
         const now = Date.now();
@@ -697,6 +708,7 @@ export class OpenCodeClient {
         this.pendingUserMsgIdBySession.delete(sessionId);
         this.pendingAssistantMsgIdBySession.delete(sessionId);
         this.currentTurnUserMsgIdBySession.delete(sessionId);
+        this.displayTurnUserMsgIdBySession.delete(sessionId);
         this.currentTurnAssistantMsgIdBySession.delete(sessionId);
         this.currentTurnStartedAtBySession.delete(sessionId);
         this.lastSseAtBySession.delete(sessionId);
@@ -831,6 +843,18 @@ export class OpenCodeClient {
             this.currentTurnStartedAtBySession.set(sessionId, Date.now());
         }
         this.logUiDebug(`EXT: turn.anchor.user | sessionId=${sessionId} | userMsgId=${userMsgId} | reason=${reason}`);
+    }
+
+    private setDisplayTurnUserMsgId(sessionId: string, userMsgId: string, reason = 'unknown'): void {
+        if (!sessionId || !userMsgId || !userMsgId.startsWith('msg_')) return;
+        const existing = this.displayTurnUserMsgIdBySession.get(sessionId);
+        if (existing && existing === userMsgId) return;
+        this.displayTurnUserMsgIdBySession.set(sessionId, userMsgId);
+        this.logUiDebug(`EXT: turn.anchor.user.display | sessionId=${sessionId} | userMsgId=${userMsgId} | reason=${reason}`);
+    }
+
+    private hasDisplayTurnUserMsgId(sessionId: string): boolean {
+        return this.displayTurnUserMsgIdBySession.has(sessionId);
     }
 
     public setCurrentTurnAssistantMsgId(sessionId: string, assistantMsgId: string, reason = 'unknown'): void {
@@ -2455,6 +2479,15 @@ export class OpenCodeClient {
         return mode === 'compaction' || agent === 'compaction';
     }
 
+    private isSyntheticUserMessageInfo(info: any): boolean {
+        if (!info || typeof info !== 'object') return false;
+        if (this.isCompactionSummaryInfo(info)) return true;
+        const mode = typeof info.mode === 'string' ? info.mode.toLowerCase() : '';
+        const agent = typeof info.agent === 'string' ? info.agent.toLowerCase() : '';
+        if (mode === 'compaction' || agent === 'compaction') return true;
+        return false;
+    }
+
     private rememberIgnoredSummaryMessage(sessionId: string | undefined, messageId: string | undefined): void {
         if (!sessionId || !messageId) return;
         const existing = this.ignoredSummaryMessageIdsBySession.get(sessionId) || new Set<string>();
@@ -3868,6 +3901,7 @@ export class OpenCodeClient {
             const messageId = info?.id;
             const sessionId = info?.sessionID;
             const role = info?.role;
+            let shouldEmitUserMessageEvent = true;
             if (source === 'sse' && typeof sessionId === 'string' && typeof messageId === 'string' && messageId.startsWith('msg_')) {
                 this.lastObservedMsgIdBySession.set(sessionId, messageId);
                 this.markSessionProgress(sessionId, 'sse-message-updated', messageId);
@@ -3888,13 +3922,22 @@ export class OpenCodeClient {
                 }
             }
             if (sessionId && role === 'user' && typeof messageId === 'string' && source === 'sse') {
+                const isAutoResumeAnchor = this.awaitingAutoResumeUserAnchorBySession.has(sessionId);
+                const isSyntheticUser = isAutoResumeAnchor || this.isSyntheticUserMessageInfo(info);
                 if (this.turnStateBySession.has(sessionId)) {
-                    this.setCurrentTurnUserMsgId(sessionId, messageId, 'sse-user-message');
+                    this.setCurrentTurnUserMsgId(sessionId, messageId, isSyntheticUser ? 'sse-user-message-synthetic' : 'sse-user-message');
+                    if (!isSyntheticUser && !this.hasDisplayTurnUserMsgId(sessionId)) {
+                        this.setDisplayTurnUserMsgId(sessionId, messageId, 'sse-user-message');
+                    }
                 }
-                if (this.awaitingAutoResumeUserAnchorBySession.has(sessionId)) {
+                if (isAutoResumeAnchor) {
                     this.setCurrentTurnUserMsgId(sessionId, messageId, 'autoresume-user-anchor');
                     this.awaitingAutoResumeUserAnchorBySession.delete(sessionId);
                     this.markSessionProgress(sessionId, 'autoresume-user-anchor', messageId);
+                }
+                if (isSyntheticUser) {
+                    this.logUiDebug(`EXT: user.ack.updated.skip | sessionId=${sessionId} | msgId=${messageId} | reason=synthetic-user`);
+                    shouldEmitUserMessageEvent = false;
                 }
             }
             const cwd = info?.path?.cwd;
@@ -3908,7 +3951,9 @@ export class OpenCodeClient {
                 }
             }
             if (role === 'user' && messageId && source === 'sse') {
-                events.push({ type: 'message', text: messageId, sessionId });
+                if (shouldEmitUserMessageEvent) {
+                    events.push({ type: 'message', text: messageId, sessionId });
+                }
             }
             if (role === 'assistant' && messageId) {
                 if (sessionId && typeof info?.parentID === 'string') {
@@ -3986,9 +4031,23 @@ export class OpenCodeClient {
             if (part?.type === 'text') {
                 const msgId = typeof part?.messageID === 'string' ? part.messageID : '';
                 const knownLenBefore = msgId ? (this.assistantTextLengths.get(msgId) || 0) : 0;
-                if (source === 'sse' && sessionId && msgId && this.messageRoleById.get(msgId) === 'user' && this.isAutoResumePromptText(part?.text)) {
-                    this.setCurrentTurnUserMsgId(sessionId, msgId, 'autoresume-user');
-                    this.markSessionProgress(sessionId, 'autoresume-user-seen', msgId);
+                const roleForMsg = msgId ? this.messageRoleById.get(msgId) : undefined;
+                if (source === 'sse' && sessionId && msgId && roleForMsg === 'user') {
+                    const partText = typeof part?.text === 'string' ? part.text : '';
+                    if (this.isAutoResumePromptText(partText)) {
+                        this.setCurrentTurnUserMsgId(sessionId, msgId, 'autoresume-user');
+                        this.markSessionProgress(sessionId, 'autoresume-user-seen', msgId);
+                        this.logUiDebug(`EXT: user.ack.part.skip | sessionId=${sessionId} | msgId=${msgId} | reason=autoresume-hidden`);
+                    } else {
+                        this.setCurrentTurnUserMsgId(sessionId, msgId, 'user-part-ack');
+                        if (!this.hasDisplayTurnUserMsgId(sessionId)) {
+                            this.setDisplayTurnUserMsgId(sessionId, msgId, 'user-part-ack');
+                        }
+                        this.markSessionProgress(sessionId, 'user-part-ack', msgId);
+                        events.push({ type: 'message', text: msgId, sessionId });
+                        this.logUiDebug(`EXT: user.ack.part.accept | sessionId=${sessionId} | msgId=${msgId} | reason=role-user`);
+                    }
+                    return events;
                 }
                 if (sessionId && msgId) {
                     const assistantId = this.pendingAssistantMsgIdBySession.get(sessionId);
@@ -3997,8 +4056,9 @@ export class OpenCodeClient {
                     }
                 }
                 if (msgId) {
-                    const role = this.messageRoleById.get(msgId);
+                    const role = roleForMsg;
                     if (role && role !== 'assistant') {
+                        this.logUiDebug(`EXT: user.ack.part.skip | sessionId=${sessionId || 'null'} | msgId=${msgId} | reason=non-assistant-role:${role}`);
                         return events;
                     }
                 }
@@ -5186,6 +5246,22 @@ export class OpenCodeClient {
         return models;
     }
 
+    public async listAgents(): Promise<AgentInfo[]> {
+        await this.ensureServer();
+        const payload = await this.requestJson<any[]>('GET', '/agent');
+        const list = Array.isArray(payload) ? payload : [];
+        const agents: AgentInfo[] = [];
+        for (const item of list) {
+            const id = typeof item?.name === 'string' ? item.name : '';
+            if (!id) continue;
+            const mode = typeof item?.mode === 'string' ? item.mode : '';
+            const hidden = item?.hidden === true;
+            const description = typeof item?.description === 'string' ? item.description : undefined;
+            agents.push({ id, mode, hidden, description });
+        }
+        return agents;
+    }
+
     public async listSessions(): Promise<SessionInfo[]> {
         await this.ensureServer();
         const sessions = await this.requestJson<any[]>('GET', '/session');
@@ -5333,6 +5409,7 @@ export class OpenCodeClient {
             ['Claude Opus 4.5', '3x'],
             ['Claude Opus 4.6', '3x'],
             ['Claude Sonnet 4', '1x'],
+            ['Claude Sonnet 4.6', '1x'],
             ['Claude Sonnet 4.5', '1x'],
             ['Gemini 2.5 Pro', '1x'],
             ['Gemini 3 Flash', '0.33x'],

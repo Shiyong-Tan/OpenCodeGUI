@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.1.9
+
+- Fixed turn-state race when sends are blocked in-flight: `registerPendingUserLocal` no longer starts a new turn and no longer clears finalize waiters/timers for the active turn.
+- Improved user message ID binding by prioritizing SSE `message.part.updated` user text acknowledgements (`part.messageID`) and binding `local-* -> msg_*` earlier and more reliably.
+- Added synthetic user handling for auto-resume/compaction flows: non-manual user messages are marked hidden in session hydration and excluded from visible timeline rendering.
+- Added GitHub Copilot speed label mapping for `Claude Sonnet 4.6` as `1x`.
+
+## 1.1.8
+
+- Added dynamic mode loading from `GET /agent` and now only shows agents where `mode=primary` and `hidden!=true`, with safe fallback to `plan/build` when agent discovery is unavailable.
+- Updated mode initialization and persistence: invalid stored modes are auto-corrected to an available mode, and default selection now prefers `plan`.
+- Improved header blocked-send UX: session title temporarily switches to `Waiting for previous response...` with warning color, then restores automatically when the turn is sendable again.
+- Fixed a pending-indicator regression where blocked-send text (`Please wait while the previous response finishes.`) could still appear next to the header after the title-based waiting UX update.
+- Fixed mode/variant dropdown item indentation by separating simple dropdown option styling from model-option styling.
+- Refined model dropdown sizing: keep selected-model control width unchanged, while sizing only the model popup panel from measured content width (`name + two spaces + speed`, speed-aware) with a `320px` max cap.
+
 ## 1.1.7
 
 - Security hotfix: removed hardcoded Google OAuth `client_id`/`client_secret` from source and switched Google quota token refresh to runtime-loaded credentials.
