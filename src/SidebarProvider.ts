@@ -2348,11 +2348,13 @@ ${attachmentLines.join('\n')}`
         const storedVariant = this._context.globalState.get<string>('opencode.variant');
         const storedMode = this._context.globalState.get<string>('opencode.mode');
 
-        const primaryModes = agents
-            .filter((agent) => agent.mode === 'primary' && !agent.hidden)
+        const allModes = agents
+            .filter((agent) => agent.mode === 'all' && !agent.hidden)
             .map((agent) => agent.id)
             .filter((value, index, arr) => arr.indexOf(value) === index);
-        this.availableModes = primaryModes.length ? primaryModes : ['plan', 'build'];
+        const mergedModes = ['plan', 'build', ...allModes]
+            .filter((value, index, arr) => arr.indexOf(value) === index);
+        this.availableModes = mergedModes.length ? mergedModes : ['plan', 'build'];
         const resolvedMode = (storedMode && this.availableModes.includes(storedMode))
             ? storedMode
             : (this.availableModes.includes('plan') ? 'plan' : this.availableModes[0]);
