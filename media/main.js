@@ -646,7 +646,7 @@ function upsertMessage(session, payload) {
         return;
     }
     const existing = session.messagesById.get(payload.id);
-    const existing = session.messagesById.get(payload.id);
+
     if (existing) {
         const next = {
             ...existing,
@@ -6320,7 +6320,7 @@ function applyQuestionOptionWidth(actionsEl, options) {
     const labels = Array.isArray(options) ? options.map((opt) => (typeof opt?.label === 'string' ? opt.label : '')) : [];
     const longest = labels.reduce((max, label) => Math.max(max, label.length), 0);
     const widthCh = Math.max(12, longest + 4);
-    actionsEl.style.setProperty('--question-option-width', `${widthCh}ch`);
+    // actionsEl.style.setProperty('--question-option-width', `${widthCh}ch`);
 }
 
 function renderQuestionOverlayModal() {
@@ -6414,6 +6414,40 @@ function renderQuestionOverlayModal() {
     }
 
     card.appendChild(actions);
+    const freeTextRow = document.createElement('div');
+    freeTextRow.className = 'question-free-text-row';
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'question-free-text-input';
+    input.placeholder = 'Type your answer...';
+    freeTextRow.appendChild(input);
+
+    const submitBtn = document.createElement('button');
+    submitBtn.type = 'button';
+    submitBtn.className = 'question-free-text-submit';
+    submitBtn.textContent = 'Submit';
+    freeTextRow.appendChild(submitBtn);
+
+    const handleFreeTextSubmit = () => {
+        const val = input.value.trim();
+        if (!val) return;
+
+        const allInteractive = card.querySelectorAll('button, input');
+        for (const el of allInteractive) el.disabled = true;
+
+        commitCurrentQuestionAnswers([val]);
+    };
+
+    submitBtn.addEventListener('click', handleFreeTextSubmit);
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            handleFreeTextSubmit();
+        }
+    });
+
+    card.appendChild(freeTextRow);
+
     wrapper.appendChild(card);
     document.body.appendChild(wrapper);
     questionOverlayEl = wrapper;
