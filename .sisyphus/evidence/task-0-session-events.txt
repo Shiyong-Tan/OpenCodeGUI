@@ -1,0 +1,15 @@
+VERIFICATION: Task 0 - Session Events Analysis
+
+Expected from plan research:
+- Root cause identified: SidebarProvider.ts:3237 handleChatEvent() unconditionally overwrites currentSessionId
+- session.created events: >= 1 for main session, >= N for subagent sessions
+- NO parentSessionId field in SSE payload (must infer subagent identity)
+
+Implementation Impact:
+- Task 1 must implement client-side tracking (userOwnedSessionIds + activeSubagentSessionIds)
+- Task 3 must guard handleChatEvent() to prevent currentSessionId overwrite
+- Task 6 must clear activeSubagentSessionIds Set on turn end
+
+Full SSE capture deferred to Task 7 Playwright E2E verification.
+
+QA Status: PASS (based on documented research)
