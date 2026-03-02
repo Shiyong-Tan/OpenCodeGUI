@@ -4840,6 +4840,18 @@ window.addEventListener('message', (event) => {
                 setSystemNotice('');
                 break;
             }
+            case 'subagentStatus': {
+                const subagentIndicator = document.getElementById('subagent-indicator');
+                if (subagentIndicator) {
+                    if (message.active && message.count) {
+                        subagentIndicator.textContent = `⚡ ${message.count} subagent${message.count > 1 ? 's' : ''} working...`;
+                        subagentIndicator.classList.remove('hidden');
+                    } else {
+                        subagentIndicator.classList.add('hidden');
+                    }
+                }
+                break;
+            }
             case 'stallCard': {
                 const sessionId = getEventSessionId(message, 'stallCard');
                 if (sessionId && sessionId !== activeSessionId) break;

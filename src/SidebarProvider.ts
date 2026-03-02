@@ -4172,6 +4172,7 @@ ${attachmentLines.join('\n')}`
                     <span class="session-title" id="session-title">New Session</span>
                     <span class="server-status-dot status-connected" id="server-status-dot" title="Connected"></span>
                     <span class="pending-indicator hidden" id="pending-indicator"></span>
+                    <span class="subagent-indicator hidden" id="subagent-indicator"></span>
                     <span class="undo-status hidden" id="undo-status">Undo not available</span>
                     <div class="session-controls">
                         <button class="icon-btn" id="new-session-btn" title="New Session">
