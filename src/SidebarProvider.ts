@@ -101,6 +101,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private _webviewInstanceId?: string;
     private client: OpenCodeClient;
     private currentSessionId?: string;
+    private userOwnedSessionIds = new Set<string>();
+    private activeSubagentSessionIds = new Set<string>();
     private selectedModel?: string;
     private selectedVariant?: string;
     private selectedMode?: string;
@@ -154,6 +156,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private getWorkspaceKeyForRoot(root: string): string {
         const normalized = this.normalizeWorkspaceRoot(root);
         return crypto.createHash('sha1').update(normalized).digest('hex');
+    }
+
+    private isUserOwnedSession(id: string): boolean {
+        return this.userOwnedSessionIds.has(id) || id === this.currentSessionId;
+    }
+
+    private trackUserOwnedSession(id: string | undefined): void {
+        if (id) {
+            this.userOwnedSessionIds.add(id);
+        }
+    }
+    private clearSubagentSessions(): void {
+        this.activeSubagentSessionIds.clear();
     }
 
     private getWorkspaceKey(): string {
@@ -866,6 +881,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         try {
                             const sessionInfo = await this.client.createSession();
                             this.currentSessionId = sessionInfo.id;
+                            this.trackUserOwnedSession(this.currentSessionId);
                             this.client.setSessionId(this.currentSessionId);
                             const workspaceFolder = this.client.getWorkspaceRoot() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
                             if (workspaceFolder) {
@@ -1044,6 +1060,8 @@ ${attachmentLines.join('\n')}`
                         if (this.currentSessionId) {
                             this.client.finishTurn(this.currentSessionId);
                         }
+                        this.clearSubagentSessions();
+                        liveWebview.postMessage({ type: 'subagentStatus', active: false });
                         await this.postModelQuota(liveWebview, 'chat-done');
                         if (this.pendingClientMessageId) {
                             await this.handleAbortedMessage(this.pendingClientMessageId, liveWebview);
@@ -1080,6 +1098,8 @@ ${attachmentLines.join('\n')}`
                         if (this.currentSessionId) {
                             this.client.finishTurn(this.currentSessionId);
                         }
+                        this.clearSubagentSessions();
+                        activeWebview.postMessage({ type: 'subagentStatus', active: false });
                         if (this.pendingClientMessageId) {
                             await this.handleAbortedMessage(this.pendingClientMessageId, activeWebview);
                             this.pendingClientMessageId = undefined;
@@ -1363,6 +1383,7 @@ ${attachmentLines.join('\n')}`
                         this.resetUiState();
                         let sessionDataSent = false;
                         this.currentSessionId = targetSessionId;
+                        this.trackUserOwnedSession(this.currentSessionId);
                         this.client.setSessionId(this.currentSessionId);
                         const isCurrentSelection = () => (
                             this.currentSessionId === targetSessionId &&
@@ -1909,6 +1930,8 @@ ${attachmentLines.join('\n')}`
                     if (this.currentSessionId) {
                         this.client.finishTurn(this.currentSessionId);
                     }
+                    this.clearSubagentSessions();
+                    activeWebview.postMessage({ type: 'subagentStatus', active: false });
                     break;
                 }
                 case "restoreAll": {
@@ -2524,6 +2547,7 @@ ${attachmentLines.join('\n')}`
                                     }
                                     this.uiDebugChannel.appendLine(`[EXT][SNAP_LOAD_HIT] sessionId=${recentSessionId} file=${this.getSnapshotFile(recentSessionId)} bytes=${snap.bytes}`);
                                     this.currentSessionId = recentSessionId;
+                                    this.trackUserOwnedSession(this.currentSessionId);
                                     this.client.setSessionId(this.currentSessionId);
                                     snapshotLoaded = true;
                                 } else {
@@ -2555,6 +2579,7 @@ ${attachmentLines.join('\n')}`
                             const formattedRaw = this.formatSession(exportData);
                             const formatted = await this.injectChangeLists(recentSessionId, formattedRaw);
                             this.currentSessionId = recentSessionId;
+                            this.trackUserOwnedSession(this.currentSessionId);
                             this.client.setSessionId(this.currentSessionId);
                             const liveWebview = this._view?.webview || webview;
                             await this.ensureSessionUndoReady(recentSessionId, liveWebview);
@@ -2647,6 +2672,7 @@ ${attachmentLines.join('\n')}`
                     this.uiDebugChannel.appendLine('[EXT][AUTO_SELECT_SKIP] reason=no-workspace-session-match');
                 } else {
                     this.currentSessionId = mostRecent.id;
+                    this.trackUserOwnedSession(this.currentSessionId);
                     this.client.setSessionId(this.currentSessionId);
                     this.uiDebugChannel.appendLine(`[EXT][AUTO_SELECT] sessionId=${this.currentSessionId} reason=no-current-session`);
                 
@@ -2697,6 +2723,7 @@ ${attachmentLines.join('\n')}`
                 try {
                     const newSession = await this.client.createSession();
                     this.currentSessionId = newSession.id;
+                    this.trackUserOwnedSession(this.currentSessionId);
                     this.client.setSessionId(this.currentSessionId);
                     this.uiDebugChannel.appendLine(`[EXT][SESSION_CREATED] sessionId=${this.currentSessionId}`);
                     
@@ -3233,8 +3260,16 @@ ${attachmentLines.join('\n')}`
 
     private handleChatEvent(event: ChatEvent, webview: vscode.Webview): void {
         if (event.type === 'session' && event.sessionId) {
+            if (!this.isUserOwnedSession(event.sessionId) && this.sendInFlightBySession.has(this.currentSessionId!)) {
+                this.activeSubagentSessionIds.add(event.sessionId);
+                const liveWebview = this._view?.webview || webview;
+                liveWebview.postMessage({ type: 'subagentStatus', active: true, count: this.activeSubagentSessionIds.size });
+                return;
+            }
+
             const prevSessionId = this.currentSessionId;
-            this.currentSessionId = event.sessionId;
+            const nextSessionId = event.sessionId;
+            this.currentSessionId = nextSessionId;
             this.client.setSessionId(this.currentSessionId);
             const liveWebview = this._view?.webview || webview;
             if (prevSessionId && prevSessionId !== event.sessionId) {
@@ -3262,6 +3297,20 @@ ${attachmentLines.join('\n')}`
                         }
                     });
                 }
+            }
+            return;
+        }
+
+        if (event.sessionId && this.activeSubagentSessionIds.has(event.sessionId)) {
+            if (event.type === 'files' && event.files && event.files.length && this.currentSessionId) {
+                this.client.queueSubagentChanges(this.currentSessionId, event.files);
+                const liveWebview = this._view?.webview || webview;
+                event.files.forEach((file, index) => {
+                    const fileChange = file as FileSnapshot & { changes?: unknown };
+                    if (fileChange.changes) {
+                        this.openDiffForFileChange(fileChange, liveWebview, index);
+                    }
+                });
             }
             return;
         }
@@ -3448,33 +3497,8 @@ ${attachmentLines.join('\n')}`
             const picked = this.pickActiveFile(event.files);
             if (!picked) return;
             const { file: active, index } = picked;
-            // Only auto-open diff for file changes produced by tool_use write/edit/apply_patch.
-            // Ignore session-wide diffs (e.g. session.diff) which can be emitted during read-only work.
-            const isToolUseChange =
-                active.type === 'update' ||
-                active.type === 'create' ||
-                active.type === 'delete' ||
-                typeof active.existsBefore === 'boolean' ||
-                typeof active.existsAfter === 'boolean';
-            if (!isToolUseChange) return;
-
-            if (typeof active.before !== 'string' || typeof active.after !== 'string') return;
-            const beforeText = this.normalizeText(active.before);
-            const afterText = this.normalizeText(active.after);
-            const beforeHash = this.hashText(beforeText);
-            const afterHash = this.hashText(afterText);
-            const cache = this.diffHashes.get(active.filePath);
-            const shouldUpdate = !cache || cache.before !== beforeHash || cache.after !== afterHash;
-            if (!shouldUpdate) {
-                return;
-            }
-            this.diffHashes.set(active.filePath, { before: beforeHash, after: afterHash });
-            this.currentDiffFilePath = active.filePath;
-            this.diffProvider.markNextChangeAutoFollow();
-            this.diffProvider.updateFromSnapshot(active.filePath, beforeText, afterText, active.diff);
-            const diffLen = active.diff ? active.diff.length : 0;
-            const basename = pathModule.basename(active.filePath);
-            OpenCodeClient.outputChannel.appendLine(`[DIFF] file=${basename} idx=${index} before=${beforeText.length} after=${afterText.length} diff=${diffLen}`);
+            const liveWebview = this._view?.webview || webview;
+            this.openDiffForFileChange(active, liveWebview, index);
             return;
         }
 
@@ -3554,8 +3578,9 @@ ${attachmentLines.join('\n')}`
     private async refreshSessions(webview: vscode.Webview, requestId: string): Promise<void> {
         try {
             const sessions = await this.client.listSessions();
+            const filteredSessions = sessions.filter(s => !this.activeSubagentSessionIds.has(s.id));
             const topSession = sessions?.[0];
-            webview.postMessage({ type: 'sessionsList', requestId, sessions });
+            webview.postMessage({ type: 'sessionsList', requestId, sessions: filteredSessions });
         } catch (error) {
             this.postAddResponse(webview, `Failed to refresh sessions: ${error}`);
         }
@@ -3779,6 +3804,37 @@ ${attachmentLines.join('\n')}`
             }
         }
         return Array.from(paths);
+    }
+
+    private openDiffForFileChange(file: FileSnapshot, webview: vscode.Webview, index: number): void {
+        void webview;
+        // Only auto-open diff for file changes produced by tool_use write/edit/apply_patch.
+        // Ignore session-wide diffs (e.g. session.diff) which can be emitted during read-only work.
+        const isToolUseChange =
+            file.type === 'update' ||
+            file.type === 'create' ||
+            file.type === 'delete' ||
+            typeof file.existsBefore === 'boolean' ||
+            typeof file.existsAfter === 'boolean';
+        if (!isToolUseChange) return;
+
+        if (typeof file.before !== 'string' || typeof file.after !== 'string') return;
+        const beforeText = this.normalizeText(file.before);
+        const afterText = this.normalizeText(file.after);
+        const beforeHash = this.hashText(beforeText);
+        const afterHash = this.hashText(afterText);
+        const cache = this.diffHashes.get(file.filePath);
+        const shouldUpdate = !cache || cache.before !== beforeHash || cache.after !== afterHash;
+        if (!shouldUpdate) {
+            return;
+        }
+        this.diffHashes.set(file.filePath, { before: beforeHash, after: afterHash });
+        this.currentDiffFilePath = file.filePath;
+        this.diffProvider.markNextChangeAutoFollow();
+        this.diffProvider.updateFromSnapshot(file.filePath, beforeText, afterText, file.diff);
+        const diffLen = file.diff ? file.diff.length : 0;
+        const basename = pathModule.basename(file.filePath);
+        OpenCodeClient.outputChannel.appendLine(`[DIFF] file=${basename} idx=${index} before=${beforeText.length} after=${afterText.length} diff=${diffLen}`);
     }
 
     private pickActiveFile(files: FileSnapshot[]): { file: FileSnapshot; index: number } | undefined {

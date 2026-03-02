@@ -2102,6 +2102,20 @@ export class OpenCodeClient {
         // this.logUiDebug(`[DBG_TURN_QUEUE] session=${sessionId} turnKey=${turnKey} added=${changeSpecs.length} total=${next.changes.length}`);
     }
 
+    public queueSubagentChanges(mainSessionId: string, files: any[]): void {
+        if (!mainSessionId || !files?.length) return;
+        const pending = this.pendingTurnChangesBySession.get(mainSessionId);
+        if (!pending) {
+            this.logUiDebug(`subagent.queue.skip | sessionId=${mainSessionId} | reason=no-pending-turn`);
+            return;
+        }
+        const changeSpecs = this.buildChangeSpecs(files as FileSnapshot[]);
+        if (!changeSpecs.length) return;
+        this.markTurnHasWrites(mainSessionId, 'subagent-file-change');
+        pending.changes.push(...changeSpecs);
+        this.pendingTurnChangesBySession.set(mainSessionId, pending);
+    }
+
     public async commitPendingTurnChanges(sessionId: string): Promise<void> {
         if (!sessionId) return;
         if (!this.gitUndoAvailable || !this.gitUndo) return;
