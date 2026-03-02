@@ -2369,6 +2369,8 @@ ${attachmentLines.join('\n')}`
         } catch (error) {
             this.postAddResponse(webview, `Failed to load sessions: ${error}`);
         }
+        // Filter: exclude subagent sessions from UI display
+        sessions = sessions.filter(s => this.isUserOwnedSession(s.id));
         const storedModel = this._context.globalState.get<string>('opencode.model');
         const storedVariant = this._context.globalState.get<string>('opencode.variant');
         const storedMode = this._context.globalState.get<string>('opencode.mode');
@@ -3588,7 +3590,7 @@ ${attachmentLines.join('\n')}`
     private async refreshSessions(webview: vscode.Webview, requestId: string): Promise<void> {
         try {
             const sessions = await this.client.listSessions();
-            const filteredSessions = sessions.filter(s => !this.activeSubagentSessionIds.has(s.id));
+            const filteredSessions = sessions.filter(s => this.isUserOwnedSession(s.id));
             const topSession = sessions?.[0];
             webview.postMessage({ type: 'sessionsList', requestId, sessions: filteredSessions });
         } catch (error) {

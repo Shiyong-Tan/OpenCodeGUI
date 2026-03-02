@@ -1,0 +1,7 @@
+        sessions = sessions.filter(s => this.isUserOwnedSession(s.id));
+        const storedModel = this._context.globalState.get<string>('opencode.model');
+        const storedVariant = this._context.globalState.get<string>('opencode.variant');
+--
+            const filteredSessions = sessions.filter(s => this.isUserOwnedSession(s.id));
+            const topSession = sessions?.[0];
+            webview.postMessage({ type: 'sessionsList', requestId, sessions: filteredSessions });

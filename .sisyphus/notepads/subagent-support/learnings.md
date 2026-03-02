@@ -228,3 +228,64 @@ public queueSubagentChanges(mainSessionId: string, files: any[]): void
 - Did NOT modify `GitUndoEngine.ts` (READ ONLY per instructions)
 - Did NOT expose private internals beyond `queueSubagentChanges` method (plan line 507)
 
+
+## Task 5: Filter subagent sessions from session list UI
+
+**Date**: 2026-03-02
+
+### Implementation Summary
+Modified `src/SidebarProvider.ts` to filter out subagent sessions from session list displayed to users.
+
+### Changes Made
+
+#### 1. sendInit() method (line 2372-2373)
+Added filter after loading sessions from `client.listSessions()`:
+```typescript
+// Filter: exclude subagent sessions from UI display
+sessions = sessions.filter(s => this.isUserOwnedSession(s.id));
+```
+
+This ensures the initial sessions list sent to webview during init excludes subagent sessions.
+
+#### 2. refreshSessions() method (line 3593)
+Updated existing filter for consistency - changed from:
+```typescript
+const filteredSessions = sessions.filter(s => !this.activeSubagentSessionIds.has(s.id));
+```
+To:
+```typescript
+const filteredSessions = sessions.filter(s => this.isUserOwnedSession(s.id));
+```
+
+This ensures dynamic session refresh uses same filtering logic as init.
+
+### Filter Logic
+Both locations use `isUserOwnedSession(id)` which checks:
+- `this.userOwnedSessionIds.has(id)` - Session in tracked user-owned set
+- `|| id === this.currentSessionId` - OR is the current active session
+
+This dual-check prevents:
+- Subagent sessions from appearing in UI dropdown
+- Loss of current session if it becomes active during operations
+
+### Session Flow
+1. **Init Phase**: `sendInit()` sends filtered sessions list to webview (line 2480)
+2. **Refresh Phase**: `refreshSessions()` updates session list (line 3595)
+3. **Both phases** now use `isUserOwnedSession()` for consistent filtering
+
+### QA Results
+- **Filter count:** 2 occurrences (sendInit + refreshSessions) ✅
+- **Filter pattern:** Both use `isUserOwnedSession(s.id)` ✅
+- **TypeScript compilation:** exit 0 ✅
+- **LSP diagnostics:** No errors in SidebarProvider.ts ✅
+
+### Integration with Previous Tasks
+- Depends on Task 1: `isUserOwnedSession()` method ✅
+- Depends on Task 3: `activeSubagentSessionIds` Set tracking ✅
+- Filter applies BEFORE sending to webview (not during retrieval)
+- No storage/persistence changes (display-only filter)
+
+### Evidence Files
+- `.sisyphus/evidence/task-5-filter.txt` - grep output showing both filters
+- `.sisyphus/evidence/task-5-compile.txt` - TypeScript compilation output
+
