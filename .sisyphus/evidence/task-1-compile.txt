@@ -1,0 +1,4 @@
+
+> opencode-gui@1.1.10 compile
+> tsc -p ./
+

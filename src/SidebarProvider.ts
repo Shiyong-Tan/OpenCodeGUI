@@ -103,6 +103,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private currentSessionId?: string;
     private userOwnedSessionIds = new Set<string>();
     private activeSubagentSessionIds = new Set<string>();
+
+    private isUserOwnedSession(id: string): boolean {
+        return this.userOwnedSessionIds.has(id) || id === this.currentSessionId;
+    }
+
+    private trackUserOwnedSession(id: string | undefined): void {
+        if (id) {
+            this.userOwnedSessionIds.add(id);
+        }
+    }
+
+    private clearSubagentSessions(): void {
+        this.activeSubagentSessionIds.clear();
+    }
     private selectedModel?: string;
     private selectedVariant?: string;
     private selectedMode?: string;
@@ -158,18 +172,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return crypto.createHash('sha1').update(normalized).digest('hex');
     }
 
-    private isUserOwnedSession(id: string): boolean {
-        return this.userOwnedSessionIds.has(id) || id === this.currentSessionId;
-    }
-
-    private trackUserOwnedSession(id: string | undefined): void {
-        if (id) {
-            this.userOwnedSessionIds.add(id);
-        }
-    }
-    private clearSubagentSessions(): void {
-        this.activeSubagentSessionIds.clear();
-    }
 
     private getWorkspaceKey(): string {
         return this.currentWorkspaceKey || 'no-workspace';
