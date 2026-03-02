@@ -4423,6 +4423,21 @@ window.addEventListener('message', (event) => {
                 setServerStatus(status, message.reason || null);
                 break;
             }
+            case 'subagentStatus': {
+                const active = Boolean(message.active);
+                const count = typeof message.count === 'number' ? Math.max(0, message.count) : 0;
+                const subagentEl = document.getElementById('subagent-indicator');
+                if (!subagentEl) break;
+                if (active && count > 0) {
+                    const plural = count > 1 ? 's' : '';
+                    subagentEl.textContent = `⚡ ${count} subagent${plural} working...`;
+                    subagentEl.classList.remove('hidden');
+                } else {
+                    subagentEl.textContent = '';
+                    subagentEl.classList.add('hidden');
+                }
+                break;
+            }
             case 'resetUiState': {
                 const incomingSessionId = message.sessionId || message.sessionID || '';
                 const hydrated = Boolean(activeSessionId && incomingSessionId && activeSessionId === incomingSessionId && hydratedSessions.has(activeSessionId));
