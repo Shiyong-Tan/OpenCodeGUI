@@ -4369,10 +4369,23 @@ window.addEventListener('message', (event) => {
                 models = Array.isArray(message.models) ? message.models : [];
                 refreshFreeModelIds();
                 sessions = Array.isArray(message.sessions) ? message.sessions : [];
-                const receivedModes = Array.isArray(message.modes)
+                // Deduplicate modes: prefer decorated variants (e.g., "Sisyphus (Ultraworker)") over raw ids
+                const rawModes = Array.isArray(message.modes)
                     ? message.modes.filter((item, index, arr) => typeof item === 'string' && item.length > 0 && arr.indexOf(item) === index)
                     : [];
+                const decoratedBases = new Set(
+                    rawModes.filter(m => /\(.+\)/.test(m))
+                        .map(m => m.split('(')[0].trim().toLowerCase())
+                );
+                const receivedModes = rawModes.filter((m) => {
+                    if (m === 'plan' || m === 'build') return true;
+                    const isDecorated = /\(.+\)/.test(m);
+                    if (isDecorated) return true;
+                    const base = m.split('(')[0].trim().toLowerCase();
+                    return !decoratedBases.has(base);
+                });
                 modes = receivedModes.length ? receivedModes : ['plan', 'build'];
+
                 selectedModel = message.selectedModel || (models[0] ? models[0].fullId : '');
                 selectedVariant = message.selectedVariant || '';
                 const incomingMode = typeof message.selectedMode === 'string' ? message.selectedMode : '';
