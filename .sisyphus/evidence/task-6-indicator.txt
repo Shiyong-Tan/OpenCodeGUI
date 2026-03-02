@@ -1,0 +1,11 @@
+                        liveWebview.postMessage({ type: 'subagentStatus', active: false });
+                        await this.postModelQuota(liveWebview, 'chat-done');
+                        if (this.pendingClientMessageId) {
+--
+                        activeWebview.postMessage({ type: 'subagentStatus', active: false });
+                        if (this.pendingClientMessageId) {
+                            await this.handleAbortedMessage(this.pendingClientMessageId, activeWebview);
+--
+                    activeWebview.postMessage({ type: 'subagentStatus', active: false });
+                    break;
+                }

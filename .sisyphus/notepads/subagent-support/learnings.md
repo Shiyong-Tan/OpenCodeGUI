@@ -289,3 +289,95 @@ This dual-check prevents:
 - `.sisyphus/evidence/task-5-filter.txt` - grep output showing both filters
 - `.sisyphus/evidence/task-5-compile.txt` - TypeScript compilation output
 
+
+## Task 6: Cleanup activeSubagentSessionIds and hide indicator on turn end
+
+**Date**: 2026-03-02
+
+### Implementation Summary
+Turn-end cleanup logic was already present and complete across three turn completion code paths in `src/SidebarProvider.ts`.
+
+### Cleanup Call Sites
+
+**All three turn completion paths implement cleanup:**
+
+1. **Line 1064-1065** (Main success path after sendMessage chat completion)
+   ```typescript
+   this.clearSubagentSessions();
+   liveWebview.postMessage({ type: 'subagentStatus', active: false });
+   ```
+
+2. **Line 1102-1103** (Error path during sendMessage execution)
+   ```typescript
+   this.clearSubagentSessions();
+   activeWebview.postMessage({ type: 'subagentStatus', active: false });
+   ```
+
+3. **Line 1934-1935** (Build mode undo/restore completion path)
+   ```typescript
+   this.clearSubagentSessions();
+   activeWebview.postMessage({ type: 'subagentStatus', active: false });
+   ```
+
+### Integration Flow
+
+**Turn Completion Sequence:**
+1. `finishTurn(sessionId)` called to close server-side turn
+2. `clearSubagentSessions()` clears `activeSubagentSessionIds` Set
+3. `postMessage({ type: 'subagentStatus', active: false })` sent to webview
+4. Handler in main.js adds .hidden class to subagent-indicator element
+5. Subagent UI state cleared for next turn
+
+### Cleanup Logic
+
+**clearSubagentSessions() method (line ~107):**
+```typescript
+private clearSubagentSessions(): void {
+    this.activeSubagentSessionIds.clear();
+}
+```
+
+- Only clears `activeSubagentSessionIds` Set
+- Does NOT touch `userOwnedSessionIds` Set (per plan spec)
+- No parameters required (fully isolated cleanup)
+
+### Handler Behavior (main.js)
+
+The subagentStatus message handler:
+- Treats missing/undefined `count` as 0
+- Shows indicator only when `active: true AND count > 0`
+- Hides indicator when `active: false` OR `count <= 0`
+- Handler at lines 4426-4440 (first pattern) and later duplication
+
+### QA Results
+- **Cleanup call count:** 4 occurrences (1 declaration + 3 call sites) ✅
+  - Expected: >= 2 (declaration + call site)
+- **Indicator hide message:** 3 occurrences across all turn completion paths ✅
+  - Expected: >= 1
+- **TypeScript compilation:** exit 0, no errors ✅
+- **LSP diagnostics:** No errors in SidebarProvider.ts ✅
+
+### Evidence Files
+- `.sisyphus/evidence/task-6-cleanup.txt` - 4 clearSubagentSessions occurrences
+- `.sisyphus/evidence/task-6-indicator.txt` - 3 subagentStatus active:false messages
+- `.sisyphus/evidence/task-6-compile.txt` - TypeScript compilation output (clean)
+
+### Key Observations
+1. **Pre-existing implementation:** Cleanup was already correctly implemented before Task 6 started (likely from earlier development)
+2. **Consistency:** All three turn completion paths follow identical cleanup pattern
+3. **Robustness:** Covers success path, error path, and mode-specific (build) path
+4. **Handler resilience:** JavaScript handler gracefully handles missing count parameter
+
+### Task Completion Status
+- ✅ Turn-end cleanup logic present at all completion points
+- ✅ activeSubagentSessionIds cleared on turn end
+- ✅ Subagent indicator hidden via postMessage on turn end
+- ✅ No integration issues detected
+- ✅ Ready for Task 7 (E2E verification)
+
+### Integration Dependencies Met
+- ✅ Task 1: Helper methods in place (clearSubagentSessions, isUserOwnedSession)
+- ✅ Task 3: activeSubagentSessionIds tracked during subagent session detection
+- ✅ Task 5: Sessions filtered before UI display
+- ✅ Task 6: Cleanup completes turn lifecycle
+
