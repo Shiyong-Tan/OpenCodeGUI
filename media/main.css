@@ -1376,7 +1376,7 @@ select#variant-select {
 }
 
 select#mode-select {
-    max-width: 70px;
+    max-width: 210px;
     min-width: 48px;
 }
 

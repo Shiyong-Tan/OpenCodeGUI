@@ -136,6 +136,89 @@ function computeModelPanelWidthPx(wrapper, items) {
     return widthPx;
 }
 
+function computeModePanelWidthPx(wrapper, modeItems) {
+    if (!wrapper) return 0;
+    const labels = Array.isArray(modeItems)
+        ? modeItems.filter((mode) => typeof mode === 'string' && mode.length > 0)
+        : [];
+    if (!labels.length) return 0;
+
+    const button = wrapper.querySelector('.select-button');
+    const styleSource = button || wrapper;
+    const computed = window.getComputedStyle(styleSource);
+    const fontWeight = computed.fontWeight || '400';
+    const fontSize = computed.fontSize || '12px';
+    const fontFamily = computed.fontFamily || 'sans-serif';
+    const font = `${fontWeight} ${fontSize} ${fontFamily}`;
+
+    let maxTextWidth = 0;
+    for (const label of labels) {
+        const textWidth = measureTextWidth(label, font);
+        if (textWidth > maxTextWidth) {
+            maxTextWidth = textWidth;
+        }
+    }
+
+    const padLeft = Number.parseFloat(computed.paddingLeft || '0') || 0;
+    const padRight = Number.parseFloat(computed.paddingRight || '0') || 0;
+    const gap = Number.parseFloat(computed.columnGap || computed.gap || '4') || 4;
+    const iconWidth = 10;
+    const iconBuffer = 6;
+    const textSafety = 2;
+
+    const minWidthPx = 48;
+    const maxWidthPx = 210;
+    const targetWidth = Math.ceil(maxTextWidth + padLeft + padRight + gap + iconWidth + iconBuffer + textSafety);
+    return Math.max(minWidthPx, Math.min(maxWidthPx, targetWidth));
+}
+
+function computeModeTriggerWidthPx(wrapper, selectedMode) {
+    if (!wrapper || !selectedMode) return 0;
+
+    const button = wrapper.querySelector('.select-button');
+    const styleSource = button || wrapper;
+    const computed = window.getComputedStyle(styleSource);
+    const fontWeight = computed.fontWeight || '400';
+    const fontSize = computed.fontSize || '12px';
+    const fontFamily = computed.fontFamily || 'sans-serif';
+    const font = `${fontWeight} ${fontSize} ${fontFamily}`;
+
+    const textWidth = measureTextWidth(selectedMode, font);
+
+    const padLeft = Number.parseFloat(computed.paddingLeft || '0') || 0;
+    const padRight = Number.parseFloat(computed.paddingRight || '0') || 0;
+    const gap = Number.parseFloat(computed.columnGap || computed.gap || '4') || 4;
+    const iconWidth = 10;
+    const iconBuffer = 6;
+    const textSafety = 2;
+
+    const minWidthPx = 48;
+    const maxWidthPx = 210;
+    const targetWidth = Math.ceil(textWidth + padLeft + padRight + gap + iconWidth + iconBuffer + textSafety);
+
+    const inputContainer = wrapper.closest('.input-container');
+    const containerWidth = inputContainer ? inputContainer.clientWidth : 0;
+    const maxOneThird = containerWidth > 0 ? Math.floor(containerWidth / 3) : maxWidthPx;
+    const finalWidth = Math.max(minWidthPx, Math.min(targetWidth, Math.min(maxWidthPx, maxOneThird)));
+    return finalWidth;
+}
+
+function syncModeControlWidth(selectEl, modeItems, selectedMode) {
+    if (!selectEl) return;
+    const wrapper = selectEl.parentElement;
+    if (!wrapper) return;
+    const widthPx = computeModeTriggerWidthPx(wrapper, selectedMode);
+    if (widthPx > 0) {
+        wrapper.style.width = `${widthPx}px`;
+        wrapper.style.minWidth = `${widthPx}px`;
+        wrapper.style.maxWidth = '210px';
+        return;
+    }
+    wrapper.style.removeProperty('width');
+    wrapper.style.removeProperty('min-width');
+    wrapper.style.removeProperty('max-width');
+}
+
 function setSendBlockedNotice(text) {
     sendBlockedNotice = typeof text === 'string' ? text : '';
     headerStatusText = sendBlockedNotice ? 'Waiting for previous response...' : '';
@@ -3292,8 +3375,20 @@ function renderMessageElement(message, renderedSet) {
                 modeSelect.value = value;
                 applyModeStyles(selectedMode);
                 vscode.postMessage({ type: 'setMode', value: selectedMode });
+                syncModeControlWidth(modeSelect, modeItems, selectedMode);
+                if (modePanel) {
+                    modePanel.style.width = `${computeModePanelWidthPx(modeWrapper, modeItems)}px`;
+                }
             }
         });
+        syncModeControlWidth(modeSelect, modeItems, selectedMode);
+        const modeWrapper = modeSelect.parentElement;
+        const modeDropdown = modeWrapper ? modeWrapper.querySelector('.simple-dropdown') : null;
+        const modePanel = modeDropdown ? modeDropdown.querySelector('.dropdown-panel') : null;
+        if (modePanel) {
+            const panelWidth = computeModePanelWidthPx(modeWrapper, modeItems);
+            modePanel.style.width = `${panelWidth}px`;
+        }
     }
 
     function renderVariantSelect() {
@@ -3483,7 +3578,7 @@ function renderMessageElement(message, renderedSet) {
         container.classList.remove('mode-plan', 'mode-build');
         if (mode === 'plan') {
             container.classList.add('mode-plan');
-        } else {
+        } else if (mode === 'build') {
             container.classList.add('mode-build');
         }
     }
@@ -4122,7 +4217,7 @@ function applyPromptToSession(sessionId, payload) {
     input.addEventListener('keydown', (e) => {
         if (e.key === 'Tab' && document.activeElement === input) {
             e.preventDefault();
-            const modeItems = Array.isArray(modes) && modes.length ? modes : ['plan', 'build'];
+            const modeItems = ['plan', 'build'];
             const currentIndex = modeItems.indexOf(modeSelect.value);
             const nextIndex = currentIndex >= 0 ? ((currentIndex + 1) % modeItems.length) : 0;
             const nextMode = modeItems[nextIndex] || 'plan';
@@ -4130,6 +4225,7 @@ function applyPromptToSession(sessionId, payload) {
             selectedMode = nextMode;
             applyModeStyles(selectedMode);
             renderModeSelect();
+            vscode.postMessage({ type: 'ui-debug', payload: ['[TAB_SWITCH_MODE]', `to=${selectedMode}`, `displayValue=${modeSelect.value}`] });
             vscode.postMessage({ type: 'setMode', value: selectedMode });
             return;
         }
@@ -4151,7 +4247,9 @@ function applyPromptToSession(sessionId, payload) {
     modeSelect.addEventListener('change', (e) => {
         selectedMode = e.target.value;
         applyModeStyles(selectedMode);
+        vscode.postMessage({ type: 'ui-debug', payload: ['[MODE_SELECT_CHANGE]', `to=${selectedMode}`, `displayValue=${e.target.value}`] });
         vscode.postMessage({ type: 'setMode', value: selectedMode });
+        syncModeControlWidth(modeSelect, modes, selectedMode);
     });
 
     variantSelect.addEventListener('change', (e) => {
@@ -4274,7 +4372,11 @@ window.addEventListener('message', (event) => {
                 const receivedModes = Array.isArray(message.modes)
                     ? message.modes.filter((item, index, arr) => typeof item === 'string' && item.length > 0 && arr.indexOf(item) === index)
                     : [];
-                modes = receivedModes.length ? receivedModes : ['plan', 'build'];
+                const modesWithDescription = receivedModes.filter(m => /\(|\s/.test(m));
+                const alwaysKeep = ['plan', 'build'];
+                const filteredModes = [...alwaysKeep, ...modesWithDescription];
+                const uniqueModes = filteredModes.filter((v, i, a) => a.indexOf(v) === i);
+                modes = uniqueModes.length ? uniqueModes : ['plan', 'build'];
                 selectedModel = message.selectedModel || (models[0] ? models[0].fullId : '');
                 selectedVariant = message.selectedVariant || '';
                 const incomingMode = typeof message.selectedMode === 'string' ? message.selectedMode : '';
