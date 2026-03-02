@@ -170,3 +170,61 @@ if (!this.isUserOwnedSession(event.sessionId)) {
 - Subagent session IDs tracked in separate `activeSubagentSessionIds` Set
 - Webview receives real-time subagent status updates
 - Session ID flickering bug FIXED at root cause
+
+## Task 4: Queue subagent file changes for merging into main session's undo boundary
+
+**Completed:** Mon Mar 02 2026
+
+### Implementation Summary
+The `queueSubagentChanges()` public method already exists in `src/OpenCodeClient.ts` at line 2105-2117.
+
+### Method Signature
+```typescript
+public queueSubagentChanges(mainSessionId: string, files: any[]): void
+```
+
+### Implementation Details
+- **Location:** `src/OpenCodeClient.ts` lines 2105-2117
+- **Pattern:** Merges subagent file changes directly into main session's `pendingTurnChangesBySession` entry
+- **No separate queue:** The plan specifies merging directly (lines 484-488), NOT using a separate `subagentFileChangesQueue` field
+- **Integration:** Uses existing `buildChangeSpecs()` to convert `FileSnapshot[]` to `FileChangeSpec[]`
+- **Write tracking:** Calls `markTurnHasWrites(mainSessionId, 'subagent-file-change')` to track subagent contributions
+
+### Key Logic Flow
+1. Validates `mainSessionId` and `files` parameters
+2. Retrieves pending turn changes for main session: `this.pendingTurnChangesBySession.get(mainSessionId)`
+3. If no pending turn, logs debug and returns early (no throw)
+4. Converts files to change specs: `this.buildChangeSpecs(files as FileSnapshot[])`
+5. Marks turn as having writes from subagent
+6. Pushes change specs into main session's pending changes array
+7. Updates map entry
+
+### Guard Logic
+- Returns early if `mainSessionId` is empty or `files` array is empty
+- Returns early with debug log if main session has no active pending turn (line 2108-2111)
+- Returns early if `buildChangeSpecs()` produces empty array (line 2113)
+
+### Integration with Undo System
+- No changes to `commitPendingTurnChanges()` required (it already processes whatever is in the Map)
+- No changes to `GitUndoEngine.ts` (verified: 0 diff lines)
+- Subagent changes merge seamlessly into main session's undo boundary when `commitPendingTurnChanges(mainSessionId)` is called
+
+### QA Results
+- **Method exists:** `.sisyphus/evidence/task-4-method.txt` - 1 occurrence ✅
+- **No GitUndoEngine changes:** `.sisyphus/evidence/task-4-no-undo-changes.txt` - 0 diff lines ✅
+- **TypeScript compilation:** `.sisyphus/evidence/task-4-compile.txt` - exit 0 ✅
+- **LSP diagnostics:** Zero errors in OpenCodeClient.ts ✅
+
+### Key Observations
+1. **Unified undo tracking:** Subagent file changes are indistinguishable from main session changes once queued
+2. **No tracking of source:** Implementation does NOT track which subagent contributed which file change (per plan line 506)
+3. **Deferred commit:** Changes are queued but not committed until main session turn completes
+4. **Debug visibility:** Logs `subagent.queue.skip` when main session has no active turn
+
+### Plan Compliance
+- Followed plan lines 484-488 exactly
+- Did NOT add separate `subagentFileChangesQueue` field (not in plan)
+- Did NOT modify `commitPendingTurnChanges()` (plan line 505)
+- Did NOT modify `GitUndoEngine.ts` (READ ONLY per instructions)
+- Did NOT expose private internals beyond `queueSubagentChanges` method (plan line 507)
+
