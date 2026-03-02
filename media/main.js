@@ -4217,7 +4217,7 @@ function applyPromptToSession(sessionId, payload) {
     input.addEventListener('keydown', (e) => {
         if (e.key === 'Tab' && document.activeElement === input) {
             e.preventDefault();
-            const modeItems = ['plan', 'build'];
+            const modeItems = Array.isArray(modes) && modes.length ? modes : ['plan', 'build'];
             const currentIndex = modeItems.indexOf(modeSelect.value);
             const nextIndex = currentIndex >= 0 ? ((currentIndex + 1) % modeItems.length) : 0;
             const nextMode = modeItems[nextIndex] || 'plan';
@@ -4372,11 +4372,7 @@ window.addEventListener('message', (event) => {
                 const receivedModes = Array.isArray(message.modes)
                     ? message.modes.filter((item, index, arr) => typeof item === 'string' && item.length > 0 && arr.indexOf(item) === index)
                     : [];
-                const modesWithDescription = receivedModes.filter(m => /\(|\s/.test(m));
-                const alwaysKeep = ['plan', 'build'];
-                const filteredModes = [...alwaysKeep, ...modesWithDescription];
-                const uniqueModes = filteredModes.filter((v, i, a) => a.indexOf(v) === i);
-                modes = uniqueModes.length ? uniqueModes : ['plan', 'build'];
+                modes = receivedModes.length ? receivedModes : ['plan', 'build'];
                 selectedModel = message.selectedModel || (models[0] ? models[0].fullId : '');
                 selectedVariant = message.selectedVariant || '';
                 const incomingMode = typeof message.selectedMode === 'string' ? message.selectedMode : '';

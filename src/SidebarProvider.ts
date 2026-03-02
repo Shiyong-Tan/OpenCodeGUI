@@ -701,7 +701,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.client = new OpenCodeClient();
         this.client.setStorage(this._context.globalState);
         this.uiDebugChannel = vscode.window.createOutputChannel('OpenCode UI Debug');
-        this.uiDebugChannel.show(true);
         this.client.setUiDebugChannel(this.uiDebugChannel);
         this.client.setServerStatusHandler((status, reason) => {
             this.sendServerStatus(status, reason);
@@ -850,16 +849,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     // 更新 this._view 为最新实例
                     this._view = webviewView;
                     this._webviewInstanceId = data.webviewInstanceId;
-                    // this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_1_RX] webviewReady | wvId=${this._webviewInstanceId}`);
+                    this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_1_RX] webviewReady | wvId=${this._webviewInstanceId}`);
                     
                     const liveWebview = this._view?.webview;
                         if (liveWebview) {
-                            // this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_2_START] calling sendInit()`);
+                            this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_2_START] calling sendInit() | initPosted=${this.initPosted}`);
                             await this.sendInit(liveWebview);
-                            // this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_3_DONE] sendInit() complete, sending ack`);
+                            this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_3_DONE] sendInit() complete, sending ack`);
                         
                         liveWebview.postMessage({ type: 'webviewReadyAck', timestamp: Date.now(), webviewInstanceId: this._webviewInstanceId });
-                        // this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_4_ACK] ack sent`);
+                        this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_4_ACK] ack sent`);
                     }
                     break;
                 }
@@ -2344,6 +2343,7 @@ ${attachmentLines.join('\n')}`
     }
 
     private async sendInit(webview: vscode.Webview): Promise<void> {
+        this.uiDebugChannel.appendLine(`[EXT][SENDINIT_START] initPosted=${this.initPosted}`);
         let models: ModelInfo[] = [];
         let agents: AgentInfo[] = [];
         let sessions: SessionInfo[] = [];
