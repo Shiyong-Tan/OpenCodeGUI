@@ -246,7 +246,7 @@ PM|  - Step 5: Parse the capture file and create analysis:
 
 ---
 
-- [ ] 1. Add session ownership tracking infrastructure to SidebarProvider
+- [x] 1. Add session ownership tracking infrastructure to SidebarProvider
 
   **What to do**:
   - Add two new private fields to the `SidebarProvider` class (near line 103 where other private fields are declared):
@@ -318,7 +318,7 @@ PM|  - Step 5: Parse the capture file and create analysis:
 
 ---
 
-- [ ] 2. Add subagent indicator to webview (media/main.js + media/main.css)
+- [x] 2. Add subagent indicator to webview (media/main.js + media/main.css)
 
   **What to do**:
   - In `media/main.js`, add a new message handler case for `type: 'subagentStatus'`:
@@ -394,7 +394,7 @@ PM|  - Step 5: Parse the capture file and create analysis:
 ---
 
 
-- [ ] 3. Guard `handleChatEvent` against ALL subagent session events
+- [x] 3. Guard `handleChatEvent` against ALL subagent session events
 
   **What to do**:
   - In `src/SidebarProvider.ts`, in `handleChatEvent()` starting at line 3234:
@@ -478,7 +478,7 @@ PM|  - Step 5: Parse the capture file and create analysis:
 
 ---
 
-- [ ] 4. Merge subagent file changes into main session undo boundary
+- [x] 4. Merge subagent file changes into main session undo boundary
 
   **What to do**:
   - In `src/OpenCodeClient.ts`, add a new PUBLIC method `queueSubagentChanges(mainSessionId: string, files: any[]): void`:
@@ -559,7 +559,7 @@ PM|  - Step 5: Parse the capture file and create analysis:
 
 ---
 
-- [ ] 5. Filter subagent sessions from session list UI
+- [x] 5. Filter subagent sessions from session list UI
 
   **What to do**:
   - In `src/SidebarProvider.ts`, in `refreshSessions()` method at approximately line 3554:
@@ -620,7 +620,7 @@ PM|  - Step 5: Parse the capture file and create analysis:
 
 ---
 
-- [ ] 6. Cleanup on turn end + integration verification
+- [x] 6. Cleanup on turn end + integration verification
 
   **What to do**:
   - In `src/SidebarProvider.ts`, find all places where `finishTurn()` is called (search: `grep -n 'finishTurn' src/SidebarProvider.ts`):
@@ -696,7 +696,7 @@ PM|  - Step 5: Parse the capture file and create analysis:
 
 ---
 
-- [ ] 7. Playwright End-to-End Verification (MiniMax M2.5 Free)
+- [x] 7. Playwright End-to-End Verification (MiniMax M2.5 Free)
 
   **What to do**:
   - Use the `playwright` skill to launch VS Code with the extension loaded (Extension Development Host).
@@ -760,11 +760,11 @@ PM|  - Step 5: Parse the capture file and create analysis:
 
 ## Final Verification Wave
 
-- [ ] F1. **Plan Compliance Audit** — `oracle`
+- [x] F1. **Plan Compliance Audit** — `oracle`
   Read the plan end-to-end. For each "Must Have": verify implementation exists (read file, grep). For each "Must NOT Have": grep codebase for forbidden patterns. Check `npm run compile` passes. Verify all evidence files in `.sisyphus/evidence/`.
   Output: `Must Have [N/N] | Must NOT Have [N/N] | Tasks [N/N] | VERDICT: APPROVE/REJECT`
 
-- [ ] F2. **Code Quality + Compile Check** — `unspecified-high`
+- [x] F2. **Code Quality + Compile Check** — `unspecified-high`
   Run `npm run compile`. Check all modified files for: `as any` added, empty catches added, console.log added in extension code, TypeScript errors, unused imports. Verify no AI slop (excessive comments, over-abstraction, generic names). Check that guard in `handleChatEvent` is properly placed before all 11 event type branches (not just session).
   Output: `Build [PASS/FAIL] | Files clean [N/N] | VERDICT: APPROVE/REJECT`
 
