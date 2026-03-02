@@ -103,6 +103,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private currentSessionId?: string;
     private userOwnedSessionIds = new Set<string>();
     private activeSubagentSessionIds = new Set<string>();
+    private subagentProgressBySession = new Map<string, { taskId: string; description: string; startedAt: number }>();
 
     private isUserOwnedSession(id: string): boolean {
         return this.userOwnedSessionIds.has(id) || id === this.currentSessionId;
@@ -116,6 +117,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     private clearSubagentSessions(): void {
         this.activeSubagentSessionIds.clear();
+        this.subagentProgressBySession.clear();
+    }
+
+    private removeSubagentSession(sessionId: string): void {
+        this.activeSubagentSessionIds.delete(sessionId);
+        this.subagentProgressBySession.delete(sessionId);
+        this.emitSubagentStatus();
+    }
+
+    private emitSubagentStatus(active?: boolean): void {
+        const liveWebview = this._view?.webview;
+        if (!liveWebview) return;
+        const agents = Array.from(this.subagentProgressBySession.values()).map(entry => ({
+            sessionId: entry.taskId,
+            description: entry.description,
+            startedAt: entry.startedAt
+        }));
+        const isActive = active !== undefined ? active : agents.length > 0;
+        liveWebview.postMessage({ type: 'subagentStatus', active: isActive, agents });
     }
     private selectedModel?: string;
     private selectedVariant?: string;
@@ -1027,8 +1047,8 @@ ${attachmentLines.join('\n')}`
                                 sessionId: this.currentSessionId,
                                 mode: this.selectedMode
                             },
-                            (event: ChatEvent) => {
-                                this.handleChatEvent(event, activeWebview);
+                            async (event: ChatEvent) => {
+                                await this.handleChatEvent(event, activeWebview);
                             }
                         );
 
@@ -1916,6 +1936,16 @@ ${attachmentLines.join('\n')}`
                             payload: { ...this.lastDraft }
                         });
                     }
+                    // Cleanup before chatDone
+                    if (this.currentSessionId) {
+                        await this.client.commitPendingTurnChanges(this.currentSessionId);
+                    }
+                    if (this.currentSessionId) {
+                        this.client.finishTurn(this.currentSessionId);
+                    }
+                    this.clearSubagentSessions();
+                    this.emitSubagentStatus(false);
+
                     const doneAssistantMsgId = this.currentSessionId
                         ? this.client.getTurnAssistantMsgId(this.currentSessionId)
                         : undefined;
@@ -1925,14 +1955,6 @@ ${attachmentLines.join('\n')}`
                         assistantMsgId: doneAssistantMsgId,
                         lastAssistantMsgId: doneAssistantMsgId
                     });
-                    if (this.currentSessionId) {
-                        await this.client.commitPendingTurnChanges(this.currentSessionId);
-                    }
-                    if (this.currentSessionId) {
-                        this.client.finishTurn(this.currentSessionId);
-                    }
-                    this.clearSubagentSessions();
-                    activeWebview.postMessage({ type: 'subagentStatus', active: false });
                     break;
                 }
                 case "restoreAll": {
@@ -3262,7 +3284,7 @@ ${attachmentLines.join('\n')}`
         this.refreshDiffIfTouched(result.touchedFiles);
     }
 
-    private handleChatEvent(event: ChatEvent, webview: vscode.Webview): void {
+    private async handleChatEvent(event: ChatEvent, webview: vscode.Webview): Promise<void> {
         if (event.type === 'session' && event.sessionId) {
             if (!this.isUserOwnedSession(event.sessionId) && this.sendInFlightBySession.has(this.currentSessionId!)) {
                 this.activeSubagentSessionIds.add(event.sessionId);
@@ -3454,6 +3476,16 @@ ${attachmentLines.join('\n')}`
         if (event.type === 'error' && event.text) {
             const liveWebview = this._view?.webview || webview;
             liveWebview.postMessage({ type: 'addResponse', value: `Error: ${event.text}`, sessionId: this.currentSessionId });
+            // Cleanup before chatDone
+            if (this.currentSessionId) {
+                await this.client.commitPendingTurnChanges(this.currentSessionId);
+            }
+            if (this.currentSessionId) {
+                this.client.finishTurn(this.currentSessionId);
+            }
+            this.clearSubagentSessions();
+            this.emitSubagentStatus(false);
+
             const doneAssistantMsgId = this.currentSessionId
                 ? this.client.getTurnAssistantMsgId(this.currentSessionId)
                 : undefined;
