@@ -1,0 +1,4 @@
+            if (!this.isUserOwnedSession(event.sessionId)) {
+                this.activeSubagentSessionIds.add(event.sessionId);
+                const liveWebview = this._view?.webview || webview;
+                liveWebview.postMessage({ type: 'subagentStatus', active: true, count: this.activeSubagentSessionIds.size });

@@ -134,3 +134,39 @@ Handler follows pending-indicator pattern exactly:
 - No animations or streaming text display
 - Pluralization logic handles single/multiple subagents correctly
 - ⚡ emoji chosen for immediate visual recognition of activity
+
+## Task 3: Guard handleChatEvent to prevent session ID hijacking
+
+**Completed:** Mon Mar 02 2026
+
+### Changes Applied
+- **File:** `src/SidebarProvider.ts`
+- **Method:** `handleChatEvent()` - line 3272
+- **Guard Logic:**
+  - Before assigning `this.currentSessionId = event.sessionId`, check `!this.isUserOwnedSession(event.sessionId)`
+  - If true (subagent session), add to `activeSubagentSessionIds` Set
+  - Post `subagentStatus` message to webview with active count
+  - Return early to skip `currentSessionId` assignment
+
+### Code Pattern
+```typescript
+// Guard: Prevent subagent session IDs from hijacking currentSessionId
+if (!this.isUserOwnedSession(event.sessionId)) {
+    this.activeSubagentSessionIds.add(event.sessionId);
+    const liveWebview = this._view?.webview || webview;
+    liveWebview.postMessage({ type: 'subagentStatus', active: true, count: this.activeSubagentSessionIds.size });
+    return;
+}
+```
+
+### QA Evidence
+1. **Guard exists:** `.sisyphus/evidence/task-3-guard.txt` - 4 lines showing guard + activeSubagentSessionIds.add() + return
+2. **Tracking count:** `.sisyphus/evidence/task-3-tracking.txt` - 2 occurrences of `activeSubagentSessionIds.add` (line 3266 + line 3273)
+3. **Compilation:** `.sisyphus/evidence/task-3-compile.txt` - exit 0, no errors
+4. **LSP Diagnostics:** Zero errors in SidebarProvider.ts
+
+### Impact
+- Main session ID (`this.currentSessionId`) remains stable during subagent operations
+- Subagent session IDs tracked in separate `activeSubagentSessionIds` Set
+- Webview receives real-time subagent status updates
+- Session ID flickering bug FIXED at root cause

@@ -3269,6 +3269,14 @@ ${attachmentLines.join('\n')}`
                 return;
             }
 
+            // Guard: Prevent subagent session IDs from hijacking currentSessionId
+            if (!this.isUserOwnedSession(event.sessionId)) {
+                this.activeSubagentSessionIds.add(event.sessionId);
+                const liveWebview = this._view?.webview || webview;
+                liveWebview.postMessage({ type: 'subagentStatus', active: true, count: this.activeSubagentSessionIds.size });
+                return;
+            }
+
             const prevSessionId = this.currentSessionId;
             const nextSessionId = event.sessionId;
             this.currentSessionId = nextSessionId;
