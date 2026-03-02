@@ -640,6 +640,12 @@ function createMessage(session, payload) {
 }
 
 function upsertMessage(session, payload) {
+    // Filter out DCP (Deep Chat Protocol) metadata messages - they are protocol internals, not user content
+    if (payload.text && /▣.*DCP/s.test(payload.text)) {
+        vscode.postMessage({ type: 'ui-debug', payload: ['[WV][FILTER]', 'DCP-message-filtered', `id=${payload.id}`] });
+        return;
+    }
+    const existing = session.messagesById.get(payload.id);
     const existing = session.messagesById.get(payload.id);
     if (existing) {
         const next = {
