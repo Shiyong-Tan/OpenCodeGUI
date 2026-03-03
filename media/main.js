@@ -2795,6 +2795,9 @@ function renderMessageElement(message, renderedSet) {
         div.className = `message ${isUser ? 'user' : isSystem ? 'system' : 'bot'}`;
         if (message.meta?.isThinking === true) {
             div.classList.add('thinking');
+            // Streaming animation lives on outer bubble (.streaming).
+            // Keep .streaming off inner content.
+            div.classList.add('streaming');
         }
         div.dataset.messageId = message.id;
 
@@ -2814,6 +2817,15 @@ function renderMessageElement(message, renderedSet) {
             content.textContent = sanitized;
         }
         div.appendChild(content);
+
+        if (message.meta?.isThinking && message.meta?.statusText) {
+            // statusText rendered only during streaming.
+            const statusDiv = document.createElement('div');
+            statusDiv.className = 'message-status';
+            statusDiv.textContent = message.meta.statusText;
+            div.appendChild(statusDiv);
+        }
+        // .streaming class removed on re-render when not thinking.
 
         if (Array.isArray(message.meta?.images) && message.meta.images.length) {
             const imageWrap = document.createElement('div');
@@ -3986,7 +3998,7 @@ function applyPromptToSession(sessionId, payload) {
                 id: msgId,
                 role: message.role || 'assistant',
                 text: message.lastText || 'Thinking...',
-                meta: { isThinking: true, internalId: backendId }
+                meta: { isThinking: true, internalId: backendId, statusText: '' }
             });
             session.thinkingId = thinking.id;
             vscode.postMessage({ type: 'ui-debug', payload: ['handleAssistantMeta', 'new-thinking', msgId] });
@@ -4007,15 +4019,29 @@ function applyPromptToSession(sessionId, payload) {
                 vscode.postMessage({ type: 'ui-debug', payload: ['handleAssistantMeta', 'drop-finalized-target', targetId] });
                 return;
             }
-            const nextText = typeof message.lastText === 'string' ? message.lastText : target.text;
-            const normalized = typeof nextText === 'string' ? nextText.trim() : '';
-            const hasStatusChange = normalized.length > 0 && normalized !== 'Thinking...';
-            if (hasStatusChange) {
-                // agent timeout notice removed
+            if (message?.isStatusUpdate) {
+                const statusText = typeof message.lastText === 'string' ? message.lastText : '';
+                // isStatusUpdate: statusText only to avoid flicker. (isStatusUpdate statusText)
+                target.meta = { ...target.meta, internalId: backendId, isThinking: true, statusText };
+                const statusEl = document.querySelector(`[data-message-id="${targetId}"] .message-status`);
+                if (statusEl) {
+                    statusEl.textContent = statusText;
+                } else {
+                    window.__oc?.renderFromState?.();
+                }
+                vscode.postMessage({ type: 'ui-debug', payload: ['handleAssistantMeta', 'status-update', targetId] });
+            } else {
+                const nextText = typeof message.lastText === 'string' ? message.lastText : target.text;
+                const normalized = typeof nextText === 'string' ? nextText.trim() : '';
+                const hasStatusChange = normalized.length > 0 && normalized !== 'Thinking...';
+                if (hasStatusChange) {
+                    // agent timeout notice removed
+                }
+                target.text = nextText;
+                target.meta = { ...target.meta, internalId: backendId, isThinking: true, statusText: '' };
+                vscode.postMessage({ type: 'ui-debug', payload: ['handleAssistantMeta', 'merged', targetId] });
+                window.__oc?.renderFromState?.();
             }
-            target.text = nextText;
-            target.meta = { ...target.meta, internalId: backendId, isThinking: true };
-            vscode.postMessage({ type: 'ui-debug', payload: ['handleAssistantMeta', 'merged', targetId] });
         }
 
         assertInvariants(sessionId, 'assistantMeta');
@@ -4094,9 +4120,11 @@ function applyPromptToSession(sessionId, payload) {
     if (session.thinkingId && session.messagesById.has(session.thinkingId)) {
         const msg = session.messagesById.get(session.thinkingId);
         msg.meta.isThinking = false;
-            if (msg.text === 'Thinking...') {
-                msg.text = '';
-            }
+        // Clear statusText when streaming finishes.
+        msg.meta.statusText = null;
+        if (msg.text === 'Thinking...') {
+            msg.text = '';
+        }
         session.thinkingId = null;
         console.log('[Thinking] chatDone cleared pending');
     }
@@ -4496,19 +4524,75 @@ window.addEventListener('message', (event) => {
                 break;
             }
             case 'subagentStatus': {
-                const active = Boolean(message.active);
-                const count = typeof message.count === 'number' ? Math.max(0, message.count) : 0;
-                const subagentEl = document.getElementById('subagent-indicator');
-                if (!subagentEl) break;
-                if (active && count > 0) {
-                    const plural = count > 1 ? 's' : '';
-                    subagentEl.textContent = `⚡ ${count} subagent${plural} working...`;
-                    subagentEl.classList.remove('hidden');
-                } else {
-                    subagentEl.textContent = '';
-                    subagentEl.classList.add('hidden');
+              const { active, agents } = data;
+              // Update the header indicator count
+              const indicator = document.getElementById('subagent-indicator');
+              if (indicator) {
+                indicator.style.display = active && agents.length > 0 ? '' : 'none';
+                indicator.textContent = active ? `${agents.length} agent${agents.length !== 1 ? 's' : ''} running` : '';
+              }
+              // Manage in-chat subagent cards container
+              const chatContainer = document.getElementById('chat-container');
+              if (!active || agents.length === 0) {
+                // Clear cards and intervals
+                if (subagentCardsContainer) {
+                  subagentCardsContainer.remove();
+                  subagentCardsContainer = null;
                 }
-                break;
+                // Clear all elapsed timers
+                for (const [id, timer] of subagentIntervals) clearInterval(timer);
+                subagentIntervals.clear();
+              } else {
+                // Create container if needed
+                if (!subagentCardsContainer) {
+                  subagentCardsContainer = document.createElement('div');
+                  subagentCardsContainer.className = 'subagent-cards in-chat';
+                  // Insert after last thinking bubble, or at end of chatContainer
+                  const thinkingBubble = chatContainer?.querySelector('.message-bubble.streaming');
+                  if (thinkingBubble?.parentElement) {
+                    thinkingBubble.parentElement.insertAdjacentElement('afterend', subagentCardsContainer);
+                  } else {
+                    chatContainer?.appendChild(subagentCardsContainer);
+                  }
+                }
+                // Update cards for each agent
+                const renderedIds = new Set();
+                for (const agent of agents) {
+                  const sid = agent.sessionId;
+                  renderedIds.add(sid);
+                  let card = subagentCardsContainer.querySelector(`[data-agent-id="${sid}"]`);
+                  if (!card) {
+                    card = document.createElement('div');
+                    card.className = 'subagent-card';
+                    card.dataset.agentId = sid;
+                    card.dataset.startedAt = agent.startedAt;
+                    card.innerHTML = `<span class="subagent-name"></span><span class="subagent-elapsed"></span><div class="subagent-status"></div><div class="subagent-action"></div>`;
+                    subagentCardsContainer.appendChild(card);
+                    // Elapsed time interval
+                    const startedAt = agent.startedAt;
+                    const timer = setInterval(() => {
+                      const el = card.querySelector('.subagent-elapsed');
+                      if (el) {
+                        const sec = Math.floor((Date.now() - startedAt) / 1000);
+                        el.textContent = sec < 60 ? `${sec}s` : `${Math.floor(sec/60)}m${sec%60}s`;
+                      }
+                    }, 1000);
+                    subagentIntervals.set(sid, timer);
+                  }
+                  card.querySelector('.subagent-name').textContent = agent.title || agent.description || 'Agent';
+                  card.querySelector('.subagent-status').textContent = agent.latestText ? agent.latestText.slice(0, 80) : '';
+                  card.querySelector('.subagent-action').textContent = agent.latestTool || '';
+                }
+                // Remove cards for agents no longer active
+                for (const card of subagentCardsContainer.querySelectorAll('.subagent-card')) {
+                  if (!renderedIds.has(card.dataset.agentId)) {
+                    card.remove();
+                    const timer = subagentIntervals.get(card.dataset.agentId);
+                    if (timer) { clearInterval(timer); subagentIntervals.delete(card.dataset.agentId); }
+                  }
+                }
+              }
+              break;
             }
             case 'resetUiState': {
                 const incomingSessionId = message.sessionId || message.sessionID || '';
@@ -4921,18 +5005,6 @@ window.addEventListener('message', (event) => {
                 const sessionId = getEventSessionId(message, 'systemNoticeClear');
                 if (sessionId && sessionId !== activeSessionId) break;
                 setSystemNotice('');
-                break;
-            }
-            case 'subagentStatus': {
-                const subagentIndicator = document.getElementById('subagent-indicator');
-                if (subagentIndicator) {
-                    if (message.active && message.count) {
-                        subagentIndicator.textContent = `⚡ ${message.count} subagent${message.count > 1 ? 's' : ''} working...`;
-                        subagentIndicator.classList.remove('hidden');
-                    } else {
-                        subagentIndicator.classList.add('hidden');
-                    }
-                }
                 break;
             }
             case 'stallCard': {
