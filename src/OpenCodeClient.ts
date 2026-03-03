@@ -207,7 +207,7 @@ type RevertedSegment = {
     fileSet?: string[];
 };
 
-type EventSource = 'sse' | 'resync';
+type EventSource = 'sse' | 'resync' | 'session-idle';
 type ServerStatus = 'connected' | 'reconnecting' | 'error';
 
 type ServerLock = {
@@ -297,6 +297,8 @@ export class OpenCodeClient {
     private turnFinalMsgIdBySession = new Map<string, string>();
     private finalizingMsgIdBySession = new Map<string, string>();
     private turnFinalQuietTimersBySession = new Map<string, NodeJS.Timeout>();
+    private readonly expectedMainAgentBySession = new Map<string, string>();
+    private readonly sessionIdleReceivedBySession = new Set<string>();
     private turnFinalWaitersBySession = new Map<string, Array<() => void>>();
     private turnFinalResolvedBySession = new Set<string>();
     private turnFinalSourceBySession = new Map<string, EventSource>();
@@ -612,6 +614,8 @@ export class OpenCodeClient {
         this.turnSettleLastFingerprintBySession.delete(sessionId);
         this.turnSettleNoDeltaCountBySession.delete(sessionId);
         this.rescueResumeAtBySession.delete(sessionId);
+        this.expectedMainAgentBySession.delete(sessionId);
+        this.sessionIdleReceivedBySession.delete(sessionId);
         this.turnRecoveryModeBySession.delete(sessionId);
         this.turnResyncEpochBySession.delete(sessionId);
         this.lastProgressAtBySession.delete(sessionId);
@@ -4259,8 +4263,14 @@ export class OpenCodeClient {
             return events;
         }
         if (type === 'session.status' && props?.sessionID && props?.status?.type === 'idle') {
-            if (this.canceledActiveTurnBySession.get(props.sessionID) === true) {
+            const sessionId = props.sessionID;
+            this.sessionIdleReceivedBySession.add(sessionId);
+            this.logUiDebug(`EXT: session.idle.received | sessionId=${sessionId}`);
+            if (this.canceledActiveTurnBySession.get(sessionId) === true) {
                 return events;
+            }
+            if (this.turnStateBySession.has(sessionId)) {
+                this.markTurnFinal(sessionId, undefined, 'session-idle');
             }
             return events;
         }
