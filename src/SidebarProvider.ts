@@ -135,7 +135,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             startedAt: entry.startedAt
         }));
         const isActive = active !== undefined ? active : agents.length > 0;
-        liveWebview.postMessage({ type: 'subagentStatus', active: isActive, agents });
+        liveWebview.postMessage({ type: 'subagentStatus', active: isActive, agents, count: agents.length });
     }
     private selectedModel?: string;
     private selectedVariant?: string;
@@ -947,6 +947,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         this.uiDebugChannel.appendLine(`EXT: send.enter | reqId=${reqId} | sessionId=${this.currentSessionId || 'null'} | hasAttachments=${String(Boolean(attachments.length))} | attachmentsCount=${attachments.length} | attachKeys=${attachKeys}`);
                         const userText = (data.value as string) || '';
                         let modelText = userText;
+                        if (this.selectedMode === 'plan' || /prometheus/i.test(this.selectedMode || '')) {
+                            modelText = modelText + '\n\nPlease use "question tool" to communicate. Consult Metis for making plans. In the plan, require the executor to make changes directly in the current working directory, instead of in a new working directory.';
+                        }
                         this.lastDraft = {
                             text: userText,
                             attachments: [],
@@ -1082,7 +1085,7 @@ ${attachmentLines.join('\n')}`
                             this.client.finishTurn(this.currentSessionId);
                         }
                         this.clearSubagentSessions();
-                        liveWebview.postMessage({ type: 'subagentStatus', active: false });
+                        this.emitSubagentStatus(false);
                         await this.postModelQuota(liveWebview, 'chat-done');
                         if (this.pendingClientMessageId) {
                             await this.handleAbortedMessage(this.pendingClientMessageId, liveWebview);
@@ -1120,7 +1123,7 @@ ${attachmentLines.join('\n')}`
                             this.client.finishTurn(this.currentSessionId);
                         }
                         this.clearSubagentSessions();
-                        activeWebview.postMessage({ type: 'subagentStatus', active: false });
+                        this.emitSubagentStatus(false);
                         if (this.pendingClientMessageId) {
                             await this.handleAbortedMessage(this.pendingClientMessageId, activeWebview);
                             this.pendingClientMessageId = undefined;
@@ -3288,16 +3291,24 @@ ${attachmentLines.join('\n')}`
         if (event.type === 'session' && event.sessionId) {
             if (!this.isUserOwnedSession(event.sessionId) && this.sendInFlightBySession.has(this.currentSessionId!)) {
                 this.activeSubagentSessionIds.add(event.sessionId);
-                const liveWebview = this._view?.webview || webview;
-                liveWebview.postMessage({ type: 'subagentStatus', active: true, count: this.activeSubagentSessionIds.size });
+                this.subagentProgressBySession.set(event.sessionId, {
+                    taskId: event.sessionId,
+                    description: '',
+                    startedAt: Date.now()
+                });
+                this.emitSubagentStatus(true);
                 return;
             }
 
             // Guard: Prevent subagent session IDs from hijacking currentSessionId
             if (!this.isUserOwnedSession(event.sessionId)) {
                 this.activeSubagentSessionIds.add(event.sessionId);
-                const liveWebview = this._view?.webview || webview;
-                liveWebview.postMessage({ type: 'subagentStatus', active: true, count: this.activeSubagentSessionIds.size });
+                this.subagentProgressBySession.set(event.sessionId, {
+                    taskId: event.sessionId,
+                    description: '',
+                    startedAt: Date.now()
+                });
+                this.emitSubagentStatus(true);
                 return;
             }
 
