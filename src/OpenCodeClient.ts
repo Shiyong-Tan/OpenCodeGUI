@@ -78,7 +78,7 @@ export type PermissionOverlayPayload = {
 };
 
 export type ChatEvent = {
-    type: 'text' | 'session' | 'raw' | 'permission' | 'diff' | 'message' | 'error' | 'toolPatch' | 'files' | 'assistantMessageMeta' | 'questionOverlay' | 'permissionRequest' | 'permissionReplied' | 'autoResumeStallWarn' | 'autoResumeStallClear' | 'autoResumeHardStop';
+    type: 'text' | 'session' | 'raw' | 'permission' | 'diff' | 'message' | 'error' | 'toolPatch' | 'files' | 'assistantMessageMeta' | 'questionOverlay' | 'permissionRequest' | 'permissionReplied' | 'autoResumeStallWarn' | 'autoResumeStallClear' | 'autoResumeHardStop' | 'todoUpdate';
     text?: string;
     sessionId?: string;
     files?: FileSnapshot[];
@@ -106,6 +106,7 @@ export type ChatEvent = {
     actionLabel?: string;
     isSyntheticUser?: boolean;
     isStatusUpdate?: boolean;
+    todos?: Array<{content: string; status: string; priority: string}>;
 };
 type PendingQuestionControl = {
     callId: string;
@@ -4185,6 +4186,14 @@ export class OpenCodeClient {
                                 this.markTurnHasWrites(sessionId, 'tool:bash');
                             }
                         }
+                    }
+                }
+                // Detect todowrite tool completion and emit todoUpdate event
+                if (toolName === 'todowrite' && part?.state?.status === 'completed') {
+                    const todos = part?.state?.metadata?.todos;
+                    if (Array.isArray(todos) && todos.length > 0 && sessionId) {
+                        const msgId = this.getTurnAssistantMsgId(sessionId) || part?.messageID || '';
+                        events.push({ type: 'todoUpdate', todos, sessionId, assistantMsgId: msgId });
                     }
                 }
                 if (source === 'sse' && sessionId && toolState.becameTerminal && !this.hasPendingOrRunningTools(sessionId) && !this.turnFinalResolvedBySession.has(sessionId)) {

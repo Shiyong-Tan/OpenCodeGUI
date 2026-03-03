@@ -3330,6 +3330,16 @@ ${attachmentLines.join('\n')}`
     }
 
     private async handleChatEvent(event: ChatEvent, webview: vscode.Webview): Promise<void> {
+        // Handle todoUpdate event for main session only
+        if (event.type === 'todoUpdate' && this.isUserOwnedSession(event.sessionId || '')) {
+            webview.postMessage({
+                type: 'todoUpdate',
+                todos: event.todos,
+                anchorMessageId: event.assistantMsgId,
+                sessionId: event.sessionId,
+            });
+            return;
+        }
         if (event.type === 'session' && event.sessionId) {
             if (!this.isUserOwnedSession(event.sessionId) && this.sendInFlightBySession.has(this.currentSessionId!)) {
                 this.activeSubagentSessionIds.add(event.sessionId);
