@@ -3481,6 +3481,16 @@ ${attachmentLines.join('\n')}`
             const sessionId = event.sessionId || this.currentSessionId;
             if (sessionId) {
                 this.appendAssistantBuffer(sessionId, event.text);
+                // Push accumulated text to webview immediately for real-time streaming
+                const liveWebview = this._view?.webview || webview;
+                const accumulated = this.assistantTextBufferBySession.get(sessionId) ?? '';
+                liveWebview?.postMessage({
+                    type: 'assistantMessageMeta',
+                    sessionId,
+                    tmpKey: this.pendingAssistantTmpKeyBySession?.get(sessionId),
+                    lastText: accumulated,
+                    isStatusUpdate: false
+                });
             }
             return;
         }
