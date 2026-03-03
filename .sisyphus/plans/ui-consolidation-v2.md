@@ -191,7 +191,7 @@ Wave FINAL:
 
 ---
 
-- [ ] 2. **main.js — Restore plan file card**
+- [x] 2. **main.js — Restore plan file card**
 
   **What to do**:
   - In `renderMessageElement`: after handling changeList and undoSegment, add handler for `message.meta?.kind === 'planFile'`:
@@ -340,7 +340,7 @@ Wave FINAL:
 
 ---
 
-- [ ] 4. **main.js — Question prompt markdown + question card auto-height**
+- [x] 4. **main.js — Question prompt markdown + question card auto-height**
 
   **What to do**:
 
@@ -408,7 +408,7 @@ Wave FINAL:
 
 ---
 
-- [ ] 5. **main.css — All new CSS additions**
+- [x] 5. **main.css — All new CSS additions**
 
   **What to do**:
 
@@ -768,7 +768,7 @@ Wave FINAL:
 
 ---
 
-- [ ] 8. **main.js — todoUpdate message handler + todo card rendering**
+- [x] 8. **main.js — todoUpdate message handler + todo card rendering**
 
   **What to do**:
 
@@ -869,7 +869,7 @@ Wave FINAL:
 
 ---
 
-- [ ] 9. **Compile + smoke test**
+- [x] 9. **Compile + smoke test**
 
   **What to do**:
   - Run `npm run compile` — must pass with 0 errors
@@ -901,7 +901,7 @@ Wave FINAL:
 
 ## Final Verification Wave
 
-- [ ] F1. **Code Quality Review** — `unspecified-high`
+- [x] F1. **Code Quality Review** — `unspecified-high`
   Run `npm run compile` + `node --check media/main.js`. Search for: `console.log` in production paths, syntax errors, unclosed brackets. Check for duplicate `case` handlers in main.js switch. Verify no accidental removal of existing functionality.
   Output: `Build [PASS/FAIL] | Syntax [PASS/FAIL] | Duplicates [CLEAN/issues] | VERDICT`
 
