@@ -4120,14 +4120,16 @@ export class OpenCodeClient {
                     }
                 }
                 if (msgId && !this.assistantStatusCleared.has(msgId)) {
-                events.push({
-                    type: 'assistantMessageMeta',
-                    sessionId,
-                    assistantMsgId: part?.messageID,
-                    lastText: 'Finalizing the response...',
-                    tmpKey: this.getPendingAssistantTmpKey(sessionId),
-                    isStatusUpdate: true
-                });
+                    if (msgId === this.getFinalizingMsgId(sessionId)) {
+                        events.push({
+                            type: 'assistantMessageMeta',
+                            sessionId,
+                            assistantMsgId: part?.messageID,
+                            lastText: 'Finalizing the response...',
+                            tmpKey: this.getPendingAssistantTmpKey(sessionId),
+                            isStatusUpdate: true
+                        });
+                    }
                     this.assistantStatusCleared.add(msgId);
                 }
                 events.push({ type: 'text', text: chunk, sessionId, assistantMsgId: part?.messageID, tmpKey: this.getPendingAssistantTmpKey(sessionId) });
