@@ -2910,6 +2910,29 @@ function renderMessageElement(message, renderedSet) {
             div.appendChild(actions);
         }
 
+
+        // Todo list (below assistant bubble)
+        if (message.role === 'assistant' && !message.meta?.isThinking &&
+            Array.isArray(message.meta?.todos) && message.meta.todos.length > 0) {
+            const todoCard = document.createElement('div');
+            todoCard.className = 'todo-list';
+            for (const todo of message.meta.todos) {
+                if (!todo || typeof todo.content !== 'string') continue;
+                const item = document.createElement('div');
+                const status = todo.status || 'pending';
+                item.className = `todo-item todo-${status}`;
+                const check = document.createElement('span');
+                check.className = 'todo-check';
+                check.textContent = status === 'completed' ? '✓' : status === 'cancelled' ? '✗' : status === 'in_progress' ? '◎' : '○';
+                const label = document.createElement('span');
+                label.className = 'todo-content';
+                label.textContent = todo.content;
+                item.appendChild(check);
+                item.appendChild(label);
+                todoCard.appendChild(item);
+            }
+            div.appendChild(todoCard);
+        }
         chatContainer.appendChild(div);
     }
 
@@ -5477,6 +5500,18 @@ window.addEventListener('message', (event) => {
                         anchorMessageId: anchorMessageId
                     }
                 });
+                window.__oc?.renderFromState?.();
+                break;
+            }
+            case 'todoUpdate': {
+                const { todos, anchorMessageId, sessionId: sid } = message;
+                if (!anchorMessageId || !Array.isArray(todos)) break;
+                const session = getSessionState(sid || activeSessionId);
+                if (!session) break;
+                const msg = session.messagesById.get(anchorMessageId);
+                if (!msg) break;
+                if (!msg.meta) msg.meta = {};
+                msg.meta.todos = todos;
                 window.__oc?.renderFromState?.();
                 break;
             }
