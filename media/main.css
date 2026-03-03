@@ -678,6 +678,8 @@ body {
     pointer-events: auto;
     width: min(92vw, 760px);
     max-width: 760px;
+    max-height: 60vh;
+    overflow-y: auto;
 }
 
 .question-card {
@@ -859,7 +861,8 @@ body {
 }
 
 .question-card-btn {
-    width: min(var(--question-option-width, 98%), 98%);
+    width: var(--question-option-width, fit-content);
+    max-width: 98%;
     text-align: left;
     white-space: normal;
     line-height: 1.3;
