@@ -4099,7 +4099,8 @@ ${attachmentLines.join('\n')}`
             const mode = typeof message?.info?.mode === 'string' ? message.info.mode.toLowerCase() : '';
             const agent = typeof message?.info?.agent === 'string' ? message.info.agent.toLowerCase() : '';
             const isAutoResumeText = role === 'user' && text.trimStart().startsWith('[OC_UI_AUTORESUME');
-            const isSyntheticUser = role === 'user' && (isAutoResumeText || mode === 'compaction' || agent === 'compaction');
+            const isBoulderContinuation = role === 'user' && text.includes('[SYSTEM DIRECTIVE: OH-MY-OPENCODE - BOULDER CONTINUATION]');
+            const isSyntheticUser = role === 'user' && (isAutoResumeText || isBoulderContinuation || mode === 'compaction' || agent === 'compaction');
             const messageIndex = this.client.registerMessage(resolvedId);
             messages.push({ role, text, id: resolvedId, messageIndex, meta: isSyntheticUser ? { syntheticUser: true } : undefined });
         }

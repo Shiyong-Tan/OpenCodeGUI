@@ -5464,6 +5464,10 @@ window.addEventListener('message', (event) => {
                     });
                     break;
                 }
+                // Filter out BOULDER CONTINUATION messages
+                if (message.message.role === 'user' && message.message.text && message.message.text.includes('[SYSTEM DIRECTIVE: OH-MY-OPENCODE - BOULDER CONTINUATION]')) {
+                    break;
+                }
                 if (message.message && message.message.id) {
                     upsertMessage(session, {
                         id: message.message.id,
@@ -5534,6 +5538,10 @@ window.addEventListener('message', (event) => {
                 const sessionId = getEventSessionId(message, 'messageAppend');
                 if (!sessionId) break;
                 const session = getSessionState(sessionId, true);
+                // Filter out BOULDER CONTINUATION messages
+                if (message.message.role === 'user' && message.message.text && message.message.text.includes('[SYSTEM DIRECTIVE: OH-MY-OPENCODE - BOULDER CONTINUATION]')) {
+                    break;
+                }
                 if (message.message && message.message.id) {
                     upsertMessage(session, {
                         id: message.message.id,
