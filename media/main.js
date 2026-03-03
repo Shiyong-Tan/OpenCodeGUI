@@ -3162,6 +3162,13 @@ function renderMessageElement(message, renderedSet) {
                 renderMessageElement(planMsg, renderedSet);
             }
 
+        // Re-insert subagent cards container if active
+        if (subagentCardsContainer && session?.thinkingId) {
+            const thinkingBubble = document.getElementById(session.thinkingId);
+            if (thinkingBubble?.parentNode && !subagentCardsContainer.parentNode) {
+                thinkingBubble.parentNode.insertBefore(subagentCardsContainer, thinkingBubble.nextSibling);
+            }
+        }
         if (lastConflictPayload && lastConflictPayload.sessionId === activeSessionId) {
             renderConflictCard(lastConflictPayload);
         }
@@ -4142,6 +4149,11 @@ function applyPromptToSession(sessionId, payload) {
         session.thinkingId = null;
         console.log('[Thinking] chatDone cleared pending');
     }
+    // Clear subagent cards container
+    if (subagentCardsContainer) {
+        subagentCardsContainer.remove();
+        subagentCardsContainer = null;
+    }
     const resolvedFinal =
         message?.lastAssistantMsgId ||
         message?.assistantMsgId ||
@@ -4584,41 +4596,77 @@ window.addEventListener('message', (event) => {
                         const sessionId = agent.sessionId;
                         currentSessionIds.add(sessionId);
 
-                        let card = cardsContainer.querySelector(`.subagent-card[data-session-id="${sessionId}"]`);
+                        let card = subagentCardsContainer.querySelector(`.subagent-card[data-session-id="${sessionId}"]`);
                         if (!card) {
                             card = document.createElement('div');
                             card.className = 'subagent-card';
                             card.dataset.sessionId = sessionId;
 
-                            const descEl = document.createElement('div');
-                            descEl.className = 'subagent-name';
-                            descEl.textContent = agent.taskName || agent.description || 'Running...';
+                            const nameEl = document.createElement('div');
+                            nameEl.className = 'subagent-name';
+                            nameEl.textContent = agent.title || agent.description || agent.sessionId || 'Running...';
 
                             const timeEl = document.createElement('div');
                             timeEl.className = 'subagent-elapsed';
                             timeEl.textContent = '0s';
                             timeEl.dataset.startedAt = agent.startedAt || '';
 
-                            if (agent.mode || agent.model) {
-                                const statusEl = document.createElement('div');
-                                statusEl.className = 'subagent-status';
-                                statusEl.textContent = [agent.mode, agent.model].filter(Boolean).join(' · ');
-                                card.appendChild(statusEl);
-                            }
+                            const statusEl = document.createElement('div');
+                            statusEl.className = 'subagent-status';
+                            statusEl.textContent = agent.model || '';
 
-                            if (agent.action) {
-                                const actionEl = document.createElement('div');
-                                actionEl.className = 'subagent-action';
-                                actionEl.textContent = agent.action;
-                                card.appendChild(actionEl);
-                            }
-                            card.appendChild(descEl);
+                            const actionEl = document.createElement('div');
+                            actionEl.className = 'subagent-action';
+                            actionEl.textContent = agent.latestTool || '';
+
+                            const latestTextEl = document.createElement('div');
+                            latestTextEl.className = 'subagent-latest-text';
+                            const txt = agent.latestText || '';
+                            latestTextEl.textContent = txt.length > 80 ? txt.slice(0, 80) + '...' : txt;
+
+                            card.appendChild(nameEl);
+                            if (agent.model) card.appendChild(statusEl);
+                            if (agent.latestTool) card.appendChild(actionEl);
+                            if (agent.latestText) card.appendChild(latestTextEl);
                             card.appendChild(timeEl);
-                            cardsContainer.appendChild(card);
+                            subagentCardsContainer.appendChild(card);
                         } else {
-                            const descEl = card.querySelector('.subagent-name');
-                            if (descEl && descEl.textContent !== agent.description) {
-                                descEl.textContent = agent.description;
+                            const nameEl = card.querySelector('.subagent-name');
+                            const statusEl = card.querySelector('.subagent-status');
+                            const actionEl = card.querySelector('.subagent-action');
+                            const latestTextEl = card.querySelector('.subagent-latest-text');
+                            
+                            if (nameEl) nameEl.textContent = agent.title || agent.description || agent.sessionId || 'Running...';
+                            
+                            if (statusEl && agent.model) {
+                                statusEl.textContent = agent.model;
+                            } else if (!statusEl && agent.model) {
+                                const newStatus = document.createElement('div');
+                                newStatus.className = 'subagent-status';
+                                newStatus.textContent = agent.model;
+                                card.insertBefore(newStatus, nameEl.nextSibling);
+                            }
+                            
+                            if (actionEl && agent.latestTool) {
+                                actionEl.textContent = agent.latestTool;
+                            } else if (!actionEl && agent.latestTool) {
+                                const newAction = document.createElement('div');
+                                newAction.className = 'subagent-action';
+                                newAction.textContent = agent.latestTool;
+                                const insertAfter = statusEl || nameEl;
+                                card.insertBefore(newAction, insertAfter.nextSibling);
+                            }
+                            
+                            if (latestTextEl && agent.latestText) {
+                                const txt = agent.latestText;
+                                latestTextEl.textContent = txt.length > 80 ? txt.slice(0, 80) + '...' : txt;
+                            } else if (!latestTextEl && agent.latestText) {
+                                const newText = document.createElement('div');
+                                newText.className = 'subagent-latest-text';
+                                const txt = agent.latestText;
+                                newText.textContent = txt.length > 80 ? txt.slice(0, 80) + '...' : txt;
+                                const insertAfter = actionEl || statusEl || nameEl;
+                                card.insertBefore(newText, insertAfter.nextSibling);
                             }
                         }
 
@@ -4648,10 +4696,10 @@ window.addEventListener('message', (event) => {
                         }
                     });
                 } else {
-                    cardsContainer.classList.add('hidden');
+                    subagentCardsContainer.classList.add('hidden');
                 }
 
-                const allCards = cardsContainer.querySelectorAll('.subagent-card');
+                const allCards = subagentCardsContainer.querySelectorAll('.subagent-card');
                 allCards.forEach(card => {
                     const sessionId = card.dataset.sessionId;
                     if (!currentSessionIds.has(sessionId)) {

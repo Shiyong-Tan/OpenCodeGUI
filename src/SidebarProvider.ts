@@ -3308,8 +3308,9 @@ ${attachmentLines.join('\n')}`
                     description: '',
                     startedAt: Date.now()
                 });
-                this.client.getSessionInfo(event.sessionId).then((info: any) => {
-                    const entry = this.subagentProgressBySession.get(event.sessionId);
+                const sessionId = event.sessionId;
+                this.client.getSessionInfo(sessionId).then((info: any) => {
+                    const entry = this.subagentProgressBySession.get(sessionId);
                     if (entry) {
                         entry.title = info?.title || '';
                         entry.model = info?.model || info?.config?.model || '';
@@ -3328,8 +3329,9 @@ ${attachmentLines.join('\n')}`
                     description: '',
                     startedAt: Date.now()
                 });
-                this.client.getSessionInfo(event.sessionId).then((info: any) => {
-                    const entry = this.subagentProgressBySession.get(event.sessionId);
+                const sessionId = event.sessionId;
+                this.client.getSessionInfo(sessionId).then((info: any) => {
+                    const entry = this.subagentProgressBySession.get(sessionId);
                     if (entry) {
                         entry.title = info?.title || '';
                         entry.model = info?.model || info?.config?.model || '';

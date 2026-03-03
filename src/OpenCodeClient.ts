@@ -4089,17 +4089,17 @@ export class OpenCodeClient {
                         this.assistantHasDelta.add(msgId);
                     }
                 } else if (typeof part?.text === 'string') {
-                    if (msgId && this.assistantHasDelta.has(msgId)) {
-                        chunk = '';
-                    } else {
-                        const prevLen = msgId ? (this.assistantTextLengths.get(msgId) || 0) : 0;
-                        const nextLen = part.text.length;
-                        if (nextLen > prevLen) {
-                            chunk = part.text.slice(prevLen);
-                        }
+                    // Even if we've seen deltas, if there's new full text beyond what we've shown, emit it
+                    const nextLen = part.text.length;
+                    const prevLen = msgId ? (this.assistantTextLengths.get(msgId) || 0) : 0;
+                    
+                    if (nextLen > prevLen) {
+                        chunk = part.text.slice(prevLen);
                         if (msgId) {
                             this.assistantTextLengths.set(msgId, nextLen);
                         }
+                    } else {
+                        chunk = '';
                     }
                 }
                 if (!chunk) return events;

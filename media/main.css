@@ -1810,6 +1810,21 @@ select#mode-select {
     margin-top: 4px;
     width: 100%;
 }
+.subagent-cards-container.in-chat {
+    margin: 4px 0 4px 16px;
+    border-left: 2px solid var(--vscode-widget-border, rgba(127,127,127,0.3));
+    padding-left: 8px;
+}
+
+.subagent-latest-text {
+    font-size: 0.85em;
+    opacity: 0.75;
+    font-style: italic;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 300px;
+}
 
 .subagent-cards-container.hidden {
     display: none;
