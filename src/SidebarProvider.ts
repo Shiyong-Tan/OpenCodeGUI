@@ -877,13 +877,29 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     this._webviewInstanceId = data.webviewInstanceId;
                     this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_1_RX] webviewReady | wvId=${this._webviewInstanceId}`);
                     
-                    const liveWebview = this._view?.webview;
-                        if (liveWebview) {
-                            this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_2_START] calling sendInit() | initPosted=${this.initPosted}`);
+                const liveWebview = this._view?.webview;
+                    if (liveWebview) {
+                        this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_2_START] calling sendInit() | initPosted=${this.initPosted}`);
+                        let sendInitError: Error | undefined;
+                        try {
                             await this.sendInit(liveWebview);
                             this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_3_DONE] sendInit() complete, sending ack`);
+                        } catch (err) {
+                            sendInitError = err instanceof Error ? err : new Error(String(err));
+                            this.uiDebugChannel.appendLine(`[EXT][SENDINIT_ERROR] sendInit threw: ${sendInitError.message}`);
+                        }
                         
-                        liveWebview.postMessage({ type: 'webviewReadyAck', timestamp: Date.now(), webviewInstanceId: this._webviewInstanceId });
+                        if (sendInitError) {
+                            liveWebview.postMessage({ 
+                                type: 'webviewReadyAck', 
+                                timestamp: Date.now(), 
+                                webviewInstanceId: this._webviewInstanceId,
+                                error: true,
+                                message: sendInitError.message
+                            });
+                        } else {
+                            liveWebview.postMessage({ type: 'webviewReadyAck', timestamp: Date.now(), webviewInstanceId: this._webviewInstanceId });
+                        }
                         this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_4_ACK] ack sent`);
                     }
                     break;
@@ -2580,7 +2596,11 @@ ${attachmentLines.join('\n')}`
                                         stderrLastLine: normalized.stderrLastLine || ''
                                     };
                                     const liveWebview = this._view?.webview || webview;
-                                    await this.ensureSessionUndoReady(recentSessionId, liveWebview);
+                                    try {
+                                        await this.ensureSessionUndoReady(recentSessionId, liveWebview);
+                                    } catch (err) {
+                                        this.uiDebugChannel.appendLine(`[EXT][UNDO_WARN] ensureSessionUndoReady failed for ${recentSessionId}: ${err}`);
+                                    }
                                     liveWebview.postMessage(payload);
                                     const payloadMessages = Array.isArray(payload?.messages) ? payload.messages.length : 0;
                                     if (payloadMessages > 0) {
@@ -2623,7 +2643,11 @@ ${attachmentLines.join('\n')}`
                             this.trackUserOwnedSession(this.currentSessionId);
                             this.client.setSessionId(this.currentSessionId);
                             const liveWebview = this._view?.webview || webview;
-                            await this.ensureSessionUndoReady(recentSessionId, liveWebview);
+                            try {
+                                await this.ensureSessionUndoReady(recentSessionId, liveWebview);
+                            } catch (err) {
+                                this.uiDebugChannel.appendLine(`[EXT][UNDO_WARN] ensureSessionUndoReady failed for ${recentSessionId}: ${err}`);
+                            }
                             const persisted = await this.loadPersistedSegment(recentSessionId);
                             const historySegments = persisted?.segment?.historySegments || [];
                             if (persisted?.segment?.historySegments) {
@@ -2802,7 +2826,12 @@ ${attachmentLines.join('\n')}`
             this.pendingBaselineTurnKey = `baseline-${Date.now()}`;
             this.pendingBaselineFailed = false;
             liveWebview.postMessage({ type: 'baselineStatus', ready: false, message: 'Initializing Git baseline...' });
-            const baselineResult = await this.client.ensureBaselineForTurn(this.pendingBaselineTurnKey);
+            let baselineResult: { ok: boolean } = { ok: false };
+            try {
+                baselineResult = await this.client.ensureBaselineForTurn(this.pendingBaselineTurnKey);
+            } catch (err) {
+                this.uiDebugChannel.appendLine(`[EXT][BASELINE_WARN] ensureBaselineForTurn failed: ${err}`);
+            }
             this.baselineReady = baselineResult.ok;
             if (!baselineResult.ok) {
                 this.pendingBaselineFailed = true;
@@ -2815,6 +2844,7 @@ ${attachmentLines.join('\n')}`
             }
         }
 
+        this.uiDebugChannel.appendLine(`[EXT][SENDINIT_END] sendInit completed successfully`);
 }
 
 
