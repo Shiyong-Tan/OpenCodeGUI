@@ -103,7 +103,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private currentSessionId?: string;
     private userOwnedSessionIds = new Set<string>();
     private activeSubagentSessionIds = new Set<string>();
-    private subagentProgressBySession = new Map<string, { taskId: string; description: string; startedAt: number }>();
+    private subagentProgressBySession = new Map<string, { taskId: string; description: string; startedAt: number; title?: string; model?: string; latestText?: string; latestTool?: string }>();
 
     private isUserOwnedSession(id: string): boolean {
         return this.userOwnedSessionIds.has(id) || id === this.currentSessionId;
@@ -132,7 +132,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const agents = Array.from(this.subagentProgressBySession.values()).map(entry => ({
             sessionId: entry.taskId,
             description: entry.description,
-            startedAt: entry.startedAt
+            startedAt: entry.startedAt,
+            title: entry.title || '',
+            model: entry.model || '',
+            latestText: entry.latestText || '',
+            latestTool: entry.latestTool || ''
         }));
         const isActive = active !== undefined ? active : agents.length > 0;
         liveWebview.postMessage({ type: 'subagentStatus', active: isActive, agents, count: agents.length });
@@ -2185,17 +2189,25 @@ ${attachmentLines.join('\n')}`
                         break;
                     }
                     try {
-                        const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(absPath));
-                        const editor = await vscode.window.showTextDocument(doc, { preview: true });
-                        const safeLine = Math.min(Math.max(line - 1, 0), Math.max(doc.lineCount - 1, 0));
-                        const lineText = doc.lineAt(safeLine).text;
-                        const safeCol = Math.min(Math.max(col - 1, 0), lineText.length);
-                        const pos = new vscode.Position(safeLine, safeCol);
-                        editor.selection = new vscode.Selection(pos, pos);
-                        editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
-                        this.uiDebugChannel.appendLine(
-                            `EXT: openFileAtLocation | path=${rawPath} | line=${line} | col=${col} | resolvedAbs=${absPath} | ok`
-                        );
+                        // Open .md files in preview mode
+                        if (absPath.endsWith('.md')) {
+                            await vscode.commands.executeCommand('markdown.showPreview', vscode.Uri.file(absPath));
+                            this.uiDebugChannel.appendLine(
+                                `EXT: openFileAtLocation | path=${rawPath} | resolvedAbs=${absPath} | opened in markdown preview`
+                            );
+                        } else {
+                            const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(absPath));
+                            const editor = await vscode.window.showTextDocument(doc, { preview: true });
+                            const safeLine = Math.min(Math.max(line - 1, 0), Math.max(doc.lineCount - 1, 0));
+                            const lineText = doc.lineAt(safeLine).text;
+                            const safeCol = Math.min(Math.max(col - 1, 0), lineText.length);
+                            const pos = new vscode.Position(safeLine, safeCol);
+                            editor.selection = new vscode.Selection(pos, pos);
+                            editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+                            this.uiDebugChannel.appendLine(
+                                `EXT: openFileAtLocation | path=${rawPath} | line=${line} | col=${col} | resolvedAbs=${absPath} | ok`
+                            );
+                        }
                     } catch (error) {
                         this.uiDebugChannel.appendLine(
                             `EXT: openFileAtLocation | path=${rawPath} | line=${line} | col=${col} | resolvedAbs=${absPath} | error=${String(error)}`
@@ -3296,6 +3308,14 @@ ${attachmentLines.join('\n')}`
                     description: '',
                     startedAt: Date.now()
                 });
+                this.client.getSessionInfo(event.sessionId).then((info: any) => {
+                    const entry = this.subagentProgressBySession.get(event.sessionId);
+                    if (entry) {
+                        entry.title = info?.title || '';
+                        entry.model = info?.model || info?.config?.model || '';
+                        this.emitSubagentStatus();
+                    }
+                }).catch(() => {});
                 this.emitSubagentStatus(true);
                 return;
             }
@@ -3308,6 +3328,14 @@ ${attachmentLines.join('\n')}`
                     description: '',
                     startedAt: Date.now()
                 });
+                this.client.getSessionInfo(event.sessionId).then((info: any) => {
+                    const entry = this.subagentProgressBySession.get(event.sessionId);
+                    if (entry) {
+                        entry.title = info?.title || '';
+                        entry.model = info?.model || info?.config?.model || '';
+                        this.emitSubagentStatus();
+                    }
+                }).catch(() => {});
                 this.emitSubagentStatus(true);
                 return;
             }
@@ -3347,8 +3375,41 @@ ${attachmentLines.join('\n')}`
         }
 
         if (event.sessionId && this.activeSubagentSessionIds.has(event.sessionId)) {
+            // Intercept subagent events to update progress
+            if (event.type === 'text' && typeof event.text === 'string') {
+                const entry = this.subagentProgressBySession.get(event.sessionId);
+                if (entry) {
+                    entry.latestText = event.text.slice(-80);
+                    this.emitSubagentStatus();
+                }
+            }
+            if (event.type === 'toolPatch' && typeof event.text === 'string') {
+                const entry = this.subagentProgressBySession.get(event.sessionId);
+                if (entry) {
+                    const match = event.text.match(/(?:---\s+a\/|\+\+\+\s+b\/|diff\s+--git\s+[^\s]+\s+b\/)([^\s\n]+)/);
+                    const filename = match ? pathModule.basename(match[1]) : '';
+                    entry.latestTool = 'Applying patch' + (filename ? ': ' + filename : '');
+                    this.emitSubagentStatus();
+                }
+            }
+            if (event.type === 'diff' && typeof event.text === 'string') {
+                const entry = this.subagentProgressBySession.get(event.sessionId);
+                if (entry) {
+                    const match = event.text.match(/(?:---\s+a\/|\+\+\+\s+b\/|diff\s+--git\s+[^\s]+\s+b\/)([^\s\n]+)/);
+                    const filename = match ? pathModule.basename(match[1]) : '';
+                    entry.latestTool = 'Editing ' + (filename || 'file');
+                    this.emitSubagentStatus();
+                }
+            }
             if (event.type === 'files' && event.files && event.files.length && this.currentSessionId) {
                 this.client.queueSubagentChanges(this.currentSessionId, event.files);
+                const entry = this.subagentProgressBySession.get(event.sessionId!);
+                if (entry && event.files && event.files.length) {
+                    const firstFile = typeof event.files[0] === 'string' ? event.files[0] : (event.files[0] as any).path || '';
+                    const filename = firstFile ? pathModule.basename(firstFile) : 'file';
+                    entry.latestTool = 'Writing ' + filename;
+                    this.emitSubagentStatus();
+                }
                 const liveWebview = this._view?.webview || webview;
                 event.files.forEach((file, index) => {
                     const fileChange = file as FileSnapshot & { changes?: unknown };
@@ -3356,6 +3417,22 @@ ${attachmentLines.join('\n')}`
                         this.openDiffForFileChange(fileChange, liveWebview, index);
                     }
                 });
+                
+                // Detect .md files and send plan file card
+                const mdFiles = event.files
+                    .map(f => (typeof f === 'string' ? f : (f as any).path))
+                    .filter((path): path is string => typeof path === 'string' && path.endsWith('.md'));
+                if (mdFiles.length) {
+                    const anchorMessageId = this.client.getTurnAssistantMsgId(this.currentSessionId);
+                    if (anchorMessageId) {
+                        liveWebview.postMessage({
+                            type: 'planFileCard',
+                            files: mdFiles,
+                            anchorMessageId,
+                            sessionId: this.currentSessionId
+                        });
+                    }
+                }
             }
             return;
         }
@@ -3570,6 +3647,22 @@ ${attachmentLines.join('\n')}`
             const { file: active, index } = picked;
             const liveWebview = this._view?.webview || webview;
             this.openDiffForFileChange(active, liveWebview, index);
+            
+            // Detect .md files and send plan file card
+            const mdFiles = event.files
+                .map(f => (typeof f === 'string' ? f : (f as any).path))
+                .filter((path): path is string => typeof path === 'string' && path.endsWith('.md'));
+            if (mdFiles.length && this.currentSessionId) {
+                const anchorMessageId = this.client.getTurnAssistantMsgId(this.currentSessionId);
+                if (anchorMessageId) {
+                    liveWebview.postMessage({
+                        type: 'planFileCard',
+                        files: mdFiles,
+                        anchorMessageId,
+                        sessionId: this.currentSessionId
+                    });
+                }
+            }
             return;
         }
 

@@ -462,7 +462,12 @@ body {
     color: var(--vscode-descriptionForeground, #888);
     opacity: 0.8;
     padding: 4px 0 2px;
-    font-style: italic;
+    font-style: normal;
+}
+
+.turn-divider {
+    border-top: 1px solid var(--vscode-widget-border, rgba(127,127,127,0.2));
+    margin: 8px 0 4px 0;
 }
 
 
@@ -700,6 +705,46 @@ body {
     width: 100%;
     box-sizing: border-box;
     margin-right: 0;
+}
+
+/* Plan file card */
+.plan-file-card {
+    border: 1px solid var(--vscode-widget-border);
+    border-radius: 8px;
+    padding: 10px;
+    margin-top: 10px;
+    margin-right: 8px;
+    background: var(--vscode-editor-background);
+    color: var(--vscode-foreground);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.12);
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.plan-file-card-header {
+    font-weight: 600;
+    font-size: var(--card-header-size);
+    margin-bottom: 8px;
+}
+
+.plan-file-card-files {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.plan-file-name {
+    color: var(--vscode-textLink-foreground);
+    cursor: pointer;
+    font-size: 0.9em;
+    padding: 2px 4px;
+    border-radius: 4px;
+    transition: background 0.15s;
+}
+
+.plan-file-name:hover {
+    background: var(--vscode-list-hoverBackground);
+    text-decoration: underline;
 }
 
 .conflict-card-header {

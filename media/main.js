@@ -76,6 +76,7 @@ let headerStatusText = '';
 let textMeasureCanvas = null;
 
 let subagentIntervals = new Map();
+let subagentCardsContainer = null;
 const SEND_BLOCK_NOTICE = 'Please wait while the previous response finishes.';
 
 function renderHeaderTitle() {
@@ -2636,6 +2637,49 @@ function renderMessageElement(message, renderedSet) {
         return;
     }
 
+    // Plan file card rendering
+    if (message.meta?.kind === 'planFile') {
+        const files = Array.isArray(message.meta?.files) ? message.meta.files : [];
+        if (!files.length) return;
+
+        const container = document.createElement('div');
+        container.className = 'plan-file-card';
+        container.dataset.messageId = message.id;
+
+        const header = document.createElement('div');
+        header.className = 'plan-file-card-header';
+        header.textContent = '📄 Plan file';
+        container.appendChild(header);
+
+        const fileList = document.createElement('div');
+        fileList.className = 'plan-file-card-files';
+
+        for (const rawPath of files) {
+            if (typeof rawPath !== 'string' || !rawPath.length) continue;
+            const normalized = rawPath.replace(/\\/g, '/');
+            const parts = normalized.split('/');
+            const filename = parts.pop() || normalized;
+
+            const fileSpan = document.createElement('span');
+            fileSpan.className = 'plan-file-name';
+            fileSpan.textContent = filename;
+            fileSpan.dataset.path = rawPath;
+            fileSpan.addEventListener('click', () => {
+                vscode.postMessage({
+                    type: 'openFileAtLocation',
+                    path: rawPath,
+                    line: 1,
+                    col: 1
+                });
+            });
+            fileList.appendChild(fileSpan);
+        }
+
+        container.appendChild(fileList);
+        chatContainer.appendChild(container);
+        return;
+    }
+
         if (message.meta?.kind === 'undoSegmentPlaceholder' || message.id.startsWith('system:undo-seg:')) {
             const session = getSessionOrNull(activeSessionId);
             const noticeKey = message.meta?.noticeKey || message.id.replace('system:undo-seg:', '');
@@ -2748,6 +2792,12 @@ function renderMessageElement(message, renderedSet) {
             div.appendChild(content);
             chatContainer.appendChild(div);
             return;
+        }
+
+        if (message.role === 'user' && chatContainer.querySelectorAll('.message.user').length > 0) {
+            const divider = document.createElement('div');
+            divider.className = 'turn-divider';
+            chatContainer.appendChild(divider);
         }
 
         const messageType = message.role === 'assistant'
@@ -3096,7 +3146,21 @@ function renderMessageElement(message, renderedSet) {
             if (derivedHiddenSet.has(id)) continue;
             renderMessageElement(msg, renderedSet);
             renderKeys.push(id);
-        }
+            
+            // Inject plan file card if present
+            if (session.planFileCards?.has(id)) {
+                const planData = session.planFileCards.get(id);
+                const planMsg = {
+                    id: `planfile:${id}`,
+                    role: 'system',
+                    text: '',
+                    meta: {
+                        kind: 'planFile',
+                        files: planData.files
+                    }
+                };
+                renderMessageElement(planMsg, renderedSet);
+            }
 
         if (lastConflictPayload && lastConflictPayload.sessionId === activeSessionId) {
             renderConflictCard(lastConflictPayload);
@@ -4489,21 +4553,32 @@ window.addEventListener('message', (event) => {
                     }
                 }
 
-                let cardsContainer = document.getElementById('subagent-cards');
-                if (!cardsContainer && subagentEl && subagentEl.parentNode) {
-                    cardsContainer = document.createElement('div');
-                    cardsContainer.id = 'subagent-cards';
-                    cardsContainer.className = 'subagent-cards-container hidden';
-                    subagentEl.parentNode.insertBefore(cardsContainer, subagentEl.nextSibling);
+                // Create/reuse the subagent cards container
+                if (!subagentCardsContainer) {
+                    subagentCardsContainer = document.createElement('div');
+                    subagentCardsContainer.id = 'subagent-cards';
+                    subagentCardsContainer.className = 'subagent-cards-container in-chat hidden';
                 }
 
-                if (!cardsContainer) break;
+                if (!subagentCardsContainer) break;
 
                 const agents = Array.isArray(message.agents) ? message.agents : [];
                 const currentSessionIds = new Set();
 
                 if (active && agents.length > 0) {
-                    cardsContainer.classList.remove('hidden');
+                    subagentCardsContainer.classList.remove('hidden');
+                    
+                    // Insert cards below thinking bubble
+                    const session = getSessionOrNull(activeSessionId);
+                    if (session && session.thinkingId) {
+                        const thinkingBubble = document.getElementById(session.thinkingId);
+                        if (thinkingBubble && thinkingBubble.parentNode && !subagentCardsContainer.parentNode) {
+                            thinkingBubble.parentNode.insertBefore(subagentCardsContainer, thinkingBubble.nextSibling);
+                        }
+                    } else if (!subagentCardsContainer.parentNode) {
+                        // Fallback: append to chat container
+                        if (chatContainer) chatContainer.appendChild(subagentCardsContainer);
+                    }
 
                     agents.forEach(agent => {
                         const sessionId = agent.sessionId;
@@ -5449,6 +5524,21 @@ window.addEventListener('message', (event) => {
                     }
                 }
                 if (updated) {
+                    window.__oc?.renderFromState?.();
+                }
+                break;
+            }
+            case 'planFileCard': {
+                const sessionId = getEventSessionId(message, 'planFileCard');
+                if (!sessionId) break;
+                const session = getSessionState(sessionId, true);
+                if (!session.planFileCards) {
+                    session.planFileCards = new Map();
+                }
+                const anchorMessageId = message.anchorMessageId;
+                const files = Array.isArray(message.files) ? message.files : [];
+                if (anchorMessageId && files.length) {
+                    session.planFileCards.set(anchorMessageId, { files, sessionId });
                     window.__oc?.renderFromState?.();
                 }
                 break;
