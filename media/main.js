@@ -2631,6 +2631,44 @@ function renderMessageElement(message, renderedSet) {
         return;
     }
 
+    if (message.meta?.kind === 'planFile') {
+        const files = Array.isArray(message.meta?.files) ? message.meta.files : [];
+        if (!files.length) return;
+
+        const container = document.createElement('div');
+        container.className = 'plan-file-card';
+        container.dataset.messageId = message.id;
+
+        const header = document.createElement('div');
+        header.className = 'plan-file-card-header';
+        header.textContent = '📋 Plan File';
+        container.appendChild(header);
+
+        const body = document.createElement('div');
+        body.className = 'plan-file-card-body';
+
+        for (const filePath of files) {
+            if (typeof filePath !== 'string' || !filePath.length) continue;
+
+            const fileSpan = document.createElement('span');
+            fileSpan.className = 'plan-file-name';
+            fileSpan.textContent = filePath;
+            fileSpan.style.cursor = 'pointer';
+            fileSpan.addEventListener('click', () => {
+                vscode.postMessage({
+                    type: 'openFileAtLocation',
+                    filePath: filePath
+                });
+            });
+
+            body.appendChild(fileSpan);
+        }
+
+        container.appendChild(body);
+        chatContainer.appendChild(container);
+        return;
+    }
+
         if (message.meta?.kind === 'undoSegmentPlaceholder' || message.id.startsWith('system:undo-seg:')) {
             const session = getSessionOrNull(activeSessionId);
             const noticeKey = message.meta?.noticeKey || message.id.replace('system:undo-seg:', '');
@@ -5342,6 +5380,34 @@ window.addEventListener('message', (event) => {
                 }
                 break;
             }
+            case 'planFileCard': {
+                const sessionId = getEventSessionId(message, 'planFileCard');
+                if (!sessionId) break;
+                const session = getSessionState(sessionId, true);
+                const files = Array.isArray(message.files)
+                    ? message.files.filter((item) => typeof item === 'string' && item.length)
+                    : [];
+                const anchorMessageId = message.anchorMessageId || null;
+                if (!files.length || !anchorMessageId) break;
+
+                if (!session.planFileCards) {
+                    session.planFileCards = new Map();
+                }
+                session.planFileCards.set(anchorMessageId, files);
+
+                upsertMessage(session, {
+                    id: `system:planFile:${anchorMessageId}`,
+                    role: 'system',
+                    text: '',
+                    meta: {
+                        kind: 'planFile',
+                        files: files,
+                        anchorMessageId: anchorMessageId
+                    }
+                });
+                window.__oc?.renderFromState?.();
+                break;
+            }
             case 'messageAppend': {
                 const sessionId = getEventSessionId(message, 'messageAppend');
                 if (!sessionId) break;
@@ -6371,6 +6437,8 @@ function renderQuestionOverlayModal() {
 
     const card = document.createElement('div');
     card.className = 'conflict-card question-card question-overlay-card';
+    card.style.maxHeight = '60vh';
+    card.style.overflowY = 'auto';
 
     const header = document.createElement('div');
     header.className = 'conflict-card-header';
@@ -6379,7 +6447,8 @@ function renderQuestionOverlayModal() {
 
     const prompt = document.createElement('div');
     prompt.className = 'question-card-question';
-    prompt.textContent = current.prompt;
+    renderMarkdownInto(prompt, current.prompt || '');
+    prompt.classList.add('markdown-body');
     card.appendChild(prompt);
 
     const actions = document.createElement('div');
@@ -6435,6 +6504,38 @@ function renderQuestionOverlayModal() {
         });
         actions.appendChild(submit);
     }
+
+    // Add free-text textarea input
+    const freeTextRow = document.createElement('div');
+    freeTextRow.className = 'question-free-text-row';
+    const textarea = document.createElement('textarea');
+    textarea.className = 'question-free-text-input';
+    textarea.placeholder = 'Or type your answer...';
+    textarea.rows = 1;
+    
+    // Auto-expand textarea up to 3 rows
+    textarea.addEventListener('input', () => {
+        const lines = (textarea.value.match(/\n/g) || []).length + 1;
+        textarea.rows = Math.min(lines, 3);
+    });
+    
+    // Handle Enter key to submit, Shift+Enter for newline
+    textarea.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            const text = textarea.value.trim();
+            if (text) {
+                const buttons = card.querySelectorAll('button.question-card-btn,button.question-card-submit');
+                for (const btn of buttons) btn.disabled = true;
+                commitCurrentQuestionAnswers([text]);
+            }
+            return;
+        }
+    });
+    
+    freeTextRow.appendChild(textarea);
+    actions.appendChild(freeTextRow);
+
 
     card.appendChild(actions);
     wrapper.appendChild(card);

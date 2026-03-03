@@ -1870,3 +1870,97 @@ select#mode-select {
     opacity: 0.85;
     font-style: italic;
 }
+
+/* ==============================================================================================
+   UI Consolidation V2 - Wave 1/2/3 Additions
+   ============================================================================================== */
+
+/* --- Streaming Animation --- */
+@keyframes bubble-pulse {
+  0% { box-shadow: 0 0 0 0px rgba(0, 122, 204, 0.2); }
+  100% { box-shadow: 0 0 0 10px rgba(0, 122, 204, 0); }
+}
+
+.message.streaming {
+  animation: bubble-pulse 1.5s infinite;
+}
+
+/* --- Subagent Cards (Alias/New) --- */
+.subagent-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 4px;
+    width: 100%;
+}
+
+.subagent-cards.in-chat {
+    margin: 4px 0 4px 16px;
+    border-left: 2px solid var(--vscode-widget-border, rgba(127,127,127,0.3));
+    padding-left: 8px;
+}
+
+/* --- Plan File Card Body --- */
+.plan-file-card-body {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+/* --- Todo List --- */
+.todo-list {
+    margin-top: 8px;
+    border: 1px solid var(--vscode-widget-border);
+    border-radius: 6px;
+    background: var(--vscode-editor-background);
+    padding: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.todo-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    font-size: 0.9em;
+    padding: 2px 4px;
+    border-radius: 4px;
+    color: var(--vscode-foreground);
+}
+
+.todo-check {
+    font-family: monospace;
+    font-weight: bold;
+    flex-shrink: 0;
+    width: 1.2em;
+    text-align: center;
+}
+
+.todo-content {
+    flex: 1;
+    word-break: break-word;
+}
+
+/* Todo Status Variants */
+.todo-pending {
+    opacity: 0.8;
+}
+
+.todo-in_progress {
+    color: var(--vscode-textLink-foreground);
+    font-weight: 500;
+    background: var(--vscode-list-hoverBackground);
+}
+
+.todo-completed {
+    color: var(--vscode-descriptionForeground);
+    text-decoration: line-through;
+    opacity: 0.7;
+}
+
+.todo-cancelled {
+    color: var(--vscode-errorForeground);
+    text-decoration: line-through;
+    opacity: 0.6;
+}
