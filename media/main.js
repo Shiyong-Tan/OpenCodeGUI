@@ -6482,7 +6482,7 @@ function renderQuestionOverlayModal() {
 
     const prompt = document.createElement('div');
     prompt.className = 'question-card-question';
-    prompt.textContent = current.prompt;
+    renderMarkdownInto(prompt, current.prompt || '');
     card.appendChild(prompt);
 
     const actions = document.createElement('div');
