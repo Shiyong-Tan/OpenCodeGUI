@@ -3737,6 +3737,12 @@ export class OpenCodeClient {
             this.logUiDebug(`EXT: finalizing.ignore | sessionId=${sessionId} | msgId=${String(info?.id || 'null')} | reason=summary-compaction`);
             return false;
         }
+        const expectedAgent = this.expectedMainAgentBySession.get(sessionId);
+        const idleReceived = this.sessionIdleReceivedBySession.has(sessionId);
+        if (expectedAgent && !idleReceived && typeof info.agent === 'string' && info.agent !== expectedAgent) {
+            this.logUiDebug(`EXT: turn.final.skip | reason=agent-mismatch | agent=${info.agent} | expected=${expectedAgent} | sessionId=${sessionId}`);
+            return false;
+        }
         if (!this.isCompletionFinal(info)) return false;
         const parentId = info?.parentID;
         const msgId = info?.id;
@@ -4939,6 +4945,7 @@ export class OpenCodeClient {
             payload.model = modelRef;
         }
         payload.agent = options.mode || 'plan';
+        this.expectedMainAgentBySession.set(sessionId, options.mode || 'plan');
         if (options.files && options.files.length) {
             payload.parts.push(...options.files.map((file) => ({ type: 'file', path: file })));
         }
