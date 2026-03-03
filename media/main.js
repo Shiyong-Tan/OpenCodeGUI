@@ -74,9 +74,9 @@ let systemNoticeText = '';
 let baseSessionTitle = 'OpenCode: Chat';
 let headerStatusText = '';
 let textMeasureCanvas = null;
-
 let subagentIntervals = new Map();
 let subagentCardsContainer = null;
+
 const SEND_BLOCK_NOTICE = 'Please wait while the previous response finishes.';
 
 function renderHeaderTitle() {
@@ -647,13 +647,7 @@ function upsertMessage(session, payload) {
         vscode.postMessage({ type: 'ui-debug', payload: ['[WV][FILTER]', 'DCP-message-filtered', `id=${payload.id}`] });
         return;
     }
-    // Filter out system-reminder protocol messages - only suppress for user-role messages (not assistant)
-    if (payload.role === 'user' && payload.text && /<system-reminder/i.test(payload.text)) {
-        vscode.postMessage({ type: 'ui-debug', payload: ['[WV][FILTER]', 'system-reminder-filtered', `id=${payload.id}`] });
-        return;
-    }
     const existing = session.messagesById.get(payload.id);
-
     if (existing) {
         const next = {
             ...existing,
@@ -2637,49 +2631,6 @@ function renderMessageElement(message, renderedSet) {
         return;
     }
 
-    // Plan file card rendering
-    if (message.meta?.kind === 'planFile') {
-        const files = Array.isArray(message.meta?.files) ? message.meta.files : [];
-        if (!files.length) return;
-
-        const container = document.createElement('div');
-        container.className = 'plan-file-card';
-        container.dataset.messageId = message.id;
-
-        const header = document.createElement('div');
-        header.className = 'plan-file-card-header';
-        header.textContent = '📄 Plan file';
-        container.appendChild(header);
-
-        const fileList = document.createElement('div');
-        fileList.className = 'plan-file-card-files';
-
-        for (const rawPath of files) {
-            if (typeof rawPath !== 'string' || !rawPath.length) continue;
-            const normalized = rawPath.replace(/\\/g, '/');
-            const parts = normalized.split('/');
-            const filename = parts.pop() || normalized;
-
-            const fileSpan = document.createElement('span');
-            fileSpan.className = 'plan-file-name';
-            fileSpan.textContent = filename;
-            fileSpan.dataset.path = rawPath;
-            fileSpan.addEventListener('click', () => {
-                vscode.postMessage({
-                    type: 'openFileAtLocation',
-                    path: rawPath,
-                    line: 1,
-                    col: 1
-                });
-            });
-            fileList.appendChild(fileSpan);
-        }
-
-        container.appendChild(fileList);
-        chatContainer.appendChild(container);
-        return;
-    }
-
         if (message.meta?.kind === 'undoSegmentPlaceholder' || message.id.startsWith('system:undo-seg:')) {
             const session = getSessionOrNull(activeSessionId);
             const noticeKey = message.meta?.noticeKey || message.id.replace('system:undo-seg:', '');
@@ -2794,12 +2745,6 @@ function renderMessageElement(message, renderedSet) {
             return;
         }
 
-        if (message.role === 'user' && chatContainer.querySelectorAll('.message.user').length > 0) {
-            const divider = document.createElement('div');
-            divider.className = 'turn-divider';
-            chatContainer.appendChild(divider);
-        }
-
         const messageType = message.role === 'assistant'
             ? 'bot'
             : message.role === 'user'
@@ -2832,18 +2777,6 @@ function renderMessageElement(message, renderedSet) {
         }
         div.appendChild(content);
 
-        // Remove existing status div if any
-        const existingStatus = div.querySelector('.message-status');
-        if (existingStatus) existingStatus.remove();
-        // Add status div when thinking + statusText
-        if (message.meta?.isThinking && message.meta?.statusText) {
-            const statusDiv = document.createElement('div');
-            statusDiv.className = 'message-status';
-            statusDiv.textContent = message.meta.statusText;
-            div.appendChild(statusDiv);
-        }
-
-
         if (Array.isArray(message.meta?.images) && message.meta.images.length) {
             const imageWrap = document.createElement('div');
             imageWrap.className = 'message-images';
@@ -2867,6 +2800,20 @@ function renderMessageElement(message, renderedSet) {
             }
         }
 
+        // Insert turn divider before user messages (except first)
+        if (message.role === 'user' && renderedSet && renderedSet.size > 0) {
+            const hasUserMessages = Array.from(renderedSet).some(id => {
+                const session = getSessionState(activeSessionId);
+                if (!session) return false;
+                const msg = session.messagesById.get(id);
+                return msg && msg.role === 'user';
+            });
+            if (hasUserMessages) {
+                const divider = document.createElement('div');
+                divider.className = 'turn-divider';
+                chatContainer.appendChild(divider);
+            }
+        }
         if (message.role === 'user') {
             const actions = document.createElement('div');
             actions.className = 'message-actions';
@@ -2918,16 +2865,13 @@ function renderMessageElement(message, renderedSet) {
 
     function stripAttachmentManifest(text) {
         if (!text) return text;
-        // Strip Prometheus mode system suffix before displaying to user
-        const prometheusSuffix = '\n\nPlease use "question tool" to communicate. Consult Metis for making plans. In the plan, require the executor to make changes directly in the current working directory, instead of in a new working directory.';
-        let stripped = text.endsWith(prometheusSuffix) ? text.slice(0, text.length - prometheusSuffix.length) : text;
         const marker = '---\nAttachments (workspace files; read from disk; DO NOT use any URL):';
-        const start = stripped.indexOf(marker);
-        if (start === -1) return stripped;
-        const end = stripped.indexOf('\n---', start + marker.length);
-        if (end === -1) return stripped;
-        const before = stripped.slice(0, start).trimEnd();
-        const after = stripped.slice(end + '\n---'.length).trimStart();
+        const start = text.indexOf(marker);
+        if (start === -1) return text;
+        const end = text.indexOf('\n---', start + marker.length);
+        if (end === -1) return text;
+        const before = text.slice(0, start).trimEnd();
+        const after = text.slice(end + '\n---'.length).trimStart();
         return [before, after].filter(Boolean).join('\n\n');
     }
 
@@ -3146,29 +3090,8 @@ function renderMessageElement(message, renderedSet) {
             if (derivedHiddenSet.has(id)) continue;
             renderMessageElement(msg, renderedSet);
             renderKeys.push(id);
-            
-            // Inject plan file card if present
-            if (session.planFileCards?.has(id)) {
-                const planData = session.planFileCards.get(id);
-                const planMsg = {
-                    id: `planfile:${id}`,
-                    role: 'system',
-                    text: '',
-                    meta: {
-                        kind: 'planFile',
-                        files: planData.files
-                    }
-                };
-                renderMessageElement(planMsg, renderedSet);
-            }
-
-        // Re-insert subagent cards container if active
-        if (subagentCardsContainer && session?.thinkingId) {
-            const thinkingBubble = document.getElementById(session.thinkingId);
-            if (thinkingBubble?.parentNode && !subagentCardsContainer.parentNode) {
-                thinkingBubble.parentNode.insertBefore(subagentCardsContainer, thinkingBubble.nextSibling);
-            }
         }
+
         if (lastConflictPayload && lastConflictPayload.sessionId === activeSessionId) {
             renderConflictCard(lastConflictPayload);
         }
@@ -4024,12 +3947,8 @@ function applyPromptToSession(sessionId, payload) {
             const thinking = upsertMessage(session, {
                 id: msgId,
                 role: message.role || 'assistant',
-                text: message.isStatusUpdate === true ? 'Thinking...' : (message.lastText || 'Thinking...'),
-                meta: { 
-                    isThinking: true, 
-                    internalId: backendId,
-                    statusText: message.isStatusUpdate === true ? (message.lastText || '') : null
-                }
+                text: message.lastText || 'Thinking...',
+                meta: { isThinking: true, internalId: backendId }
             });
             session.thinkingId = thinking.id;
             vscode.postMessage({ type: 'ui-debug', payload: ['handleAssistantMeta', 'new-thinking', msgId] });
@@ -4050,19 +3969,14 @@ function applyPromptToSession(sessionId, payload) {
                 vscode.postMessage({ type: 'ui-debug', payload: ['handleAssistantMeta', 'drop-finalized-target', targetId] });
                 return;
             }
-            const hasStatusChange = typeof message.lastText === 'string' && message.lastText.trim().length > 0 && message.lastText.trim() !== 'Thinking...';
+            const nextText = typeof message.lastText === 'string' ? message.lastText : target.text;
+            const normalized = typeof nextText === 'string' ? nextText.trim() : '';
+            const hasStatusChange = normalized.length > 0 && normalized !== 'Thinking...';
             if (hasStatusChange) {
                 // agent timeout notice removed
             }
-            if (message.isStatusUpdate === true) {
-                // Status-only update: store in meta, do NOT touch target.text
-                target.meta = { ...target.meta, isThinking: true, statusText: message.lastText || '' };
-            } else {
-                // Real text update: set target.text and clear status
-                const nextText = typeof message.lastText === 'string' ? message.lastText : target.text;
-                target.text = nextText;
-                target.meta = { ...target.meta, isThinking: true, statusText: null };
-            }
+            target.text = nextText;
+            target.meta = { ...target.meta, internalId: backendId, isThinking: true };
             vscode.postMessage({ type: 'ui-debug', payload: ['handleAssistantMeta', 'merged', targetId] });
         }
 
@@ -4074,12 +3988,6 @@ function applyPromptToSession(sessionId, payload) {
         // agent timeout notice removed
         const backendId = getEventMessageId(message);
         const chunkText = getEventChunkText(message);
-        // Skip late-arriving chunks after chatDone
-        if (!session.thinkingId && !session.currentTurnAssistantKey && typeof message?.assistantMsgId !== 'string') {
-            vscode.postMessage({ type: 'ui-debug', payload: ['handleChatChunk', 'drop-late-chunk-after-done'] });
-            return;
-        }
-
 
     const msgId = typeof message?.assistantMsgId === 'string' ? message.assistantMsgId : null;
     if (msgId) {
@@ -4145,21 +4053,14 @@ function applyPromptToSession(sessionId, payload) {
         const session = getSessionState(sessionId);
         if (!session) return;
         // agent timeout notice removed
-        const oldThinkingId = session.thinkingId;
     if (session.thinkingId && session.messagesById.has(session.thinkingId)) {
         const msg = session.messagesById.get(session.thinkingId);
         msg.meta.isThinking = false;
-        msg.meta.statusText = null;
             if (msg.text === 'Thinking...') {
                 msg.text = '';
             }
         session.thinkingId = null;
         console.log('[Thinking] chatDone cleared pending');
-    }
-    // Clear subagent cards container
-    if (subagentCardsContainer) {
-        subagentCardsContainer.remove();
-        subagentCardsContainer = null;
     }
     const resolvedFinal =
         message?.lastAssistantMsgId ||
@@ -4192,18 +4093,6 @@ function applyPromptToSession(sessionId, payload) {
         session.currentTurnAssistantMsgId = null;
         session.currentTurnAssistantKey = null;
     }
-    // Remove ghost tmp bubble if upgrade didn't replace it
-    if (oldThinkingId && session.messagesById.has(oldThinkingId)) {
-        const isTmpId = oldThinkingId.startsWith('tmp:') || oldThinkingId.startsWith('local-');
-        if (isTmpId && !resolvedFinal) {
-            removeMessageFromSession(session, oldThinkingId);
-            vscode.postMessage({
-                type: 'ui-debug',
-                payload: ['[CHATDONE] Removed ghost tmp bubble', oldThinkingId]
-            });
-        }
-    }
-
     updateSendGate();
     assertInvariants(sessionId, 'chatDone');
 }
@@ -4572,169 +4461,15 @@ window.addEventListener('message', (event) => {
                 const active = Boolean(message.active);
                 const count = typeof message.count === 'number' ? Math.max(0, message.count) : 0;
                 const subagentEl = document.getElementById('subagent-indicator');
-
-                if (subagentEl) {
-                    if (active && count > 0) {
-                        const plural = count > 1 ? 's' : '';
-                        subagentEl.textContent = `⚡ ${count} subagent${plural} working...`;
-                        subagentEl.classList.remove('hidden');
-                    } else {
-                        subagentEl.textContent = '';
-                        subagentEl.classList.add('hidden');
-                    }
-                }
-
-                // Create/reuse the subagent cards container
-                if (!subagentCardsContainer) {
-                    subagentCardsContainer = document.createElement('div');
-                    subagentCardsContainer.id = 'subagent-cards';
-                    subagentCardsContainer.className = 'subagent-cards-container in-chat hidden';
-                }
-
-                if (!subagentCardsContainer) break;
-
-                const agents = Array.isArray(message.agents) ? message.agents : [];
-                const currentSessionIds = new Set();
-
-                if (active && agents.length > 0) {
-                    subagentCardsContainer.classList.remove('hidden');
-                    
-                    // Insert cards below thinking bubble
-                    const session = getSessionOrNull(activeSessionId);
-                    if (session && session.thinkingId) {
-                        const thinkingBubble = document.getElementById(session.thinkingId);
-                        if (thinkingBubble && thinkingBubble.parentNode && !subagentCardsContainer.parentNode) {
-                            thinkingBubble.parentNode.insertBefore(subagentCardsContainer, thinkingBubble.nextSibling);
-                        }
-                    } else if (!subagentCardsContainer.parentNode) {
-                        // Fallback: append to chat container
-                        if (chatContainer) chatContainer.appendChild(subagentCardsContainer);
-                    }
-
-                    agents.forEach(agent => {
-                        const sessionId = agent.sessionId;
-                        currentSessionIds.add(sessionId);
-
-                        let card = subagentCardsContainer.querySelector(`.subagent-card[data-session-id="${sessionId}"]`);
-                        if (!card) {
-                            card = document.createElement('div');
-                            card.className = 'subagent-card';
-                            card.dataset.sessionId = sessionId;
-
-                            const nameEl = document.createElement('div');
-                            nameEl.className = 'subagent-name';
-                            nameEl.textContent = agent.title || agent.description || agent.sessionId || 'Running...';
-
-                            const timeEl = document.createElement('div');
-                            timeEl.className = 'subagent-elapsed';
-                            timeEl.textContent = '0s';
-                            timeEl.dataset.startedAt = agent.startedAt || '';
-
-                            const statusEl = document.createElement('div');
-                            statusEl.className = 'subagent-status';
-                            statusEl.textContent = agent.model || '';
-
-                            const actionEl = document.createElement('div');
-                            actionEl.className = 'subagent-action';
-                            actionEl.textContent = agent.latestTool || '';
-
-                            const latestTextEl = document.createElement('div');
-                            latestTextEl.className = 'subagent-latest-text';
-                            const txt = agent.latestText || '';
-                            latestTextEl.textContent = txt.length > 80 ? txt.slice(0, 80) + '...' : txt;
-
-                            card.appendChild(nameEl);
-                            if (agent.model) card.appendChild(statusEl);
-                            if (agent.latestTool) card.appendChild(actionEl);
-                            if (agent.latestText) card.appendChild(latestTextEl);
-                            card.appendChild(timeEl);
-                            subagentCardsContainer.appendChild(card);
-                        } else {
-                            const nameEl = card.querySelector('.subagent-name');
-                            const statusEl = card.querySelector('.subagent-status');
-                            const actionEl = card.querySelector('.subagent-action');
-                            const latestTextEl = card.querySelector('.subagent-latest-text');
-                            
-                            if (nameEl) nameEl.textContent = agent.title || agent.description || agent.sessionId || 'Running...';
-                            
-                            if (statusEl && agent.model) {
-                                statusEl.textContent = agent.model;
-                            } else if (!statusEl && agent.model) {
-                                const newStatus = document.createElement('div');
-                                newStatus.className = 'subagent-status';
-                                newStatus.textContent = agent.model;
-                                card.insertBefore(newStatus, nameEl.nextSibling);
-                            }
-                            
-                            if (actionEl && agent.latestTool) {
-                                actionEl.textContent = agent.latestTool;
-                            } else if (!actionEl && agent.latestTool) {
-                                const newAction = document.createElement('div');
-                                newAction.className = 'subagent-action';
-                                newAction.textContent = agent.latestTool;
-                                const insertAfter = statusEl || nameEl;
-                                card.insertBefore(newAction, insertAfter.nextSibling);
-                            }
-                            
-                            if (latestTextEl && agent.latestText) {
-                                const txt = agent.latestText;
-                                latestTextEl.textContent = txt.length > 80 ? txt.slice(0, 80) + '...' : txt;
-                            } else if (!latestTextEl && agent.latestText) {
-                                const newText = document.createElement('div');
-                                newText.className = 'subagent-latest-text';
-                                const txt = agent.latestText;
-                                newText.textContent = txt.length > 80 ? txt.slice(0, 80) + '...' : txt;
-                                const insertAfter = actionEl || statusEl || nameEl;
-                                card.insertBefore(newText, insertAfter.nextSibling);
-                            }
-                        }
-
-                        if (!subagentIntervals.has(sessionId)) {
-                            const startedAt = agent.startedAt || Date.now();
-                            const updateTime = () => {
-                                const now = Date.now();
-                                const elapsed = Math.max(0, now - startedAt);
-                                const seconds = Math.floor(elapsed / 1000);
-                                const timeEl = card.querySelector('.subagent-elapsed');
-                                if (timeEl) {
-                                    if (seconds < 60) {
-                                        timeEl.textContent = `${seconds}s`;
-                                    } else {
-                                        const m = Math.floor(seconds / 60);
-                                        const s = seconds % 60;
-                                        timeEl.textContent = `${m}m ${s}s`;
-                                    }
-                                } else {
-                                    clearInterval(subagentIntervals.get(sessionId));
-                                    subagentIntervals.delete(sessionId);
-                                }
-                            };
-                            updateTime();
-                            const intervalId = setInterval(updateTime, 1000);
-                            subagentIntervals.set(sessionId, intervalId);
-                        }
-                    });
+                if (!subagentEl) break;
+                if (active && count > 0) {
+                    const plural = count > 1 ? 's' : '';
+                    subagentEl.textContent = `⚡ ${count} subagent${plural} working...`;
+                    subagentEl.classList.remove('hidden');
                 } else {
-                    subagentCardsContainer.classList.add('hidden');
+                    subagentEl.textContent = '';
+                    subagentEl.classList.add('hidden');
                 }
-
-                const allCards = subagentCardsContainer.querySelectorAll('.subagent-card');
-                allCards.forEach(card => {
-                    const sessionId = card.dataset.sessionId;
-                    if (!currentSessionIds.has(sessionId)) {
-                        if (subagentIntervals.has(sessionId)) {
-                            clearInterval(subagentIntervals.get(sessionId));
-                            subagentIntervals.delete(sessionId);
-                        }
-                        card.remove();
-                    }
-                });
-
-                if (!active || agents.length === 0) {
-                    subagentIntervals.forEach(intervalId => clearInterval(intervalId));
-                    subagentIntervals.clear();
-                }
-
                 break;
             }
             case 'resetUiState': {
@@ -5148,6 +4883,18 @@ window.addEventListener('message', (event) => {
                 const sessionId = getEventSessionId(message, 'systemNoticeClear');
                 if (sessionId && sessionId !== activeSessionId) break;
                 setSystemNotice('');
+                break;
+            }
+            case 'subagentStatus': {
+                const subagentIndicator = document.getElementById('subagent-indicator');
+                if (subagentIndicator) {
+                    if (message.active && message.count) {
+                        subagentIndicator.textContent = `⚡ ${message.count} subagent${message.count > 1 ? 's' : ''} working...`;
+                        subagentIndicator.classList.remove('hidden');
+                    } else {
+                        subagentIndicator.classList.add('hidden');
+                    }
+                }
                 break;
             }
             case 'stallCard': {
@@ -5595,21 +5342,6 @@ window.addEventListener('message', (event) => {
                 }
                 break;
             }
-            case 'planFileCard': {
-                const sessionId = getEventSessionId(message, 'planFileCard');
-                if (!sessionId) break;
-                const session = getSessionState(sessionId, true);
-                if (!session.planFileCards) {
-                    session.planFileCards = new Map();
-                }
-                const anchorMessageId = message.anchorMessageId;
-                const files = Array.isArray(message.files) ? message.files : [];
-                if (anchorMessageId && files.length) {
-                    session.planFileCards.set(anchorMessageId, { files, sessionId });
-                    window.__oc?.renderFromState?.();
-                }
-                break;
-            }
             case 'messageAppend': {
                 const sessionId = getEventSessionId(message, 'messageAppend');
                 if (!sessionId) break;
@@ -5621,8 +5353,8 @@ window.addEventListener('message', (event) => {
                     });
                     break;
                 }
-                // Filter out BOULDER CONTINUATION messages
-                if (message.message.role === 'user' && message.message.text && message.message.text.includes('[SYSTEM DIRECTIVE: OH-MY-OPENCODE - BOULDER CONTINUATION]')) {
+                // Filter BOULDER CONTINUATION messages
+                if (message.message && message.message.role === 'user' && message.message.text && message.message.text.includes('[SYSTEM DIRECTIVE: OH-MY-OPENCODE - BOULDER CONTINUATION]')) {
                     break;
                 }
                 if (message.message && message.message.id) {
@@ -5695,8 +5427,8 @@ window.addEventListener('message', (event) => {
                 const sessionId = getEventSessionId(message, 'messageAppend');
                 if (!sessionId) break;
                 const session = getSessionState(sessionId, true);
-                // Filter out BOULDER CONTINUATION messages
-                if (message.message.role === 'user' && message.message.text && message.message.text.includes('[SYSTEM DIRECTIVE: OH-MY-OPENCODE - BOULDER CONTINUATION]')) {
+                // Filter BOULDER CONTINUATION messages
+                if (message.message && message.message.role === 'user' && message.message.text && message.message.text.includes('[SYSTEM DIRECTIVE: OH-MY-OPENCODE - BOULDER CONTINUATION]')) {
                     break;
                 }
                 if (message.message && message.message.id) {
@@ -6647,7 +6379,7 @@ function renderQuestionOverlayModal() {
 
     const prompt = document.createElement('div');
     prompt.className = 'question-card-question';
-    renderMarkdownInto(prompt, current.prompt || '');
+    prompt.textContent = current.prompt;
     card.appendChild(prompt);
 
     const actions = document.createElement('div');
@@ -6705,40 +6437,6 @@ function renderQuestionOverlayModal() {
     }
 
     card.appendChild(actions);
-    const freeTextRow = document.createElement('div');
-    freeTextRow.className = 'question-free-text-row';
-
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.className = 'question-free-text-input';
-    input.placeholder = 'Type your answer...';
-    freeTextRow.appendChild(input);
-
-    const submitBtn = document.createElement('button');
-    submitBtn.type = 'button';
-    submitBtn.className = 'question-free-text-submit';
-    submitBtn.textContent = 'Submit';
-    freeTextRow.appendChild(submitBtn);
-
-    const handleFreeTextSubmit = () => {
-        const val = input.value.trim();
-        if (!val) return;
-
-        const allInteractive = card.querySelectorAll('button, input');
-        for (const el of allInteractive) el.disabled = true;
-
-        commitCurrentQuestionAnswers([val]);
-    };
-
-    submitBtn.addEventListener('click', handleFreeTextSubmit);
-    input.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-            handleFreeTextSubmit();
-        }
-    });
-
-    card.appendChild(freeTextRow);
-
     wrapper.appendChild(card);
     document.body.appendChild(wrapper);
     questionOverlayEl = wrapper;
