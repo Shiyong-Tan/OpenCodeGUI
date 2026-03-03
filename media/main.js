@@ -4074,6 +4074,12 @@ function applyPromptToSession(sessionId, payload) {
         // agent timeout notice removed
         const backendId = getEventMessageId(message);
         const chunkText = getEventChunkText(message);
+        // Skip late-arriving chunks after chatDone
+        if (!session.thinkingId && !session.currentTurnAssistantKey && typeof message?.assistantMsgId !== 'string') {
+            vscode.postMessage({ type: 'ui-debug', payload: ['handleChatChunk', 'drop-late-chunk-after-done'] });
+            return;
+        }
+
 
     const msgId = typeof message?.assistantMsgId === 'string' ? message.assistantMsgId : null;
     if (msgId) {
@@ -4139,6 +4145,7 @@ function applyPromptToSession(sessionId, payload) {
         const session = getSessionState(sessionId);
         if (!session) return;
         // agent timeout notice removed
+        const oldThinkingId = session.thinkingId;
     if (session.thinkingId && session.messagesById.has(session.thinkingId)) {
         const msg = session.messagesById.get(session.thinkingId);
         msg.meta.isThinking = false;
@@ -4185,6 +4192,18 @@ function applyPromptToSession(sessionId, payload) {
         session.currentTurnAssistantMsgId = null;
         session.currentTurnAssistantKey = null;
     }
+    // Remove ghost tmp bubble if upgrade didn't replace it
+    if (oldThinkingId && session.messagesById.has(oldThinkingId)) {
+        const isTmpId = oldThinkingId.startsWith('tmp:') || oldThinkingId.startsWith('local-');
+        if (isTmpId && !resolvedFinal) {
+            removeMessageFromSession(session, oldThinkingId);
+            vscode.postMessage({
+                type: 'ui-debug',
+                payload: ['[CHATDONE] Removed ghost tmp bubble', oldThinkingId]
+            });
+        }
+    }
+
     updateSendGate();
     assertInvariants(sessionId, 'chatDone');
 }
