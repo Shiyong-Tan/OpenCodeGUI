@@ -163,10 +163,10 @@ Wave FINAL:
   - `src/SidebarProvider.ts` L4229: SidebarProvider already tags these; same text match needed in main.js
 
   **Acceptance Criteria**:
-  - [ ] `node --check media/main.js` passes
-  - [ ] `subagentIntervals` and `subagentCardsContainer` globals present at file top
-  - [ ] BOULDER text string found in main.js (2+ locations)
-  - [ ] `turn-divider` string found in main.js (1+ location)
+  - [x] `node --check media/main.js` passes
+  - [x] `subagentIntervals` and `subagentCardsContainer` globals present at file top
+  - [x] BOULDER text string found in main.js (2+ locations)
+  - [x] `turn-divider` string found in main.js (1+ location)
 
   ```
   Scenario: BOULDER message hidden
@@ -222,9 +222,9 @@ Wave FINAL:
   - `src/SidebarProvider.ts` L3463, L3693: how planFileCard is posted (fields: `anchorMessageId`, `files: string[]`)
 
   **Acceptance Criteria**:
-  - [ ] `node --check media/main.js` passes
-  - [ ] `planFileCard` string appears in main.js
-  - [ ] `plan-file-card` CSS class used in main.js
+  - [x] `node --check media/main.js` passes
+  - [x] `planFileCard` string appears in main.js
+  - [x] `plan-file-card` CSS class used in main.js
 
   ```
   Scenario: Plan file card rendered
@@ -298,11 +298,11 @@ Wave FINAL:
   - `src/SidebarProvider.ts` L3577: how isStatusUpdate is forwarded to webview
 
   **Acceptance Criteria**:
-  - [ ] `node --check media/main.js` passes
-  - [ ] Tool status text (e.g., "Reading file.ts...") appears and is replaced (not accumulated)
-  - [ ] Bubble container has `streaming` class while streaming, removed on done
-  - [ ] Text content inside bubble does NOT flicker between tool events
-  - [ ] Final messageAppend clears temp text and shows final text
+  - [x] `node --check media/main.js` passes
+  - [x] Tool status text (e.g., "Reading file.ts...") appears and is replaced (not accumulated)
+  - [x] Bubble container has `streaming` class while streaming, removed on done
+  - [x] Text content inside bubble does NOT flicker between tool events
+  - [x] Final messageAppend clears temp text and shows final text
 
   ```
   Scenario: Tool status replaces (not accumulates)
@@ -378,10 +378,10 @@ Wave FINAL:
   - Lost git version had free-text row — pattern: `<div class="question-free-text-row"><textarea>...</textarea><button>Submit</button></div>`
 
   **Acceptance Criteria**:
-  - [ ] `node --check media/main.js` passes
-  - [ ] Question prompt renders markdown (bold, code, lists)
-  - [ ] Textarea expands to max 3 rows, then scrolls
-  - [ ] Card does not exceed 60% of viewport height
+  - [x] `node --check media/main.js` passes
+  - [x] Question prompt renders markdown (bold, code, lists)
+  - [x] Textarea expands to max 3 rows, then scrolls
+  - [x] Card does not exceed 60% of viewport height
 
   ```
   Scenario: Markdown prompt
@@ -536,9 +536,9 @@ Wave FINAL:
   - `media/main.js` renderMessageElement: confirms DOM structure (which classes are used on which elements)
 
   **Acceptance Criteria**:
-  - [ ] All new CSS class names present in main.css
-  - [ ] No duplicate rule blocks
-  - [ ] No syntax errors in CSS
+  - [x] All new CSS class names present in main.css
+  - [x] No duplicate rule blocks
+  - [x] No syntax errors in CSS
 
   ```
   Scenario: Streaming bubble flicker visible
@@ -662,10 +662,10 @@ Wave FINAL:
   - `media/main.css` subagent card classes (from Task 5): `.subagent-cards`, `.subagent-card`, `.subagent-name`, `.subagent-elapsed`, `.subagent-status`, `.subagent-action`
 
   **Acceptance Criteria**:
-  - [ ] `node --check media/main.js` passes
-  - [ ] Only ONE `case 'subagentStatus'` handler in main.js
-  - [ ] `subagentIntervals` referenced in main.js
-  - [ ] `subagentCardsContainer` referenced in main.js
+  - [x] `node --check media/main.js` passes
+  - [x] Only ONE `case 'subagentStatus'` handler in main.js
+  - [x] `subagentIntervals` referenced in main.js
+  - [x] `subagentCardsContainer` referenced in main.js
 
   ```
   Scenario: Subagent cards appear during multi-agent run
@@ -747,11 +747,11 @@ Wave FINAL:
   - `src/SidebarProvider.ts` `this.isUserOwnedSession`: how to check if main session
 
   **Acceptance Criteria**:
-  - [ ] `npm run compile` passes (TypeScript check)
-  - [ ] `'todoUpdate'` in OpenCodeClient.ts ChatEvent type union
-  - [ ] `todos?:` field in ChatEvent
-  - [ ] todowrite detection block in mapServerEventToChatEvents
-  - [ ] todoUpdate handler in SidebarProvider handleChatEvent
+  - [x] `npm run compile` passes (TypeScript check)
+  - [x] `'todoUpdate'` in OpenCodeClient.ts ChatEvent type union
+  - [x] `todos?:` field in ChatEvent
+  - [x] todowrite detection block in mapServerEventToChatEvents
+  - [x] todoUpdate handler in SidebarProvider handleChatEvent
 
   ```
   Scenario: todoUpdate event fires for main session
@@ -839,10 +839,10 @@ Wave FINAL:
   - `src/SidebarProvider.ts` todoUpdate postMessage (Task 7): `{type:'todoUpdate', todos, anchorMessageId, sessionId}`
 
   **Acceptance Criteria**:
-  - [ ] `node --check media/main.js` passes
-  - [ ] `case 'todoUpdate'` in main.js message switch
-  - [ ] `todo-list` class used in renderMessageElement
-  - [ ] `✓` / `○` / `◎` / `✗` icons in main.js
+  - [x] `node --check media/main.js` passes
+  - [x] `case 'todoUpdate'` in main.js message switch
+  - [x] `todo-list` class used in renderMessageElement
+  - [x] `✓` / `○` / `◎` / `✗` icons in main.js
 
   ```
   Scenario: Todo list appears below assistant bubble
@@ -885,14 +885,14 @@ Wave FINAL:
   - **Blocked By**: Tasks 1-8
 
   **Acceptance Criteria**:
-  - [ ] `npm run compile` exits 0
-  - [ ] `node --check media/main.js` exits 0
-  - [ ] `grep -c "BOULDER CONTINUATION" media/main.js` ≥ 1
-  - [ ] `grep -c "turn-divider" media/main.js` ≥ 1
-  - [ ] `grep -c "planFileCard" media/main.js` ≥ 1
-  - [ ] `grep -c "subagentIntervals" media/main.js` ≥ 1
-  - [ ] `grep -c "todoUpdate" media/main.js` ≥ 1
-  - [ ] `grep -c "streaming" media/main.js` ≥ 1
+  - [x] `npm run compile` exits 0
+  - [x] `node --check media/main.js` exits 0
+  - [x] `grep -c "BOULDER CONTINUATION" media/main.js` ≥ 1
+  - [x] `grep -c "turn-divider" media/main.js` ≥ 1
+  - [x] `grep -c "planFileCard" media/main.js` ≥ 1
+  - [x] `grep -c "subagentIntervals" media/main.js` ≥ 1
+  - [x] `grep -c "todoUpdate" media/main.js` ≥ 1
+  - [x] `grep -c "streaming" media/main.js` ≥ 1
 
   **Commit**: YES
   - Message: `chore: compile and verify all ui-consolidation-v2 tasks`
