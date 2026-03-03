@@ -646,6 +646,11 @@ function upsertMessage(session, payload) {
         vscode.postMessage({ type: 'ui-debug', payload: ['[WV][FILTER]', 'DCP-message-filtered', `id=${payload.id}`] });
         return;
     }
+    // Filter out system-reminder protocol messages - only suppress for user-role messages (not assistant)
+    if (payload.role === 'user' && payload.text && /<system-reminder/i.test(payload.text)) {
+        vscode.postMessage({ type: 'ui-debug', payload: ['[WV][FILTER]', 'system-reminder-filtered', `id=${payload.id}`] });
+        return;
+    }
     const existing = session.messagesById.get(payload.id);
 
     if (existing) {
@@ -2851,13 +2856,16 @@ function renderMessageElement(message, renderedSet) {
 
     function stripAttachmentManifest(text) {
         if (!text) return text;
+        // Strip Prometheus mode system suffix before displaying to user
+        const prometheusSuffix = '\n\nPlease use "question tool" to communicate. Consult Metis for making plans. In the plan, require the executor to make changes directly in the current working directory, instead of in a new working directory.';
+        let stripped = text.endsWith(prometheusSuffix) ? text.slice(0, text.length - prometheusSuffix.length) : text;
         const marker = '---\nAttachments (workspace files; read from disk; DO NOT use any URL):';
-        const start = text.indexOf(marker);
-        if (start === -1) return text;
-        const end = text.indexOf('\n---', start + marker.length);
-        if (end === -1) return text;
-        const before = text.slice(0, start).trimEnd();
-        const after = text.slice(end + '\n---'.length).trimStart();
+        const start = stripped.indexOf(marker);
+        if (start === -1) return stripped;
+        const end = stripped.indexOf('\n---', start + marker.length);
+        if (end === -1) return stripped;
+        const before = stripped.slice(0, start).trimEnd();
+        const after = stripped.slice(end + '\n---'.length).trimStart();
         return [before, after].filter(Boolean).join('\n\n');
     }
 
@@ -4486,18 +4494,32 @@ window.addEventListener('message', (event) => {
                             card.dataset.sessionId = sessionId;
 
                             const descEl = document.createElement('div');
-                            descEl.className = 'subagent-card-desc';
-                            descEl.textContent = agent.description || 'Subagent Task';
+                            descEl.className = 'subagent-name';
+                            descEl.textContent = agent.taskName || agent.description || 'Running...';
 
                             const timeEl = document.createElement('div');
-                            timeEl.className = 'subagent-card-time';
+                            timeEl.className = 'subagent-elapsed';
                             timeEl.textContent = '0s';
+                            timeEl.dataset.startedAt = agent.startedAt || '';
 
+                            if (agent.mode || agent.model) {
+                                const statusEl = document.createElement('div');
+                                statusEl.className = 'subagent-status';
+                                statusEl.textContent = [agent.mode, agent.model].filter(Boolean).join(' · ');
+                                card.appendChild(statusEl);
+                            }
+
+                            if (agent.action) {
+                                const actionEl = document.createElement('div');
+                                actionEl.className = 'subagent-action';
+                                actionEl.textContent = agent.action;
+                                card.appendChild(actionEl);
+                            }
                             card.appendChild(descEl);
                             card.appendChild(timeEl);
                             cardsContainer.appendChild(card);
                         } else {
-                            const descEl = card.querySelector('.subagent-card-desc');
+                            const descEl = card.querySelector('.subagent-name');
                             if (descEl && descEl.textContent !== agent.description) {
                                 descEl.textContent = agent.description;
                             }
@@ -4509,7 +4531,7 @@ window.addEventListener('message', (event) => {
                                 const now = Date.now();
                                 const elapsed = Math.max(0, now - startedAt);
                                 const seconds = Math.floor(elapsed / 1000);
-                                const timeEl = card.querySelector('.subagent-card-time');
+                                const timeEl = card.querySelector('.subagent-elapsed');
                                 if (timeEl) {
                                     if (seconds < 60) {
                                         timeEl.textContent = `${seconds}s`;
@@ -6402,7 +6424,7 @@ function applyQuestionOptionWidth(actionsEl, options) {
     const labels = Array.isArray(options) ? options.map((opt) => (typeof opt?.label === 'string' ? opt.label : '')) : [];
     const longest = labels.reduce((max, label) => Math.max(max, label.length), 0);
     const widthCh = Math.max(12, longest + 4);
-    // actionsEl.style.setProperty('--question-option-width', `${widthCh}ch`);
+    actionsEl.style.setProperty('--question-option-width', `${widthCh}ch`);
 }
 
 function renderQuestionOverlayModal() {
