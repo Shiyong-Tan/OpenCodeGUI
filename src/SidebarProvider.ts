@@ -3462,7 +3462,8 @@ ${attachmentLines.join('\n')}`
                 lastText: event.lastText,
                 sessionId,
                 assistantMsgId: event.assistantMsgId,
-                tmpKey
+                tmpKey,
+                isStatusUpdate: event.isStatusUpdate
             });
             if (sessionId && typeof event.assistantMsgId === 'string' && typeof event.messageIndex === 'number') {
                 liveWebview.postMessage({
@@ -3500,6 +3501,11 @@ ${attachmentLines.join('\n')}`
             const doneAssistantMsgId = this.currentSessionId
                 ? this.client.getTurnAssistantMsgId(this.currentSessionId)
                 : undefined;
+            // Flush any buffered text before chatDone
+            if (this.currentSessionId) {
+                this.flushAssistantBufferToWebview(this.currentSessionId, liveWebview);
+            }
+
             liveWebview.postMessage({
                 type: 'chatDone',
                 sessionId: this.currentSessionId,

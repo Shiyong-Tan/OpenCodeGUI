@@ -2782,6 +2782,18 @@ function renderMessageElement(message, renderedSet) {
         }
         div.appendChild(content);
 
+        // Remove existing status div if any
+        const existingStatus = div.querySelector('.message-status');
+        if (existingStatus) existingStatus.remove();
+        // Add status div when thinking + statusText
+        if (message.meta?.isThinking && message.meta?.statusText) {
+            const statusDiv = document.createElement('div');
+            statusDiv.className = 'message-status';
+            statusDiv.textContent = message.meta.statusText;
+            div.appendChild(statusDiv);
+        }
+
+
         if (Array.isArray(message.meta?.images) && message.meta.images.length) {
             const imageWrap = document.createElement('div');
             imageWrap.className = 'message-images';
@@ -3941,8 +3953,12 @@ function applyPromptToSession(sessionId, payload) {
             const thinking = upsertMessage(session, {
                 id: msgId,
                 role: message.role || 'assistant',
-                text: message.lastText || 'Thinking...',
-                meta: { isThinking: true, internalId: backendId }
+                text: message.isStatusUpdate === true ? 'Thinking...' : (message.lastText || 'Thinking...'),
+                meta: { 
+                    isThinking: true, 
+                    internalId: backendId,
+                    statusText: message.isStatusUpdate === true ? (message.lastText || '') : null
+                }
             });
             session.thinkingId = thinking.id;
             vscode.postMessage({ type: 'ui-debug', payload: ['handleAssistantMeta', 'new-thinking', msgId] });
@@ -3963,14 +3979,19 @@ function applyPromptToSession(sessionId, payload) {
                 vscode.postMessage({ type: 'ui-debug', payload: ['handleAssistantMeta', 'drop-finalized-target', targetId] });
                 return;
             }
-            const nextText = typeof message.lastText === 'string' ? message.lastText : target.text;
-            const normalized = typeof nextText === 'string' ? nextText.trim() : '';
-            const hasStatusChange = normalized.length > 0 && normalized !== 'Thinking...';
+            const hasStatusChange = typeof message.lastText === 'string' && message.lastText.trim().length > 0 && message.lastText.trim() !== 'Thinking...';
             if (hasStatusChange) {
                 // agent timeout notice removed
             }
-            target.text = nextText;
-            target.meta = { ...target.meta, internalId: backendId, isThinking: true };
+            if (message.isStatusUpdate === true) {
+                // Status-only update: store in meta, do NOT touch target.text
+                target.meta = { ...target.meta, isThinking: true, statusText: message.lastText || '' };
+            } else {
+                // Real text update: set target.text and clear status
+                const nextText = typeof message.lastText === 'string' ? message.lastText : target.text;
+                target.text = nextText;
+                target.meta = { ...target.meta, isThinking: true, statusText: null };
+            }
             vscode.postMessage({ type: 'ui-debug', payload: ['handleAssistantMeta', 'merged', targetId] });
         }
 
@@ -4050,6 +4071,7 @@ function applyPromptToSession(sessionId, payload) {
     if (session.thinkingId && session.messagesById.has(session.thinkingId)) {
         const msg = session.messagesById.get(session.thinkingId);
         msg.meta.isThinking = false;
+        msg.meta.statusText = null;
             if (msg.text === 'Thinking...') {
                 msg.text = '';
             }

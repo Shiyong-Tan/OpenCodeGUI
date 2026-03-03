@@ -457,6 +457,14 @@ body {
     font-size: 1.3em;
     line-height: 1;
 }
+.message-status {
+    font-size: 0.85em;
+    color: var(--vscode-descriptionForeground, #888);
+    opacity: 0.8;
+    padding: 4px 0 2px;
+    font-style: italic;
+}
+
 
 .undo-btn {
     border: none;

@@ -105,8 +105,8 @@ export type ChatEvent = {
     metadata?: any;
     actionLabel?: string;
     isSyntheticUser?: boolean;
+    isStatusUpdate?: boolean;
 };
-
 type PendingQuestionControl = {
     callId: string;
     requestId?: string;
@@ -4120,13 +4120,14 @@ export class OpenCodeClient {
                     }
                 }
                 if (msgId && !this.assistantStatusCleared.has(msgId)) {
-                    events.push({
-                        type: 'assistantMessageMeta',
-                        sessionId,
-                        assistantMsgId: part?.messageID,
-                        lastText: 'Finalizing the response...',
-                        tmpKey: this.getPendingAssistantTmpKey(sessionId)
-                    });
+                events.push({
+                    type: 'assistantMessageMeta',
+                    sessionId,
+                    assistantMsgId: part?.messageID,
+                    lastText: 'Finalizing the response...',
+                    tmpKey: this.getPendingAssistantTmpKey(sessionId),
+                    isStatusUpdate: true
+                });
                     this.assistantStatusCleared.add(msgId);
                 }
                 events.push({ type: 'text', text: chunk, sessionId, assistantMsgId: part?.messageID, tmpKey: this.getPendingAssistantTmpKey(sessionId) });
@@ -4159,7 +4160,7 @@ export class OpenCodeClient {
                 if (statusText && source !== 'resync') {
                     const resolvedId = this.getTurnAssistantMsgId(sessionId);
                     const assistantMsgId = resolvedId || part?.messageID;
-                    events.push({ type: 'assistantMessageMeta', sessionId, assistantMsgId, lastText: statusText, tmpKey: this.getPendingAssistantTmpKey(sessionId) });
+                    events.push({ type: 'assistantMessageMeta', sessionId, assistantMsgId, lastText: statusText, tmpKey: this.getPendingAssistantTmpKey(sessionId), isStatusUpdate: true });
                 }
                 const toolName = typeof part?.tool === 'string' ? part.tool : '';
                 if (part?.state?.status === 'completed' && sessionId) {
