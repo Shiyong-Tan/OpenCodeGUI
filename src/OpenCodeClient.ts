@@ -4782,6 +4782,14 @@ export class OpenCodeClient {
         }
         this.logUiDebug(`EXT: resync.fetch.path | sessionId=${sessionId} | source=${source} | anchor=${anchorMsgId || 'null'} | anchorHit=${String(anchorHit)} | recentCount=${recentList.length} | usedCount=${list.length}`);
 
+        // Pre-scan: find the last stop-final message
+        let lastStopFinalId: string | undefined;
+        for (const m of list) {
+            if (m?.info?.role === 'assistant' && m?.info?.finish === 'stop' && typeof m?.info?.id === 'string') {
+                lastStopFinalId = m.info.id;
+            }
+        }
+
         for (const item of list) {
             if (typeof resyncEpoch === 'number' && !this.isResyncRunActive(sessionId, resyncEpoch)) {
                 this.logUiDebug(`EXT: resync.drop.stale | sessionId=${sessionId} | epoch=${resyncEpoch} | stage=scan`);
@@ -4846,6 +4854,17 @@ export class OpenCodeClient {
                 const isFinal = Boolean(info?.finish) || typeof completedAt === 'number';
                 let acceptedFinal = false;
                 if (isFinal) {
+                    // Stale-override guard: if this is the last stop-final and parentId mismatches currentUser, override
+                    if (messageId === lastStopFinalId && info.finish === 'stop') {
+                        const currentUser = this.currentTurnUserMsgIdBySession.get(sessionId);
+                        const parentId = info?.parentID;
+                        if (currentUser !== undefined && typeof parentId === 'string' && parentId.length > 0 && currentUser !== parentId) {
+                            this.logUiDebug(
+                                `turn.anchor.stale-override | sessionId=${sessionId} | oldUser=${currentUser} | newUser=${parentId} | triggerMsg=${messageId}`
+                            );
+                            this.setCurrentTurnUserMsgId(sessionId, parentId, 'resync-stale-override');
+                        }
+                    }
                     this.maybeBackfillTurnUserAnchor(sessionId, info);
                     if (this.shouldAcceptTurnCompletionFinal(sessionId, info)) {
                         this.logUiDebug(`EXT: turn.final.accept | sessionId=${sessionId} | msgId=${messageId} | finish=${String(info?.finish || '')} | source=resync`);
