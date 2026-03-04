@@ -2825,6 +2825,41 @@ function renderMessageElement(message, renderedSet) {
             statusDiv.textContent = message.meta.statusText;
             div.appendChild(statusDiv);
         }
+        
+        // STREAMING PATH: Show subagent data with live text/tool
+        if (message.meta?.isThinking && session && session.activeSubagents && session.activeSubagents.length > 0) {
+            const inlineContainer = document.createElement('div');
+            inlineContainer.className = 'subagent-inline';
+            for (const agent of session.activeSubagents) {
+                const entry = document.createElement('div');
+                entry.className = 'subagent-inline-entry';
+                
+                // Header: name + description (always shown)
+                const header = document.createElement('div');
+                header.className = 'subagent-inline-header';
+                header.textContent = `🧠 ${agent.title || agent.description || 'Subagent'}`;
+                entry.appendChild(header);
+                
+                // Latest text (only during streaming — when latestText not null)
+                if (agent.latestText != null) {
+                    const textEl = document.createElement('div');
+                    textEl.className = 'subagent-inline-text';
+                    textEl.textContent = agent.latestText;
+                    entry.appendChild(textEl);
+                }
+                
+                // Latest tool (italic, only during streaming)
+                if (agent.latestTool != null) {
+                    const toolEl = document.createElement('div');
+                    toolEl.className = 'subagent-inline-tool';
+                    toolEl.textContent = agent.latestTool;
+                    entry.appendChild(toolEl);
+                }
+                
+                inlineContainer.appendChild(entry);
+            }
+            div.appendChild(inlineContainer);
+        }
         // .streaming class removed on re-render when not thinking.
 
         if (Array.isArray(message.meta?.images) && message.meta.images.length) {
@@ -2848,6 +2883,23 @@ function renderMessageElement(message, renderedSet) {
             if (!text && !hasStructured && !hasImages) {
                 return;
             }
+        }
+        
+        // NON-STREAMING PATH: Show subagent headers only (latestText/latestTool cleared)
+        if (message.role === 'assistant' && !message.meta?.isThinking && session && session.activeSubagents && session.activeSubagents.length > 0) {
+            const inlineContainer = document.createElement('div');
+            inlineContainer.className = 'subagent-inline';
+            for (const agent of session.activeSubagents) {
+                const entry = document.createElement('div');
+                entry.className = 'subagent-inline-entry';
+                const header = document.createElement('div');
+                header.className = 'subagent-inline-header';
+                header.textContent = `🧠 ${agent.title || agent.description || 'Subagent'}`;
+                entry.appendChild(header);
+                // latestText and latestTool are null here (cleared in handleChatDone)
+                inlineContainer.appendChild(entry);
+            }
+            div.appendChild(inlineContainer);
         }
 
         // Insert turn divider before user messages (except first)
@@ -3990,7 +4042,7 @@ function applyPromptToSession(sessionId, payload) {
                 id: tempId,
                 role: 'assistant',
                 text: 'Thinking...',
-                meta: { isThinking: true, parentClientMessageId: payload.clientMessageId }
+                meta: { isThinking: true, parentClientMessageId: payload.clientMessageId, textSegments: [], currentSegment: '' }
             });
             session.thinkingId = thinkingMsg.id;
             session.currentTurnAssistantKey = thinkingMsg.id;
@@ -4073,6 +4125,13 @@ function applyPromptToSession(sessionId, payload) {
                 return;
             }
             if (message?.isStatusUpdate) {
+                // When a tool call arrives, finalize current speech segment
+                if (target.meta && target.meta.currentSegment && target.meta.currentSegment.trim()) {
+                    target.meta.textSegments = [...(target.meta.textSegments || []), target.meta.currentSegment];
+                    target.meta.currentSegment = '';
+                    // Re-synthesize text
+                    target.text = target.meta.textSegments.join('\n\n');
+                }
                 const statusText = typeof message.lastText === 'string' ? message.lastText : '';
                 // isStatusUpdate: statusText only to avoid flicker. (isStatusUpdate statusText)
                 target.meta = { ...target.meta, internalId: backendId, isThinking: true, statusText };
@@ -4154,11 +4213,15 @@ function applyPromptToSession(sessionId, payload) {
                 vscode.postMessage({ type: 'ui-debug', payload: ['handleChatChunk', 'drop-finalized-target', targetId] });
                 return;
             }
-            if (target.meta?.isThinking === true && target.text === 'Thinking...') {
-                target.text = chunkText;
-            } else {
-                target.text = (target.text || '') + chunkText;
-            }
+            if (!target.meta) target.meta = {};
+            if (!target.meta.textSegments) { target.meta.textSegments = []; target.meta.currentSegment = ''; }
+            // Append chunk to currentSegment
+            target.meta.currentSegment = (target.meta.currentSegment || '') + chunkText;
+            // Synthesize target.text from all segments + current (for renderAssistantMarkdown)
+            target.text = [...(target.meta.textSegments || []), target.meta.currentSegment]
+              .filter(s => s.length > 0)
+              .join('\n\n');
+            if (!target.text) target.text = 'Thinking...';
             target.meta = { ...target.meta, isThinking: true };
             vscode.postMessage({ type: 'ui-debug', payload: ['handleChatChunk', 'appended', targetId] });
         }
@@ -4177,6 +4240,20 @@ function applyPromptToSession(sessionId, payload) {
         msg.meta.statusText = null;
         if (msg.text === 'Thinking...') {
             msg.text = '';
+        }
+        // Finalize any remaining currentSegment
+        if (msg.meta && msg.meta.currentSegment && msg.meta.currentSegment.trim()) {
+            msg.meta.textSegments = [...(msg.meta.textSegments || []), msg.meta.currentSegment];
+            msg.meta.currentSegment = '';
+            msg.text = msg.meta.textSegments.join('\n\n');
+        }
+        // For subagents: clear latestText and latestTool but keep name/task
+        if (session.activeSubagents) {
+            session.activeSubagents = session.activeSubagents.map(a => ({
+                ...a,
+                latestText: null,
+                latestTool: null,
+            }));
         }
         session.thinkingId = null;
         console.log('[Thinking] chatDone cleared pending');
@@ -4578,73 +4655,28 @@ window.addEventListener('message', (event) => {
             }
             case 'subagentStatus': {
               const { active, agents } = data;
-              // Update the header indicator count
+              // Find the current session
+              const sess = getSessionState(activeSessionId);
+              if (sess) {
+                if (active && agents && agents.length > 0) {
+                  sess.activeSubagents = agents; // [{ sessionId, title, description, latestText, latestTool, startedAt }]
+                } else {
+                  // Keep entries but clear live data when done
+                  if (sess.activeSubagents) {
+                    sess.activeSubagents = sess.activeSubagents.map(a => ({
+                      ...a, latestText: null, latestTool: null,
+                    }));
+                  }
+                }
+              }
+              // Update header indicator
               const indicator = document.getElementById('subagent-indicator');
               if (indicator) {
-                indicator.style.display = active && agents.length > 0 ? '' : 'none';
+                indicator.style.display = active && agents && agents.length > 0 ? '' : 'none';
                 indicator.textContent = active ? `${agents.length} agent${agents.length !== 1 ? 's' : ''} running` : '';
               }
-              // Manage in-chat subagent cards container
-              const chatContainer = document.getElementById('chat-container');
-              if (!active || agents.length === 0) {
-                // Clear cards and intervals
-                if (subagentCardsContainer) {
-                  subagentCardsContainer.remove();
-                  subagentCardsContainer = null;
-                }
-                // Clear all elapsed timers
-                for (const [id, timer] of subagentIntervals) clearInterval(timer);
-                subagentIntervals.clear();
-              } else {
-                // Create container if needed
-                if (!subagentCardsContainer) {
-                  subagentCardsContainer = document.createElement('div');
-                  subagentCardsContainer.className = 'subagent-cards in-chat';
-                  // Insert after last thinking bubble, or at end of chatContainer
-                  const thinkingBubble = chatContainer?.querySelector('.message-bubble.streaming');
-                  if (thinkingBubble?.parentElement) {
-                    thinkingBubble.parentElement.insertAdjacentElement('afterend', subagentCardsContainer);
-                  } else {
-                    chatContainer?.appendChild(subagentCardsContainer);
-                  }
-                }
-                // Update cards for each agent
-                const renderedIds = new Set();
-                for (const agent of agents) {
-                  const sid = agent.sessionId;
-                  renderedIds.add(sid);
-                  let card = subagentCardsContainer.querySelector(`[data-agent-id="${sid}"]`);
-                  if (!card) {
-                    card = document.createElement('div');
-                    card.className = 'subagent-card';
-                    card.dataset.agentId = sid;
-                    card.dataset.startedAt = agent.startedAt;
-                    card.innerHTML = `<span class="subagent-name"></span><span class="subagent-elapsed"></span><div class="subagent-status"></div><div class="subagent-action"></div>`;
-                    subagentCardsContainer.appendChild(card);
-                    // Elapsed time interval
-                    const startedAt = agent.startedAt;
-                    const timer = setInterval(() => {
-                      const el = card.querySelector('.subagent-elapsed');
-                      if (el) {
-                        const sec = Math.floor((Date.now() - startedAt) / 1000);
-                        el.textContent = sec < 60 ? `${sec}s` : `${Math.floor(sec/60)}m${sec%60}s`;
-                      }
-                    }, 1000);
-                    subagentIntervals.set(sid, timer);
-                  }
-                  card.querySelector('.subagent-name').textContent = agent.title || agent.description || 'Agent';
-                  card.querySelector('.subagent-status').textContent = agent.latestText ? agent.latestText.slice(0, 80) : '';
-                  card.querySelector('.subagent-action').textContent = agent.latestTool || '';
-                }
-                // Remove cards for agents no longer active
-                for (const card of subagentCardsContainer.querySelectorAll('.subagent-card')) {
-                  if (!renderedIds.has(card.dataset.agentId)) {
-                    card.remove();
-                    const timer = subagentIntervals.get(card.dataset.agentId);
-                    if (timer) { clearInterval(timer); subagentIntervals.delete(card.dataset.agentId); }
-                  }
-                }
-              }
+              // Trigger re-render to show updated subagent data in bubble
+              scheduleRenderFromState();
               break;
             }
             case 'resetUiState': {
