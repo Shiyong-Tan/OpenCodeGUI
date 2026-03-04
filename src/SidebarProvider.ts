@@ -967,9 +967,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         this.uiDebugChannel.appendLine(`EXT: send.enter | reqId=${reqId} | sessionId=${this.currentSessionId || 'null'} | hasAttachments=${String(Boolean(attachments.length))} | attachmentsCount=${attachments.length} | attachKeys=${attachKeys}`);
                         const userText = (data.value as string) || '';
                         let modelText = userText;
-                        if (this.selectedMode === 'plan' || /prometheus/i.test(this.selectedMode || '')) {
-                            modelText = modelText + '\n\nPlease use "question tool" to communicate. Consult Metis for making plans. In the plan, require the executor to make changes directly in the current working directory, instead of in a new working directory.';
-                        }
                         this.lastDraft = {
                             text: userText,
                             attachments: [],
