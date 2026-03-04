@@ -642,9 +642,16 @@ function createMessage(session, payload) {
 }
 
 function upsertMessage(session, payload) {
-    // Filter out DCP (Deep Chat Protocol) metadata messages - they are protocol internals, not user content
-    if (payload.text && /▣.*DCP/s.test(payload.text)) {
-        vscode.postMessage({ type: 'ui-debug', payload: ['[WV][FILTER]', 'DCP-message-filtered', `id=${payload.id}`] });
+    const text = typeof payload.text === 'string' ? payload.text : '';
+    const normalizedText = text.trimStart();
+    const isSystemDcpMessage = payload.role === 'system'
+        && normalizedText.startsWith('▣')
+        && normalizedText.includes('DCP');
+    if (isSystemDcpMessage) {
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: ['[WV][FILTER]', 'DCP-system-message-filtered', `id=${payload.id}`]
+        });
         return;
     }
     const existing = session.messagesById.get(payload.id);
@@ -2512,6 +2519,7 @@ function renderMessageElement(message, renderedSet) {
         return;
     }
     renderedSet.add(message.id);
+    const session = getSessionState(activeSessionId);
 
         if (message.meta?.kind === 'changeList') {
             const files = Array.isArray(message.meta?.files) ? message.meta.files : [];
@@ -2803,16 +2811,16 @@ function renderMessageElement(message, renderedSet) {
 
         const content = document.createElement('div');
         content.className = 'message-content';
+        const raw = message.text || '';
         if (message.meta?.isDiff) {
             const pre = document.createElement('pre');
             const code = document.createElement('code');
-            code.textContent = message.meta.diffText || message.text || '';
+            code.textContent = message.meta.diffText || raw;
             pre.appendChild(code);
             content.appendChild(pre);
         } else if (message.role === 'assistant') {
             renderAssistantMarkdown(content, message);
         } else {
-            const raw = message.text || '';
             const sanitized = message.role === 'user' ? stripSystemInjections(stripAttachmentManifest(raw)) : raw;
             content.textContent = sanitized;
         }
@@ -2880,8 +2888,13 @@ function renderMessageElement(message, renderedSet) {
             const text = (content.textContent || '').trim();
             const hasStructured = Boolean(content.querySelector('pre, code, table, img, video, audio, ul, ol, blockquote, a, hr, .md-table-wrap'));
             const hasImages = Array.isArray(message.meta?.images) && message.meta.images.length > 0;
+            const hasRawText = typeof raw === 'string' && raw.trim().length > 0;
             if (!text && !hasStructured && !hasImages) {
-                return;
+                if (hasRawText) {
+                    content.textContent = raw;
+                } else {
+                    return;
+                }
             }
         }
         
@@ -3000,7 +3013,7 @@ function renderMessageElement(message, renderedSet) {
         return [before, after].filter(Boolean).join('\n\n');
     }
 
-    function stripSystemInjections(text) {
+function stripSystemInjections(text) {
         if (!text) return text;
         let s = text;
 
@@ -3015,8 +3028,17 @@ function renderMessageElement(message, renderedSet) {
         // Minimal cleanup: normalize excess newlines and trim
         s = s.replace(/\n{3,}/g, '\n\n').trim();
 
-        return s;
-    }
+    return s;
+}
+
+function shouldHideDcpUiMessage(message) {
+    const raw = typeof message?.text === 'string' ? message.text : '';
+    if (!raw) return false;
+    const normalized = message?.role === 'user'
+        ? stripSystemInjections(stripAttachmentManifest(raw)).trimStart()
+        : raw.trimStart();
+    return normalized.includes('▣ DCP');
+}
 
     function renderSegmentElement(session, segment, renderedSet, renderKey) {
         const container = document.createElement('div');
@@ -3213,10 +3235,53 @@ function renderMessageElement(message, renderedSet) {
         const renderedSet = new Set();
         const segmentByNoticeKey = session.segmentsByNoticeKey; // Use existing map
         const renderKeys = [];
+        const renderStats = {
+            missingMessage: 0,
+            hidden: 0,
+            dcpHidden: 0,
+            rendered: 0,
+            skippedNoDom: 0,
+            errors: 0,
+            skippedSample: []
+        };
+
+        function trackSkipped(id, role, reason) {
+            if (renderStats.skippedSample.length < 12) {
+                renderStats.skippedSample.push(`${id}:${role || 'unknown'}:${reason}`);
+            }
+        }
+
+        function renderMessageSafely(msg, id) {
+            const beforeChildren = chatContainer.childElementCount;
+            try {
+                renderMessageElement(msg, renderedSet);
+            } catch (error) {
+                renderStats.errors += 1;
+                trackSkipped(id, msg?.role, 'render-throw');
+                vscode.postMessage({
+                    type: 'ui-debug',
+                    payload: ['[WV][RENDER_ERR]', `id=${id}`, `role=${msg?.role || 'unknown'}`, `error=${String(error)}`]
+                });
+                return false;
+            }
+
+            const afterChildren = chatContainer.childElementCount;
+            if (afterChildren > beforeChildren) {
+                renderStats.rendered += 1;
+                return true;
+            }
+
+            renderStats.skippedNoDom += 1;
+            trackSkipped(id, msg?.role, 'no-dom-output');
+            return false;
+        }
 
         for (const id of timeline) {
             const msg = session.messagesById.get(id);
-            if (!msg) continue;
+            if (!msg) {
+                renderStats.missingMessage += 1;
+                continue;
+            }
 
             if (id.startsWith('system:undo:')) {
                 const segment = segmentByNoticeKey.get(id);
@@ -3224,16 +3289,47 @@ function renderMessageElement(message, renderedSet) {
                     renderSegmentElement(session, segment, renderedSet, id);
                     renderKeys.push(id);
                 } else if (!derivedHiddenSet.has(id)) {
-                    renderMessageElement(msg, renderedSet);
-                    renderKeys.push(id);
+                    if (shouldHideDcpUiMessage(msg)) {
+                        renderStats.dcpHidden += 1;
+                        continue;
+                    }
+                    if (renderMessageSafely(msg, id)) {
+                        renderKeys.push(id);
+                    }
+                } else {
+                    renderStats.hidden += 1;
                 }
                 continue;
             }
 
-            if (derivedHiddenSet.has(id)) continue;
-            renderMessageElement(msg, renderedSet);
-            renderKeys.push(id);
+            if (derivedHiddenSet.has(id)) {
+                renderStats.hidden += 1;
+                continue;
+            }
+            if (shouldHideDcpUiMessage(msg)) {
+                renderStats.dcpHidden += 1;
+                continue;
+            }
+            if (renderMessageSafely(msg, id)) {
+                renderKeys.push(id);
+            }
         }
+
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: [
+                '[WV][RENDER_AUDIT]',
+                `timeline=${timeline.length}`,
+                `rendered=${renderStats.rendered}`,
+                `hidden=${renderStats.hidden}`,
+                `dcpHidden=${renderStats.dcpHidden}`,
+                `missingMessage=${renderStats.missingMessage}`,
+                `skippedNoDom=${renderStats.skippedNoDom}`,
+                `errors=${renderStats.errors}`,
+                `domChildren=${chatContainer.childElementCount}`,
+                `sample=${renderStats.skippedSample.join('|') || 'none'}`
+            ]
+        });
 
         if (lastConflictPayload && lastConflictPayload.sessionId === activeSessionId) {
             renderConflictCard(lastConflictPayload);
