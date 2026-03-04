@@ -2849,7 +2849,7 @@ function renderMessageElement(message, renderedSet) {
                 entry.appendChild(header);
                 
                 // Latest text (only during streaming — when latestText not null)
-                if (agent.latestText != null) {
+                if (typeof agent.latestText === 'string' && agent.latestText.length > 0) {
                     const textEl = document.createElement('div');
                     textEl.className = 'subagent-inline-text';
                     textEl.textContent = agent.latestText;
