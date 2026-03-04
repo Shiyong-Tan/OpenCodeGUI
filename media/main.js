@@ -3013,6 +3013,37 @@ function renderMessageElement(message, renderedSet) {
         return [before, after].filter(Boolean).join('\n\n');
     }
 
+    /**
+     * Hides marker-delimited blocks from user messages.
+     * Removes opener + content + terminator (inclusive).
+     * Handles multiple openers and unclosed blocks gracefully.
+     */
+    function hideMarkerRanges(s) {
+        const openers = [
+            '[SYSTEM DIRECTIVE: OH-MY-OPENCODE - TODO CONTINUATION]',
+            '<system-reminder>'
+        ];
+        const terminator = '<!-- OMO_INTERNAL_INITIATOR -->';
+
+        for (const opener of openers) {
+            let idx = s.indexOf(opener);
+            while (idx !== -1) {
+                const endIdx = s.indexOf(terminator, idx);
+                if (endIdx !== -1) {
+                    // Remove inclusive: opener + content + terminator
+                    s = s.slice(0, idx) + s.slice(endIdx + terminator.length);
+                    // Search again from same position (content shifted left)
+                    idx = s.indexOf(opener, idx);
+                } else {
+                    // Unclosed opener - leave unchanged, stop searching this opener
+                    break;
+                }
+            }
+        }
+
+        return s;
+    }
+
 function stripSystemInjections(text) {
         if (!text) return text;
         let s = text;
@@ -3024,6 +3055,9 @@ function stripSystemInjections(text) {
         // Template B: [search-mode] block (6 lines)
         const templateB = '[search-mode]\nMAXIMIZE SEARCH EFFORT. Launch multiple background agents IN PARALLEL:\n- explore agents (codebase patterns, file structures, ast-grep)\n- librarian agents (remote repos, official docs, GitHub examples)\nPlus direct tools: Grep, ripgrep (rg), ast-grep (sg)\nNEVER stop at first result - be exhaustive.';
         s = s.replace(templateB, '');
+
+        // Marker-range hiding (inclusive removal)
+        s = hideMarkerRanges(s);
 
         // Minimal cleanup: normalize excess newlines and trim
         s = s.replace(/\n{3,}/g, '\n\n').trim();
