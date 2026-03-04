@@ -2484,7 +2484,7 @@ document.addEventListener('DOMContentLoaded', () => {
             renderAssistantMarkdown(content, message);
         } else {
             const rawText = message.text || '';
-            const trimmedText = isUser ? rawText.replace(/^(\r?\n)+/, '') : rawText;
+            const trimmedText = isUser ? stripSystemInjections(rawText.replace(/^(\r?\n)+/, '')) : rawText;
             content.textContent = trimmedText;
         }
         div.appendChild(content);
@@ -2813,7 +2813,7 @@ function renderMessageElement(message, renderedSet) {
             renderAssistantMarkdown(content, message);
         } else {
             const raw = message.text || '';
-            const sanitized = message.role === 'user' ? stripAttachmentManifest(raw) : raw;
+            const sanitized = message.role === 'user' ? stripSystemInjections(stripAttachmentManifest(raw)) : raw;
             content.textContent = sanitized;
         }
         div.appendChild(content);
@@ -2946,6 +2946,36 @@ function renderMessageElement(message, renderedSet) {
         const before = text.slice(0, start).trimEnd();
         const after = text.slice(end + '\n---'.length).trimStart();
         return [before, after].filter(Boolean).join('\n\n');
+    }
+
+    function stripSystemInjections(text) {
+        if (!text) return text;
+        let s = text;
+
+        // 1. HTML comment injections (e.g. <!-- OMO_INTERNAL_INITIATOR -->)
+        s = s.replace(/<!--[\s\S]*?-->/g, '');
+
+        // 2. <system-reminder>...</system-reminder> blocks (multi-line)
+        s = s.replace(/<system-reminder[\s\S]*?<\/system-reminder>/gi, '');
+
+        // 3. [SYSTEM DIRECTIVE: OH-MY-OPENCODE - ...] lines (any variant)
+        s = s.replace(/^\[SYSTEM DIRECTIVE:.*\]\s*$/gm, '');
+
+        // 4. [analyze-mode] tag line
+        s = s.replace(/^\[analyze-mode\]\s*$/gim, '');
+
+        // 5. ANALYSIS MODE. block — from the header line through the next blank line
+        //    Pattern: "ANALYSIS MODE." line + content until blank line or end
+        s = s.replace(/^ANALYSIS MODE\..*?(?:\n\n|\n(?=\S)|$)/gims, '');
+
+        // 6. "Please use "question tool"..." footer — from that phrase to end of message
+        //    (This injection is always appended as a trailing block)
+        s = s.replace(/\n+Please use [""']question tool[""'][\s\S]*$/i, '');
+
+        // 7. Collapse 3+ blank lines to max 2, trim
+        s = s.replace(/\n{3,}/g, '\n\n').trim();
+
+        return s;
     }
 
     function renderSegmentElement(session, segment, renderedSet, renderKey) {
@@ -3926,7 +3956,7 @@ function applyPromptToSession(sessionId, payload) {
     session.cancelledTurn = false;
     session.canceledActiveTurn = false;
     session.activeTurnOpId = payload.opId || null;
-    const displayText = payload.text || 'Image attached.';
+    const displayText = stripSystemInjections(payload.text || 'Image attached.');
         const userMessage = upsertMessage(session, {
             id: payload.clientMessageId,
             role: 'user',
