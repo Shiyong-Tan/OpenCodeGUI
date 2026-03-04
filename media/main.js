@@ -3004,27 +3004,15 @@ function renderMessageElement(message, renderedSet) {
         if (!text) return text;
         let s = text;
 
-        // 1. HTML comment injections (e.g. <!-- OMO_INTERNAL_INITIATOR -->)
-        s = s.replace(/<!--[\s\S]*?-->/g, '');
+        // Template A: [analyze-mode] block (11 lines)
+        const templateA = '[analyze-mode]\nANALYSIS MODE. Gather context before diving deep:\nCONTEXT GATHERING (parallel):\n- 1-2 explore agents (codebase patterns, implementations)\n- 1-2 librarian agents (if external library involved)\n- Direct tools: Grep, AST-grep, LSP for targeted searches\nIF COMPLEX - DO NOT STRUGGLE ALONE. Consult specialists:\n- **Oracle**: Conventional problems (architecture, debugging, complex logic)\n- **Artistry**: Non-conventional problems (different approach needed)\nSYNTHESIZE findings before proceeding.\n---';
+        s = s.replace(templateA, '');
 
-        // 2. <system-reminder>...</system-reminder> blocks (multi-line)
-        s = s.replace(/<system-reminder[\s\S]*?<\/system-reminder>/gi, '');
+        // Template B: [search-mode] block (6 lines)
+        const templateB = '[search-mode]\nMAXIMIZE SEARCH EFFORT. Launch multiple background agents IN PARALLEL:\n- explore agents (codebase patterns, file structures, ast-grep)\n- librarian agents (remote repos, official docs, GitHub examples)\nPlus direct tools: Grep, ripgrep (rg), ast-grep (sg)\nNEVER stop at first result - be exhaustive.';
+        s = s.replace(templateB, '');
 
-        // 3. [SYSTEM DIRECTIVE: OH-MY-OPENCODE - ...] lines (any variant)
-        s = s.replace(/^\[SYSTEM DIRECTIVE:.*\]\s*$/gm, '');
-
-        // 4. [analyze-mode] tag line
-        s = s.replace(/^\[analyze-mode\]\s*$/gim, '');
-
-        // 5. ANALYSIS MODE. block — from the header line through the next blank line
-        //    Pattern: "ANALYSIS MODE." line + content until blank line or end
-        s = s.replace(/^ANALYSIS MODE\..*?(?:\n\n|\n(?=\S)|$)/gims, '');
-
-        // 6. "Please use "question tool"..." footer — from that phrase to end of message
-        //    (This injection is always appended as a trailing block)
-        s = s.replace(/\n+Please use [""']question tool[""'][\s\S]*$/i, '');
-
-        // 7. Collapse 3+ blank lines to max 2, trim
+        // Minimal cleanup: normalize excess newlines and trim
         s = s.replace(/\n{3,}/g, '\n\n').trim();
 
         return s;
