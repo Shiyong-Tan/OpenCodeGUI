@@ -78,7 +78,7 @@ export type PermissionOverlayPayload = {
 };
 
 export type ChatEvent = {
-    type: 'text' | 'session' | 'raw' | 'permission' | 'diff' | 'message' | 'error' | 'toolPatch' | 'files' | 'assistantMessageMeta' | 'questionOverlay' | 'permissionRequest' | 'permissionReplied' | 'autoResumeStallWarn' | 'autoResumeStallClear' | 'autoResumeHardStop' | 'todoUpdate';
+    type: 'text' | 'session' | 'raw' | 'permission' | 'diff' | 'message' | 'error' | 'tool' | 'toolPatch' | 'files' | 'assistantMessageMeta' | 'questionOverlay' | 'permissionRequest' | 'permissionReplied' | 'autoResumeStallWarn' | 'autoResumeStallClear' | 'autoResumeHardStop' | 'todoUpdate';
     text?: string;
     sessionId?: string;
     files?: FileSnapshot[];
@@ -107,6 +107,8 @@ export type ChatEvent = {
     isSyntheticUser?: boolean;
     isStatusUpdate?: boolean;
     todos?: Array<{content: string; status: string; priority: string}>;
+    tool?: string;
+    toolState?: { status?: string; input?: any; output?: any };
 };
 type PendingQuestionControl = {
     callId: string;
@@ -329,6 +331,7 @@ export class OpenCodeClient {
     private pendingQuestionCallIdsBySession = new Map<string, Set<string>>();
     private pendingPermissionIdsBySession = new Map<string, Set<string>>();
     private ignoredSummaryMessageIdsBySession = new Map<string, Set<string>>();
+    private subagentToParentSessionMap = new Map<string, string>();
     private readonly resyncCooldownMs = 500;
     private readonly silenceWindowMs = 1800;
     private readonly finalQuietWindowMs = 300;
@@ -755,6 +758,117 @@ export class OpenCodeClient {
         if (!sessionId) return false;
         const pending = this.pendingTurnChangesBySession.get(sessionId);
         return Boolean(pending?.changes?.length);
+    }
+
+    /**
+     * Get all related session IDs for grouped diff gating.
+     * Returns the session ID plus any mapped subagents (if parent) or the parent (if subagent).
+     * Used to check if any session in the group has active writes or pending changes.
+     * @param sessionId - The session ID to query (can be parent or subagent)
+     * @returns Array of related session IDs [sessionId, ...subagentIds] or [sessionId, parentId]
+     */
+    public getRelatedSessionIds(sessionId: string): string[] {
+        if (!sessionId) return [];
+        
+        // Check if this is a subagent session - if so, include parent
+        const parentId = this.subagentToParentSessionMap.get(sessionId);
+        if (parentId) {
+            return [sessionId, parentId];
+        }
+        
+        // Check if this is a parent session - if so, include all subagents
+        const subagentIds: string[] = [];
+        for (const [subagentId, mappedParentId] of this.subagentToParentSessionMap.entries()) {
+            if (mappedParentId === sessionId) {
+                subagentIds.push(subagentId);
+            }
+        }
+        
+        if (subagentIds.length > 0) {
+            return [sessionId, ...subagentIds];
+        }
+        
+        // No associations - return just this session
+        return [sessionId];
+    }
+
+    /**
+     * Check if session OR any related session (parent/subagent) has active turn writes.
+     * Used for grouped diff gating to allow diffs when any session in the group is active.
+     * @param sessionId - The session ID to check (can be parent or subagent)
+     * @returns true if any related session has active turn writes
+     */
+    public hasGroupedActiveTurnWrites(sessionId: string): boolean {
+        const relatedIds = this.getRelatedSessionIds(sessionId);
+        for (const id of relatedIds) {
+            if (this.hasActiveTurnWrites(id)) {
+                this.logUiDebug(`EXT: grouped.turn.write.check | sessionId=${sessionId} | relatedId=${id} | hasWrites=true`);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Check if session OR any related session (parent/subagent) has pending turn changes.
+     * Used for grouped diff gating to allow diffs when any session in the group has pending changes.
+     * @param sessionId - The session ID to check (can be parent or subagent)
+     * @returns true if any related session has pending turn changes
+     */
+    public hasGroupedPendingTurnChanges(sessionId: string): boolean {
+        const relatedIds = this.getRelatedSessionIds(sessionId);
+        for (const id of relatedIds) {
+            if (this.hasPendingTurnChanges(id)) {
+                this.logUiDebug(`EXT: grouped.turn.pending.check | sessionId=${sessionId} | relatedId=${id} | hasPending=true`);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Register a subagent session as a child of a parent session for grouped diff gating.
+     * This allows diff events from the subagent to pass gating checks when the parent has active writes.
+     * @param subagentSessionId - The subagent session ID
+     * @param parentSessionId - The parent session ID
+     */
+    public registerSubagentSession(subagentSessionId: string, parentSessionId: string): void {
+        if (!subagentSessionId || !parentSessionId) return;
+        this.subagentToParentSessionMap.set(subagentSessionId, parentSessionId);
+        this.logUiDebug(`EXT: session.group.register | subagent=${subagentSessionId} | parent=${parentSessionId}`);
+    }
+
+    /**
+     * Clear the parent association for a subagent session.
+     * @param subagentSessionId - The subagent session ID to unlink
+     */
+    public clearSubagentSession(subagentSessionId: string): void {
+        if (!subagentSessionId) return;
+        const hadParent = this.subagentToParentSessionMap.delete(subagentSessionId);
+        if (hadParent) {
+            this.logUiDebug(`EXT: session.group.clear | subagent=${subagentSessionId}`);
+        }
+    }
+
+    /**
+     * Clear all subagent associations for a parent session.
+     * Useful when a parent session is being cleaned up or reset.
+     * @param parentSessionId - The parent session ID
+     */
+    public clearSubagentsForParent(parentSessionId: string): void {
+        if (!parentSessionId) return;
+        const subagentIds: string[] = [];
+        for (const [subagentId, mappedParentId] of this.subagentToParentSessionMap.entries()) {
+            if (mappedParentId === parentSessionId) {
+                subagentIds.push(subagentId);
+            }
+        }
+        for (const subagentId of subagentIds) {
+            this.subagentToParentSessionMap.delete(subagentId);
+        }
+        if (subagentIds.length > 0) {
+            this.logUiDebug(`EXT: session.group.clear-parent | parent=${parentSessionId} | cleared=${subagentIds.length}`);
+        }
     }
 
     private shouldQueueTurnChanges(sessionId: string | undefined, source: EventSource, messageId?: string): boolean {
@@ -3875,6 +3989,32 @@ export class OpenCodeClient {
         return false;
     }
 
+    private extractTextPayload(value: unknown, depth = 0): string {
+        if (typeof value === 'string') {
+            return value;
+        }
+        if (!value || typeof value !== 'object' || depth > 2) {
+            return '';
+        }
+        const node = value as Record<string, unknown>;
+        const candidates: unknown[] = [
+            node.text,
+            node.value,
+            node.delta,
+            node.chunk,
+            node.content,
+            node.part,
+            node.message,
+        ];
+        for (const candidate of candidates) {
+            const extracted = this.extractTextPayload(candidate, depth + 1);
+            if (typeof extracted === 'string' && extracted.length > 0) {
+                return extracted;
+            }
+        }
+        return '';
+    }
+
     private mapServerEventToChatEvents(type: string, props: any, source: EventSource = 'sse'): ChatEvent[] {
         const events: ChatEvent[] = [];
         if (type === 'session.created' || type === 'session.updated') {
@@ -4094,18 +4234,20 @@ export class OpenCodeClient {
                     }
                 }
                 let chunk = '';
-                if (typeof part?.delta === 'string' && part.delta.length) {
-                    chunk = part.delta;
+                const deltaText = this.extractTextPayload(part?.delta);
+                if (deltaText.length > 0) {
+                    chunk = deltaText;
                     if (msgId) {
                         this.assistantHasDelta.add(msgId);
                     }
-                } else if (typeof part?.text === 'string') {
+                } else {
+                    const partText = this.extractTextPayload(part?.text);
                     // Even if we've seen deltas, if there's new full text beyond what we've shown, emit it
-                    const nextLen = part.text.length;
+                    const nextLen = partText.length;
                     const prevLen = msgId ? (this.assistantTextLengths.get(msgId) || 0) : 0;
                     
                     if (nextLen > prevLen) {
-                        chunk = part.text.slice(prevLen);
+                        chunk = partText.slice(prevLen);
                         if (msgId) {
                             this.assistantTextLengths.set(msgId, nextLen);
                         }

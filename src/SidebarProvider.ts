@@ -103,7 +103,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private currentSessionId?: string;
     private userOwnedSessionIds = new Set<string>();
     private activeSubagentSessionIds = new Set<string>();
-    private subagentProgressBySession = new Map<string, { taskId: string; description: string; startedAt: number; title?: string; model?: string; latestText?: string; latestTool?: string }>();
+    private subagentProgressBySession = new Map<string, { taskId: string; parentSessionId: string; description: string; startedAt: number; title?: string; mode?: string; model?: string; latestText?: string; latestTool?: string; latestToolInput?: string; isDone?: boolean }>();
 
     private isUserOwnedSession(id: string): boolean {
         return this.userOwnedSessionIds.has(id) || id === this.currentSessionId;
@@ -116,6 +116,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private clearSubagentSessions(): void {
+        this.activeSubagentSessionIds.forEach(sessionId => {
+            this.client.clearSubagentSession(sessionId);
+            this.uiDebugChannel.appendLine(`[SidebarProvider] Cleared subagent session mapping: ${sessionId}`);
+        });
         this.activeSubagentSessionIds.clear();
         this.subagentProgressBySession.clear();
     }
@@ -131,15 +135,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         if (!liveWebview) return;
         const agents = Array.from(this.subagentProgressBySession.values()).map(entry => ({
             sessionId: entry.taskId,
+            parentSessionId: entry.parentSessionId,
             description: entry.description,
+            mode: entry.mode || '',
             startedAt: entry.startedAt,
             title: entry.title || '',
             model: entry.model || '',
             latestText: entry.latestText || '',
-            latestTool: entry.latestTool || ''
+            latestTool: entry.latestTool || '',
+            latestToolInput: entry.latestToolInput || '',
+            isDone: entry.isDone === true
         }));
         const isActive = active !== undefined ? active : agents.length > 0;
-        liveWebview.postMessage({ type: 'subagentStatus', active: isActive, agents, count: agents.length });
+        liveWebview.postMessage({ type: 'subagentStatus', active: isActive, agents, count: agents.length, sessionId: this.currentSessionId });
     }
     private selectedModel?: string;
     private selectedVariant?: string;
@@ -1101,6 +1109,13 @@ ${attachmentLines.join('\n')}`
                         if (this.currentSessionId) {
                             this.client.finishTurn(this.currentSessionId);
                         }
+                        // Mark all active subagents as done before clearing
+                        for (const entry of this.subagentProgressBySession.values()) {
+                            entry.isDone = true;
+                        }
+                        if (this.subagentProgressBySession.size > 0) {
+                            this.emitSubagentStatus();
+                        }
                         this.clearSubagentSessions();
                         this.emitSubagentStatus(false);
                         await this.postModelQuota(liveWebview, 'chat-done');
@@ -1138,6 +1153,13 @@ ${attachmentLines.join('\n')}`
                         await this.resolvePendingUserUpgrade(this.currentSessionId, activeWebview);
                         if (this.currentSessionId) {
                             this.client.finishTurn(this.currentSessionId);
+                        }
+                        // Mark all active subagents as done before clearing (error path)
+                        for (const entry of this.subagentProgressBySession.values()) {
+                            entry.isDone = true;
+                        }
+                        if (this.subagentProgressBySession.size > 0) {
+                            this.emitSubagentStatus();
                         }
                         this.clearSubagentSessions();
                         this.emitSubagentStatus(false);
@@ -3340,17 +3362,24 @@ ${attachmentLines.join('\n')}`
         if (event.type === 'session' && event.sessionId) {
             if (!this.isUserOwnedSession(event.sessionId) && this.sendInFlightBySession.has(this.currentSessionId!)) {
                 this.activeSubagentSessionIds.add(event.sessionId);
+                this.client.registerSubagentSession(event.sessionId, this.currentSessionId || '');
+                const initialMode = typeof (event as any).mode === 'string' ? (event as any).mode : '';
                 this.subagentProgressBySession.set(event.sessionId, {
                     taskId: event.sessionId,
-                    description: '',
+                    parentSessionId: this.currentSessionId || '',
+                    description: initialMode,
+                    mode: initialMode,
                     startedAt: Date.now()
                 });
+                this.uiDebugChannel.appendLine(`[SidebarProvider] Registered subagent session mapping: ${event.sessionId} -> ${this.currentSessionId}`);
                 const sessionId = event.sessionId;
                 this.client.getSessionInfo(sessionId).then((info: any) => {
                     const entry = this.subagentProgressBySession.get(sessionId);
                     if (entry) {
                         entry.title = info?.title || '';
-                        entry.model = info?.model || info?.config?.model || '';
+                        entry.mode = entry.mode || info?.mode || info?.agent || '';
+                        entry.description = entry.description || entry.mode || '';
+                        entry.model = entry.model || info?.modelID || info?.model || info?.config?.model || '';
                         this.emitSubagentStatus();
                     }
                 }).catch(() => {});
@@ -3361,9 +3390,12 @@ ${attachmentLines.join('\n')}`
             // Guard: Prevent subagent session IDs from hijacking currentSessionId
             if (!this.isUserOwnedSession(event.sessionId)) {
                 this.activeSubagentSessionIds.add(event.sessionId);
+                const initialMode = typeof (event as any).mode === 'string' ? (event as any).mode : '';
                 this.subagentProgressBySession.set(event.sessionId, {
                     taskId: event.sessionId,
-                    description: '',
+                    parentSessionId: this.currentSessionId || '',
+                    description: initialMode,
+                    mode: initialMode,
                     startedAt: Date.now()
                 });
                 const sessionId = event.sessionId;
@@ -3371,7 +3403,9 @@ ${attachmentLines.join('\n')}`
                     const entry = this.subagentProgressBySession.get(sessionId);
                     if (entry) {
                         entry.title = info?.title || '';
-                        entry.model = info?.model || info?.config?.model || '';
+                        entry.mode = entry.mode || info?.mode || info?.agent || '';
+                        entry.description = entry.description || entry.mode || '';
+                        entry.model = entry.model || info?.modelID || info?.model || info?.config?.model || '';
                         this.emitSubagentStatus();
                     }
                 }).catch(() => {});
@@ -3418,16 +3452,43 @@ ${attachmentLines.join('\n')}`
             if (event.type === 'text' && typeof event.text === 'string') {
                 const entry = this.subagentProgressBySession.get(event.sessionId);
                 if (entry) {
-                    entry.latestText = event.text.slice(-80);
+                    entry.latestText = event.text.length > 200
+                        ? event.text.slice(0, 200) + '...'
+                        : event.text;
+                    entry.isDone = false;
                     this.emitSubagentStatus();
+                }
+            }
+            // Handle generic tool events (e.g., grep, read, etc.)
+            if (event.type === 'tool' && event.tool) {
+                const entry = this.subagentProgressBySession.get(event.sessionId);
+                if (entry) {
+                    const toolName = event.tool;
+                    const status = event.toolState?.status || 'running';
+                    if (status === 'running' || status === 'pending') {
+                        entry.latestTool = toolName;
+                        const input = event.toolState?.input;
+                        if (input && typeof input === 'object') {
+                            // Extract meaningful input display
+                            const inputDisplay = input.filePath || input.path || input.pattern || input.query || '';
+                            entry.latestToolInput = inputDisplay;
+                        } else {
+                            entry.latestToolInput = '';
+                        }
+                        entry.isDone = false;
+                        this.emitSubagentStatus();
+                    }
                 }
             }
             if (event.type === 'toolPatch' && typeof event.text === 'string') {
                 const entry = this.subagentProgressBySession.get(event.sessionId);
                 if (entry) {
                     const match = event.text.match(/(?:---\s+a\/|\+\+\+\s+b\/|diff\s+--git\s+[^\s]+\s+b\/)([^\s\n]+)/);
-                    const filename = match ? pathModule.basename(match[1]) : '';
+                    const filepath = match ? match[1] : '';
+                    const filename = filepath ? pathModule.basename(filepath) : '';
                     entry.latestTool = 'Applying patch' + (filename ? ': ' + filename : '');
+                    entry.latestToolInput = filepath || '';
+                    entry.isDone = false;
                     this.emitSubagentStatus();
                 }
             }
@@ -3435,8 +3496,11 @@ ${attachmentLines.join('\n')}`
                 const entry = this.subagentProgressBySession.get(event.sessionId);
                 if (entry) {
                     const match = event.text.match(/(?:---\s+a\/|\+\+\+\s+b\/|diff\s+--git\s+[^\s]+\s+b\/)([^\s\n]+)/);
-                    const filename = match ? pathModule.basename(match[1]) : '';
+                    const filepath = match ? match[1] : '';
+                    const filename = filepath ? pathModule.basename(filepath) : '';
                     entry.latestTool = 'Editing ' + (filename || 'file');
+                    entry.latestToolInput = filepath || '';
+                    entry.isDone = false;
                     this.emitSubagentStatus();
                 }
             }
@@ -3447,6 +3511,8 @@ ${attachmentLines.join('\n')}`
                     const firstFile = typeof event.files[0] === 'string' ? event.files[0] : (event.files[0] as any).path || '';
                     const filename = firstFile ? pathModule.basename(firstFile) : 'file';
                     entry.latestTool = 'Writing ' + filename;
+                    entry.latestToolInput = firstFile || '';
+                    entry.isDone = false;
                     this.emitSubagentStatus();
                 }
                 const liveWebview = this._view?.webview || webview;
@@ -3471,6 +3537,10 @@ ${attachmentLines.join('\n')}`
                             sessionId: this.currentSessionId
                         });
                     }
+                }
+                // Emit changed-file list immediately for subagent file modifications
+                if (this.currentSessionId) {
+                    await this.emitDiffFileList(this.currentSessionId, liveWebview);
                 }
             }
             return;
@@ -3621,7 +3691,14 @@ ${attachmentLines.join('\n')}`
             if (this.currentSessionId) {
                 this.client.finishTurn(this.currentSessionId);
             }
-            this.clearSubagentSessions();
+                        // Mark all active subagents as done before clearing (error event path)
+                        for (const entry of this.subagentProgressBySession.values()) {
+                            entry.isDone = true;
+                        }
+                        if (this.subagentProgressBySession.size > 0) {
+                            this.emitSubagentStatus();
+                        }
+                        this.clearSubagentSessions();
             this.emitSubagentStatus(false);
 
             const doneAssistantMsgId = this.currentSessionId
@@ -3701,6 +3778,10 @@ ${attachmentLines.join('\n')}`
                         sessionId: this.currentSessionId
                     });
                 }
+            }
+            // Emit changed-file list immediately for main-agent file modifications
+            if (this.currentSessionId) {
+                await this.emitDiffFileList(this.currentSessionId, liveWebview);
             }
             return;
         }
