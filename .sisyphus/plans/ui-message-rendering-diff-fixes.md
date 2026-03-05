@@ -620,7 +620,7 @@ Wave FINAL (Parallel independent review):
     Evidence: .sisyphus/evidence/task-10-late-diff.log
   ```
 
-- [ ] 11. Regression guard for latest-state replace behavior
+- [x] 11. Regression guard for latest-state replace behavior
 
   **What to do**:
   - Add an explicit log or assertion path to confirm `assistantMessageMeta` replace behavior remains in effect for main agent.

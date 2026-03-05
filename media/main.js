@@ -4343,6 +4343,7 @@ function applyPromptToSession(sessionId, payload) {
                 }
                 vscode.postMessage({ type: 'ui-debug', payload: ['handleAssistantMeta', 'status-update', targetId] });
             } else {
+                console.log(`[ASSIST_META] replace mode | key=${targetId} | textLen=${typeof message.lastText === 'string' ? message.lastText.length : 0} | streaming=true`);
                 const nextText = typeof message.lastText === 'string' ? message.lastText : target.text;
                 const normalized = typeof nextText === 'string' ? nextText.trim() : '';
                 const hasStatusChange = normalized.length > 0 && normalized !== 'Thinking...';
@@ -4351,7 +4352,7 @@ function applyPromptToSession(sessionId, payload) {
                 }
                 target.text = nextText;
                 target.meta = { ...target.meta, internalId: backendId, isThinking: true, statusText: '', currentSegment: '' };
-                console.log('[ASSIST_META] currentSegment reset on full text replace');
+                console.log('[ASSIST_META] currentSegment reset on full text replace | no cumulative append logic active');
                 vscode.postMessage({ type: 'ui-debug', payload: ['handleAssistantMeta', 'merged', targetId] });
                 window.__oc?.renderFromState?.();
             }
