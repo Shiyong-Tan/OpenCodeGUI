@@ -538,6 +538,7 @@ export class OpenCodeClient {
 
     public setPendingAssistantTmpKey(sessionId: string, tmpKey: string): void {
         if (!sessionId || !tmpKey) return;
+        if (!tmpKey.startsWith('tmp:') && !tmpKey.startsWith('local-')) return;
         const existing = this.turnStateBySession.get(sessionId);
         if (existing) {
             existing.pendingAssistantTmpKey = tmpKey;
@@ -1763,11 +1764,12 @@ export class OpenCodeClient {
                         }
                     }
                     if (assistantMsgId && onEvent) {
+                        const resolvedSessionId = sessionId || this.currentSessionId;
                         onEvent({
                             type: 'assistantMessageMeta',
-                            sessionId,
+                            sessionId: resolvedSessionId,
                             assistantMsgId,
-                            tmpKey: this.getPendingAssistantTmpKey(sessionId)
+                            tmpKey: this.getPendingAssistantTmpKey(resolvedSessionId)
                         });
                     }
                     if (parsed.type === 'error') {

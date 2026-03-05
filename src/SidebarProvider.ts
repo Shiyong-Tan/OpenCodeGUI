@@ -1049,6 +1049,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             activeSendSessionId = this.currentSessionId;
                             this.sendInFlightBySession.add(this.currentSessionId);
                             this.pendingLocalKeyBySession.set(this.currentSessionId, clientMessageId);
+                            this.pendingAssistantTmpKeyBySession.delete(this.currentSessionId);
                             const liveWebview = this._view?.webview || activeWebview;
                             liveWebview.postMessage({ type: 'turnInFlight', sessionId: this.currentSessionId, inFlight: true });
                             this.client.startTurnWithOp(this.currentSessionId, clientMessageId, opId);
@@ -1229,12 +1230,18 @@ ${attachmentLines.join('\n')}`
                         }
                         if (this.currentSessionId) {
                             this.assistantTextBufferBySession.delete(this.currentSessionId);
+                            this.pendingAssistantTmpKeyBySession.delete(this.currentSessionId);
+                            const pendingLocalKey = this.pendingLocalKeyBySession.get(this.currentSessionId);
+                            if (pendingLocalKey) {
+                                this.pendingAssistantTmpKeyByLocalKey.delete(pendingLocalKey);
+                            }
                         }
                         await this.postModelQuota(activeWebview, 'chat-error');
                     } finally {
                         if (activeSendSessionId) {
                             this.sendInFlightBySession.delete(activeSendSessionId);
                             this.pendingLocalKeyBySession.delete(activeSendSessionId);
+                            this.pendingAssistantTmpKeyBySession.delete(activeSendSessionId);
                             const liveWebview = this._view?.webview || activeWebview;
                             liveWebview.postMessage({ type: 'turnInFlight', sessionId: activeSendSessionId, inFlight: false });
                         }
@@ -3756,6 +3763,13 @@ ${attachmentLines.join('\n')}`
                 const pendingLocalKey = this.pendingLocalKeyBySession.get(sessionId);
                 if (pendingLocalKey && pendingLocalKey.startsWith('local-')) {
                     this.pendingAssistantTmpKeyByLocalKey.set(pendingLocalKey, tmpKey);
+                }
+            }
+            if (sessionId && event.assistantMsgId) {
+                this.pendingAssistantTmpKeyBySession.delete(sessionId);
+                const pendingLocalKey = this.pendingLocalKeyBySession.get(sessionId);
+                if (pendingLocalKey && pendingLocalKey.startsWith('local-')) {
+                    this.pendingAssistantTmpKeyByLocalKey.delete(pendingLocalKey);
                 }
             }
             if (event.assistantMsgId && sessionId) {

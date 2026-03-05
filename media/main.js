@@ -25,6 +25,62 @@ md.renderer.rules.table_close = function (tokens, idx, options, env, self) {
 
 const purify = window.DOMPurify;
 
+let tempFinalTraceEnabled = null;
+const TEMP_FINAL_TRACE_PREFIX = '[TMP_FINAL_TRACE]';
+function isTempFinalTraceEnabled() {
+    if (tempFinalTraceEnabled !== null) return tempFinalTraceEnabled;
+    try {
+        tempFinalTraceEnabled = window?.__oc?.debug?.tempFinal === true
+            || window?.__oc?.debug?.tempFinalTrace === true
+            || localStorage.getItem('oc_trace_temp_final') === '1';
+    } catch (error) {
+        tempFinalTraceEnabled = false;
+    }
+    return tempFinalTraceEnabled;
+}
+
+function emitTempFinalTrace(label, payload) {
+    if (!isTempFinalTraceEnabled()) return;
+    const safePayload = Array.isArray(payload) ? payload : [payload];
+    vscode.postMessage({ type: 'ui-debug', payload: [TEMP_FINAL_TRACE_PREFIX, label, ...safePayload] });
+}
+
+let tempFinalAssertEnabled = null;
+function isTempFinalAssertEnabled() {
+    if (tempFinalAssertEnabled !== null) return tempFinalAssertEnabled;
+    try {
+        tempFinalAssertEnabled = window?.__oc?.debug?.tempFinalAssert === true
+            || localStorage.getItem('oc_assert_temp_final') === '1';
+    } catch (error) {
+        tempFinalAssertEnabled = false;
+    }
+    return tempFinalAssertEnabled;
+}
+
+function assertTempFinalParity(sessionId, stage, finalKey) {
+    if (!isTempFinalAssertEnabled()) return;
+    const session = getSessionState(sessionId);
+    if (!session || !finalKey || typeof finalKey !== 'string') return;
+    const finalMsg = session.messagesById.get(finalKey);
+    if (!finalMsg || finalMsg.role !== 'assistant') return;
+    const tmpKey = session.pendingAssistantUpgrade?.tmpKey;
+    if (!tmpKey || tmpKey === finalKey) return;
+    const tmpMsg = session.messagesById.get(tmpKey);
+    if (!tmpMsg || tmpMsg.role !== 'assistant') return;
+    const finalText = typeof finalMsg.text === 'string' ? finalMsg.text : '';
+    const tmpText = typeof tmpMsg.text === 'string' ? tmpMsg.text : '';
+    if (finalText && tmpText && finalText !== tmpText) {
+        emitTempFinalTrace('assert.parity.mismatch', [
+            `stage=${stage}`,
+            `sessionId=${sessionId}`,
+            `finalKey=${finalKey}`,
+            `tmpKey=${tmpKey}`,
+            `finalLen=${finalText.length}`,
+            `tmpLen=${tmpText.length}`
+        ]);
+    }
+}
+
 let models = [];
 let sessions = [];
 let modes = ['plan', 'build'];
@@ -434,7 +490,9 @@ function createSessionState() {
         backendTurnInFlight: false,
         pendingAssistantUpgrade: null,
         awaitingFinalMapBind: false,
+        streamMode: null,
         seenDiffKeys: new Set(),
+        assistantUpgradeSeen: new Set(),
         nextOrder: 0,
         serverIdToKey: new Map(),
         clientKeyToServerId: new Map(),
@@ -497,6 +555,10 @@ function removeMessageFromSession(session, messageId) {
     session.backendTurnInFlight = false;
     session.currentTurnAssistantKey = null;
     session.currentTurnAssistantMsgId = null;
+    session.streamMode = null;
+    if (session.assistantUpgradeSeen instanceof Set) {
+        session.assistantUpgradeSeen.clear();
+    }
     session.activeTurnOpId = null;
     window.__oc?.renderFromState?.();
     updateSendGate();
@@ -1205,11 +1267,40 @@ function replaceKeyEverywhere(oldId, newId) {
     let timelineReplaced = false;
     let deduped = false;
 
+    const pickCompleteMessage = (primary, secondary) => {
+        if (!primary) return secondary || null;
+        if (!secondary) return primary || null;
+        const primaryText = typeof primary.text === 'string' ? primary.text : '';
+        const secondaryText = typeof secondary.text === 'string' ? secondary.text : '';
+        if (primaryText.length !== secondaryText.length) {
+            return primaryText.length > secondaryText.length ? primary : secondary;
+        }
+        const primarySegments = Array.isArray(primary.meta?.textSegments) ? primary.meta.textSegments.length : 0;
+        const secondarySegments = Array.isArray(secondary.meta?.textSegments) ? secondary.meta.textSegments.length : 0;
+        if (primarySegments !== secondarySegments) {
+            return primarySegments > secondarySegments ? primary : secondary;
+        }
+        const primaryThinking = primary.meta?.isThinking === true;
+        const secondaryThinking = secondary.meta?.isThinking === true;
+        if (primaryThinking !== secondaryThinking) {
+            return primaryThinking ? secondary : primary;
+        }
+        const primaryOrder = typeof primary.order === 'number' ? primary.order : -1;
+        const secondaryOrder = typeof secondary.order === 'number' ? secondary.order : -1;
+        return primaryOrder >= secondaryOrder ? primary : secondary;
+    };
+
     if (message) {
         session.messagesById.delete(oldId);
         if (!existing) {
             message.id = newId;
             session.messagesById.set(newId, message);
+        } else {
+            const selected = pickCompleteMessage(message, existing);
+            if (selected) {
+                selected.id = newId;
+                session.messagesById.set(newId, selected);
+            }
         }
     }
 
@@ -1587,6 +1678,14 @@ function attemptAssistantUpgrade(sessionId, payload, source) {
     const tmpKey = payload?.tmpKey;
     const assistantMsgId = payload?.assistantMsgId;
 
+    emitTempFinalTrace('upgrade.attempt', [
+        `source=${source || 'unknown'}`,
+        `payloadSession=${payloadSession || 'null'}`,
+        `currentSession=${currentSession || 'null'}`,
+        `tmpKey=${tmpKey || 'null'}`,
+        `assistantMsgId=${assistantMsgId || 'null'}`
+    ]);
+
     vscode.postMessage({
         type: 'ui-debug',
         payload: ['[DBG_WV_ID]', `type=${source} sessionPayload=${payloadSession || 'null'} currentSession=${currentSession || 'null'} tmpKey=${tmpKey || 'null'} assistantMsgId=${assistantMsgId || 'null'}`]
@@ -1606,6 +1705,23 @@ function attemptAssistantUpgrade(sessionId, payload, source) {
         return;
     }
 
+    if (session.canceledActiveTurn) {
+        emitTempFinalTrace('upgrade.drop', ['reason=canceledActiveTurn']);
+        return;
+    }
+
+    if (!tmpKey && !session.currentTurnAssistantKey && !session.pendingAssistantUpgrade && !session.awaitingFinalMapBind) {
+        emitTempFinalTrace('upgrade.drop', ['reason=no-turn-binding']);
+        return;
+    }
+
+    if (session.assistantUpgradeSeen instanceof Set && session.assistantUpgradeSeen.has(assistantMsgId)) {
+        if (session.currentTurnAssistantKey === assistantMsgId) {
+            emitTempFinalTrace('upgrade.idempotent', [`assistantMsgId=${assistantMsgId}`]);
+            return;
+        }
+    }
+
     const resolveLastAssistantKey = () => {
         for (let i = session.timeline.length - 1; i >= 0; i--) {
             const id = session.timeline[i];
@@ -1615,8 +1731,26 @@ function attemptAssistantUpgrade(sessionId, payload, source) {
         return null;
     };
 
-    const currentKey = session.currentTurnAssistantKey || tmpKey || resolveLastAssistantKey();
+    const candidateTmpKey = typeof tmpKey === 'string'
+        ? tmpKey
+        : (session.pendingAssistantUpgrade?.assistantMsgId === assistantMsgId ? session.pendingAssistantUpgrade?.tmpKey : null);
+    const pickCandidateKey = (key) => {
+        if (typeof key !== 'string' || !key.length) return null;
+        if (key.startsWith('tmp:') || key.startsWith('local-')) return key;
+        if (session.messagesById.has(key)) return key;
+        return null;
+    };
+    const currentKey = pickCandidateKey(session.currentTurnAssistantKey)
+        || pickCandidateKey(candidateTmpKey)
+        || (session.awaitingFinalMapBind ? resolveLastAssistantKey() : null);
     const newKey = assistantMsgId;
+
+    emitTempFinalTrace('upgrade.keySelect', [
+        `currentTurnKey=${session.currentTurnAssistantKey || 'null'}`,
+        `candidateTmpKey=${candidateTmpKey || 'null'}`,
+        `resolvedCurrentKey=${currentKey || 'null'}`,
+        `newKey=${newKey}`
+    ]);
 
     vscode.postMessage({
         type: 'ui-debug',
@@ -1670,6 +1804,10 @@ function attemptAssistantUpgrade(sessionId, payload, source) {
         payload: ['ASSIST_UPGRADE', `curKey=${currentKey || 'null'}`, `newKey=${newKey}`, `curIndex=${curIndex === null ? 'null' : curIndex}`,
             `newIndex=${newIndex === null ? 'null' : newIndex}`, `replaced=${replaced}`, `reason=${reason}`, `tail=${tail}`]
     });
+
+    if (session.assistantUpgradeSeen instanceof Set) {
+        session.assistantUpgradeSeen.add(newKey);
+    }
 
     const bound = session.currentTurnAssistantKey === newKey;
     if (bound) {
@@ -4230,9 +4368,13 @@ function applyPromptToSession(sessionId, payload) {
     session.currentTurnAssistantKey = null;
     session.pendingAssistantUpgrade = null;
     session.awaitingFinalMapBind = false;
+    session.streamMode = null;
     session.backendTurnInFlight = false;
     if (session.seenDiffKeys instanceof Set) {
         session.seenDiffKeys.clear();
+    }
+    if (session.assistantUpgradeSeen instanceof Set) {
+        session.assistantUpgradeSeen.clear();
     }
 
         if (!session.thinkingId) {
@@ -4253,13 +4395,13 @@ function applyPromptToSession(sessionId, payload) {
         // agent timeout notice removed
     }
 
-    function handleAssistantMeta(sessionId, message) {
+function handleAssistantMeta(sessionId, message) {
         const session = getSessionState(sessionId, true);
         const backendId = getEventMessageId(message);
-    const msgId = typeof message?.assistantMsgId === 'string' ? message.assistantMsgId : null;
-    if (msgId) {
-        session.currentTurnAssistantMsgId = msgId;
-    }
+        const msgId = typeof message?.assistantMsgId === 'string' ? message.assistantMsgId : null;
+        if (msgId) {
+            session.currentTurnAssistantMsgId = msgId;
+        }
         if (!msgId && !session.thinkingId) {
             vscode.postMessage({ type: 'ui-debug', payload: ['handleAssistantMeta', 'drop-no-backendId-no-thinking'] });
             return;
@@ -4267,6 +4409,10 @@ function applyPromptToSession(sessionId, payload) {
 
         if (message?.clientMessageId && backendId) {
             registerMessageIdMapping(session, message.clientMessageId, backendId, 'assistantMessageMeta');
+        }
+
+        if (!session.streamMode) {
+            session.streamMode = 'meta';
         }
 
         if ((typeof message?.tmpKey === 'string') && (message.tmpKey.startsWith('tmp:') || message.tmpKey.startsWith('local-')) && (typeof msgId === 'string') && msgId.startsWith('msg_')) {
@@ -4342,6 +4488,12 @@ function applyPromptToSession(sessionId, payload) {
                 }
                 vscode.postMessage({ type: 'ui-debug', payload: ['handleAssistantMeta', 'status-update', targetId] });
             } else {
+                if (!session.streamMode) {
+                    session.streamMode = 'meta';
+                } else if (session.streamMode !== 'meta') {
+                    emitTempFinalTrace('meta.replace.drop', [`reason=streamMode=${session.streamMode}`, `targetId=${targetId}`]);
+                    return;
+                }
                 console.log(`[ASSIST_META] replace mode | key=${targetId} | textLen=${typeof message.lastText === 'string' ? message.lastText.length : 0} | streaming=true`);
                 const nextText = typeof message.lastText === 'string' ? message.lastText : target.text;
                 const normalized = typeof nextText === 'string' ? nextText.trim() : '';
@@ -4350,8 +4502,19 @@ function applyPromptToSession(sessionId, payload) {
                     // agent timeout notice removed
                 }
                 target.text = nextText;
-                target.meta = { ...target.meta, internalId: backendId, isThinking: true, statusText: '', currentSegment: '' };
+                target.meta = {
+                    ...target.meta,
+                    internalId: backendId,
+                    isThinking: true,
+                    statusText: '',
+                    currentSegment: '',
+                    textSegments: []
+                };
                 console.log('[ASSIST_META] currentSegment reset on full text replace | no cumulative append logic active');
+                if (isTempFinalTraceEnabled()) {
+                    const segmentsLen = Array.isArray(target.meta?.textSegments) ? target.meta.textSegments.length : 0;
+                    emitTempFinalTrace('meta.replace.reset', [`targetId=${targetId}`, `textLen=${typeof nextText === 'string' ? nextText.length : 0}`, `segments=${segmentsLen}`]);
+                }
                 vscode.postMessage({ type: 'ui-debug', payload: ['handleAssistantMeta', 'merged', targetId] });
                 window.__oc?.renderFromState?.();
             }
@@ -4360,16 +4523,28 @@ function applyPromptToSession(sessionId, payload) {
         assertInvariants(sessionId, 'assistantMeta');
     }
 
-    function handleChatChunk(sessionId, message) {
+function handleChatChunk(sessionId, message) {
         const session = getSessionState(sessionId, true);
         // agent timeout notice removed
         const backendId = getEventMessageId(message);
         const chunkText = getEventChunkText(message);
 
-    const msgId = typeof message?.assistantMsgId === 'string' ? message.assistantMsgId : null;
-    if (msgId) {
-        session.currentTurnAssistantMsgId = msgId;
-    }
+        if (!session?.thinkingId && !session?.currentTurnAssistantKey && !session?.backendTurnInFlight) {
+            emitTempFinalTrace('chatChunk.drop', [`sessionId=${sessionId}`, 'reason=no-active-turn']);
+            return;
+        }
+
+        if (!session.streamMode) {
+            session.streamMode = 'chunk';
+        } else if (session.streamMode !== 'chunk') {
+            emitTempFinalTrace('chatChunk.drop', [`reason=streamMode=${session.streamMode}`, `sessionId=${sessionId}`]);
+            return;
+        }
+
+        const msgId = typeof message?.assistantMsgId === 'string' ? message.assistantMsgId : null;
+        if (msgId) {
+            session.currentTurnAssistantMsgId = msgId;
+        }
 
         if ((typeof message?.tmpKey === 'string') && (message.tmpKey.startsWith('tmp:') || message.tmpKey.startsWith('local-')) && (typeof msgId === 'string') && msgId.startsWith('msg_')) {
             session.pendingAssistantUpgrade = {
@@ -4403,6 +4578,7 @@ function applyPromptToSession(sessionId, payload) {
 
         if (!targetId) {
             vscode.postMessage({ type: 'ui-debug', payload: ['handleChatChunk', 'drop-no-target'] });
+            emitTempFinalTrace('chatChunk.drop', [`sessionId=${sessionId}`, 'reason=no-target']);
             return;
         }
 
@@ -4475,6 +4651,9 @@ function applyPromptToSession(sessionId, payload) {
         const beforeKey = session.currentTurnAssistantKey;
         attemptAssistantUpgrade(sessionId, { assistantMsgId: resolvedFinal }, 'chatDone');
         replaced = beforeKey !== session.currentTurnAssistantKey && session.currentTurnAssistantKey === resolvedFinal;
+        if (session.currentTurnAssistantKey === resolvedFinal) {
+            session.assistantUpgradeSeen?.add?.(resolvedFinal);
+        }
     }
 
     const match = Boolean(resolvedFinal && session.currentTurnAssistantKey === resolvedFinal);
@@ -4484,15 +4663,28 @@ function applyPromptToSession(sessionId, payload) {
             `match=${match}`, `replaced=${replaced}`]
     });
 
+    assertTempFinalParity(sessionId, 'chatDone', resolvedFinal);
+
     if (resolvedFinal && typeof resolvedFinal === 'string') {
         if (!match) {
             session.awaitingFinalMapBind = true;
+            if (!session.pendingAssistantUpgrade || session.pendingAssistantUpgrade.assistantMsgId !== resolvedFinal) {
+                session.pendingAssistantUpgrade = {
+                    tmpKey: session.currentTurnAssistantKey || session.thinkingId || null,
+                    assistantMsgId: resolvedFinal,
+                    source: 'chatDone',
+                    ts: Date.now()
+                };
+            }
         } else {
             session.awaitingFinalMapBind = false;
             session.pendingAssistantUpgrade = null;
+            session.currentTurnAssistantMsgId = null;
+            session.currentTurnAssistantKey = null;
         }
-        session.currentTurnAssistantMsgId = null;
-        session.currentTurnAssistantKey = null;
+    }
+    if (resolvedFinal && typeof resolvedFinal === 'string') {
+        session.streamMode = null;
     }
     updateSendGate();
     assertInvariants(sessionId, 'chatDone');
