@@ -462,7 +462,7 @@ body {
     color: var(--vscode-descriptionForeground, #888);
     opacity: 0.8;
     padding: 4px 0 2px;
-    font-style: italic;
+    font-style: normal;
 }
 
 .turn-divider {
@@ -1790,6 +1790,11 @@ select#mode-select {
 }
 
 
+/* Make all em tags in temporary streaming messages non-italic */
+/* Scoped to streaming context only to not affect final messages */
+.message.streaming .message-content em {
+    font-style: normal;
+}
 
 .message.system.undo-segment-placeholder {
     background: transparent;
@@ -1819,7 +1824,7 @@ select#mode-select {
 .subagent-latest-text {
     font-size: 0.85em;
     opacity: 0.75;
-    font-style: italic;
+    font-style: normal;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1868,14 +1873,14 @@ select#mode-select {
 .subagent-action {
     font-size: 0.78em;
     opacity: 0.85;
-    font-style: italic;
+    font-style: normal;
 }
 
 /* Subagent inline block inside streaming bubble */
 .subagent-inline {
-  margin-top: 10px;
-  padding-top: 8px;
-  border-top: 1px solid var(--vscode-widget-border, rgba(255,255,255,0.1));
+  margin-top: 8px;
+  padding-left: 10px;
+  border-left: 2px solid var(--vscode-widget-border, rgba(255,255,255,0.2));
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -1894,19 +1899,61 @@ select#mode-select {
   color: var(--vscode-descriptionForeground);
 }
 
-.subagent-inline-text {
-  font-size: 0.78em;
-  opacity: 0.7;
-  color: var(--vscode-descriptionForeground);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
+/* Tool-use rows should remain italic - higher specificity to override em rules */
 .subagent-inline-tool {
   font-size: 0.78em;
   opacity: 0.85;
-  font-style: italic;
+  font-style: italic !important;
+  color: var(--vscode-descriptionForeground);
+  margin-left: 8px;
+}
+
+/* Subagent inline text and its em tags should be non-italic */
+.subagent-inline-text,
+.subagent-inline-text em {
+  font-size: 0.78em;
+  font-style: normal;
+  opacity: 0.9;
+  color: var(--vscode-foreground);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  margin-left: 14px;
+}
+
+/* Normalize subagent text block spacing to remove excessive vertical gaps */
+.subagent-inline-text > * {
+  margin: 0.22em 0;
+}
+
+.subagent-inline-text > :first-child {
+  margin-top: 0;
+}
+
+.subagent-inline-text > :last-child {
+  margin-bottom: 0;
+}
+
+.subagent-inline-meta {
+  font-size: 0.8em;
+  margin-left: 14px;
+  opacity: 0.8;
+  color: var(--vscode-descriptionForeground);
+}
+
+.subagent-inline-input {
+  font-size: 0.74em;
+  margin-left: 20px;
+  opacity: 0.72;
+  color: var(--vscode-descriptionForeground);
+  font-family: var(--vscode-editor-font-family, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.subagent-inline-done {
+  font-size: 0.78em;
+  margin-left: 14px;
+  opacity: 0.85;
   color: var(--vscode-descriptionForeground);
 }
 
@@ -1921,7 +1968,7 @@ select#mode-select {
 }
 
 .message.streaming {
-  animation: bubble-pulse 1.5s infinite;
+  animation: bubble-pulse 3s infinite;
 }
 
 /* --- Subagent Cards (Alias/New) --- */
