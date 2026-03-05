@@ -109,6 +109,10 @@ export type ChatEvent = {
     todos?: Array<{content: string; status: string; priority: string}>;
     tool?: string;
     toolState?: { status?: string; input?: any; output?: any };
+    mode?: string;
+    agent?: string;
+    modelID?: string;
+    providerID?: string;
 };
 type PendingQuestionControl = {
     callId: string;
@@ -4082,7 +4086,14 @@ export class OpenCodeClient {
         const events: ChatEvent[] = [];
         if (type === 'session.created' || type === 'session.updated') {
             if (props?.info?.id) {
-                events.push({ type: 'session', sessionId: props.info.id });
+                events.push({
+                    type: 'session',
+                    sessionId: props.info.id,
+                    mode: typeof props.info?.mode === 'string' ? props.info.mode : undefined,
+                    agent: typeof props.info?.agent === 'string' ? props.info.agent : undefined,
+                    modelID: typeof props.info?.modelID === 'string' ? props.info.modelID : undefined,
+                    providerID: typeof props.info?.providerID === 'string' ? props.info.providerID : undefined,
+                });
             }
             return events;
         }
@@ -4137,6 +4148,23 @@ export class OpenCodeClient {
             if (sessionId && this.canceledActiveTurnBySession.get(sessionId) === true) {
                 return events;
             }
+			// Extract mode/model from message.updated for subagent sessions
+			if (typeof sessionId === 'string' && role === 'assistant' && this.subagentToParentSessionMap.has(sessionId)) {
+				const mode = typeof info?.mode === 'string' ? info.mode : undefined;
+				const agent = typeof info?.agent === 'string' ? info.agent : undefined;
+				const modelID = typeof info?.modelID === 'string' ? info.modelID : undefined;
+				const providerID = typeof info?.providerID === 'string' ? info.providerID : undefined;
+				if (mode || agent || modelID || providerID) {
+					events.push({
+						type: 'session',
+						sessionId,
+						mode,
+						agent,
+						modelID,
+						providerID,
+					});
+				}
+			}
             const isCompactionSummary = role === 'assistant' && this.isCompactionSummaryInfo(info);
             if (isCompactionSummary && typeof messageId === 'string') {
                 this.rememberIgnoredSummaryMessage(sessionId, messageId);
