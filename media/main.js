@@ -561,7 +561,50 @@ function updateSendGate() {
 }
 
 function getEventChunkText(message) {
-    return message?.value || message?.part?.text || '';
+    function extractText(value, depth = 0) {
+        if (typeof value === 'string' && value.length > 0) {
+            return value;
+        }
+        if (!value || typeof value !== 'object' || depth > 2) {
+            return '';
+        }
+        const nestedCandidates = [
+            value.text,
+            value.value,
+            value.chunk,
+            value.delta,
+            value.content,
+            value.part,
+            value.message,
+        ];
+        for (const nested of nestedCandidates) {
+            const found = extractText(nested, depth + 1);
+            if (found.length > 0) {
+                return found;
+            }
+        }
+        return '';
+    }
+
+    const candidates = [
+        message?.value,
+        message?.text,
+        message?.chunk,
+        message?.delta,
+        message?.part?.text,
+        message?.part?.value,
+        message?.part?.chunk,
+        message?.part?.delta,
+        message?.part?.content,
+        message?.content,
+    ];
+    for (const value of candidates) {
+        const text = extractText(value);
+        if (text.length > 0) {
+            return text;
+        }
+    }
+    return '';
 }
 
 function registerServerId(sessionId, serverId, messageKey) {
@@ -1614,6 +1657,11 @@ function attemptAssistantUpgrade(sessionId, payload, source) {
         replaceKeyEverywhere(currentKey, newKey);
         replaced = true;
         reason = 'tmp-local-index';
+    } else if ((currentKey.startsWith('tmp:') || currentKey.startsWith('local-')) && !session.messageIndexMap && newKey.startsWith('msg_')) {
+        replaceKeyEverywhere(currentKey, newKey);
+        replaced = true;
+        reason = 'index-map-missing-fallback';
+        console.log('[ASSIST_UPGRADE] fallback path triggered, reason=index-map-missing');
     }
 
     const tail = formatTail(session.timeline, 2);
@@ -2305,6 +2353,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function ensureQuotaTooltip() {
         if (quotaTooltipEl) return;
+
         const div = document.createElement('div');
         div.className = 'quota-tooltip hidden';
         document.body.appendChild(div);
@@ -2819,9 +2868,28 @@ function renderMessageElement(message, renderedSet) {
             pre.appendChild(code);
             content.appendChild(pre);
         } else if (message.role === 'assistant') {
-            renderAssistantMarkdown(content, message);
+            // For completed main-agent messages, render only final text (last segment)
+            const isCompleted = message.meta?.isThinking !== true;
+            if (isCompleted && Array.isArray(message.meta?.textSegments) && message.meta.textSegments.length > 0) {
+                // Render only the last segment (final text)
+                const finalSegment = message.meta.textSegments[message.meta.textSegments.length - 1];
+                const finalText = typeof finalSegment === 'string' ? finalSegment.trim() : '';
+                if (finalText) {
+                    const tempMessage = { ...message, text: finalText };
+                    renderAssistantMarkdown(content, tempMessage);
+                } else {
+                    // Fallback to full text if final segment is empty
+                    renderAssistantMarkdown(content, message);
+                }
+            } else {
+                // Streaming or no segments: render full accumulated text
+                renderAssistantMarkdown(content, message);
+            }
         } else {
             const sanitized = message.role === 'user' ? stripSystemInjections(stripAttachmentManifest(raw)) : raw;
+            if (message.role === 'user' && !sanitized.trim()) {
+                return;
+            }
             content.textContent = sanitized;
         }
         div.appendChild(content);
@@ -2834,41 +2902,86 @@ function renderMessageElement(message, renderedSet) {
             div.appendChild(statusDiv);
         }
         
-        // STREAMING PATH: Show subagent data with live text/tool
-        if (message.meta?.isThinking && session && session.activeSubagents && session.activeSubagents.length > 0) {
-            const inlineContainer = document.createElement('div');
-            inlineContainer.className = 'subagent-inline';
-            for (const agent of session.activeSubagents) {
-                const entry = document.createElement('div');
-                entry.className = 'subagent-inline-entry';
-                
-                // Header: name + description (always shown)
-                const header = document.createElement('div');
-                header.className = 'subagent-inline-header';
-                header.textContent = `🧠 ${agent.title || agent.description || 'Subagent'}`;
-                entry.appendChild(header);
-                
-                // Latest text (only during streaming — when latestText not null)
-                if (typeof agent.latestText === 'string' && agent.latestText.length > 0) {
-                    const textEl = document.createElement('div');
-                    textEl.className = 'subagent-inline-text';
-                    textEl.textContent = agent.latestText;
-                    entry.appendChild(textEl);
+        // Subagents display inline with assistant text flow.
+        const subagents = message.meta?.subagents || [];
+        if (subagents.length > 0 && message.meta?.isThinking) {
+             const inlineContainer = document.createElement('div');
+             inlineContainer.className = 'subagent-inline';
+             const messageIsThinking = Boolean(message.meta?.isThinking);
+
+             function pickMode(agent) {
+                 if (typeof agent.mode === 'string' && agent.mode.trim()) return agent.mode.trim();
+                 if (typeof agent.description === 'string' && agent.description.trim()) return agent.description.trim();
+                 if (typeof agent.title === 'string' && agent.title.trim()) return agent.title.trim();
+                 return '';
+             }
+
+             subagents.forEach((agent, index) => {
+                 const entry = document.createElement('div');
+                 entry.className = 'subagent-inline-entry';
+
+                 // 1) Subagent N: [title],
+                 const header = document.createElement('div');
+                 header.className = 'subagent-inline-header';
+                 const titleText = (typeof agent.title === 'string' && agent.title.trim()) ? agent.title.trim() : 'Subagent';
+                 header.textContent = `🧠 Subagent ${index + 1}: ${titleText}`;
+                 entry.appendChild(header);
+
+                 // 2) indented [description], [model]
+                 const mode = pickMode(agent);
+                 const model = (typeof agent.model === 'string' && agent.model.trim()) ? agent.model.trim() : '';
+                 if (mode || model) {
+                     const metaRow = document.createElement('div');
+                     metaRow.className = 'subagent-inline-meta';
+                     metaRow.textContent = mode && model ? `${mode}, ${model}` : (mode || model);
+                     entry.appendChild(metaRow);
+                 }
+
+                const latestText = typeof agent.latestText === 'string' ? agent.latestText.trim() : '';
+                const latestTool = typeof agent.latestTool === 'string' ? agent.latestTool.trim() : '';
+                const latestToolInput = typeof agent.latestToolInput === 'string' ? agent.latestToolInput.trim() : '';
+                const isDone = agent.isDone === true || (!messageIsThinking && !latestText && !latestTool);
+
+                if (isDone) {
+                    const doneRow = document.createElement('div');
+                    doneRow.className = 'subagent-inline-done';
+                    doneRow.textContent = 'Task done.';
+                    entry.appendChild(doneRow);
+                    inlineContainer.appendChild(entry);
+                    return;
                 }
-                
-                // Latest tool (italic, only during streaming)
-                if (agent.latestTool != null) {
-                    const toolEl = document.createElement('div');
-                    toolEl.className = 'subagent-inline-tool';
-                    toolEl.textContent = agent.latestTool;
-                    entry.appendChild(toolEl);
+
+                // 3) indented latest text (streaming only)
+                if (latestText) {
+                    const textRow = document.createElement('div');
+                    textRow.className = 'subagent-inline-text';
+                    // Dedupe: remove leading title prefix from latestText if present
+                    let textToRender = latestText;
+                    if (titleText && latestText.startsWith(titleText)) {
+                        textToRender = latestText.slice(titleText.length).trim();
+                    }
+                   renderMarkdownInto(textRow, textToRender);
+                    entry.appendChild(textRow);
                 }
-                
-                inlineContainer.appendChild(entry);
-            }
-            div.appendChild(inlineContainer);
+
+                 // 4) indented latest tool (streaming only, italic)
+                 if (latestTool) {
+                     const toolRow = document.createElement('div');
+                     toolRow.className = 'subagent-inline-tool';
+                     toolRow.textContent = `🔧 ${latestTool}`;
+                     entry.appendChild(toolRow);
+                 }
+
+                 if (latestToolInput) {
+                     const inputRow = document.createElement('div');
+                     inputRow.className = 'subagent-inline-input';
+                     inputRow.textContent = latestToolInput;
+                     entry.appendChild(inputRow);
+                 }
+                 inlineContainer.appendChild(entry);
+             });
+             content.appendChild(inlineContainer);
         }
-        // .streaming class removed on re-render when not thinking.
 
         if (Array.isArray(message.meta?.images) && message.meta.images.length) {
             const imageWrap = document.createElement('div');
@@ -2882,37 +2995,6 @@ function renderMessageElement(message, renderedSet) {
                 imageWrap.appendChild(img);
             }
             div.appendChild(imageWrap);
-        }
-
-        if (message.role === 'assistant' && message.meta?.isThinking !== true) {
-            const text = (content.textContent || '').trim();
-            const hasStructured = Boolean(content.querySelector('pre, code, table, img, video, audio, ul, ol, blockquote, a, hr, .md-table-wrap'));
-            const hasImages = Array.isArray(message.meta?.images) && message.meta.images.length > 0;
-            const hasRawText = typeof raw === 'string' && raw.trim().length > 0;
-            if (!text && !hasStructured && !hasImages) {
-                if (hasRawText) {
-                    content.textContent = raw;
-                } else {
-                    return;
-                }
-            }
-        }
-        
-        // NON-STREAMING PATH: Show subagent headers only (latestText/latestTool cleared)
-        if (message.role === 'assistant' && !message.meta?.isThinking && session && session.activeSubagents && session.activeSubagents.length > 0) {
-            const inlineContainer = document.createElement('div');
-            inlineContainer.className = 'subagent-inline';
-            for (const agent of session.activeSubagents) {
-                const entry = document.createElement('div');
-                entry.className = 'subagent-inline-entry';
-                const header = document.createElement('div');
-                header.className = 'subagent-inline-header';
-                header.textContent = `🧠 ${agent.title || agent.description || 'Subagent'}`;
-                entry.appendChild(header);
-                // latestText and latestTool are null here (cleared in handleChatDone)
-                inlineContainer.appendChild(entry);
-            }
-            div.appendChild(inlineContainer);
         }
 
         // Insert turn divider before user messages (except first)
@@ -3066,12 +3148,12 @@ function stripSystemInjections(text) {
 }
 
 function shouldHideDcpUiMessage(message) {
+    if (message?.role !== 'system') {
+        return false;
+    }
     const raw = typeof message?.text === 'string' ? message.text : '';
     if (!raw) return false;
-    const normalized = message?.role === 'user'
-        ? stripSystemInjections(stripAttachmentManifest(raw)).trimStart()
-        : raw.trimStart();
-    return normalized.includes('▣ DCP');
+    return raw.trimStart().includes('▣ DCP');
 }
 
     function renderSegmentElement(session, segment, renderedSet, renderKey) {
@@ -4160,7 +4242,7 @@ function applyPromptToSession(sessionId, payload) {
                 id: tempId,
                 role: 'assistant',
                 text: 'Thinking...',
-                meta: { isThinking: true, parentClientMessageId: payload.clientMessageId, textSegments: [], currentSegment: '' }
+                meta: { isThinking: true, parentClientMessageId: payload.clientMessageId, textSegments: [], currentSegment: '', subagents: [] }
             });
             session.thinkingId = thinkingMsg.id;
             session.currentTurnAssistantKey = thinkingMsg.id;
@@ -4268,7 +4350,8 @@ function applyPromptToSession(sessionId, payload) {
                     // agent timeout notice removed
                 }
                 target.text = nextText;
-                target.meta = { ...target.meta, internalId: backendId, isThinking: true, statusText: '' };
+                target.meta = { ...target.meta, internalId: backendId, isThinking: true, statusText: '', currentSegment: '' };
+                console.log('[ASSIST_META] currentSegment reset on full text replace');
                 vscode.postMessage({ type: 'ui-debug', payload: ['handleAssistantMeta', 'merged', targetId] });
                 window.__oc?.renderFromState?.();
             }
@@ -4365,16 +4448,20 @@ function applyPromptToSession(sessionId, payload) {
             msg.meta.currentSegment = '';
             msg.text = msg.meta.textSegments.join('\n\n');
         }
-        // For subagents: clear latestText and latestTool but keep name/task
-        if (session.activeSubagents) {
-            session.activeSubagents = session.activeSubagents.map(a => ({
-                ...a,
-                latestText: null,
-                latestTool: null,
-            }));
+        // For subagents: snapshot into meta before clearing
+        if (session.activeSubagents && session.activeSubagents.length > 0) {
+            if (msg.meta) {
+                // Snapshot final state, clearing streaming artifacts
+                msg.meta.subagents = session.activeSubagents.map(a => ({
+                    ...a,
+                    latestText: null,
+                    latestTool: null
+                }));
+            }
+            session.activeSubagents = [];
         }
         session.thinkingId = null;
-        console.log('[Thinking] chatDone cleared pending');
+
     }
     const resolvedFinal =
         message?.lastAssistantMsgId ||
@@ -4772,21 +4859,74 @@ window.addEventListener('message', (event) => {
                 break;
             }
             case 'subagentStatus': {
-              const { active, agents } = data;
-              // Find the current session
-              const sess = getSessionState(activeSessionId);
+              const { active, agents, sessionId } = message;
+              // Find the current session (prefer payload sessionId)
+              const sess = getSessionState(sessionId || activeSessionId);
+              
               if (sess) {
-                if (active && agents && agents.length > 0) {
-                  sess.activeSubagents = agents; // [{ sessionId, title, description, latestText, latestTool, startedAt }]
+                const incomingAgents = Array.isArray(agents) ? agents : [];
+                const currentThinking = sess.thinkingId ? sess.messagesById.get(sess.thinkingId) : null;
+                const previousAgents = Array.isArray(currentThinking?.meta?.subagents)
+                  ? currentThinking.meta.subagents
+                  : (Array.isArray(sess.activeSubagents) ? sess.activeSubagents : []);
+                const previousBySession = new Map(previousAgents.map(a => [a.sessionId, a]));
+
+                if (active && incomingAgents.length > 0) {
+                  const mergedAgents = incomingAgents.map((agent) => {
+                    const prev = previousBySession.get(agent.sessionId) || {};
+                    const latestText = typeof agent.latestText === 'string' && agent.latestText.trim().length > 0
+                      ? agent.latestText
+                      : (typeof prev.latestText === 'string' ? prev.latestText : '');
+                    const latestTool = typeof agent.latestTool === 'string' && agent.latestTool.trim().length > 0
+                      ? agent.latestTool
+                      : (typeof prev.latestTool === 'string' ? prev.latestTool : '');
+                    const latestToolInput = typeof agent.latestToolInput === 'string' && agent.latestToolInput.trim().length > 0
+                      ? agent.latestToolInput
+                      : (typeof prev.latestToolInput === 'string' ? prev.latestToolInput : '');
+                    const description = typeof agent.description === 'string' && agent.description.trim().length > 0
+                      ? agent.description
+                      : (typeof prev.description === 'string' ? prev.description : '');
+                    const title = typeof agent.title === 'string' && agent.title.trim().length > 0
+                      ? agent.title
+                      : (typeof prev.title === 'string' ? prev.title : '');
+                    const model = typeof agent.model === 'string' && agent.model.trim().length > 0
+                      ? agent.model
+                      : (typeof prev.model === 'string' ? prev.model : '');
+                    return {
+                      ...prev,
+                      ...agent,
+                      title,
+                      description,
+                      model,
+                      latestText,
+                      latestTool,
+                      latestToolInput,
+                      isDone: false,
+                    };
+                  });
+
+                  sess.activeSubagents = mergedAgents;
+                  
+                  // If currently thinking, update the message metadata for live display
+                  if (currentThinking && currentThinking.meta) {
+                    currentThinking.meta.subagents = mergedAgents;
+                  }
                 } else {
-                  // Keep entries but clear live data when done
-                  if (sess.activeSubagents) {
-                    sess.activeSubagents = sess.activeSubagents.map(a => ({
-                      ...a, latestText: null, latestTool: null,
+                  if (currentThinking && currentThinking.meta && Array.isArray(currentThinking.meta.subagents)) {
+                    currentThinking.meta.subagents = currentThinking.meta.subagents.map((agent) => ({
+                      ...agent,
+                      latestText: '',
+                      latestTool: '',
+                      latestToolInput: '',
+                      isDone: true,
                     }));
                   }
+
+                  // On inactive, clear session-level list
+                  sess.activeSubagents = [];
                 }
               }
+              
               // Update header indicator
               const indicator = document.getElementById('subagent-indicator');
               if (indicator) {
@@ -4797,6 +4937,7 @@ window.addEventListener('message', (event) => {
               scheduleRenderFromState();
               break;
             }
+
             case 'resetUiState': {
                 const incomingSessionId = message.sessionId || message.sessionID || '';
                 const hydrated = Boolean(activeSessionId && incomingSessionId && activeSessionId === incomingSessionId && hydratedSessions.has(activeSessionId));
