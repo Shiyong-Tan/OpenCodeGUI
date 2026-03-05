@@ -666,6 +666,39 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.uiDebugChannel.appendLine(`[EXT][DIFF_LIST] sessionId=${sessionId} count=${files.length} anchor=${anchorMessageId || 'null'}`);
     }
 
+    /**
+     * Wrapper for emitDiffFileList that retries until anchor message ID is ready.
+     * Prevents race condition where anchor is still tmp: during finalization.
+     */
+    private async emitDiffFileListWithRetry(sessionId: string, webview: vscode.Webview): Promise<void> {
+        const maxAttempts = 5;
+        const delayMs = 50;
+        
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            const anchorMessageId = this.client.getTurnAssistantMsgId(sessionId);
+            const isReady = anchorMessageId && 
+                           !anchorMessageId.startsWith('tmp:') && 
+                           !anchorMessageId.startsWith('local-');
+            
+            if (isReady) {
+                this.uiDebugChannel?.appendLine(`[EXT][DIFF_LIST] anchor ready | attempt=${attempt}/${maxAttempts} anchor=${anchorMessageId}`);
+                await this.emitDiffFileList(sessionId, webview);
+                return;
+            }
+            
+            this.uiDebugChannel?.appendLine(`[EXT][DIFF_LIST] anchor not ready | attempt=${attempt}/${maxAttempts} anchor=${anchorMessageId || 'null'} reason=${!anchorMessageId ? 'missing' : 'tmp/local'}`);
+            
+            if (attempt < maxAttempts) {
+                await this.waitMs(delayMs);
+            }
+        }
+        
+        // Max retries exceeded - emit anyway to avoid blocking turn completion
+        const finalAnchor = this.client.getTurnAssistantMsgId(sessionId);
+        this.uiDebugChannel?.appendLine(`[EXT][DIFF_LIST] max retries exceeded | emitting anyway | anchor=${finalAnchor || 'null'}`);
+        await this.emitDiffFileList(sessionId, webview);
+    }
+
     private async getFileTextAtCommit(repo: GitRepoRef, commit: string, relativePath: string): Promise<string | null> {
         const normalized = relativePath.replace(/\\/g, '/');
         const exists = await runGit(repo, ['cat-file', '-e', `${commit}:${normalized}`]);
@@ -1104,7 +1137,7 @@ ${attachmentLines.join('\n')}`
                         this.uiDebugChannel.appendLine(`EXT: finalize.order | sessionId=${this.currentSessionId || 'null'} | phase=upgrade-done`);
                         this.postMessageIndexMap(liveWebview);
                         if (this.currentSessionId) {
-                            await this.emitDiffFileList(this.currentSessionId, liveWebview);
+                            await this.emitDiffFileListWithRetry(this.currentSessionId, liveWebview);
                         }
                         if (this.currentSessionId) {
                             this.client.finishTurn(this.currentSessionId);
