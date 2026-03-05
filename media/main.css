@@ -1790,8 +1790,20 @@ select#mode-select {
 }
 
 
-/* Make all em tags in temporary streaming messages non-italic */
-/* Scoped to streaming context only to not affect final messages */
+.message.bot.thinking {
+    color: var(--vscode-descriptionForeground);
+    font-style: italic;
+    animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+    0% { opacity: 0.5; }
+    50% { opacity: 1; }
+    100% { opacity: 0.5; }
+}
+
+/* Streaming content should render in normal style, not inherited italic */
+.message.streaming .message-content,
 .message.streaming .message-content em {
     font-style: normal;
 }

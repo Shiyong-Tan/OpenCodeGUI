@@ -113,6 +113,7 @@ export type ChatEvent = {
     agent?: string;
     modelID?: string;
     providerID?: string;
+    isDone?: boolean;
 };
 type PendingQuestionControl = {
     callId: string;
@@ -4037,8 +4038,16 @@ export class OpenCodeClient {
                 return fileName ? `Reading: ${fileName}` : 'Reading file...';
             case 'apply_patch':
                 return fileName ? `Applying patch: ${fileName}` : 'Applying patch...';
+            case 'bash':
+                return 'Running command...';
+            case 'grep':
+                return 'Searching...';
+            case 'glob':
+                return 'Finding files...';
             default:
-                return null;
+                if (typeof tool === 'string' && tool.startsWith('lsp_')) return 'Language server...';
+                if (typeof tool === 'string' && tool.startsWith('ast_grep')) return 'AST search...';
+                return typeof tool === 'string' && tool ? `Running: ${tool}` : null;
         }
     }
 
@@ -4221,6 +4230,13 @@ export class OpenCodeClient {
                 const completedAt = info?.time?.completed;
                 const isFinal = Boolean(info?.finish) || typeof completedAt === 'number';
                 if (isFinal) {
+                    if (typeof sessionId === 'string' && this.subagentToParentSessionMap.has(sessionId)) {
+                        events.push({
+                            type: 'session',
+                            sessionId,
+                            isDone: true,
+                        });
+                    }
                     const messageIndex = this.registerMessage(messageId);
                     this.recordAssistantMsgId(sessionId, messageId);
                     let acceptedFinal = false;
@@ -4407,6 +4423,21 @@ export class OpenCodeClient {
                     const resolvedId = this.getTurnAssistantMsgId(sessionId);
                     const assistantMsgId = resolvedId || part?.messageID;
                     events.push({ type: 'assistantMessageMeta', sessionId, assistantMsgId, lastText: statusText, tmpKey: this.getPendingAssistantTmpKey(sessionId), isStatusUpdate: true });
+                }
+                if (typeof sessionId === 'string' && this.subagentToParentSessionMap.has(sessionId)) {
+                    const status = part?.state?.status;
+                    if ((status === 'running' || status === 'pending') && source !== 'resync') {
+                        events.push({
+                            type: 'tool',
+                            sessionId,
+                            tool: statusText || (typeof part?.tool === 'string' ? part.tool : ''),
+                            toolState: {
+                                status,
+                                input: part?.state?.input,
+                                output: part?.state?.output,
+                            },
+                        });
+                    }
                 }
                 const toolName = typeof part?.tool === 'string' ? part.tool : '';
                 if (part?.state?.status === 'completed' && sessionId) {

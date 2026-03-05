@@ -2909,12 +2909,11 @@ function renderMessageElement(message, renderedSet) {
              inlineContainer.className = 'subagent-inline';
              const messageIsThinking = Boolean(message.meta?.isThinking);
 
-             function pickMode(agent) {
-                 if (typeof agent.mode === 'string' && agent.mode.trim()) return agent.mode.trim();
-                 if (typeof agent.description === 'string' && agent.description.trim()) return agent.description.trim();
-                 if (typeof agent.title === 'string' && agent.title.trim()) return agent.title.trim();
-                 return '';
-             }
+            function pickMode(agent) {
+                if (typeof agent.mode === 'string' && agent.mode.trim()) return agent.mode.trim();
+                if (typeof agent.description === 'string' && agent.description.trim()) return agent.description.trim();
+                return '';
+            }
 
              subagents.forEach((agent, index) => {
                  const entry = document.createElement('div');

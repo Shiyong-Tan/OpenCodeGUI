@@ -112,6 +112,26 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private trackUserOwnedSession(id: string | undefined): void {
         if (id) {
             this.userOwnedSessionIds.add(id);
+            this._context.globalState.update(this.USER_OWNED_SESSIONS_KEY, JSON.stringify([...this.userOwnedSessionIds]));
+        }
+    }
+
+    private async loadUserOwnedSessions(): Promise<void> {
+        try {
+            const raw = this._context.globalState.get<string>(this.USER_OWNED_SESSIONS_KEY);
+            if (!raw) {
+                this.uiDebugChannel.appendLine('[SidebarProvider] loadUserOwnedSessions: no stored sessions');
+                return;
+            }
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed)) {
+                parsed.forEach((id: string) => this.userOwnedSessionIds.add(id));
+                this.uiDebugChannel.appendLine(`[SidebarProvider] loadUserOwnedSessions: restored ${parsed.length} session(s)`);
+            } else {
+                this.uiDebugChannel.appendLine('[SidebarProvider] loadUserOwnedSessions: invalid format (not an array)');
+            }
+        } catch (error) {
+            this.uiDebugChannel.appendLine(`[SidebarProvider] loadUserOwnedSessions: failed with error: ${String(error)}`);
         }
     }
 
@@ -164,6 +184,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private uiDebugChannel!: vscode.OutputChannel;
     private undoSegmentsBySession: Map<string, Map<string, SegmentState>> = new Map();
     private readonly UNDO_SEGMENTS_KEY = 'opencode.undoSegmentsBySession.v1';
+    private readonly USER_OWNED_SESSIONS_KEY = 'opencode.userOwnedSessionIds.v1';
     private pendingAssistantTmpKeyBySession = new Map<string, string>();
     private pendingAssistantTmpKeyByLocalKey = new Map<string, string>();
     private pendingLocalKeyBySession = new Map<string, string>();
@@ -772,6 +793,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     ) {
         this.client = new OpenCodeClient();
         this.client.setStorage(this._context.globalState);
+        void this.loadUserOwnedSessions();
         this.uiDebugChannel = vscode.window.createOutputChannel('OpenCode UI Debug');
         this.client.setUiDebugChannel(this.uiDebugChannel);
         this.client.setServerStatusHandler((status, reason) => {
@@ -3401,15 +3423,38 @@ ${attachmentLines.join('\n')}`
             if (!this.isUserOwnedSession(event.sessionId) && this.sendInFlightBySession.has(this.currentSessionId!)) {
                 this.activeSubagentSessionIds.add(event.sessionId);
                 this.client.registerSubagentSession(event.sessionId, this.currentSessionId || '');
-                const initialMode = typeof (event as any).mode === 'string' ? (event as any).mode : '';
+                const existing = this.subagentProgressBySession.get(event.sessionId);
+                const initialMode = event.mode || event.agent || '';
+                const initialModel = event.modelID || event.providerID || '';
+                if (existing) {
+                    if (event.isDone === true) {
+                        existing.isDone = true;
+                        existing.latestText = '';
+                        existing.latestTool = '';
+                        existing.latestToolInput = '';
+                    }
+                    if (initialMode) {
+                        existing.mode = initialMode;
+                        existing.description = existing.description || initialMode;
+                    }
+                    if (initialModel) {
+                        existing.model = initialModel;
+                    }
+                    this.uiDebugChannel.appendLine(`[SidebarProvider] Subagent session event: ${event.sessionId} | mode=${event.mode || 'null'} | agent=${event.agent || 'null'} | modelID=${event.modelID || 'null'} | providerID=${event.providerID || 'null'}`);
+                    this.emitSubagentStatus();
+                    return;
+                }
                 this.subagentProgressBySession.set(event.sessionId, {
                     taskId: event.sessionId,
                     parentSessionId: this.currentSessionId || '',
                     description: initialMode,
                     mode: initialMode,
+                    model: initialModel,
+                    isDone: event.isDone === true,
                     startedAt: Date.now()
                 });
                 this.uiDebugChannel.appendLine(`[SidebarProvider] Registered subagent session mapping: ${event.sessionId} -> ${this.currentSessionId}`);
+                this.uiDebugChannel.appendLine(`[SidebarProvider] Subagent session event: ${event.sessionId} | mode=${event.mode || 'null'} | agent=${event.agent || 'null'} | modelID=${event.modelID || 'null'} | providerID=${event.providerID || 'null'}`);
                 const sessionId = event.sessionId;
                 this.client.getSessionInfo(sessionId).then((info: any) => {
                     const entry = this.subagentProgressBySession.get(sessionId);
@@ -3428,14 +3473,37 @@ ${attachmentLines.join('\n')}`
             // Guard: Prevent subagent session IDs from hijacking currentSessionId
             if (!this.isUserOwnedSession(event.sessionId)) {
                 this.activeSubagentSessionIds.add(event.sessionId);
-                const initialMode = typeof (event as any).mode === 'string' ? (event as any).mode : '';
+                const existing = this.subagentProgressBySession.get(event.sessionId);
+                const initialMode = event.mode || event.agent || '';
+                const initialModel = event.modelID || event.providerID || '';
+                if (existing) {
+                    if (event.isDone === true) {
+                        existing.isDone = true;
+                        existing.latestText = '';
+                        existing.latestTool = '';
+                        existing.latestToolInput = '';
+                    }
+                    if (initialMode) {
+                        existing.mode = initialMode;
+                        existing.description = existing.description || initialMode;
+                    }
+                    if (initialModel) {
+                        existing.model = initialModel;
+                    }
+                    this.uiDebugChannel.appendLine(`[SidebarProvider] Subagent session event: ${event.sessionId} | mode=${event.mode || 'null'} | agent=${event.agent || 'null'} | modelID=${event.modelID || 'null'} | providerID=${event.providerID || 'null'}`);
+                    this.emitSubagentStatus();
+                    return;
+                }
                 this.subagentProgressBySession.set(event.sessionId, {
                     taskId: event.sessionId,
                     parentSessionId: this.currentSessionId || '',
                     description: initialMode,
                     mode: initialMode,
+                    model: initialModel,
+                    isDone: event.isDone === true,
                     startedAt: Date.now()
                 });
+                this.uiDebugChannel.appendLine(`[SidebarProvider] Subagent session event: ${event.sessionId} | mode=${event.mode || 'null'} | agent=${event.agent || 'null'} | modelID=${event.modelID || 'null'} | providerID=${event.providerID || 'null'}`);
                 const sessionId = event.sessionId;
                 this.client.getSessionInfo(sessionId).then((info: any) => {
                     const entry = this.subagentProgressBySession.get(sessionId);
@@ -3490,6 +3558,9 @@ ${attachmentLines.join('\n')}`
             if (event.type === 'text' && typeof event.text === 'string') {
                 const entry = this.subagentProgressBySession.get(event.sessionId);
                 if (entry) {
+                    if (entry.isDone) {
+                        return;
+                    }
                     entry.latestText = event.text.length > 200
                         ? event.text.slice(0, 200) + '...'
                         : event.text;
@@ -3501,6 +3572,9 @@ ${attachmentLines.join('\n')}`
             if (event.type === 'tool' && event.tool) {
                 const entry = this.subagentProgressBySession.get(event.sessionId);
                 if (entry) {
+                    if (entry.isDone) {
+                        return;
+                    }
                     const toolName = event.tool;
                     const status = event.toolState?.status || 'running';
                     if (status === 'running' || status === 'pending') {
@@ -3521,6 +3595,9 @@ ${attachmentLines.join('\n')}`
             if (event.type === 'toolPatch' && typeof event.text === 'string') {
                 const entry = this.subagentProgressBySession.get(event.sessionId);
                 if (entry) {
+                    if (entry.isDone) {
+                        return;
+                    }
                     const match = event.text.match(/(?:---\s+a\/|\+\+\+\s+b\/|diff\s+--git\s+[^\s]+\s+b\/)([^\s\n]+)/);
                     const filepath = match ? match[1] : '';
                     const filename = filepath ? pathModule.basename(filepath) : '';
@@ -3533,6 +3610,9 @@ ${attachmentLines.join('\n')}`
             if (event.type === 'diff' && typeof event.text === 'string') {
                 const entry = this.subagentProgressBySession.get(event.sessionId);
                 if (entry) {
+                    if (entry.isDone) {
+                        return;
+                    }
                     const match = event.text.match(/(?:---\s+a\/|\+\+\+\s+b\/|diff\s+--git\s+[^\s]+\s+b\/)([^\s\n]+)/);
                     const filepath = match ? match[1] : '';
                     const filename = filepath ? pathModule.basename(filepath) : '';
@@ -3543,8 +3623,11 @@ ${attachmentLines.join('\n')}`
                 }
             }
             if (event.type === 'files' && event.files && event.files.length && this.currentSessionId) {
-                this.client.queueSubagentChanges(this.currentSessionId, event.files);
                 const entry = this.subagentProgressBySession.get(event.sessionId!);
+                if (entry && entry.isDone) {
+                    return;
+                }
+                this.client.queueSubagentChanges(this.currentSessionId, event.files);
                 if (entry && event.files && event.files.length) {
                     const firstFile = typeof event.files[0] === 'string' ? event.files[0] : (event.files[0] as any).path || '';
                     const filename = firstFile ? pathModule.basename(firstFile) : 'file';
@@ -4484,18 +4567,6 @@ ${attachmentLines.join('\n')}`
                 <script src="${texmathScriptUri}"></script>
                 <script src="${domPurifyUri}"></script>
                 <script src="${highlightScriptUri}"></script>
-                <style>
-                    .message.bot.thinking {
-                        color: var(--vscode-descriptionForeground);
-                        font-style: italic;
-                        animation: pulse 1.5s infinite;
-                    }
-                    @keyframes pulse {
-                        0% { opacity: 0.5; }
-                        50% { opacity: 1; }
-                        100% { opacity: 0.5; }
-                    }
-                </style>
                 <title>OpenCode Chat</title>
             </head>
             <body>
