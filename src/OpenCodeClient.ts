@@ -800,12 +800,16 @@ export class OpenCodeClient {
      */
     public hasGroupedActiveTurnWrites(sessionId: string): boolean {
         const relatedIds = this.getRelatedSessionIds(sessionId);
+        this.logUiDebug(`[DIFF_GATE] hasGroupedActiveTurnWrites | sessionId=${sessionId} relatedCount=${relatedIds.length} relatedIds=[${relatedIds.join(',')}]`);
         for (const id of relatedIds) {
-            if (this.hasActiveTurnWrites(id)) {
-                this.logUiDebug(`EXT: grouped.turn.write.check | sessionId=${sessionId} | relatedId=${id} | hasWrites=true`);
+            const hasWrites = this.hasActiveTurnWrites(id);
+            this.logUiDebug(`[DIFF_GATE] check session | sessionId=${id} hasActiveTurnWrites=${hasWrites}`);
+            if (hasWrites) {
+                this.logUiDebug(`[DIFF_GATE] decision | sessionId=${sessionId} action=allow reason=grouped-active-turn-writes contributingSession=${id}`);
                 return true;
             }
         }
+        this.logUiDebug(`[DIFF_GATE] decision | sessionId=${sessionId} action=deny reason=no-grouped-active-turn-writes`);
         return false;
     }
 
@@ -817,12 +821,16 @@ export class OpenCodeClient {
      */
     public hasGroupedPendingTurnChanges(sessionId: string): boolean {
         const relatedIds = this.getRelatedSessionIds(sessionId);
+        this.logUiDebug(`[DIFF_GATE] hasGroupedPendingTurnChanges | sessionId=${sessionId} relatedCount=${relatedIds.length} relatedIds=[${relatedIds.join(',')}]`);
         for (const id of relatedIds) {
-            if (this.hasPendingTurnChanges(id)) {
-                this.logUiDebug(`EXT: grouped.turn.pending.check | sessionId=${sessionId} | relatedId=${id} | hasPending=true`);
+            const hasPending = this.hasPendingTurnChanges(id);
+            this.logUiDebug(`[DIFF_GATE] check session | sessionId=${id} hasPendingTurnChanges=${hasPending}`);
+            if (hasPending) {
+                this.logUiDebug(`[DIFF_GATE] decision | sessionId=${sessionId} action=allow reason=grouped-pending-turn-changes contributingSession=${id}`);
                 return true;
             }
         }
+        this.logUiDebug(`[DIFF_GATE] decision | sessionId=${sessionId} action=deny reason=no-grouped-pending-turn-changes`);
         return false;
     }
 
@@ -4372,7 +4380,9 @@ export class OpenCodeClient {
             }
             if (part?.type === 'tool' && part?.tool === 'apply_patch') {
                 const patchText = part?.state?.input?.patchText || part?.state?.input?.patch;
-                const allowDiff = Boolean(sessionId && (this.hasActiveTurnWrites(sessionId) || this.hasPendingTurnChanges(sessionId)));
+            const relatedIds = this.getRelatedSessionIds(sessionId);
+            const allowDiff = Boolean(sessionId && (this.hasGroupedActiveTurnWrites(sessionId) || this.hasGroupedPendingTurnChanges(sessionId)));
+            this.logUiDebug(`[DIFF_GATE] apply_patch allowDiff check | sessionId=${sessionId} relatedCount=${relatedIds.length} relatedIds=[${relatedIds.join(',')}] allowDiff=${allowDiff}`);
                 if (patchText && allowDiff) {
                     events.push({ type: 'toolPatch', text: patchText, sessionId });
                 }
@@ -4382,7 +4392,9 @@ export class OpenCodeClient {
                 if (source === 'sse' && sessionId) {
                     this.markSessionProgress(sessionId, 'sse-diff-part', diffMessageId);
                 }
-                const allowDiff = Boolean(sessionId && (this.hasActiveTurnWrites(sessionId) || this.hasPendingTurnChanges(sessionId)));
+            const relatedIds = this.getRelatedSessionIds(sessionId);
+            const allowDiff = Boolean(sessionId && (this.hasGroupedActiveTurnWrites(sessionId) || this.hasGroupedPendingTurnChanges(sessionId)));
+            this.logUiDebug(`[DIFF_GATE] diff/patch allowDiff check | sessionId=${sessionId} relatedCount=${relatedIds.length} relatedIds=[${relatedIds.join(',')}] allowDiff=${allowDiff}`);
                 if (allowDiff) {
                     events.push({ type: 'diff', text: part.text, sessionId });
                 }
@@ -4395,7 +4407,11 @@ export class OpenCodeClient {
             }
             const sessionId = props?.sessionID as string | undefined;
             if (!sessionId) return events;
-            if (!this.hasActiveTurnWrites(sessionId) && !this.hasPendingTurnChanges(sessionId)) {
+            const relatedIds = this.getRelatedSessionIds(sessionId);
+            const hasWrites = this.hasGroupedActiveTurnWrites(sessionId);
+            const hasPending = this.hasGroupedPendingTurnChanges(sessionId);
+            this.logUiDebug(`[DIFF_GATE] session.diff gate check | sessionId=${sessionId} relatedCount=${relatedIds.length} relatedIds=[${relatedIds.join(',')}] hasWrites=${hasWrites} hasPending=${hasPending}`);
+            if (!hasWrites && !hasPending) {
                 this.logUiDebug(`EXT: session.diff.skip | sessionId=${sessionId} | reason=no-turn-writes`);
                 return events;
             }
