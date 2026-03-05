@@ -56,11 +56,11 @@ Restore deterministic turn rendering and diff/change-list sequencing for main ag
 - QA evidence artifacts under `.sisyphus/evidence/` for each task scenario.
 
 ### Definition of Done
-- [ ] All planned tasks complete with evidence files.
-- [ ] No premature change-list before final assistant message.
-- [ ] Subagent file writes can trigger valid diff/change-list in parent turn.
-- [ ] Final assistant text appears once (no stacking).
-- [ ] Streaming/subagent typography matches requested behavior.
+- [x] All planned tasks complete with evidence files.
+- [x] No premature change-list before final assistant message.
+- [x] Subagent file writes can trigger valid diff/change-list in parent turn.
+- [x] Final assistant text appears once (no stacking).
+- [x] Streaming/subagent typography matches requested behavior.
 
 ### Must Have
 - Main and subagent session IDs treated as one logical diff-check group.
@@ -663,10 +663,10 @@ Wave FINAL (Parallel independent review):
 
 ## Final Verification Wave (MANDATORY)
 
-- [ ] F1. Plan Compliance Audit (`oracle`)
-- [ ] F2. Code Quality Review (`unspecified-high`)
-- [ ] F3. Scenario QA Replay (`unspecified-high`)
-- [ ] F4. Scope Fidelity Check (`deep`)
+- [x] F1. Plan Compliance Audit (`oracle`)
+- [x] F2. Code Quality Review (`unspecified-high`)
+- [x] F3. Scenario QA Replay (`unspecified-high`)
+- [x] F4. Scope Fidelity Check (`deep`)
 
 ---
 
@@ -686,6 +686,6 @@ npx tsc --noEmit
 ```
 
 ### Final Checklist
-- [ ] All Must Have items present
-- [ ] All Must NOT Have items absent
-- [ ] Evidence artifacts produced for every task scenario
+- [x] All Must Have items present
+- [x] All Must NOT Have items absent
+- [x] Evidence artifacts produced for every task scenario
