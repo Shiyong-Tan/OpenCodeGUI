@@ -3538,10 +3538,9 @@ ${attachmentLines.join('\n')}`
                         });
                     }
                 }
-                // Emit changed-file list immediately for subagent file modifications
-                if (this.currentSessionId) {
-                    await this.emitDiffFileList(this.currentSessionId, liveWebview);
-                }
+                // REMOVED: Mid-stream emitDiffFileList call
+                // Change-list should only emit after finalization sequence (chatDone → commit → upgrade → diffList)
+                // This prevents premature change-list emission before final assistant message
             }
             return;
         }
@@ -3779,10 +3778,9 @@ ${attachmentLines.join('\n')}`
                     });
                 }
             }
-            // Emit changed-file list immediately for main-agent file modifications
-            if (this.currentSessionId) {
-                await this.emitDiffFileList(this.currentSessionId, liveWebview);
-            }
+            // REMOVED: Mid-stream emitDiffFileList call
+            // Change-list should only emit after finalization sequence (chatDone → commit → upgrade → diffList)
+            // This prevents premature change-list emission before final assistant message
             return;
         }
 
