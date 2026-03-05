@@ -332,10 +332,13 @@ export class OpenCodeClient {
     private pendingPermissionIdsBySession = new Map<string, Set<string>>();
     private ignoredSummaryMessageIdsBySession = new Map<string, Set<string>>();
     private subagentToParentSessionMap = new Map<string, string>();
+    private lateDiffGraceBySession = new Map<string, { expiresAt: number; timer?: ReturnType<typeof setTimeout> }>();
+    private changeListEmittedBySession = new Map<string, boolean>();
     private readonly resyncCooldownMs = 500;
     private readonly silenceWindowMs = 1800;
     private readonly finalQuietWindowMs = 300;
     private readonly finalBackfillDeltaMs = 500;
+    private readonly lateDiffGraceMs = 300;
     private readonly rescueStartDelayMs = 20000;
     private readonly resyncLoopDelayMs = 20000;
     private readonly sseDrainQuietMs = 800;
@@ -417,6 +420,13 @@ export class OpenCodeClient {
         this.pendingQuestionCallIdsBySession.clear();
         this.pendingPermissionIdsBySession.clear();
         this.ignoredSummaryMessageIdsBySession.clear();
+        for (const entry of this.lateDiffGraceBySession.values()) {
+            if (entry.timer) {
+                clearTimeout(entry.timer);
+            }
+        }
+        this.lateDiffGraceBySession.clear();
+        this.changeListEmittedBySession.clear();
     }
 
     constructor() {
@@ -651,6 +661,7 @@ export class OpenCodeClient {
 
     public startTurn(sessionId: string, pendingUserLocalKey: string): void {
         if (!sessionId) return;
+        this.changeListEmittedBySession.delete(sessionId);
         this.canceledActiveTurnBySession.set(sessionId, false);
         this.currentTurnUserMsgIdBySession.delete(sessionId);
         this.displayTurnUserMsgIdBySession.delete(sessionId);
@@ -706,8 +717,52 @@ export class OpenCodeClient {
         }
     }
 
+    public markChangeListEmitted(sessionId: string, reason: string): boolean {
+        if (!sessionId) return false;
+        if (this.changeListEmittedBySession.get(sessionId)) {
+            this.logUiDebug(`[LATE_DIFF] change-list already emitted | sessionId=${sessionId} skipping=true reason=${reason}`);
+            return false;
+        }
+        this.changeListEmittedBySession.set(sessionId, true);
+        this.logUiDebug(`[LATE_DIFF] change-list marked emitted | sessionId=${sessionId} reason=${reason}`);
+        return true;
+    }
+
+    public wasChangeListEmitted(sessionId: string): boolean {
+        if (!sessionId) return false;
+        return this.changeListEmittedBySession.get(sessionId) === true;
+    }
+
+    public beginLateDiffGrace(sessionId: string): boolean {
+        if (!sessionId) return false;
+        if (this.lateDiffGraceBySession.has(sessionId)) {
+            return true;
+        }
+        const expiresAt = Date.now() + this.lateDiffGraceMs;
+        const timer = setTimeout(() => {
+            this.lateDiffGraceBySession.delete(sessionId);
+            this.logUiDebug(`[LATE_DIFF] grace expired | sessionId=${sessionId}`);
+        }, this.lateDiffGraceMs);
+        this.lateDiffGraceBySession.set(sessionId, { expiresAt, timer });
+        this.logUiDebug(`[LATE_DIFF] finishTurn called | sessionId=${sessionId} gracePeriod=${this.lateDiffGraceMs}ms`);
+        return true;
+    }
+
+    public isInLateDiffGrace(sessionId: string): boolean {
+        if (!sessionId) return false;
+        const entry = this.lateDiffGraceBySession.get(sessionId);
+        if (!entry) return false;
+        if (Date.now() <= entry.expiresAt) return true;
+        if (entry.timer) {
+            clearTimeout(entry.timer);
+        }
+        this.lateDiffGraceBySession.delete(sessionId);
+        return false;
+    }
+
     public finishTurn(sessionId: string): void {
         if (!sessionId) return;
+        this.beginLateDiffGrace(sessionId);
         this.turnStateBySession.delete(sessionId);
         this.pendingTurnChangesBySession.delete(sessionId);
         this.turnWriteStateBySession.delete(sessionId);
@@ -4378,46 +4433,54 @@ export class OpenCodeClient {
                     }
                 }
             }
-            if (part?.type === 'tool' && part?.tool === 'apply_patch') {
-                const patchText = part?.state?.input?.patchText || part?.state?.input?.patch;
+        if (part?.type === 'tool' && part?.tool === 'apply_patch') {
+            const patchText = part?.state?.input?.patchText || part?.state?.input?.patch;
             const relatedIds = this.getRelatedSessionIds(sessionId);
             const allowDiff = Boolean(sessionId && (this.hasGroupedActiveTurnWrites(sessionId) || this.hasGroupedPendingTurnChanges(sessionId)));
             this.logUiDebug(`[DIFF_GATE] apply_patch allowDiff check | sessionId=${sessionId} relatedCount=${relatedIds.length} relatedIds=[${relatedIds.join(',')}] allowDiff=${allowDiff}`);
-                if (patchText && allowDiff) {
-                    events.push({ type: 'toolPatch', text: patchText, sessionId });
-                }
+            if (patchText && allowDiff) {
+                events.push({ type: 'toolPatch', text: patchText, sessionId });
             }
-            if ((part?.type === 'diff' || part?.type === 'patch') && typeof part?.text === 'string') {
-                const diffMessageId = typeof part?.messageID === 'string' ? part.messageID : undefined;
-                if (source === 'sse' && sessionId) {
-                    this.markSessionProgress(sessionId, 'sse-diff-part', diffMessageId);
-                }
+        }
+        if ((part?.type === 'diff' || part?.type === 'patch') && typeof part?.text === 'string') {
+            const diffMessageId = typeof part?.messageID === 'string' ? part.messageID : undefined;
+            if (source === 'sse' && sessionId) {
+                this.markSessionProgress(sessionId, 'sse-diff-part', diffMessageId);
+            }
             const relatedIds = this.getRelatedSessionIds(sessionId);
-            const allowDiff = Boolean(sessionId && (this.hasGroupedActiveTurnWrites(sessionId) || this.hasGroupedPendingTurnChanges(sessionId)));
-            this.logUiDebug(`[DIFF_GATE] diff/patch allowDiff check | sessionId=${sessionId} relatedCount=${relatedIds.length} relatedIds=[${relatedIds.join(',')}] allowDiff=${allowDiff}`);
-                if (allowDiff) {
-                    events.push({ type: 'diff', text: part.text, sessionId });
-                }
+            const inGrace = Boolean(sessionId && this.isInLateDiffGrace(sessionId));
+            const allowDiff = Boolean(sessionId && (this.hasGroupedActiveTurnWrites(sessionId) || this.hasGroupedPendingTurnChanges(sessionId) || inGrace));
+            this.logUiDebug(`[DIFF_GATE] diff/patch allowDiff check | sessionId=${sessionId} relatedCount=${relatedIds.length} relatedIds=[${relatedIds.join(',')}] allowDiff=${allowDiff} inGrace=${inGrace}`);
+            if (inGrace && sessionId) {
+                this.logUiDebug(`[LATE_DIFF] event in grace window | sessionId=${sessionId} eventType=${part?.type}`);
             }
+            if (allowDiff) {
+                events.push({ type: 'diff', text: part.text, sessionId });
+            }
+        }
+        return events;
+    }
+    if (type === 'session.diff' && Array.isArray(props?.diff)) {
+        if (props?.sessionID && this.canceledActiveTurnBySession.get(props.sessionID) === true) {
             return events;
         }
-        if (type === 'session.diff' && Array.isArray(props?.diff)) {
-            if (props?.sessionID && this.canceledActiveTurnBySession.get(props.sessionID) === true) {
-                return events;
-            }
-            const sessionId = props?.sessionID as string | undefined;
-            if (!sessionId) return events;
-            const relatedIds = this.getRelatedSessionIds(sessionId);
-            const hasWrites = this.hasGroupedActiveTurnWrites(sessionId);
-            const hasPending = this.hasGroupedPendingTurnChanges(sessionId);
-            this.logUiDebug(`[DIFF_GATE] session.diff gate check | sessionId=${sessionId} relatedCount=${relatedIds.length} relatedIds=[${relatedIds.join(',')}] hasWrites=${hasWrites} hasPending=${hasPending}`);
-            if (!hasWrites && !hasPending) {
-                this.logUiDebug(`EXT: session.diff.skip | sessionId=${sessionId} | reason=no-turn-writes`);
-                return events;
-            }
-            const files = props.diff.map((entry: any) => ({
-                filePath: entry.file,
-                before: entry.before,
+        const sessionId = props?.sessionID as string | undefined;
+        if (!sessionId) return events;
+        const relatedIds = this.getRelatedSessionIds(sessionId);
+        const hasWrites = this.hasGroupedActiveTurnWrites(sessionId);
+        const hasPending = this.hasGroupedPendingTurnChanges(sessionId);
+        const inGrace = this.isInLateDiffGrace(sessionId);
+        this.logUiDebug(`[DIFF_GATE] session.diff gate check | sessionId=${sessionId} relatedCount=${relatedIds.length} relatedIds=[${relatedIds.join(',')}] hasWrites=${hasWrites} hasPending=${hasPending} inGrace=${inGrace}`);
+        if (!hasWrites && !hasPending && !inGrace) {
+            this.logUiDebug(`EXT: session.diff.skip | sessionId=${sessionId} | reason=no-turn-writes`);
+            return events;
+        }
+        if (inGrace) {
+            this.logUiDebug(`[LATE_DIFF] event in grace window | sessionId=${sessionId} eventType=session.diff`);
+        }
+        const files = props.diff.map((entry: any) => ({
+            filePath: entry.file,
+            before: entry.before,
                 after: entry.after,
                 additions: entry.additions,
                 deletions: entry.deletions

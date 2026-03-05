@@ -613,6 +613,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             this.uiDebugChannel.appendLine('EXT: diff.skip | reason=no-turn-writes');
             return;
         }
+        if (!this.client.markChangeListEmitted(sessionId, 'emit-diff-list')) {
+            return;
+        }
         const repo = await this.resolveInternalRepo(sessionId);
         if (!repo) return;
         let headCommit: string | null = null;
@@ -3797,6 +3800,16 @@ ${attachmentLines.join('\n')}`
             const { file: active, index } = picked;
             const liveWebview = this._view?.webview || webview;
             this.openDiffForFileChange(active, liveWebview, index);
+            const sessionId = event.sessionId || this.currentSessionId;
+            if (sessionId && this.client.isInLateDiffGrace(sessionId)) {
+                this.uiDebugChannel.appendLine(`[LATE_DIFF] event in grace window | sessionId=${sessionId} eventType=files`);
+                if (!this.client.wasChangeListEmitted(sessionId)) {
+                    this.uiDebugChannel.appendLine(`[LATE_DIFF] emitting change-list | sessionId=${sessionId} reason=late-event`);
+                    void this.emitDiffFileListWithRetry(sessionId, liveWebview);
+                } else {
+                    this.uiDebugChannel.appendLine(`[LATE_DIFF] change-list already emitted | sessionId=${sessionId} skipping=true`);
+                }
+            }
             
             // Detect .md files and send plan file card
             const mdFiles = event.files
