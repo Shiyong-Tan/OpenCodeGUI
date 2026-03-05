@@ -175,8 +175,8 @@ Wave FINAL (Parallel independent review):
   - These are the exact gate chokepoints where grouped session logic must be introduced.
 
   **Acceptance Criteria**:
-  - [ ] Grouped helper APIs exist and are used by `session.diff` skip checks.
-  - [ ] `npx tsc --noEmit` passes.
+  - [x] Grouped helper APIs exist and are used by `session.diff` skip checks.
+  - [x] `npx tsc --noEmit` passes.
 
   **QA Scenarios**:
   ```text
@@ -231,9 +231,9 @@ Wave FINAL (Parallel independent review):
   - These lifecycle points are authoritative for mapping creation/removal.
 
   **Acceptance Criteria**:
-  - [ ] Mapping register call on subagent creation.
-  - [ ] Mapping clear call on subagent cleanup.
-  - [ ] `npx tsc --noEmit` passes.
+  - [x] Mapping register call on subagent creation.
+  - [x] Mapping clear call on subagent cleanup.
+  - [x] `npx tsc --noEmit` passes.
 
   **QA Scenarios**:
   ```text
@@ -287,8 +287,8 @@ Wave FINAL (Parallel independent review):
   - They directly control tmp/final identity swap and potential text stacking.
 
   **Acceptance Criteria**:
-  - [ ] tmp->msg upgrade succeeds when index map is temporarily missing.
-  - [ ] No duplicated final text after turn completion.
+  - [x] tmp->msg upgrade succeeds when index map is temporarily missing.
+  - [x] No duplicated final text after turn completion.
 
   **QA Scenarios**:
   ```text
@@ -343,9 +343,9 @@ Wave FINAL (Parallel independent review):
   - They define where italic behavior is requested and where it is rendered.
 
   **Acceptance Criteria**:
-  - [ ] Streaming temp text renders non-italic.
-  - [ ] Tool-use text renders italic.
-  - [ ] Final non-streaming emphasis remains intact.
+  - [x] Streaming temp text renders non-italic.
+  - [x] Tool-use text renders italic.
+  - [x] Final non-streaming emphasis remains intact.
 
   **QA Scenarios**:
   ```text
@@ -399,8 +399,8 @@ Wave FINAL (Parallel independent review):
   - These selectors are the direct levers for subagent inline spacing density.
 
   **Acceptance Criteria**:
-  - [ ] Subagent inline text does not show excessive vertical gaps.
-  - [ ] Code blocks and lists remain readable.
+  - [x] Subagent inline text does not show excessive vertical gaps.
+  - [x] Code blocks and lists remain readable.
 
   **QA Scenarios**:
   ```text
@@ -449,7 +449,7 @@ Wave FINAL (Parallel independent review):
   - `src/SidebarProvider.ts:1103` - finalization emit.
 
   **Acceptance Criteria**:
-  - [ ] No `[EXT][DIFF_LIST]` logs appear before `finalize.order | phase=upgrade-done`.
+  - [x] No `[EXT][DIFF_LIST]` logs appear before `finalize.order | phase=upgrade-done`.
 
   **QA Scenarios**:
   ```text
@@ -488,7 +488,7 @@ Wave FINAL (Parallel independent review):
   - `src/SidebarProvider.ts:1098` - upgrade completion boundary.
 
   **Acceptance Criteria**:
-  - [ ] `[EXT][DIFF_LIST]` log shows `anchor=msg_*`.
+  - [x] `[EXT][DIFF_LIST]` log shows `anchor=msg_*`.
 
   **QA Scenarios**:
   ```text
@@ -527,7 +527,7 @@ Wave FINAL (Parallel independent review):
   - `src/SidebarProvider.ts:652` - upsertChangeList binding with anchor.
 
   **Acceptance Criteria**:
-  - [ ] Log shows commit hash bound to `msg_*` anchor after finalization.
+  - [x] Log shows commit hash bound to `msg_*` anchor after finalization.
 
   **QA Scenarios**:
   ```text
@@ -566,7 +566,7 @@ Wave FINAL (Parallel independent review):
   - `src/OpenCodeClient.ts:747` - gating checks.
 
   **Acceptance Criteria**:
-  - [ ] Logs indicate multiple related sessions are considered in diff gating.
+  - [x] Logs indicate multiple related sessions are considered in diff gating.
 
   **QA Scenarios**:
   ```text
@@ -605,8 +605,8 @@ Wave FINAL (Parallel independent review):
   - `src/SidebarProvider.ts:1106` - finishTurn invocation.
 
   **Acceptance Criteria**:
-  - [ ] Late diff events within grace window still render change-list once.
-  - [ ] No duplicate change-list entries.
+  - [x] Late diff events within grace window still render change-list once.
+  - [x] No duplicate change-list entries.
 
   **QA Scenarios**:
   ```text
@@ -645,7 +645,7 @@ Wave FINAL (Parallel independent review):
   - `media/main.js:4345` - latest text handling branch.
 
   **Acceptance Criteria**:
-  - [ ] Logs confirm replace behavior for temporary text updates.
+  - [x] Logs confirm replace behavior for temporary text updates.
 
   **QA Scenarios**:
   ```text
