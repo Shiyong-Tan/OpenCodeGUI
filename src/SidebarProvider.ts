@@ -640,6 +640,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const statsByPath = await this.getInternalDiffStats(repo, baseCommit, headCommit);
         const anchorMessageId = this.client.getTurnAssistantMsgId(sessionId);
         const changeListId = headCommit ? `system:changeList:${headCommit}` : `changes:${Date.now()}`;
+        this.uiDebugChannel?.appendLine(`[EXT][COMMIT_BIND] created | sessionId=${sessionId} commit=${headCommit} anchor=${anchorMessageId || 'null'} isMsg=${anchorMessageId?.startsWith('msg_') || false}`);
         webview.postMessage({
             type: 'diffFileList',
             sessionId,
@@ -662,8 +663,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 anchorMessageId,
                 createdAt: Date.now()
             });
+            this.uiDebugChannel?.appendLine(`[EXT][COMMIT_BIND] bound | changeListId=${changeListId} anchor=${anchorMessageId} isMsg=${anchorMessageId.startsWith('msg_')} commitHead=${headCommit}`);
         }
-        this.uiDebugChannel.appendLine(`[EXT][DIFF_LIST] sessionId=${sessionId} count=${files.length} anchor=${anchorMessageId || 'null'}`);
+        this.uiDebugChannel?.appendLine(`[EXT][DIFF_LIST] sessionId=${sessionId} count=${files.length} anchor=${anchorMessageId || 'null'}`);
     }
 
     /**
