@@ -3236,8 +3236,8 @@ function renderMessageElement(message, renderedSet) {
         }
 
 
-        // Todo list (below assistant bubble)
-        if (message.role === 'assistant' && !message.meta?.isThinking &&
+        // Todo list (below temporary assistant bubble only)
+        if (message.role === 'assistant' && message.meta?.isThinking === true &&
             Array.isArray(message.meta?.todos) && message.meta.todos.length > 0) {
             const todoCard = document.createElement('div');
             todoCard.className = 'todo-list';
@@ -3248,7 +3248,7 @@ function renderMessageElement(message, renderedSet) {
                 item.className = `todo-item todo-${status}`;
                 const check = document.createElement('span');
                 check.className = 'todo-check';
-                check.textContent = status === 'completed' ? '\u2713' : status === 'cancelled' ? '\u2717' : status === 'in_progress' ? '\u25CE' : '\u25CB';
+                check.textContent = status === 'completed' ? '\u2713' : status === 'in_progress' ? '\u25CF' : '\u25CB';
                 const label = document.createElement('span');
                 label.className = 'todo-content';
                 label.textContent = todo.content;
@@ -4422,7 +4422,7 @@ function applyPromptToSession(sessionId, payload) {
                 id: tempId,
                 role: 'assistant',
                 text: 'Thinking...',
-                meta: { isThinking: true, parentClientMessageId: payload.clientMessageId, textSegments: [], currentSegment: '', subagents: [] }
+                meta: { isThinking: true, parentClientMessageId: payload.clientMessageId, textSegments: [], currentSegment: '', subagents: [], todos: [] }
             });
             session.thinkingId = thinkingMsg.id;
             session.currentTurnAssistantKey = thinkingMsg.id;
@@ -4643,7 +4643,7 @@ function handleChatChunk(sessionId, message) {
         assertInvariants(sessionId, 'chatChunk');
     }
 
-    function handleChatDone(sessionId, message) {
+function handleChatDone(sessionId, message) {
         const session = getSessionState(sessionId);
         if (!session) return;
         // agent timeout notice removed
@@ -4660,6 +4660,7 @@ function handleChatChunk(sessionId, message) {
             const latest = typeof msg.meta.currentSegment === 'string' ? msg.meta.currentSegment : '';
             msg.meta.textSegments = latest ? [latest] : [];
             msg.meta.currentSegment = latest;
+            msg.meta.todos = [];
             msg.text = latest || msg.text || '';
         }
         // For subagents: snapshot into meta before clearing
@@ -6065,10 +6066,17 @@ window.addEventListener('message', (event) => {
             }
             case 'todoUpdate': {
                 const { todos, anchorMessageId, sessionId: sid } = message;
-                if (!anchorMessageId || !Array.isArray(todos)) break;
+                if (!Array.isArray(todos)) break;
                 const session = getSessionState(sid || activeSessionId);
                 if (!session) break;
-                const msg = session.messagesById.get(anchorMessageId);
+                const activeTargetId = session.currentTurnAssistantKey || session.thinkingId || null;
+                let msg = activeTargetId ? session.messagesById.get(activeTargetId) : null;
+                if ((!msg || msg.meta?.isThinking !== true) && anchorMessageId) {
+                    const anchored = session.messagesById.get(anchorMessageId);
+                    if (anchored?.meta?.isThinking === true) {
+                        msg = anchored;
+                    }
+                }
                 if (!msg) break;
                 if (!msg.meta) msg.meta = {};
                 msg.meta.todos = todos;

@@ -2021,14 +2021,16 @@ select#mode-select {
     display: flex;
     align-items: flex-start;
     gap: 8px;
-    font-size: 0.9em;
+    font-size: inherit;
     padding: 2px 4px;
     border-radius: 4px;
     color: var(--vscode-foreground);
+    font-style: normal;
+    font-weight: inherit;
 }
 
 .todo-check {
-    font-family: monospace;
+    font-family: inherit;
     font-weight: bold;
     flex-shrink: 0;
     width: 1.2em;
@@ -2042,19 +2044,17 @@ select#mode-select {
 
 /* Todo Status Variants */
 .todo-pending {
-    opacity: 0.8;
+    color: var(--vscode-errorForeground);
+    opacity: 0.95;
 }
 
 .todo-in_progress {
-    color: var(--vscode-textLink-foreground);
-    font-weight: 500;
-    background: var(--vscode-list-hoverBackground);
+    color: #d97706;
 }
 
 .todo-completed {
-    color: var(--vscode-descriptionForeground);
-    text-decoration: line-through;
-    opacity: 0.7;
+    color: var(--vscode-testing-iconPassed);
+    opacity: 0.95;
 }
 
 .todo-cancelled {
