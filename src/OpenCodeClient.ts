@@ -2560,6 +2560,24 @@ export class OpenCodeClient {
             }));
     }
 
+    public getUndoRangeForAnchor(startMessageId: string): { startIndex: number; endIndex: number } | undefined {
+        const startIndex = this.messageIndexById.get(startMessageId);
+        if (typeof startIndex !== 'number') return undefined;
+        const tailIndex = this.messageOrder.length ? this.messageOrder.length - 1 : startIndex;
+        let effectiveEndIndex = tailIndex;
+        const prevSeg = this.revertedSegment;
+        const hasActivePrev = Boolean(prevSeg && prevSeg.isActive && !prevSeg.discarded);
+        if (hasActivePrev && prevSeg) {
+            const prevStartIndex = typeof prevSeg.startMessageIndex === 'number'
+                ? prevSeg.startMessageIndex
+                : this.messageIndexById.get(prevSeg.startMessageId);
+            if (typeof prevStartIndex === 'number') {
+                effectiveEndIndex = Math.min(effectiveEndIndex, prevStartIndex - 1);
+            }
+        }
+        return { startIndex, endIndex: effectiveEndIndex };
+    }
+
     public createInternalMessageId(role: 'user' | 'assistant', sessionId?: string): string {
         const session = sessionId || 'local';
         const seq = this.internalMessageSeq++;
@@ -2642,8 +2660,13 @@ export class OpenCodeClient {
         this.revertedSegment = segment;
     }
 
-    public async undoFromMessage(startMessageId: string, options?: { force?: boolean }): Promise<{ conflicts: ConflictDetail[]; touchedFiles: string[]; applied: boolean; reason?: string }> {
+    public async undoFromMessage(startMessageId: string, options?: { force?: boolean; excludedMessageIds?: string[] }): Promise<{ conflicts: ConflictDetail[]; touchedFiles: string[]; applied: boolean; reason?: string }> {
         const force = options?.force === true;
+        const excludedMessageIds = new Set(
+            Array.isArray(options?.excludedMessageIds)
+                ? options!.excludedMessageIds.filter((id) => typeof id === 'string' && id.startsWith('msg_'))
+                : []
+        );
         const startIndex = this.messageIndexById.get(startMessageId);
         this.logUiDebug(`EXT: undo.enter | startMessageId | ${startMessageId || 'null'} | force | ${String(force)} | hasSession | ${String(Boolean(this.currentSessionId))} | messageOrderLen | ${this.messageOrder.length}`);
         if (startIndex === undefined) {
@@ -2699,7 +2722,8 @@ export class OpenCodeClient {
             return { conflicts: [], touchedFiles: [], applied: true, reason: 'empty-range' };
         }
 
-        const messageIds = this.getMessageIdsInRange(startIndex, effectiveEndIndex);
+        const messageIds = this.getMessageIdsInRange(startIndex, effectiveEndIndex)
+            .filter((id) => !excludedMessageIds.has(id));
         const firstMsgId = messageIds[0] || 'null';
         const lastMsgId = messageIds.length ? messageIds[messageIds.length - 1] : 'null';
         // this.logUiDebug(`EXT: undo.messageIds | count | ${messageIds.length} | first | ${firstMsgId} | last | ${lastMsgId}`);
@@ -2826,7 +2850,7 @@ export class OpenCodeClient {
     public async restoreFromMessage(
         startMessageId: string,
         endMessageId?: string,
-        options?: { force?: boolean; messageIds?: string[] }
+        options?: { force?: boolean; messageIds?: string[]; excludedMessageIds?: string[] }
     ): Promise<{ conflicts: ConflictDetail[]; touchedFiles: string[]; applied: boolean }> {
         const sessionId = this.currentSessionId;
         const touchedFiles: string[] = [];
@@ -2840,10 +2864,16 @@ export class OpenCodeClient {
         const targetMsgId = typeof endMessageId === 'string' && endMessageId.startsWith('msg_')
             ? endMessageId
             : startMessageId;
+        const excludedMessageIds = new Set(
+            Array.isArray(options?.excludedMessageIds)
+                ? options!.excludedMessageIds.filter((id) => typeof id === 'string' && id.startsWith('msg_'))
+                : []
+        );
         const messageIds = Array.isArray(options?.messageIds)
             ? options.messageIds.filter((id) => typeof id === 'string' && id.startsWith('msg_'))
             : [];
-        const result = await this.gitUndo.restoreToMessage(sessionId, targetMsgId, messageIds, options?.force === true);
+        const filteredMessageIds = messageIds.filter((id) => !excludedMessageIds.has(id));
+        const result = await this.gitUndo.restoreToMessage(sessionId, targetMsgId, filteredMessageIds, options?.force === true);
         if (result.conflicts.length) {
             const conflicts = result.conflicts.map((conflict) => ({
                 path: conflict.path,

@@ -1969,7 +1969,18 @@ ${attachmentLines.join('\n')}`
                         this.uiDebugChannel.appendLine(`[EXT][UNDO_CALL] anchorMsgId=${resolvedMessageId} sessionId=${sessionId || 'null'} opId=${operationId || 'null'}`);
                         this.uiDebugChannel.appendLine(`[EXT][UNDO_RX] anchorMsgId=${data.messageId} resolvedMsgId=${resolvedMessageId} sessionId=${sessionId || 'null'} opId=${operationId || 'null'}`);
                         const previousSegment = this.client.getRevertedSegment();
-                            const result = await this.client.undoFromMessage(resolvedMessageId);
+                        const currentActiveNoticeKey = previousSegment?.startMessageId
+                            ? `system:undo:${previousSegment.startMessageId}`
+                            : undefined;
+                        const undoRange = this.client.getUndoRangeForAnchor(resolvedMessageId);
+                        const invalidMessageIds = sessionId && undoRange && undoRange.endIndex >= undoRange.startIndex
+                            ? Array.from(this.getInvalidSegmentMessageIds(sessionId, {
+                                currentNoticeKey: currentActiveNoticeKey,
+                                rangeStartIndex: undoRange.startIndex,
+                                rangeEndIndex: undoRange.endIndex
+                            }))
+                            : [];
+                        const result = await this.client.undoFromMessage(resolvedMessageId, { excludedMessageIds: invalidMessageIds });
                         const currentSegment = this.client.getRevertedSegment();
                         this.uiDebugChannel.appendLine(`[EXT][UNDO_RESULT] applied=${result.applied} conflicts=${result.conflicts.length} touched=${result.touchedFiles.length} reason=${result.reason || 'null'} segmentStart=${currentSegment?.startMessageId || 'null'} segmentEnd=${currentSegment?.endMessageId || 'null'}`);
                         this.uiDebugChannel.appendLine(`[EXT][UNDO_DONE] applied=${result.applied} conflicts=${result.conflicts.length} sessionId=${sessionId || 'null'}`);
@@ -2272,7 +2283,11 @@ ${attachmentLines.join('\n')}`
                         const commitsToClear = sessionId
                             ? await this.resolveChangeListCommits(sessionId, messageIds, fallbackCommits)
                             : fallbackCommits;
-                        const result = await this.client.restoreFromMessage(anchorMsgId, endMsgId, { messageIds });
+                            const invalidMessageIds = Array.from(this.getInvalidSegmentMessageIds(sessionId, {
+                                currentNoticeKey: noticeKey,
+                                candidateMessageIds: messageIds
+                            }));
+                            const result = await this.client.restoreFromMessage(anchorMsgId, endMsgId, { messageIds, excludedMessageIds: invalidMessageIds });
                         const liveWebview = this._view?.webview || activeWebview;
                         this.uiDebugChannel.appendLine(`[EXT][RESTORE_TX] type=restoredSegment sessionId=${sessionId || 'null'} noticeKey=${noticeKey || 'null'} applied=${result.applied}`);
                         if (result.applied) {
@@ -2449,7 +2464,18 @@ ${attachmentLines.join('\n')}`
                     try {
                         if (conflictContext.kind === 'undo' && conflictContext.startMessageId) {
                             const previousSegment = this.client.getRevertedSegment();
-                            const result = await this.client.undoFromMessage(conflictContext.startMessageId, { force: true });
+                            const currentActiveNoticeKey = previousSegment?.startMessageId
+                                ? `system:undo:${previousSegment.startMessageId}`
+                                : undefined;
+                            const undoRange = this.client.getUndoRangeForAnchor(conflictContext.startMessageId);
+                            const invalidMessageIds = this.currentSessionId && undoRange && undoRange.endIndex >= undoRange.startIndex
+                                ? Array.from(this.getInvalidSegmentMessageIds(this.currentSessionId, {
+                                    currentNoticeKey: currentActiveNoticeKey,
+                                    rangeStartIndex: undoRange.startIndex,
+                                    rangeEndIndex: undoRange.endIndex
+                                }))
+                                : [];
+                            const result = await this.client.undoFromMessage(conflictContext.startMessageId, { force: true, excludedMessageIds: invalidMessageIds });
                             if (result.applied && previousSegment) {
                                 const historyEntry = {
                                     isActive: false,
@@ -2533,7 +2559,13 @@ ${attachmentLines.join('\n')}`
                             const messageIds = Array.isArray(persistedSegment?.memberMsgIds) && persistedSegment?.memberMsgIds?.length
                                 ? persistedSegment.memberMsgIds
                                 : (Array.isArray(currentSegment?.messageIds) ? currentSegment?.messageIds : []);
-                            const result = await this.client.restoreFromMessage(conflictContext.startMessageId, conflictContext.endMessageId, { force: true, messageIds });
+                            const invalidMessageIds = this.currentSessionId
+                                ? Array.from(this.getInvalidSegmentMessageIds(this.currentSessionId, {
+                                    currentNoticeKey: conflictContext.noticeKey,
+                                    candidateMessageIds: messageIds
+                                }))
+                                : [];
+                            const result = await this.client.restoreFromMessage(conflictContext.startMessageId, conflictContext.endMessageId, { force: true, messageIds, excludedMessageIds: invalidMessageIds });
                             if (this.currentSessionId && conflictContext.noticeKey) {
                                 const currentSegment = this.client.getRevertedSegment();
                             const fallbackCommits = Array.isArray(currentSegment?.startCommits) && currentSegment?.startCommits?.length
@@ -3533,6 +3565,56 @@ ${attachmentLines.join('\n')}`
         });
         this.postAddResponse(liveWebview, 'Restore applied.', { operationId });
         this.refreshDiffIfTouched(result.touchedFiles);
+    }
+
+    private getInvalidSegmentMessageIds(
+        sessionId: string,
+        options?: {
+            currentNoticeKey?: string;
+            rangeStartIndex?: number;
+            rangeEndIndex?: number;
+            candidateMessageIds?: string[];
+        }
+    ): Set<string> {
+        const invalid = new Set<string>();
+        const segMap = this.undoSegmentsBySession.get(sessionId);
+        const currentNoticeKey = options?.currentNoticeKey;
+        const rangeStartIndex = typeof options?.rangeStartIndex === 'number' ? options.rangeStartIndex : undefined;
+        const rangeEndIndex = typeof options?.rangeEndIndex === 'number' ? options.rangeEndIndex : undefined;
+        const candidateSet = Array.isArray(options?.candidateMessageIds)
+            ? new Set(options!.candidateMessageIds.filter((id) => typeof id === 'string' && id.startsWith('msg_')))
+            : undefined;
+        const hasRange = typeof rangeStartIndex === 'number' && typeof rangeEndIndex === 'number';
+        const shouldCheckRange = hasRange && rangeEndIndex! >= rangeStartIndex!;
+        const segmentOverlapsRange = (segment: SegmentState): boolean => {
+            if (!shouldCheckRange) return true;
+            let segStart = this.client.getMessageIndex(segment.anchorMsgId || '');
+            let segEnd = this.client.getMessageIndex(segment.endMsgId || '');
+            if (typeof segStart !== 'number' || typeof segEnd !== 'number') {
+                const indices = (Array.isArray(segment.memberMsgIds) ? segment.memberMsgIds : [])
+                    .map((id) => this.client.getMessageIndex(id))
+                    .filter((idx): idx is number => typeof idx === 'number');
+                if (!indices.length) return false;
+                indices.sort((a, b) => a - b);
+                segStart = indices[0];
+                segEnd = indices[indices.length - 1];
+            }
+            return segStart <= rangeEndIndex! && segEnd >= rangeStartIndex!;
+        };
+        if (segMap) {
+            for (const [noticeKey, segment] of segMap.entries()) {
+                if (currentNoticeKey && noticeKey === currentNoticeKey) continue;
+                if (segment.restoreAllowed !== false) continue;
+                if (!segmentOverlapsRange(segment)) continue;
+                const ids = Array.isArray(segment.memberMsgIds) ? segment.memberMsgIds : [];
+                for (const id of ids) {
+                    if (typeof id !== 'string' || !id.startsWith('msg_')) continue;
+                    if (candidateSet && !candidateSet.has(id)) continue;
+                    invalid.add(id);
+                }
+            }
+        }
+        return invalid;
     }
 
     private async handleChatEvent(event: ChatEvent, webview: vscode.Webview): Promise<void> {
