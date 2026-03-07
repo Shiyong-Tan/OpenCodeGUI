@@ -4806,18 +4806,15 @@ function handleChatChunk(sessionId, message) {
 
         const tmpKey = activeSessionId ? getSessionState(activeSessionId)?.thinkingId || null : null;
         const mode = selectedMode || 'unknown';
-        const isBuild = mode === 'build';
         const segCount = activeSessionId ? (getSessionState(activeSessionId)?.segmentsByNoticeKey?.size ?? 0) : 0;
         vscode.postMessage({
             type: 'ui-debug',
-            payload: ['[WV][SEND_MODE]', `mode=${mode}`, `isBuild=${isBuild}`, `segmentsCount=${segCount}`, `sessionId=${activeSessionId || 'null'}`]
+            payload: ['[WV][SEND_MODE]', `mode=${mode}`, 'discard=disabled', `segmentsCount=${segCount}`, `sessionId=${activeSessionId || 'null'}`]
         });
-        if (activeSessionId && isBuild) {
-            discardAllSegments(activeSessionId, 'buildPrompt', mode);
-        } else if (activeSessionId) {
+        if (activeSessionId) {
             vscode.postMessage({
                 type: 'ui-debug',
-                payload: ['[WV][SEG_DISCARD_SKIP]', `reason=not-build`, `mode=${mode}`, `sessionId=${activeSessionId || 'null'}`]
+                payload: ['[WV][SEG_DISCARD_SKIP]', 'reason=sendMessage-does-not-lock', `mode=${mode}`, `sessionId=${activeSessionId || 'null'}`]
             });
         }
         vscode.postMessage({
@@ -5949,6 +5946,7 @@ window.addEventListener('message', (event) => {
             case 'diffFileList': {
                 const sessionId = getEventSessionId(message, 'diffFileList');
                 if (!sessionId) break;
+                discardAllSegments(sessionId, 'file-change-detected', selectedMode || 'unknown');
                 const files = Array.isArray(message.files)
                     ? message.files.filter((item) => typeof item === 'string' && item.length)
                     : [];
@@ -6486,14 +6484,21 @@ window.addEventListener('message', (event) => {
                             `end=${endForUpsert || 'null'}`]
                     });
                     const existingSegment = session.segmentsByNoticeKey.get(upsertNoticeKey);
-                    const restoreAllowed = existingSegment?.restoreAllowed === false ? false : true;
+                    const incomingRestoreAllowed = segPayload?.restoreAllowed === false ? false : true;
+                    const restoreAllowed = existingSegment?.restoreAllowed === false ? false : incomingRestoreAllowed;
+                    if (existingSegment?.restoreAllowed === false && incomingRestoreAllowed === true) {
+                        vscode.postMessage({
+                            type: 'ui-debug',
+                            payload: ['RESTORE_LOCK_MONOTONIC_FAIL', `noticeKey=${upsertNoticeKey}`, 'from=false', 'to=true', 'action=blocked']
+                        });
+                    }
                     session.segmentsByNoticeKey.set(upsertNoticeKey, {
                         noticeKey: upsertNoticeKey,
                         anchorMsgId: normalizedAnchorForUpsert,
                         endMsgId: endForUpsert,
                         memberMsgIds,
                         applied,
-                        restoreAllowed: true,
+                        restoreAllowed,
                         ackOpId: ackOpId || null,
                         collapsed: true,
                         createdAt: Date.now()
@@ -6516,7 +6521,7 @@ window.addEventListener('message', (event) => {
                             endMsgId: endForUpsert,
                             memberMsgIds,
                             applied,
-                            restoreAllowed: true,
+                            restoreAllowed,
                             collapsed: true,
                             updatedAt: Date.now()
                         }
@@ -6849,6 +6854,14 @@ window.addEventListener('message', (event) => {
                 if (sessionId === activeSessionId) {
                     updateUndoStatusDisplay(sessionId);
                 }
+                break;
+            }
+            case 'segmentRestoreLock': {
+                const sessionId = getEventSessionId(message, 'segmentRestoreLock');
+                if (!sessionId) break;
+                const reason = typeof message.reason === 'string' && message.reason ? message.reason : 'file-change-detected';
+                discardAllSegments(sessionId, reason, selectedMode || 'unknown');
+                window.__oc?.renderFromState?.();
                 break;
             }
             case 'error': {

@@ -1278,8 +1278,9 @@ ${attachmentLines.join('\n')}`
                         if (this.currentSessionId) {
                             this.client.finishTurn(this.currentSessionId);
                         }
-                        // Mark all active subagents as done before clearing
-                        this.markAllSubagentsTerminal('done', 'main-finalize-complete');
+                        // Do not force "done" from main finalize; only subagent final-accepted can set done.
+                        // Any still-active subagents at this point are treated as cancelled.
+                        this.markAllSubagentsTerminal('cancelled', 'main-finalize-cancel-active');
                         this.emitSubagentStatus();
                         this.clearSubagentSessions();
                         this.emitTurnFinalizePhase(liveWebview, this.currentSessionId, 'finalize_done');
@@ -1421,16 +1422,20 @@ ${attachmentLines.join('\n')}`
                         break;
                     }
                     
-                    // Validate anchorMsgId
-                    if (!seg.anchorMsgId || !seg.anchorMsgId.startsWith('msg_')) {
-                        this.uiDebugChannel.appendLine(`[EXT][SEG_UPSERT_SKIP] reason=invalid-anchor anchorMsgId=${seg.anchorMsgId || 'null'} noticeKey=${seg.noticeKey}`);
-                        break;
-                    }
-                    
                     // Filter memberMsgIds to only msg_*
                     const memberMsgIds = Array.isArray(seg.memberMsgIds)
                         ? seg.memberMsgIds.filter((id: string) => typeof id === 'string' && id.startsWith('msg_'))
                         : [];
+                    const anchorMsgId = typeof seg.anchorMsgId === 'string' && seg.anchorMsgId.startsWith('msg_')
+                        ? seg.anchorMsgId
+                        : (memberMsgIds[0] || '');
+                    if (!anchorMsgId) {
+                        this.uiDebugChannel.appendLine(`[EXT][SEGMENT_INVARIANT_FAIL] reason=missing-anchor-and-members noticeKey=${seg.noticeKey}`);
+                        break;
+                    }
+                    if (!seg.anchorMsgId || !seg.anchorMsgId.startsWith('msg_')) {
+                        this.uiDebugChannel.appendLine(`[EXT][SEGMENT_INVARIANT_FAIL] reason=invalid-anchor-fallback-used noticeKey=${seg.noticeKey} fallbackAnchor=${anchorMsgId}`);
+                    }
                     
                     // Get or create segment map for this session
                     let segMap = this.undoSegmentsBySession.get(sessionId);
@@ -1442,19 +1447,27 @@ ${attachmentLines.join('\n')}`
                     const beforeCount = segMap.size;
                     this.uiDebugChannel.appendLine(
                         `[EXT][SEG_UPSERT_RX] sessionId=${sessionId} noticeKey=${seg.noticeKey} ` +
-                        `anchor=${seg.anchorMsgId} end=${seg.endMsgId || seg.anchorMsgId} members=${memberMsgIds.length}`
+                        `anchor=${anchorMsgId} end=${seg.endMsgId || anchorMsgId} members=${memberMsgIds.length}`
                     );
 
                     // Create/update segment
+                    const previousSegment = segMap.get(seg.noticeKey);
+                    const incomingRestoreAllowed = typeof seg.restoreAllowed === 'boolean' ? seg.restoreAllowed : undefined;
+                    const nextRestoreAllowed = previousSegment?.restoreAllowed === false
+                        ? false
+                        : incomingRestoreAllowed;
+                    if (previousSegment?.restoreAllowed === false && incomingRestoreAllowed === true) {
+                        this.uiDebugChannel.appendLine(`[EXT][RESTORE_LOCK_MONOTONIC_FAIL] noticeKey=${seg.noticeKey} from=false to=true action=blocked`);
+                    }
                     const segmentState: SegmentState = {
                         noticeKey: seg.noticeKey,
-                        anchorMsgId: seg.anchorMsgId,
-                        endMsgId: seg.endMsgId || seg.anchorMsgId,
+                        anchorMsgId: anchorMsgId,
+                        endMsgId: seg.endMsgId || anchorMsgId,
                         memberMsgIds: memberMsgIds,
                         applied: typeof seg.applied === 'boolean' ? seg.applied : undefined,
-                        restoreAllowed: typeof seg.restoreAllowed === 'boolean' ? seg.restoreAllowed : undefined,
+                        restoreAllowed: nextRestoreAllowed,
                         collapsed: typeof seg.collapsed === 'boolean' ? seg.collapsed : undefined,
-                        createdAt: segMap.get(seg.noticeKey)?.createdAt || Date.now(),
+                        createdAt: previousSegment?.createdAt || Date.now(),
                         updatedAt: Date.now()
                     };
                     
@@ -3738,11 +3751,8 @@ ${attachmentLines.join('\n')}`
             }
             if (event.type === 'files' && event.files && event.files.length && this.currentSessionId) {
                 const entry = this.subagentProgressBySession.get(event.sessionId!);
-                if (entry && entry.isDone) {
-                    return;
-                }
                 this.client.queueSubagentChanges(this.currentSessionId, event.files);
-                if (entry && event.files && event.files.length) {
+                if (entry && event.files && event.files.length && !entry.isDone) {
                     const firstFile = typeof event.files[0] === 'string' ? event.files[0] : (event.files[0] as any).path || '';
                     const filename = firstFile ? pathModule.basename(firstFile) : 'file';
                     entry.latestTool = 'Writing ' + filename;
@@ -3751,6 +3761,11 @@ ${attachmentLines.join('\n')}`
                     this.emitSubagentStatus();
                 }
                 const liveWebview = this._view?.webview || webview;
+                liveWebview.postMessage({
+                    type: 'segmentRestoreLock',
+                    sessionId: this.currentSessionId,
+                    reason: 'file-change-detected'
+                });
                 event.files.forEach((file, index) => {
                     this.tryOpenDiffForEventFile(file, liveWebview, index, this.currentSessionId || '', 'subagent');
                 });
@@ -4000,6 +4015,11 @@ ${attachmentLines.join('\n')}`
             if (!picked) return;
             const { file: active, index } = picked;
             const liveWebview = this._view?.webview || webview;
+            liveWebview.postMessage({
+                type: 'segmentRestoreLock',
+                sessionId: event.sessionId || this.currentSessionId,
+                reason: 'file-change-detected'
+            });
             this.tryOpenDiffForEventFile(active, liveWebview, index, event.sessionId || this.currentSessionId || '', 'main');
             const sessionId = event.sessionId || this.currentSessionId;
             if (sessionId && this.client.isInLateDiffGrace(sessionId)) {

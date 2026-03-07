@@ -2589,6 +2589,23 @@ export class OpenCodeClient {
         });
     }
 
+    private orderedUnionMessageIds(currentIds: string[], previousIds: string[]): string[] {
+        const merged = new Set<string>();
+        for (const id of currentIds) {
+            if (typeof id === 'string' && id.startsWith('msg_')) merged.add(id);
+        }
+        for (const id of previousIds) {
+            if (typeof id === 'string' && id.startsWith('msg_')) merged.add(id);
+        }
+        return Array.from(merged).sort((a, b) => {
+            const ai = this.messageIndexById.get(a);
+            const bi = this.messageIndexById.get(b);
+            const av = typeof ai === 'number' ? ai : Number.MAX_SAFE_INTEGER;
+            const bv = typeof bi === 'number' ? bi : Number.MAX_SAFE_INTEGER;
+            return av - bv;
+        });
+    }
+
     public getRevertedSegment(): RevertedSegment | undefined {
         return this.revertedSegment;
     }
@@ -2612,6 +2629,7 @@ export class OpenCodeClient {
         const hasActivePrev = Boolean(prevSeg && prevSeg.isActive && !prevSeg.discarded);
         let prevStartIndex: number | undefined;
         let prevEndIndex: number | undefined;
+        let canMergePrev = false;
         if (hasActivePrev && prevSeg) {
             prevStartIndex = typeof prevSeg.startMessageIndex === 'number'
                 ? prevSeg.startMessageIndex
@@ -2619,6 +2637,15 @@ export class OpenCodeClient {
             prevEndIndex = typeof prevSeg.endMessageIndex === 'number'
                 ? prevSeg.endMessageIndex
                 : this.messageIndexById.get(prevSeg.endMessageId);
+            const prevMemberIds = Array.isArray(prevSeg.messageIds)
+                ? prevSeg.messageIds.filter((id) => typeof id === 'string' && id.startsWith('msg_'))
+                : [];
+            const prevHasMembers = prevMemberIds.length > 0;
+            const prevStrictlyAfterCurrentStart = typeof prevStartIndex === 'number' && prevStartIndex > startIndex;
+            canMergePrev = Boolean(prevHasMembers && prevStrictlyAfterCurrentStart);
+            if (!canMergePrev) {
+                this.logUiDebug(`EXT: undo.merge.skip | reason=precondition-failed | prevHasMembers=${String(prevHasMembers)} | prevStartIndex=${typeof prevStartIndex === 'number' ? prevStartIndex : 'null'} | startIndex=${startIndex}`);
+            }
             if (typeof prevStartIndex === 'number') {
                 effectiveEndIndex = Math.min(effectiveEndIndex, prevStartIndex - 1);
             }
@@ -2637,7 +2664,13 @@ export class OpenCodeClient {
         }
 
         if (effectiveEndIndex < startIndex) {
-            this.logUiDebug(`EXT: undo.noop | reason | effectiveEndIndex<startIndex | startIndex | ${startIndex} | effectiveEndIndex | ${effectiveEndIndex}`);
+            if (hasActivePrev) {
+                this.logUiDebug(`EXT: undo.recover.tail | startIndex | ${startIndex} | oldEndIndex | ${effectiveEndIndex} | tailIndex | ${tailIndex}`);
+                effectiveEndIndex = tailIndex;
+            }
+        }
+        if (effectiveEndIndex < startIndex) {
+            this.logUiDebug(`EXT: undo.noop.empty-range.final | startIndex | ${startIndex} | effectiveEndIndex | ${effectiveEndIndex}`);
             return { conflicts: [], touchedFiles: [], applied: true, reason: 'empty-range' };
         }
 
@@ -2660,16 +2693,9 @@ export class OpenCodeClient {
                 return { conflicts, touchedFiles, applied: false, reason: result.reason || 'conflict' };
             }
 
-            let mergedEndIndex = effectiveEndIndex;
             let mergedEndId = messageIds.length ? messageIds[messageIds.length - 1] : startMessageId;
             let mergedStartCommits = result.startCommits || (result.startCommit ? [result.startCommit] : []);
-            if (hasActivePrev && prevSeg) {
-                if (typeof prevEndIndex === 'number') {
-                    mergedEndIndex = prevEndIndex;
-                }
-                if (typeof prevSeg.endMessageId === 'string' && prevSeg.endMessageId.startsWith('msg_')) {
-                    mergedEndId = prevSeg.endMessageId;
-                }
+            if (canMergePrev && prevSeg) {
                 if (Array.isArray(prevSeg.startCommits) && prevSeg.startCommits.length) {
                     mergedStartCommits = [...mergedStartCommits, ...prevSeg.startCommits];
                 } else if (prevSeg.startCommit) {
@@ -2679,12 +2705,13 @@ export class OpenCodeClient {
             if (mergedStartCommits.length > 1) {
                 mergedStartCommits = Array.from(new Set(mergedStartCommits));
             }
-            const mergedMessageIds = hasActivePrev && typeof prevEndIndex === 'number'
-                ? this.getMessageIdsInRange(startIndex, prevEndIndex)
+            const mergedMessageIds = canMergePrev && prevSeg
+                ? this.orderedUnionMessageIds(messageIds, Array.isArray(prevSeg.messageIds) ? prevSeg.messageIds : [])
                 : messageIds;
             if (mergedMessageIds.length) {
                 mergedEndId = mergedMessageIds[mergedMessageIds.length - 1];
             }
+            const mergedEndIndex = this.messageIndexById.get(mergedEndId) ?? effectiveEndIndex;
 
             this.revertedSegment = {
                 isActive: true,
@@ -2723,6 +2750,32 @@ export class OpenCodeClient {
             return { conflicts: [], touchedFiles: [], applied: false };
         }
         if (this.gitUndoAvailable && this.gitUndo) {
+            const canUseSegmentDirect =
+                typeof segment.restoreCommit === 'string' &&
+                segment.restoreCommit.length > 0 &&
+                typeof segment.undoTargetCommit === 'string' &&
+                segment.undoTargetCommit.length > 0 &&
+                Array.isArray(segment.fileSet) &&
+                segment.fileSet.length > 0;
+            if (canUseSegmentDirect) {
+                const normalizedFileSet = segment.fileSet!.filter((p) => typeof p === 'string' && p.length > 0);
+                const result = await this.gitUndo.restoreAll(
+                    sessionId,
+                    segment.restoreCommit!,
+                    normalizedFileSet,
+                    segment.undoTargetCommit!
+                );
+                if (result.conflicts.length) {
+                    const conflicts = result.conflicts.map((conflict) => ({
+                        path: conflict.path,
+                        expectedExists: conflict.expectedExists !== undefined ? conflict.expectedExists : true,
+                        currentExists: conflict.currentExists !== undefined ? conflict.currentExists : true,
+                        diffText: conflict.diffText || ''
+                    }));
+                    return { conflicts, touchedFiles: [], applied: false };
+                }
+                return { conflicts: [], touchedFiles: result.touchedFiles, applied: result.applied };
+            }
             const endMsgId = typeof segment.endMessageId === 'string' ? segment.endMessageId : '';
             if (!endMsgId.startsWith('msg_')) {
                 return { conflicts: [], touchedFiles: [], applied: false };
