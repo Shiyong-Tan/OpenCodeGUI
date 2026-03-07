@@ -1911,11 +1911,11 @@ select#mode-select {
   color: var(--vscode-descriptionForeground);
 }
 
-/* Tool-use rows should remain italic - higher specificity to override em rules */
+/* Tool-use rows should remain readable and non-italic */
 .subagent-inline-tool {
   font-size: 0.78em;
   opacity: 0.85;
-  font-style: italic !important;
+  font-style: normal !important;
   color: var(--vscode-descriptionForeground);
   margin-left: 8px;
 }

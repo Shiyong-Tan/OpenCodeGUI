@@ -1708,8 +1708,12 @@ ${attachmentLines.join('\n')}`
                             const snap = await this.readSnapshot(targetSessionId);
                             if (snap?.obj?.sessionData) {
                                 const snapPayload = snap.obj.sessionData;
-                                const snapshotMessages = Array.isArray(snapPayload.messages) ? snapPayload.messages : [];
-                                baseTitle = snapPayload.title || baseTitle;
+                                const snapshotFormatted = await this.injectChangeLists(targetSessionId, {
+                                    title: snapPayload.title || baseTitle,
+                                    messages: Array.isArray(snapPayload.messages) ? snapPayload.messages : []
+                                });
+                                const snapshotMessages = snapshotFormatted.messages;
+                                baseTitle = snapshotFormatted.title || baseTitle;
                                 baseMessages = snapshotMessages;
                                 const payload = {
                                     type: 'sessionData',
@@ -2851,7 +2855,15 @@ ${attachmentLines.join('\n')}`
                             try {
                                 const snap = await this.readSnapshot(recentSessionId);
                                 if (snap?.obj?.sessionData) {
-                                    const payload = snap.obj.sessionData;
+                                    const snapshotFormatted = await this.injectChangeLists(recentSessionId, {
+                                        title: snap.obj.sessionData?.title || 'Session',
+                                        messages: Array.isArray(snap.obj.sessionData?.messages) ? snap.obj.sessionData.messages : []
+                                    });
+                                    const payload = {
+                                        ...snap.obj.sessionData,
+                                        title: snapshotFormatted.title,
+                                        messages: snapshotFormatted.messages
+                                    };
                                     payload.meta = {
                                         source: 'snapshot',
                                         reason: 'export_failed',
@@ -3032,8 +3044,16 @@ ${attachmentLines.join('\n')}`
                         try {
                             const snap = await this.readSnapshot(this.currentSessionId);
                             if (snap?.obj?.sessionData) {
+                                const snapshotFormatted = await this.injectChangeLists(this.currentSessionId, {
+                                    title: snap.obj.sessionData?.title || 'Session',
+                                    messages: Array.isArray(snap.obj.sessionData?.messages) ? snap.obj.sessionData.messages : []
+                                });
                                 const liveWebview = this._view?.webview || webview;
-                                liveWebview.postMessage(snap.obj.sessionData);
+                                liveWebview.postMessage({
+                                    ...snap.obj.sessionData,
+                                    title: snapshotFormatted.title,
+                                    messages: snapshotFormatted.messages
+                                });
                                 this.uiDebugChannel.appendLine(`[EXT][AUTO_SELECT_SNAP_OK] sessionId=${this.currentSessionId}`);
                             }
                         } catch (snapErr) {
@@ -4710,6 +4730,13 @@ ${attachmentLines.join('\n')}`
         };
         for (const msg of messages) {
             if (!msg || typeof msg.text !== 'string') continue;
+            if (msg.role === 'system') {
+                if (msg.meta?.kind === 'changeList') {
+                    flushAssistant();
+                    normalized.push(msg);
+                }
+                continue;
+            }
             let role: 'user' | 'assistant' | null = null;
             if (msg.role === 'assistant') role = 'assistant';
             if (msg.role === 'user') role = 'user';

@@ -3142,11 +3142,11 @@ function renderMessageElement(message, renderedSet) {
                     entry.appendChild(textRow);
                 }
 
-                 // 4) indented latest tool (streaming only, italic)
+                 // 4) indented latest tool (streaming only)
                  if (latestTool) {
                      const toolRow = document.createElement('div');
                      toolRow.className = 'subagent-inline-tool';
-                     toolRow.textContent = `\u203A ${latestTool}`;
+                     toolRow.textContent = `\u25B8 ${latestTool}`;
                      entry.appendChild(toolRow);
                  }
 
