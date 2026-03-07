@@ -284,6 +284,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private lastDraft?: { text: string; attachments: string[]; model?: string; variant?: string; mode?: string };
     private currentDiffFilePath: string | null = null;
     private diffHashes = new Map<string, { before: string; after: string }>();
+    private shownDiffKeysBySession = new Map<string, Set<string>>();
     private revertedSegment?: { conflicts: ConflictDetail[]; discarded?: boolean };
     private clientMessageIdMap = new Map<string, string>();
     private revertedSegmentHistory: Array<{ isActive: boolean; discarded: boolean; startMessageId?: string; startMessageIndex?: number; endMessageId?: string; endMessageIndex?: number; collapsed: boolean; messageIds?: string[] }> = [];
@@ -3751,10 +3752,7 @@ ${attachmentLines.join('\n')}`
                 }
                 const liveWebview = this._view?.webview || webview;
                 event.files.forEach((file, index) => {
-                    const fileChange = file as FileSnapshot & { changes?: unknown };
-                    if (fileChange.changes) {
-                        this.openDiffForFileChange(fileChange, liveWebview, index);
-                    }
+                    this.tryOpenDiffForEventFile(file, liveWebview, index, this.currentSessionId || '', 'subagent');
                 });
                 
                 // Detect .md files and send plan file card
@@ -4002,7 +4000,7 @@ ${attachmentLines.join('\n')}`
             if (!picked) return;
             const { file: active, index } = picked;
             const liveWebview = this._view?.webview || webview;
-            this.openDiffForFileChange(active, liveWebview, index);
+            this.tryOpenDiffForEventFile(active, liveWebview, index, event.sessionId || this.currentSessionId || '', 'main');
             const sessionId = event.sessionId || this.currentSessionId;
             if (sessionId && this.client.isInLateDiffGrace(sessionId)) {
                 this.uiDebugChannel.appendLine(`[LATE_DIFF] event in grace window | sessionId=${sessionId} eventType=files`);
@@ -4339,6 +4337,97 @@ ${attachmentLines.join('\n')}`
         return Array.from(paths);
     }
 
+    private hasRenderableDiffPayload(file: any): boolean {
+        if (!file) return false;
+        const changes = file?.changes;
+        const hasChanges =
+            (Array.isArray(changes) && changes.length > 0) ||
+            (typeof changes === 'string' && changes.trim().length > 0);
+        const hasDiff = typeof file?.diff === 'string' && file.diff.trim().length > 0;
+        const metadataDiff = typeof file?.metadata?.diff === 'string' && file.metadata.diff.trim().length > 0;
+        const hasBeforeAfter = typeof file?.before === 'string' && typeof file?.after === 'string';
+        const hasMetadataBeforeAfter =
+            typeof file?.metadata?.filediff?.before === 'string' &&
+            typeof file?.metadata?.filediff?.after === 'string';
+        return hasChanges || hasDiff || metadataDiff || hasBeforeAfter || hasMetadataBeforeAfter;
+    }
+
+    private normalizeFileSnapshot(raw: any): FileSnapshot | undefined {
+        if (!raw) return undefined;
+        const metadata = raw?.metadata ?? raw?.state?.metadata;
+        const filediff = metadata?.filediff;
+        const filePath =
+            (typeof raw?.filePath === 'string' && raw.filePath) ||
+            (typeof raw?.path === 'string' && raw.path) ||
+            (typeof raw?.relativePath === 'string' && raw.relativePath) ||
+            (typeof filediff?.file === 'string' && filediff.file) ||
+            '';
+        if (!filePath) return undefined;
+
+        const before =
+            typeof raw?.before === 'string'
+                ? raw.before
+                : (typeof filediff?.before === 'string' ? filediff.before : undefined);
+        const after =
+            typeof raw?.after === 'string'
+                ? raw.after
+                : (typeof filediff?.after === 'string' ? filediff.after : undefined);
+        const diff =
+            typeof raw?.diff === 'string'
+                ? raw.diff
+                : (typeof metadata?.diff === 'string' ? metadata.diff : (typeof filediff?.diff === 'string' ? filediff.diff : undefined));
+        const type = raw?.type as 'update' | 'create' | 'delete' | undefined;
+
+        return {
+            filePath,
+            relativePath: typeof raw?.relativePath === 'string' ? raw.relativePath : undefined,
+            type,
+            diff,
+            before,
+            after,
+            existsBefore: typeof raw?.existsBefore === 'boolean' ? raw.existsBefore : undefined,
+            existsAfter: typeof raw?.existsAfter === 'boolean' ? raw.existsAfter : undefined,
+            additions: typeof raw?.additions === 'number'
+                ? raw.additions
+                : (typeof filediff?.additions === 'number' ? filediff.additions : undefined),
+            deletions: typeof raw?.deletions === 'number'
+                ? raw.deletions
+                : (typeof filediff?.deletions === 'number' ? filediff.deletions : undefined)
+        };
+    }
+
+    private wasDiffAlreadyShown(sessionId: string, file: FileSnapshot): boolean {
+        if (!sessionId) return false;
+        const set = this.shownDiffKeysBySession.get(sessionId) ?? new Set<string>();
+        const before = typeof file.before === 'string' ? file.before : '';
+        const after = typeof file.after === 'string' ? file.after : '';
+        const diff = typeof file.diff === 'string' ? file.diff : '';
+        const key = `${file.filePath}|${this.hashText(`${before}\n@@\n${after}\n@@\n${diff}`)}`;
+        if (set.has(key)) return true;
+        set.add(key);
+        this.shownDiffKeysBySession.set(sessionId, set);
+        return false;
+    }
+
+    private tryOpenDiffForEventFile(rawFile: any, webview: vscode.Webview, index: number, sessionId: string, lane: 'main' | 'subagent'): void {
+        if (!this.hasRenderableDiffPayload(rawFile)) {
+            this.uiDebugChannel.appendLine(`subagent.diff.skipped | lane=${lane} | reason=no-renderable-payload`);
+            return;
+        }
+        const normalized = this.normalizeFileSnapshot(rawFile);
+        if (!normalized) {
+            this.uiDebugChannel.appendLine(`subagent.diff.skipped | lane=${lane} | reason=normalize-failed`);
+            return;
+        }
+        this.uiDebugChannel.appendLine(`subagent.diff.detected | lane=${lane} | file=${normalized.filePath}`);
+        if (sessionId && this.wasDiffAlreadyShown(sessionId, normalized)) {
+            this.uiDebugChannel.appendLine(`subagent.diff.skipped | lane=${lane} | reason=duplicate | file=${normalized.filePath}`);
+            return;
+        }
+        this.openDiffForFileChange(normalized, webview, index);
+        this.uiDebugChannel.appendLine(`subagent.diff.shown | lane=${lane} | file=${normalized.filePath}`);
+    }
+
     private openDiffForFileChange(file: FileSnapshot, webview: vscode.Webview, index: number): void {
         void webview;
         // Only auto-open diff for file changes produced by tool_use write/edit/apply_patch.
@@ -4636,6 +4725,7 @@ ${attachmentLines.join('\n')}`
         this.pendingClientMessageId = undefined;
         this.currentDiffFilePath = null;
         this.diffHashes.clear();
+        this.shownDiffKeysBySession.clear();
         this.assistantTextBufferBySession.clear();
         this.pendingAssistantTmpKeyBySession.clear();
         this.pendingAssistantTmpKeyByLocalKey.clear();

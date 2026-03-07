@@ -2296,9 +2296,43 @@ export class OpenCodeClient {
         return [abs];
     }
 
+    private normalizeIncomingFileSnapshots(files: any[]): FileSnapshot[] {
+        const normalized: FileSnapshot[] = [];
+        for (const raw of files || []) {
+            if (!raw) continue;
+            if (typeof raw === 'string') {
+                const p = raw.trim();
+                if (!p) continue;
+                normalized.push({ filePath: p, type: 'update' });
+                continue;
+            }
+            const filePath =
+                (typeof raw.filePath === 'string' && raw.filePath) ||
+                (typeof raw.path === 'string' && raw.path) ||
+                (typeof raw.relativePath === 'string' && raw.relativePath) ||
+                '';
+            if (!filePath) continue;
+            normalized.push({
+                filePath,
+                relativePath: typeof raw.relativePath === 'string' ? raw.relativePath : undefined,
+                type: raw.type as 'update' | 'create' | 'delete' | undefined,
+                diff: typeof raw.diff === 'string' ? raw.diff : undefined,
+                before: typeof raw.before === 'string' ? raw.before : undefined,
+                after: typeof raw.after === 'string' ? raw.after : undefined,
+                existsBefore: typeof raw.existsBefore === 'boolean' ? raw.existsBefore : undefined,
+                existsAfter: typeof raw.existsAfter === 'boolean' ? raw.existsAfter : undefined,
+                additions: typeof raw.additions === 'number' ? raw.additions : undefined,
+                deletions: typeof raw.deletions === 'number' ? raw.deletions : undefined
+            });
+        }
+        return normalized;
+    }
+
     private buildChangeSpecs(files: FileSnapshot[]): FileChangeSpec[] {
         const changes: FileChangeSpec[] = [];
         for (const file of files) {
+            const filePath = typeof file?.filePath === 'string' ? file.filePath.trim() : '';
+            if (!filePath) continue;
             const existsBefore = typeof file.existsBefore === 'boolean'
                 ? file.existsBefore
                 : (file.type === 'create' ? false : file.type === 'delete' ? true : true);
@@ -2306,11 +2340,11 @@ export class OpenCodeClient {
                 ? file.existsAfter
                 : (file.type === 'create' ? true : file.type === 'delete' ? false : true);
             if (!existsAfter) {
-                changes.push({ type: 'delete', path: file.filePath });
+                changes.push({ type: 'delete', path: filePath });
             } else if (!existsBefore && existsAfter) {
-                changes.push({ type: 'create', path: file.filePath });
+                changes.push({ type: 'create', path: filePath });
             } else {
-                changes.push({ type: 'update', path: file.filePath });
+                changes.push({ type: 'update', path: filePath });
             }
         }
         return changes;
@@ -2382,12 +2416,22 @@ export class OpenCodeClient {
 
     public queueSubagentChanges(mainSessionId: string, files: any[]): void {
         if (!mainSessionId || !files?.length) return;
-        const pending = this.pendingTurnChangesBySession.get(mainSessionId);
+        let pending = this.pendingTurnChangesBySession.get(mainSessionId);
         if (!pending) {
-            this.logUiDebug(`subagent.queue.skip | sessionId=${mainSessionId} | reason=no-pending-turn`);
-            return;
+            const state = this.turnStateBySession.get(mainSessionId);
+            const turnKey = state?.pendingUserLocalKey || mainSessionId;
+            pending = {
+                turnKey,
+                tmpKey: state?.pendingAssistantTmpKey,
+                changes: [],
+                lastAssistantMsgId: state?.assistantMsgId || state?.lastResolvedAssistantMsgId
+            };
+            this.pendingTurnChangesBySession.set(mainSessionId, pending);
+            this.logUiDebug(`subagent.queue.bootstrap | sessionId=${mainSessionId} turnKey=${turnKey} tmpKey=${pending.tmpKey || 'null'}`);
         }
-        const changeSpecs = this.buildChangeSpecs(files as FileSnapshot[]);
+        const normalizedFiles = this.normalizeIncomingFileSnapshots(files);
+        const changeSpecs = this.buildChangeSpecs(normalizedFiles);
+        this.logUiDebug(`subagent.queue.normalize | sessionId=${mainSessionId} raw=${files.length} normalized=${normalizedFiles.length} specs=${changeSpecs.length}`);
         if (!changeSpecs.length) return;
         this.markTurnHasWrites(mainSessionId, 'subagent-file-change');
         pending.changes.push(...changeSpecs);

@@ -750,7 +750,7 @@ function upsertMessage(session, payload) {
     const text = typeof payload.text === 'string' ? payload.text : '';
     const normalizedText = text.trimStart();
     const isSystemDcpMessage = payload.role === 'system'
-        && normalizedText.startsWith('â–£')
+        && normalizedText.startsWith('\u25A3')
         && normalizedText.includes('DCP');
     if (isSystemDcpMessage) {
         vscode.postMessage({
@@ -2568,7 +2568,7 @@ document.addEventListener('DOMContentLoaded', () => {
             : '<div class="quota-tooltip-row">Quota unavailable</div>';
         quotaTooltipEl.innerHTML = `
             <div class="quota-tooltip-header">
-                <span class="quota-tooltip-title"><span class="quota-title-icon">â—”</span>Rate limits remaining</span>
+                <span class="quota-tooltip-title"><span class="quota-title-icon">\u25D4</span>Rate limits remaining</span>
             </div>
             ${body}
         `;
@@ -3174,7 +3174,7 @@ function renderMessageElement(message, renderedSet) {
             undoBtn.className = 'undo-btn';
             undoBtn.type = 'button';
             undoBtn.title = 'Undo to this message';
-            undoBtn.textContent = 'â†º';
+            undoBtn.textContent = '\u21BA';
             undoBtn.addEventListener('click', () => {
                 if (isBusy) return;
                 const sessionId = activeSessionId;
@@ -3221,7 +3221,7 @@ function renderMessageElement(message, renderedSet) {
                 item.className = `todo-item todo-${status}`;
                 const check = document.createElement('span');
                 check.className = 'todo-check';
-                check.textContent = status === 'completed' ? 'âœ“' : status === 'cancelled' ? 'âœ—' : status === 'in_progress' ? 'â—Ž' : 'â—‹';
+                check.textContent = status === 'completed' ? '\u2713' : status === 'cancelled' ? '\u2717' : status === 'in_progress' ? '\u25CE' : '\u25CB';
                 const label = document.createElement('span');
                 label.className = 'todo-content';
                 label.textContent = todo.content;
@@ -4271,7 +4271,7 @@ function shouldHideDcpUiMessage(message) {
 
             const icon = document.createElement('span');
             icon.className = 'attachment-file-icon';
-            icon.textContent = 'ðŸ“„';
+            icon.textContent = '\u{1F4C4}';
 
             const text = document.createElement('span');
             text.className = 'attachment-image-label';
