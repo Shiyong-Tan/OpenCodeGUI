@@ -96,6 +96,8 @@ interface SegmentState {
     updatedAt: number;
 }
 
+type SubagentLifecycleState = 'queued' | 'running' | 'finalizing' | 'done' | 'failed' | 'cancelled' | 'dismissed';
+
 export class SidebarProvider implements vscode.WebviewViewProvider {
     private _view?: vscode.WebviewView;
     private _webviewInstanceId?: string;
@@ -103,7 +105,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private currentSessionId?: string;
     private userOwnedSessionIds = new Set<string>();
     private activeSubagentSessionIds = new Set<string>();
-    private subagentProgressBySession = new Map<string, { taskId: string; parentSessionId: string; description: string; startedAt: number; title?: string; mode?: string; model?: string; latestText?: string; latestTool?: string; latestToolInput?: string; isDone?: boolean }>();
+    private subagentProgressBySession = new Map<string, { taskId: string; parentSessionId: string; description: string; startedAt: number; title?: string; mode?: string; model?: string; latestText?: string; latestTool?: string; latestToolInput?: string; isDone?: boolean; state?: SubagentLifecycleState; finishedAt?: number; dismissAt?: number; lastEventAt?: number; finalMessageId?: string; finalReason?: string }>();
+    private readonly subagentDoneRetentionMs = 5000;
+    private subagentRetentionTimer?: NodeJS.Timeout;
+    private task1DoneVisibleTotalMs = 0;
+    private task1DoneVisibleCount = 0;
+    private task1FalseDoneEvents = 0;
 
     private isUserOwnedSession(id: string): boolean {
         return this.userOwnedSessionIds.has(id) || id === this.currentSessionId;
@@ -136,12 +143,52 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private clearSubagentSessions(): void {
-        this.activeSubagentSessionIds.forEach(sessionId => {
+        const now = Date.now();
+        for (const [sessionId, entry] of this.subagentProgressBySession.entries()) {
+            const st = entry.state || (entry.isDone ? 'done' : 'running');
+            const expired = typeof entry.dismissAt === 'number' && entry.dismissAt <= now;
+            const canClear = st === 'dismissed' || ((st === 'done' || st === 'failed' || st === 'cancelled') && expired);
+            if (!canClear) continue;
+            if ((st === 'done' || st === 'failed' || st === 'cancelled') && typeof entry.finishedAt === 'number') {
+                const visibleMs = Math.max(0, now - entry.finishedAt);
+                this.task1DoneVisibleTotalMs += visibleMs;
+                this.task1DoneVisibleCount += 1;
+                const avgDoneVisibleMs = this.task1DoneVisibleCount > 0 ? Math.round(this.task1DoneVisibleTotalMs / this.task1DoneVisibleCount) : 0;
+                const falseDoneRate = this.task1DoneVisibleCount > 0 ? (this.task1FalseDoneEvents / this.task1DoneVisibleCount) : 0;
+                this.uiDebugChannel.appendLine(`[SidebarProvider] metrics.task1 done_visible_ms=${avgDoneVisibleMs} false_done_rate=${falseDoneRate.toFixed(4)}`);
+            }
             this.client.clearSubagentSession(sessionId);
+            this.activeSubagentSessionIds.delete(sessionId);
+            this.subagentProgressBySession.delete(sessionId);
             this.uiDebugChannel.appendLine(`[SidebarProvider] Cleared subagent session mapping: ${sessionId}`);
-        });
-        this.activeSubagentSessionIds.clear();
-        this.subagentProgressBySession.clear();
+        }
+    }
+
+    private isTerminalSubagentState(state: SubagentLifecycleState | undefined): boolean {
+        return state === 'done' || state === 'failed' || state === 'cancelled' || state === 'dismissed';
+    }
+
+    private transitionSubagentState(sessionId: string, entry: { state?: SubagentLifecycleState; isDone?: boolean; finalReason?: string; lastEventAt?: number }, to: SubagentLifecycleState, reason: string): void {
+        const from = entry.state || (entry.isDone ? 'done' : 'queued');
+        if (from === to) return;
+        if (this.isTerminalSubagentState(from) && !this.isTerminalSubagentState(to)) {
+            this.task1FalseDoneEvents += 1;
+            this.uiDebugChannel.appendLine(`[SidebarProvider] subagent.state.blocked: ${sessionId} ${from} -> ${to} reason=${reason}`);
+            return;
+        }
+        entry.state = to;
+        entry.isDone = to === 'done';
+        entry.finalReason = reason;
+        entry.lastEventAt = Date.now();
+        if (to === 'done') {
+            (entry as any).latestText = 'Task done.';
+            (entry as any).latestTool = '';
+            (entry as any).latestToolInput = '';
+        }
+        this.uiDebugChannel.appendLine(
+            `[SidebarProvider] state.transition from=${from} to=${to} reason=${reason} messageId=${(entry as any).finalMessageId || 'null'} parentId=${(entry as any).parentSessionId || 'null'} lane=subagent sessionId=${sessionId}`
+        );
+        this.emitSubagentStateDelta(sessionId, from, to, reason, entry);
     }
 
     private removeSubagentSession(sessionId: string): void {
@@ -164,11 +211,71 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             latestText: entry.latestText || '',
             latestTool: entry.latestTool || '',
             latestToolInput: entry.latestToolInput || '',
-            isDone: entry.isDone === true
+            state: entry.state || (entry.isDone ? 'done' : 'running'),
+            isDone: (entry.state || (entry.isDone ? 'done' : 'running')) === 'done'
         }));
-        const isActive = active !== undefined ? active : agents.length > 0;
-        liveWebview.postMessage({ type: 'subagentStatus', active: isActive, agents, count: agents.length, sessionId: this.currentSessionId });
+        const runningCount = agents.filter((a: any) => a.state === 'running').length;
+        const finalizingCount = agents.filter((a: any) => a.state === 'finalizing').length;
+        const doneJustNowCount = agents.filter((a: any) => a.state === 'done').length;
+        const isActive = active !== undefined ? active : (runningCount + finalizingCount) > 0;
+        liveWebview.postMessage({ type: 'subagentStatus', active: isActive, agents, count: agents.length, runningCount, finalizingCount, doneJustNowCount, sessionId: this.currentSessionId });
     }
+    private scheduleSubagentRetentionSweep(): void {
+        if (this.subagentRetentionTimer) {
+            clearTimeout(this.subagentRetentionTimer);
+            this.subagentRetentionTimer = undefined;
+        }
+        const now = Date.now();
+        let nextExpiry = Number.POSITIVE_INFINITY;
+        for (const entry of this.subagentProgressBySession.values()) {
+            if (typeof entry.dismissAt === 'number' && entry.dismissAt > now) {
+                nextExpiry = Math.min(nextExpiry, entry.dismissAt);
+            }
+        }
+        if (!Number.isFinite(nextExpiry)) return;
+        this.subagentRetentionTimer = setTimeout(() => {
+            this.clearSubagentSessions();
+            this.emitSubagentStatus();
+            this.scheduleSubagentRetentionSweep();
+        }, Math.max(100, nextExpiry - now));
+    }
+
+    private emitSubagentStateDelta(sessionId: string, from: string, to: string, reason: string, entry: any): void {
+        const liveWebview = this._view?.webview;
+        if (!liveWebview || from === to) return;
+        liveWebview.postMessage({
+            type: 'subagentStateDelta',
+            sessionId: this.currentSessionId,
+            parentSessionId: entry?.parentSessionId || this.currentSessionId,
+            agentSessionId: sessionId,
+            from,
+            to,
+            reason,
+            ts: Date.now(),
+            payload: {
+                finalMessageId: entry?.finalMessageId || '',
+                finalReason: entry?.finalReason || ''
+            }
+        });
+    }
+
+    private markAllSubagentsTerminal(kind: 'done' | 'failed' | 'cancelled', reason: string): void {
+        const now = Date.now();
+        for (const [sessionId, entry] of this.subagentProgressBySession.entries()) {
+            const st = entry.state || (entry.isDone ? 'done' : 'running');
+            if (st === 'running' || st === 'finalizing' || st === 'queued') {
+                this.transitionSubagentState(sessionId, entry, kind, reason);
+                entry.finishedAt = now;
+                entry.dismissAt = now + this.subagentDoneRetentionMs;
+                this.scheduleSubagentRetentionSweep();
+            }
+        }
+    }
+
+    private emitTurnFinalizePhase(webview: vscode.Webview, sessionId: string | undefined, phase: 'stream_done' | 'commit_done' | 'upgrade_done' | 'finalize_done'): void {
+        webview.postMessage({ type: 'turnFinalizePhase', sessionId, phase, ts: Date.now() });
+    }
+
     private selectedModel?: string;
     private selectedVariant?: string;
     private selectedMode?: string;
@@ -1154,15 +1261,18 @@ ${attachmentLines.join('\n')}`
                             assistantMsgId: doneAssistantMsgId,
                             lastAssistantMsgId: doneAssistantMsgId
                         });
+                        this.emitTurnFinalizePhase(liveWebview, this.currentSessionId, 'stream_done');
                         this.postMessageIndexMap(liveWebview);
                         if (this.currentSessionId) {
                             this.uiDebugChannel.appendLine(`EXT: finalize.order | sessionId=${this.currentSessionId} | phase=commit-start`);
                             await this.client.commitPendingTurnChanges(this.currentSessionId);
                             this.uiDebugChannel.appendLine(`EXT: finalize.order | sessionId=${this.currentSessionId} | phase=commit-done`);
+                            this.emitTurnFinalizePhase(liveWebview, this.currentSessionId, 'commit_done');
                         }
                         this.uiDebugChannel.appendLine(`EXT: finalize.order | sessionId=${this.currentSessionId || 'null'} | phase=upgrade-start`);
                         await this.resolvePendingUserUpgrade(this.currentSessionId, liveWebview);
                         this.uiDebugChannel.appendLine(`EXT: finalize.order | sessionId=${this.currentSessionId || 'null'} | phase=upgrade-done`);
+                        this.emitTurnFinalizePhase(liveWebview, this.currentSessionId, 'upgrade_done');
                         this.postMessageIndexMap(liveWebview);
                         if (this.currentSessionId) {
                             await this.emitDiffFileListWithRetry(this.currentSessionId, liveWebview);
@@ -1171,14 +1281,10 @@ ${attachmentLines.join('\n')}`
                             this.client.finishTurn(this.currentSessionId);
                         }
                         // Mark all active subagents as done before clearing
-                        for (const entry of this.subagentProgressBySession.values()) {
-                            entry.isDone = true;
-                        }
-                        if (this.subagentProgressBySession.size > 0) {
-                            this.emitSubagentStatus();
-                        }
+                        this.markAllSubagentsTerminal('done', 'main-finalize-complete');
+                        this.emitSubagentStatus();
                         this.clearSubagentSessions();
-                        this.emitSubagentStatus(false);
+                        this.emitTurnFinalizePhase(liveWebview, this.currentSessionId, 'finalize_done');
                         await this.postModelQuota(liveWebview, 'chat-done');
                         if (this.pendingClientMessageId) {
                             await this.handleAbortedMessage(this.pendingClientMessageId, liveWebview);
@@ -1208,22 +1314,21 @@ ${attachmentLines.join('\n')}`
                             assistantMsgId: doneAssistantMsgId,
                             lastAssistantMsgId: doneAssistantMsgId
                         });
+                        this.emitTurnFinalizePhase(activeWebview, this.currentSessionId, 'stream_done');
                         if (this.currentSessionId) {
                             await this.client.commitPendingTurnChanges(this.currentSessionId);
+                            this.emitTurnFinalizePhase(activeWebview, this.currentSessionId, 'commit_done');
                         }
                         await this.resolvePendingUserUpgrade(this.currentSessionId, activeWebview);
+                        this.emitTurnFinalizePhase(activeWebview, this.currentSessionId, 'upgrade_done');
                         if (this.currentSessionId) {
                             this.client.finishTurn(this.currentSessionId);
                         }
-                        // Mark all active subagents as done before clearing (error path)
-                        for (const entry of this.subagentProgressBySession.values()) {
-                            entry.isDone = true;
-                        }
-                        if (this.subagentProgressBySession.size > 0) {
-                            this.emitSubagentStatus();
-                        }
+                        // Mark all active subagents as failed before clearing (error path)
+                        this.markAllSubagentsTerminal('failed', 'main-error-finalize');
+                        this.emitSubagentStatus();
                         this.clearSubagentSessions();
-                        this.emitSubagentStatus(false);
+                        this.emitTurnFinalizePhase(activeWebview, this.currentSessionId, 'finalize_done');
                         if (this.pendingClientMessageId) {
                             await this.handleAbortedMessage(this.pendingClientMessageId, activeWebview);
                             this.pendingClientMessageId = undefined;
@@ -2052,8 +2157,9 @@ ${attachmentLines.join('\n')}`
                     if (this.currentSessionId) {
                         this.client.finishTurn(this.currentSessionId);
                     }
+                    this.markAllSubagentsTerminal('cancelled', 'user-cancel');
+                    this.emitSubagentStatus();
                     this.clearSubagentSessions();
-                    this.emitSubagentStatus(false);
 
                     const doneAssistantMsgId = this.currentSessionId
                         ? this.client.getTurnAssistantMsgId(this.currentSessionId)
@@ -3426,6 +3532,17 @@ ${attachmentLines.join('\n')}`
             });
             return;
         }
+        if (event.type === 'assistantPhase' && event.sessionId) {
+            webview.postMessage({
+                type: 'assistantPhase',
+                sessionId: event.sessionId,
+                messageId: event.messageId || event.assistantMsgId || '',
+                phase: event.phase || '',
+                lane: event.lane || 'unknown',
+                ts: Date.now()
+            });
+            return;
+        }
         if (event.type === 'session' && event.sessionId) {
             if (!this.isUserOwnedSession(event.sessionId) && this.sendInFlightBySession.has(this.currentSessionId!)) {
                 this.activeSubagentSessionIds.add(event.sessionId);
@@ -3434,12 +3551,6 @@ ${attachmentLines.join('\n')}`
                 const initialMode = event.mode || event.agent || '';
                 const initialModel = event.modelID || event.providerID || '';
                 if (existing) {
-                    if (event.isDone === true) {
-                        existing.isDone = true;
-                        existing.latestText = '';
-                        existing.latestTool = '';
-                        existing.latestToolInput = '';
-                    }
                     if (initialMode) {
                         existing.mode = initialMode;
                         existing.description = existing.description || initialMode;
@@ -3457,7 +3568,9 @@ ${attachmentLines.join('\n')}`
                     description: initialMode,
                     mode: initialMode,
                     model: initialModel,
-                    isDone: event.isDone === true,
+                    isDone: false,
+                    state: 'queued',
+                    lastEventAt: Date.now(),
                     startedAt: Date.now()
                 });
                 this.uiDebugChannel.appendLine(`[SidebarProvider] Registered subagent session mapping: ${event.sessionId} -> ${this.currentSessionId}`);
@@ -3484,12 +3597,6 @@ ${attachmentLines.join('\n')}`
                 const initialMode = event.mode || event.agent || '';
                 const initialModel = event.modelID || event.providerID || '';
                 if (existing) {
-                    if (event.isDone === true) {
-                        existing.isDone = true;
-                        existing.latestText = '';
-                        existing.latestTool = '';
-                        existing.latestToolInput = '';
-                    }
                     if (initialMode) {
                         existing.mode = initialMode;
                         existing.description = existing.description || initialMode;
@@ -3507,7 +3614,9 @@ ${attachmentLines.join('\n')}`
                     description: initialMode,
                     mode: initialMode,
                     model: initialModel,
-                    isDone: event.isDone === true,
+                    isDone: false,
+                    state: 'queued',
+                    lastEventAt: Date.now(),
                     startedAt: Date.now()
                 });
                 this.uiDebugChannel.appendLine(`[SidebarProvider] Subagent session event: ${event.sessionId} | mode=${event.mode || 'null'} | agent=${event.agent || 'null'} | modelID=${event.modelID || 'null'} | providerID=${event.providerID || 'null'}`);
@@ -3571,7 +3680,7 @@ ${attachmentLines.join('\n')}`
                     entry.latestText = event.text.length > 200
                         ? event.text.slice(0, 200) + '...'
                         : event.text;
-                    entry.isDone = false;
+                    this.transitionSubagentState(event.sessionId, entry, 'running', 'progress');
                     this.emitSubagentStatus();
                 }
             }
@@ -3594,7 +3703,7 @@ ${attachmentLines.join('\n')}`
                         } else {
                             entry.latestToolInput = '';
                         }
-                        entry.isDone = false;
+                        this.transitionSubagentState(event.sessionId, entry, 'running', 'tool-progress');
                         this.emitSubagentStatus();
                     }
                 }
@@ -3610,7 +3719,7 @@ ${attachmentLines.join('\n')}`
                     const filename = filepath ? pathModule.basename(filepath) : '';
                     entry.latestTool = 'Applying patch' + (filename ? ': ' + filename : '');
                     entry.latestToolInput = filepath || '';
-                    entry.isDone = false;
+                    this.transitionSubagentState(event.sessionId, entry, 'running', 'tool-patch');
                     this.emitSubagentStatus();
                 }
             }
@@ -3625,7 +3734,7 @@ ${attachmentLines.join('\n')}`
                     const filename = filepath ? pathModule.basename(filepath) : '';
                     entry.latestTool = 'Editing ' + (filename || 'file');
                     entry.latestToolInput = filepath || '';
-                    entry.isDone = false;
+                    this.transitionSubagentState(event.sessionId, entry, 'running', 'diff-progress');
                     this.emitSubagentStatus();
                 }
             }
@@ -3640,7 +3749,7 @@ ${attachmentLines.join('\n')}`
                     const filename = firstFile ? pathModule.basename(firstFile) : 'file';
                     entry.latestTool = 'Writing ' + filename;
                     entry.latestToolInput = firstFile || '';
-                    entry.isDone = false;
+                    this.transitionSubagentState(event.sessionId, entry, 'running', 'files-progress');
                     this.emitSubagentStatus();
                 }
                 const liveWebview = this._view?.webview || webview;
@@ -3669,6 +3778,17 @@ ${attachmentLines.join('\n')}`
                 // REMOVED: Mid-stream emitDiffFileList call
                 // Change-list should only emit after finalization sequence (chatDone → commit → upgrade → diffList)
                 // This prevents premature change-list emission before final assistant message
+            }
+            if (event.type === 'assistantMessageMeta' && event.sessionId && !event.isStatusUpdate) {
+                const entry = this.subagentProgressBySession.get(event.sessionId);
+                if (entry) {
+                    entry.finalMessageId = event.assistantMsgId || event.messageId;
+                    this.transitionSubagentState(event.sessionId, entry, 'done', 'assistant-final-accepted');
+                    entry.finishedAt = Date.now();
+                    entry.dismissAt = entry.finishedAt + this.subagentDoneRetentionMs;
+                    this.scheduleSubagentRetentionSweep();
+                    this.emitSubagentStatus();
+                }
             }
             return;
         }
@@ -3826,14 +3946,9 @@ ${attachmentLines.join('\n')}`
                 this.client.finishTurn(this.currentSessionId);
             }
                         // Mark all active subagents as done before clearing (error event path)
-                        for (const entry of this.subagentProgressBySession.values()) {
-                            entry.isDone = true;
-                        }
-                        if (this.subagentProgressBySession.size > 0) {
-                            this.emitSubagentStatus();
-                        }
+                        this.markAllSubagentsTerminal('failed', 'event-error-finalize');
+                        this.emitSubagentStatus();
                         this.clearSubagentSessions();
-            this.emitSubagentStatus(false);
 
             const doneAssistantMsgId = this.currentSessionId
                 ? this.client.getTurnAssistantMsgId(this.currentSessionId)

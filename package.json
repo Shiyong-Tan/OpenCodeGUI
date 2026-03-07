@@ -79,7 +79,8 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "watch": "tsc -watch -p ./",
+    "task1:check": "node scripts/task1-check.js"
   },
   "devDependencies": {
     "@types/vscode": "^1.80.0",

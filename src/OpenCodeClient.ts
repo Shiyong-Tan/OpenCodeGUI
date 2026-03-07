@@ -78,7 +78,7 @@ export type PermissionOverlayPayload = {
 };
 
 export type ChatEvent = {
-    type: 'text' | 'session' | 'raw' | 'permission' | 'diff' | 'message' | 'error' | 'tool' | 'toolPatch' | 'files' | 'assistantMessageMeta' | 'questionOverlay' | 'permissionRequest' | 'permissionReplied' | 'autoResumeStallWarn' | 'autoResumeStallClear' | 'autoResumeHardStop' | 'todoUpdate';
+    type: 'text' | 'session' | 'raw' | 'permission' | 'diff' | 'message' | 'error' | 'tool' | 'toolPatch' | 'files' | 'assistantMessageMeta' | 'assistantPhase' | 'questionOverlay' | 'permissionRequest' | 'permissionReplied' | 'autoResumeStallWarn' | 'autoResumeStallClear' | 'autoResumeHardStop' | 'todoUpdate';
     text?: string;
     sessionId?: string;
     files?: FileSnapshot[];
@@ -114,6 +114,8 @@ export type ChatEvent = {
     modelID?: string;
     providerID?: string;
     isDone?: boolean;
+    phase?: 'assistant_progress' | 'assistant_final_candidate' | 'assistant_final_accepted';
+    lane?: EventLane;
 };
 type PendingQuestionControl = {
     callId: string;
@@ -175,6 +177,33 @@ export type ConflictDetail = {
     expectedExists: boolean;
     currentExists: boolean;
     diffText: string;
+};
+
+type Task1Metrics = {
+    finalAcceptCount: number;
+    finalAcceptLatencyTotalMs: number;
+    falseDoneEvents: number;
+    parentMismatchChecks: number;
+    parentMismatchCount: number;
+    resyncRecoveryAttempts: number;
+    resyncRecoverySuccess: number;
+};
+
+type EventLane = 'main' | 'subagent' | 'unknown';
+
+type NormalizedEvent = {
+    type: string;
+    sessionId?: string;
+    messageId?: string;
+    role?: string;
+    parentId?: string;
+    finish?: string;
+    completedAt?: number;
+    partType?: string;
+    toolState?: string;
+    source: EventSource;
+    ts: number;
+    lane: EventLane;
 };
 
 
@@ -331,6 +360,18 @@ export class OpenCodeClient {
     private resyncInFlightBySession = new Map<string, Promise<void>>();
     private resyncCooldownUntilBySession = new Map<string, number>();
     private finalMetaSeenKeysBySession = new Map<string, Set<string>>();
+    private phaseSeenKeysBySession = new Map<string, Set<string>>();
+    private assistantPhaseByMessageId = new Map<string, 'assistant_progress' | 'assistant_final_candidate' | 'assistant_final_accepted'>();
+    private assistantFinalCandidateAtByMessageId = new Map<string, number>();
+    private task1Metrics: Task1Metrics = {
+        finalAcceptCount: 0,
+        finalAcceptLatencyTotalMs: 0,
+        falseDoneEvents: 0,
+        parentMismatchChecks: 0,
+        parentMismatchCount: 0,
+        resyncRecoveryAttempts: 0,
+        resyncRecoverySuccess: 0
+    };
     private questionOverlaySeen = new Set<string>();
     private pendingQuestionsBySession = new Map<string, Map<string, PendingQuestionControl>>();
     private pendingQuestionCallIdsBySession = new Map<string, Set<string>>();
@@ -364,6 +405,7 @@ export class OpenCodeClient {
     private restartAttemptCount = 0;
     private readonly restartCooldownMs = 60000;
     private readonly maxRestartsPerWindow = 3;
+    private readonly turnAnchorOverrideWindowMs = 120000;
 
     public resetSessionState(): void {
         this.currentSessionId = undefined;
@@ -420,6 +462,18 @@ export class OpenCodeClient {
         this.resyncInFlightBySession.clear();
         this.resyncCooldownUntilBySession.clear();
         this.finalMetaSeenKeysBySession.clear();
+        this.phaseSeenKeysBySession.clear();
+        this.assistantPhaseByMessageId.clear();
+        this.assistantFinalCandidateAtByMessageId.clear();
+        this.task1Metrics = {
+            finalAcceptCount: 0,
+            finalAcceptLatencyTotalMs: 0,
+            falseDoneEvents: 0,
+            parentMismatchChecks: 0,
+            parentMismatchCount: 0,
+            resyncRecoveryAttempts: 0,
+            resyncRecoverySuccess: 0
+        };
         this.questionOverlaySeen.clear();
         this.pendingQuestionsBySession.clear();
         this.pendingQuestionCallIdsBySession.clear();
@@ -768,6 +822,21 @@ export class OpenCodeClient {
 
     public finishTurn(sessionId: string): void {
         if (!sessionId) return;
+        const avgFinalAcceptLatencyMs = this.task1Metrics.finalAcceptCount > 0
+            ? Math.round(this.task1Metrics.finalAcceptLatencyTotalMs / this.task1Metrics.finalAcceptCount)
+            : 0;
+        const parentMismatchRate = this.task1Metrics.parentMismatchChecks > 0
+            ? (this.task1Metrics.parentMismatchCount / this.task1Metrics.parentMismatchChecks)
+            : 0;
+        const falseDoneRate = this.task1Metrics.finalAcceptCount > 0
+            ? (this.task1Metrics.falseDoneEvents / this.task1Metrics.finalAcceptCount)
+            : 0;
+        const resyncRecoveryRate = this.task1Metrics.resyncRecoveryAttempts > 0
+            ? (this.task1Metrics.resyncRecoverySuccess / this.task1Metrics.resyncRecoveryAttempts)
+            : 0;
+        this.logUiDebug(
+            `EXT: metrics.task1 | sessionId=${sessionId} | final_accept_latency_ms=${avgFinalAcceptLatencyMs} | false_done_rate=${falseDoneRate.toFixed(4)} | parent_mismatch_rate=${parentMismatchRate.toFixed(4)} | resync_recovery_rate=${resyncRecoveryRate.toFixed(4)}`
+        );
         this.beginLateDiffGrace(sessionId);
         this.turnStateBySession.delete(sessionId);
         this.pendingTurnChangesBySession.delete(sessionId);
@@ -1026,9 +1095,29 @@ export class OpenCodeClient {
         if (!sessionId || !userMsgId || !userMsgId.startsWith('msg_')) return;
         const existing = this.currentTurnUserMsgIdBySession.get(sessionId);
         if (existing && existing === userMsgId) return;
+        const startedAt = this.currentTurnStartedAtBySession.get(sessionId);
+        const now = Date.now();
+        const isOverrideReason = reason === 'synthetic-override' || reason === 'resync-stale-override' || reason === 'user-ack';
+        if (isOverrideReason && existing && existing !== userMsgId) {
+            if (reason === 'synthetic-override') {
+                const pendingParent = this.pendingUserMsgIdBySession.get(sessionId);
+                const inWindow = typeof startedAt !== 'number' || (now - startedAt) <= this.turnAnchorOverrideWindowMs;
+                if (!inWindow || (pendingParent && pendingParent !== userMsgId)) {
+                    this.logUiDebug(`EXT: turn.anchor.user.skip | sessionId=${sessionId} | userMsgId=${userMsgId} | reason=${reason} | guard=window-or-pending-parent`);
+                    return;
+                }
+            }
+            if (reason === 'resync-stale-override') {
+                const inWindow = typeof startedAt !== 'number' || (now - startedAt) <= this.turnAnchorOverrideWindowMs;
+                if (!inWindow) {
+                    this.logUiDebug(`EXT: turn.anchor.user.skip | sessionId=${sessionId} | userMsgId=${userMsgId} | reason=${reason} | guard=window`);
+                    return;
+                }
+            }
+        }
         this.currentTurnUserMsgIdBySession.set(sessionId, userMsgId);
         if (!this.currentTurnStartedAtBySession.has(sessionId)) {
-            this.currentTurnStartedAtBySession.set(sessionId, Date.now());
+            this.currentTurnStartedAtBySession.set(sessionId, now);
         }
         this.logUiDebug(`EXT: turn.anchor.user | sessionId=${sessionId} | userMsgId=${userMsgId} | reason=${reason}`);
     }
@@ -3520,6 +3609,71 @@ export class OpenCodeClient {
         return true;
     }
 
+    private consumePhaseOnce(sessionId: string | undefined, messageId: string | undefined, phase: string): boolean {
+        if (!phase) return false;
+        const bucketKey = sessionId || '__global__';
+        const scopedId = messageId || '__none__';
+        const key = `${bucketKey}|${scopedId}|${phase}`;
+        const seen = this.phaseSeenKeysBySession.get(bucketKey) || new Set<string>();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        if (seen.size > 2400) {
+            seen.clear();
+            seen.add(key);
+        }
+        this.phaseSeenKeysBySession.set(bucketKey, seen);
+        return true;
+    }
+
+    private emitAssistantPhase(
+        events: ChatEvent[] | undefined,
+        params: {
+            sessionId?: string;
+            messageId?: string;
+            parentId?: string;
+            source: EventSource;
+            lane: EventLane;
+            phase: 'assistant_progress' | 'assistant_final_candidate' | 'assistant_final_accepted';
+            reason: string;
+        }
+    ): void {
+        const { sessionId, messageId, parentId, source, lane, phase, reason } = params;
+        if (!messageId) return;
+        if (!this.consumePhaseOnce(sessionId, messageId, `assistant:${phase}`)) return;
+        const prev = this.assistantPhaseByMessageId.get(messageId) || 'assistant_progress';
+        if (prev === 'assistant_final_accepted' && phase !== 'assistant_final_accepted') {
+            this.task1Metrics.falseDoneEvents += 1;
+        }
+        if (phase === 'assistant_final_candidate') {
+            this.assistantFinalCandidateAtByMessageId.set(messageId, Date.now());
+        }
+        if (phase === 'assistant_final_accepted') {
+            const candidateAt = this.assistantFinalCandidateAtByMessageId.get(messageId);
+            if (typeof candidateAt === 'number') {
+                const latency = Math.max(0, Date.now() - candidateAt);
+                this.task1Metrics.finalAcceptLatencyTotalMs += latency;
+            }
+            this.task1Metrics.finalAcceptCount += 1;
+        }
+        this.assistantPhaseByMessageId.set(messageId, phase);
+        this.logUiDebug(
+            `EXT: state.transition | from=${prev} | to=${phase} | reason=${reason} | messageId=${messageId} | parentId=${parentId || 'null'} | lane=${lane} | source=${source} | sessionId=${sessionId || 'null'}`
+        );
+        const evt: ChatEvent = {
+            type: 'assistantPhase',
+            sessionId,
+            messageId,
+            assistantMsgId: messageId,
+            phase,
+            lane
+        };
+        if (events) {
+            events.push(evt);
+        } else {
+            this.emitChatEvents([evt]);
+        }
+    }
+
     private isCompletionFinal(info: any): boolean {
         const finish = info?.finish;
         if (typeof finish === 'string') {
@@ -3943,11 +4097,36 @@ export class OpenCodeClient {
             return false;
         }
         if (!lockedMsgId) {
+            this.task1Metrics.parentMismatchChecks += 1;
             if (!(typeof parentId === 'string' && typeof currentUser === 'string' && parentId === currentUser)) {
+                this.task1Metrics.parentMismatchCount += 1;
                 this.logUiDebug(`EXT: finalizing.ignore | sessionId=${sessionId} | msgId=${msgId || 'null'} | reason=parent-mismatch`);
                 return false;
             }
         }
+        if (this.hasRunningToolsForMessage(msgId)) return false;
+        return true;
+    }
+
+    private shouldAcceptSubagentCompletionFinal(sessionId: string | undefined, info: any): boolean {
+        if (!sessionId || !info) return false;
+        if (!this.subagentToParentSessionMap.has(sessionId)) return false;
+        if (this.isCompactionSummaryInfo(info)) return false;
+        if (!this.isCompletionFinal(info)) return false;
+        const parentId = typeof info?.parentID === 'string' ? info.parentID : '';
+        if (!parentId.startsWith('msg_')) return false;
+        const currentUser = this.currentTurnUserMsgIdBySession.get(sessionId);
+        const pendingUser = this.pendingUserMsgIdBySession.get(sessionId);
+        this.task1Metrics.parentMismatchChecks += 1;
+        if (currentUser && parentId !== currentUser) {
+            this.task1Metrics.parentMismatchCount += 1;
+            return false;
+        }
+        if (!currentUser && pendingUser && parentId !== pendingUser) {
+            this.task1Metrics.parentMismatchCount += 1;
+            return false;
+        }
+        const msgId = typeof info?.id === 'string' ? info.id : undefined;
         if (this.hasRunningToolsForMessage(msgId)) return false;
         return true;
     }
@@ -3997,6 +4176,45 @@ export class OpenCodeClient {
             return typeof sessionId === 'string' ? sessionId : undefined;
         }
         return undefined;
+    }
+
+    private classifyEventLane(sessionId: string | undefined): EventLane {
+        if (!sessionId) return 'unknown';
+        if (this.subagentToParentSessionMap.has(sessionId)) return 'subagent';
+        if (sessionId === this.currentSessionId || this.turnStateBySession.has(sessionId)) return 'main';
+        return 'unknown';
+    }
+
+    private normalizeEvent(type: string, props: any, source: EventSource): NormalizedEvent {
+        const info = props?.info || {};
+        const part = props?.part || {};
+        const sessionId = this.getSessionIdFromEvent(type, props);
+        const fromMessageUpdated = type === 'message.updated';
+        const messageId = fromMessageUpdated
+            ? (typeof info?.id === 'string' ? info.id : undefined)
+            : (typeof part?.messageID === 'string' ? part.messageID : undefined);
+        const role = fromMessageUpdated ? (typeof info?.role === 'string' ? info.role : undefined) : undefined;
+        const parentId = fromMessageUpdated ? (typeof info?.parentID === 'string' ? info.parentID : undefined) : undefined;
+        const finish = fromMessageUpdated ? (typeof info?.finish === 'string' ? info.finish : undefined) : undefined;
+        const completedAt = fromMessageUpdated && typeof info?.time?.completed === 'number' ? info.time.completed : undefined;
+        const partType = typeof part?.type === 'string' ? part.type : undefined;
+        const toolState = typeof part?.state?.status === 'string'
+            ? part.state.status
+            : (typeof part?.status === 'string' ? part.status : undefined);
+        return {
+            type,
+            sessionId,
+            messageId,
+            role,
+            parentId,
+            finish,
+            completedAt,
+            partType,
+            toolState,
+            source,
+            ts: Date.now(),
+            lane: this.classifyEventLane(sessionId)
+        };
     }
 
     private handleServerEvent(payload: string, source: EventSource = 'sse'): void {
@@ -4095,6 +4313,10 @@ export class OpenCodeClient {
 
     private mapServerEventToChatEvents(type: string, props: any, source: EventSource = 'sse'): ChatEvent[] {
         const events: ChatEvent[] = [];
+        const normalized = this.normalizeEvent(type, props, source);
+        if (normalized.sessionId) {
+            this.logUiDebug(`EXT: event.normalized | type=${normalized.type} | lane=${normalized.lane} | sessionId=${normalized.sessionId} | messageId=${normalized.messageId || 'null'} | parentId=${normalized.parentId || 'null'} | finish=${normalized.finish || 'null'} | partType=${normalized.partType || 'null'} | source=${normalized.source}`);
+        }
         if (type === 'session.created' || type === 'session.updated') {
             if (props?.info?.id) {
                 events.push({
@@ -4192,7 +4414,7 @@ export class OpenCodeClient {
                 const isAutoResumeAnchor = this.awaitingAutoResumeUserAnchorBySession.has(sessionId);
                 const isSyntheticUser = isAutoResumeAnchor || this.isSyntheticUserMessageInfo(info);
                 if (this.turnStateBySession.has(sessionId)) {
-                    this.setCurrentTurnUserMsgId(sessionId, messageId, isSyntheticUser ? 'sse-user-message-synthetic' : 'sse-user-message');
+                    this.setCurrentTurnUserMsgId(sessionId, messageId, isSyntheticUser ? 'synthetic-override' : 'sse-user-message');
                     if (!isSyntheticUser && !this.hasDisplayTurnUserMsgId(sessionId)) {
                         this.setDisplayTurnUserMsgId(sessionId, messageId, 'sse-user-message');
                     }
@@ -4223,6 +4445,8 @@ export class OpenCodeClient {
                 }
             }
             if (role === 'assistant' && messageId) {
+                const isSubagentLane = typeof sessionId === 'string' && this.subagentToParentSessionMap.has(sessionId);
+                const lane: EventLane = isSubagentLane ? 'subagent' : (sessionId === this.currentSessionId || this.turnStateBySession.has(sessionId || '') ? 'main' : 'unknown');
                 if (sessionId && typeof info?.parentID === 'string') {
                     const currentUser = this.currentTurnUserMsgIdBySession.get(sessionId);
                     if (currentUser && info.parentID === currentUser) {
@@ -4230,19 +4454,32 @@ export class OpenCodeClient {
                     }
                 }
                 const completedAt = info?.time?.completed;
-                const isFinal = Boolean(info?.finish) || typeof completedAt === 'number';
+                const isFinal = this.isCompletionFinal(info);
+                if (!isFinal || this.hasRunningToolsForMessage(messageId) || info?.finish === 'tool-calls') {
+                    this.emitAssistantPhase(events, {
+                        sessionId,
+                        messageId,
+                        parentId: typeof info?.parentID === 'string' ? info.parentID : undefined,
+                        source,
+                        lane,
+                        phase: 'assistant_progress',
+                        reason: !isFinal ? 'non-final' : 'running-tools-or-tool-calls'
+                    });
+                }
                 if (isFinal) {
-                    if (typeof sessionId === 'string' && this.subagentToParentSessionMap.has(sessionId)) {
-                        events.push({
-                            type: 'session',
-                            sessionId,
-                            isDone: true,
-                        });
-                    }
+                    this.emitAssistantPhase(events, {
+                        sessionId,
+                        messageId,
+                        parentId: typeof info?.parentID === 'string' ? info.parentID : undefined,
+                        source,
+                        lane,
+                        phase: 'assistant_final_candidate',
+                        reason: 'finish-stop'
+                    });
                     const messageIndex = this.registerMessage(messageId);
                     this.recordAssistantMsgId(sessionId, messageId);
                     let acceptedFinal = false;
-                    if (sessionId) {
+                    if (sessionId && !isSubagentLane) {
                         this.maybeBackfillTurnUserAnchor(sessionId, info);
                         if (this.shouldAcceptTurnCompletionFinal(sessionId, info)) {
                             this.logUiDebug(`EXT: turn.final.accept | sessionId=${sessionId} | msgId=${messageId} | finish=${String(info?.finish || '')} | source=${source}`);
@@ -4251,9 +4488,27 @@ export class OpenCodeClient {
                         } else {
                             this.logUiDebug(`EXT: turn.final.skip | sessionId=${sessionId} | msgId=${messageId} | finish=${String(info?.finish || '')} | source=${source}`);
                         }
+                    } else if (sessionId && isSubagentLane) {
+                        const acceptSubFinal = this.shouldAcceptSubagentCompletionFinal(sessionId, info);
+                        if (acceptSubFinal) {
+                            acceptedFinal = true;
+                            this.logUiDebug(`EXT: subagent.final.accept | sessionId=${sessionId} | msgId=${messageId} | finish=${String(info?.finish || '')} | source=${source}`);
+                        } else {
+                            this.logUiDebug(`EXT: subagent.final.skip | sessionId=${sessionId} | msgId=${messageId} | finish=${String(info?.finish || '')} | source=${source}`);
+                        }
                     }
                     const shouldEmit = source === 'sse' && acceptedFinal && this.shouldEmitFinalMeta(sessionId, messageId, completedAt, info?.finish, source);
-                    if (shouldEmit) {
+                    const phase = isSubagentLane ? 'subagent-final-accepted' : 'turn-final-accepted';
+                    if (shouldEmit && this.consumePhaseOnce(sessionId, messageId, phase)) {
+                        this.emitAssistantPhase(events, {
+                            sessionId,
+                            messageId,
+                            parentId: typeof info?.parentID === 'string' ? info.parentID : undefined,
+                            source,
+                            lane,
+                            phase: 'assistant_final_accepted',
+                            reason: isSubagentLane ? 'subagent-final-accepted' : 'turn-final-accepted'
+                        });
                         events.push({
                             type: 'assistantMessageMeta',
                             sessionId,
@@ -4313,7 +4568,7 @@ export class OpenCodeClient {
                         this.markSessionProgress(sessionId, 'autoresume-user-seen', msgId);
                         this.logUiDebug(`EXT: user.ack.part.skip | sessionId=${sessionId} | msgId=${msgId} | reason=autoresume-hidden`);
                     } else {
-                        this.setCurrentTurnUserMsgId(sessionId, msgId, 'user-part-ack');
+                        this.setCurrentTurnUserMsgId(sessionId, msgId, 'user-ack');
                         if (!this.hasDisplayTurnUserMsgId(sessionId)) {
                             this.setDisplayTurnUserMsgId(sessionId, msgId, 'user-part-ack');
                         }
@@ -4983,10 +5238,14 @@ export class OpenCodeClient {
         const resyncEpoch = this.turnStateBySession.has(sessionId)
             ? this.beginResyncRecovery(sessionId, `limited:${reason}`)
             : undefined;
+        this.task1Metrics.resyncRecoveryAttempts += 1;
         this.logUiDebug(`EXT: resyncLimited.start | sessionId=${sessionId} | reason=${reason}${typeof resyncEpoch === 'number' ? ` | epoch=${resyncEpoch}` : ''}`);
         const task = this.resyncLimited(sessionId, resyncEpoch)
             .then(async (summary) => {
                 const elapsedMs = Date.now() - startedAt;
+                if (summary.replayedFinal > 0) {
+                    this.task1Metrics.resyncRecoverySuccess += 1;
+                }
                 this.logUiDebug(
                     `EXT: resyncLimited.done | sessionId=${sessionId}${typeof resyncEpoch === 'number' ? ` | epoch=${resyncEpoch}` : ''} | replayedFinal=${summary.replayedFinal} | replayedTools=${summary.replayedTools} | elapsedMs=${elapsedMs}`
                 );
@@ -5013,10 +5272,14 @@ export class OpenCodeClient {
         }
         const resyncEpoch = this.beginResyncRecovery(sessionId, reason);
         const startedAt = Date.now();
+        this.task1Metrics.resyncRecoveryAttempts += 1;
         this.logUiDebug(`EXT: resyncResolve.start | sessionId=${sessionId} | epoch=${resyncEpoch}`);
         const task = this.resyncLimited(sessionId, resyncEpoch)
             .then(async (summary) => {
                 const elapsedMs = Date.now() - startedAt;
+                if (summary.replayedFinal > 0) {
+                    this.task1Metrics.resyncRecoverySuccess += 1;
+                }
                 this.logUiDebug(
                     `EXT: resyncResolve.done | sessionId=${sessionId} | epoch=${resyncEpoch} | replayedFinal=${summary.replayedFinal} | replayedTools=${summary.replayedTools} | elapsedMs=${elapsedMs}`
                 );
@@ -5159,31 +5422,71 @@ export class OpenCodeClient {
             }
 
             if (role === 'assistant' && typeof messageId === 'string') {
+                const isSubagentLane = this.subagentToParentSessionMap.has(sessionId);
+                const lane: EventLane = isSubagentLane ? 'subagent' : (sessionId === this.currentSessionId || this.turnStateBySession.has(sessionId) ? 'main' : 'unknown');
                 const completedAt = info?.time?.completed;
-                const isFinal = Boolean(info?.finish) || typeof completedAt === 'number';
+                const isFinal = this.isCompletionFinal(info);
                 let acceptedFinal = false;
+                if (!isFinal || this.hasRunningToolsForMessage(messageId) || info?.finish === 'tool-calls') {
+                    this.emitAssistantPhase(undefined, {
+                        sessionId,
+                        messageId,
+                        parentId: typeof info?.parentID === 'string' ? info.parentID : undefined,
+                        source: 'resync',
+                        lane,
+                        phase: 'assistant_progress',
+                        reason: !isFinal ? 'non-final' : 'running-tools-or-tool-calls'
+                    });
+                }
                 if (isFinal) {
-                    // Stale-override guard: if this is the last stop-final and parentId mismatches currentUser, override
-                    if (messageId === lastStopFinalId && info.finish === 'stop') {
-                        const currentUser = this.currentTurnUserMsgIdBySession.get(sessionId);
-                        const parentId = info?.parentID;
-                        if (currentUser !== undefined && typeof parentId === 'string' && parentId.length > 0 && currentUser !== parentId) {
-                            this.logUiDebug(
-                                `turn.anchor.stale-override | sessionId=${sessionId} | oldUser=${currentUser} | newUser=${parentId} | triggerMsg=${messageId}`
-                            );
-                            this.setCurrentTurnUserMsgId(sessionId, parentId, 'resync-stale-override');
+                    this.emitAssistantPhase(undefined, {
+                        sessionId,
+                        messageId,
+                        parentId: typeof info?.parentID === 'string' ? info.parentID : undefined,
+                        source: 'resync',
+                        lane,
+                        phase: 'assistant_final_candidate',
+                        reason: 'finish-stop'
+                    });
+                    if (!isSubagentLane) {
+                        // Stale-override guard: if this is the last stop-final and parentId mismatches currentUser, override
+                        if (messageId === lastStopFinalId && info.finish === 'stop') {
+                            const currentUser = this.currentTurnUserMsgIdBySession.get(sessionId);
+                            const parentId = info?.parentID;
+                            if (currentUser !== undefined && typeof parentId === 'string' && parentId.length > 0 && currentUser !== parentId) {
+                                this.logUiDebug(
+                                    `turn.anchor.stale-override | sessionId=${sessionId} | oldUser=${currentUser} | newUser=${parentId} | triggerMsg=${messageId}`
+                                );
+                                this.setCurrentTurnUserMsgId(sessionId, parentId, 'resync-stale-override');
+                            }
                         }
-                    }
-                    this.maybeBackfillTurnUserAnchor(sessionId, info);
-                    if (this.shouldAcceptTurnCompletionFinal(sessionId, info)) {
-                        this.logUiDebug(`EXT: turn.final.accept | sessionId=${sessionId} | msgId=${messageId} | finish=${String(info?.finish || '')} | source=resync`);
-                        this.markTurnFinal(sessionId, messageId, 'resync');
+                        this.maybeBackfillTurnUserAnchor(sessionId, info);
+                        if (this.shouldAcceptTurnCompletionFinal(sessionId, info)) {
+                            this.logUiDebug(`EXT: turn.final.accept | sessionId=${sessionId} | msgId=${messageId} | finish=${String(info?.finish || '')} | source=resync`);
+                            this.markTurnFinal(sessionId, messageId, 'resync');
+                            acceptedFinal = true;
+                        } else {
+                            this.logUiDebug(`EXT: turn.final.skip | sessionId=${sessionId} | msgId=${messageId} | finish=${String(info?.finish || '')} | source=resync`);
+                        }
+                    } else if (this.shouldAcceptSubagentCompletionFinal(sessionId, info)) {
                         acceptedFinal = true;
+                        this.logUiDebug(`EXT: subagent.final.accept | sessionId=${sessionId} | msgId=${messageId} | finish=${String(info?.finish || '')} | source=resync`);
                     } else {
-                        this.logUiDebug(`EXT: turn.final.skip | sessionId=${sessionId} | msgId=${messageId} | finish=${String(info?.finish || '')} | source=resync`);
+                        this.logUiDebug(`EXT: subagent.final.skip | sessionId=${sessionId} | msgId=${messageId} | finish=${String(info?.finish || '')} | source=resync`);
                     }
                 }
-                if (isFinal && acceptedFinal && this.shouldEmitFinalMeta(sessionId, messageId, completedAt, info?.finish, 'resync')) {
+                const shouldEmit = isFinal && acceptedFinal && this.shouldEmitFinalMeta(sessionId, messageId, completedAt, info?.finish, 'resync');
+                const phase = isSubagentLane ? 'subagent-final-accepted' : 'turn-final-accepted';
+                if (shouldEmit && this.consumePhaseOnce(sessionId, messageId, phase)) {
+                    this.emitAssistantPhase(undefined, {
+                        sessionId,
+                        messageId,
+                        parentId: typeof info?.parentID === 'string' ? info.parentID : undefined,
+                        source: 'resync',
+                        lane,
+                        phase: 'assistant_final_accepted',
+                        reason: isSubagentLane ? 'subagent-final-accepted' : 'turn-final-accepted'
+                    });
                     const messageIndex = this.registerMessage(messageId);
                     this.recordAssistantMsgId(sessionId, messageId);
                     this.emitChatEvents([
@@ -5823,3 +6126,5 @@ export class OpenCodeClient {
         }
     }
 }
+
+

@@ -3061,7 +3061,14 @@ function renderMessageElement(message, renderedSet) {
                  const header = document.createElement('div');
                  header.className = 'subagent-inline-header';
                  const titleText = (typeof agent.title === 'string' && agent.title.trim()) ? agent.title.trim() : 'Subagent';
-                 header.textContent = `🧠 Subagent ${index + 1}: ${titleText}`;
+                 const headerIcon = document.createElement('span');
+                 const stateForIcon = typeof agent.state === 'string' ? agent.state : (agent.isDone === true ? 'done' : 'running');
+                 const doneForIcon = stateForIcon === 'done';
+                 headerIcon.textContent = doneForIcon ? '\u25CF' : '\u25CB';
+                 headerIcon.style.color = doneForIcon ? '#22c55e' : '#f59e0b';
+                 headerIcon.style.marginRight = '6px';
+                 header.appendChild(headerIcon);
+                 header.appendChild(document.createTextNode(`Subagent ${index + 1}: ${titleText}`));
                  entry.appendChild(header);
 
                  // 2) indented [description], [model]
@@ -3077,19 +3084,26 @@ function renderMessageElement(message, renderedSet) {
                 const latestText = typeof agent.latestText === 'string' ? agent.latestText.trim() : '';
                 const latestTool = typeof agent.latestTool === 'string' ? agent.latestTool.trim() : '';
                 const latestToolInput = typeof agent.latestToolInput === 'string' ? agent.latestToolInput.trim() : '';
-                const isDone = agent.isDone === true || (!messageIsThinking && !latestText && !latestTool);
+                const state = typeof agent.state === 'string' ? agent.state : (agent.isDone === true ? 'done' : 'running');
+                const isTerminal = state === 'done' || state === 'failed' || state === 'cancelled';
+                const isDone = isTerminal || (!messageIsThinking && !latestText && !latestTool);
 
                 if (isDone) {
                     const doneRow = document.createElement('div');
                     doneRow.className = 'subagent-inline-done';
-                    doneRow.textContent = 'Task done.';
+                    doneRow.textContent = state === 'failed' ? 'Task failed.' : state === 'cancelled' ? 'Task cancelled.' : 'Task done.';
                     entry.appendChild(doneRow);
                     inlineContainer.appendChild(entry);
                     return;
                 }
 
                 // 3) indented latest text (streaming only)
-                if (latestText) {
+                if (state === 'finalizing') {
+                    const textRow = document.createElement('div');
+                    textRow.className = 'subagent-inline-text';
+                    textRow.textContent = 'Finalizing...';
+                    entry.appendChild(textRow);
+                } else if (latestText) {
                     const textRow = document.createElement('div');
                     textRow.className = 'subagent-inline-text';
                     // Dedupe: remove leading title prefix from latestText if present
@@ -3105,7 +3119,7 @@ function renderMessageElement(message, renderedSet) {
                  if (latestTool) {
                      const toolRow = document.createElement('div');
                      toolRow.className = 'subagent-inline-tool';
-                     toolRow.textContent = `🔧 ${latestTool}`;
+                     toolRow.textContent = `\u203A ${latestTool}`;
                      entry.appendChild(toolRow);
                  }
 
@@ -5052,84 +5066,68 @@ window.addEventListener('message', (event) => {
             }
             case 'subagentStatus': {
               const { active, agents, sessionId } = message;
-              // Find the current session (prefer payload sessionId)
               const sess = getSessionState(sessionId || activeSessionId);
-              
+              const incomingAgents = Array.isArray(agents) ? agents : [];
               if (sess) {
-                const incomingAgents = Array.isArray(agents) ? agents : [];
                 const currentThinking = sess.thinkingId ? sess.messagesById.get(sess.thinkingId) : null;
                 const previousAgents = Array.isArray(currentThinking?.meta?.subagents)
                   ? currentThinking.meta.subagents
                   : (Array.isArray(sess.activeSubagents) ? sess.activeSubagents : []);
-                const previousBySession = new Map(previousAgents.map(a => [a.sessionId, a]));
-
-                if (active && incomingAgents.length > 0) {
-                  const mergedAgents = incomingAgents.map((agent) => {
-                    const prev = previousBySession.get(agent.sessionId) || {};
-                    const latestText = typeof agent.latestText === 'string' && agent.latestText.trim().length > 0
-                      ? agent.latestText
-                      : (typeof prev.latestText === 'string' ? prev.latestText : '');
-                    const latestTool = typeof agent.latestTool === 'string' && agent.latestTool.trim().length > 0
-                      ? agent.latestTool
-                      : (typeof prev.latestTool === 'string' ? prev.latestTool : '');
-                    const latestToolInput = typeof agent.latestToolInput === 'string' && agent.latestToolInput.trim().length > 0
-                      ? agent.latestToolInput
-                      : (typeof prev.latestToolInput === 'string' ? prev.latestToolInput : '');
-                    const description = typeof agent.description === 'string' && agent.description.trim().length > 0
-                      ? agent.description
-                      : (typeof prev.description === 'string' ? prev.description : '');
-                    const title = typeof agent.title === 'string' && agent.title.trim().length > 0
-                      ? agent.title
-                      : (typeof prev.title === 'string' ? prev.title : '');
-                    const model = typeof agent.model === 'string' && agent.model.trim().length > 0
-                      ? agent.model
-                      : (typeof prev.model === 'string' ? prev.model : '');
-                    return {
-                      ...prev,
-                      ...agent,
-                      title,
-                      description,
-                      model,
-                      latestText,
-                      latestTool,
-                      latestToolInput,
-                      isDone: false,
-                    };
-                  });
-
-                  sess.activeSubagents = mergedAgents;
-                  
-                  // If currently thinking, update the message metadata for live display
-                  if (currentThinking && currentThinking.meta) {
-                    currentThinking.meta.subagents = mergedAgents;
-                  }
-                } else {
-                  if (currentThinking && currentThinking.meta && Array.isArray(currentThinking.meta.subagents)) {
-                    currentThinking.meta.subagents = currentThinking.meta.subagents.map((agent) => ({
-                      ...agent,
-                      latestText: '',
-                      latestTool: '',
-                      latestToolInput: '',
-                      isDone: true,
-                    }));
-                  }
-
-                  // On inactive, clear session-level list
-                  sess.activeSubagents = [];
+                const previousBySession = new Map(previousAgents.map((a) => [a.sessionId, a]));
+                const mergedAgents = incomingAgents.map((agent) => {
+                  const prev = previousBySession.get(agent.sessionId) || {};
+                  const prevState = typeof prev.state === 'string' ? prev.state : (prev.isDone ? 'done' : '');
+                  const state = typeof agent.state === 'string'
+                    ? agent.state
+                    : (agent.isDone ? 'done' : (prevState || 'running'));
+                  return {
+                    ...prev,
+                    ...agent,
+                    state,
+                    isDone: state === 'done' || state === 'failed' || state === 'cancelled',
+                    latestText: typeof agent.latestText === 'string' ? agent.latestText : (prev.latestText || ''),
+                    latestTool: typeof agent.latestTool === 'string' ? agent.latestTool : (prev.latestTool || ''),
+                    latestToolInput: typeof agent.latestToolInput === 'string' ? agent.latestToolInput : (prev.latestToolInput || '')
+                  };
+                });
+                sess.activeSubagents = mergedAgents;
+                if (currentThinking && currentThinking.meta) {
+                  currentThinking.meta.subagents = mergedAgents;
                 }
               }
-              
-              // Update header indicator
+
               const indicator = document.getElementById('subagent-indicator');
               if (indicator) {
-                indicator.style.display = active && agents && agents.length > 0 ? '' : 'none';
-                indicator.textContent = active ? `${agents.length} agent${agents.length !== 1 ? 's' : ''} running` : '';
+                const runningCount = typeof message.runningCount === 'number' ? message.runningCount : incomingAgents.filter((a) => a?.state === 'running').length;
+                const finalizingCount = typeof message.finalizingCount === 'number' ? message.finalizingCount : incomingAgents.filter((a) => a?.state === 'finalizing').length;
+                const doneJustNowCount = typeof message.doneJustNowCount === 'number' ? message.doneJustNowCount : incomingAgents.filter((a) => a?.state === 'done').length;
+                const hasIndicator = runningCount > 0 || finalizingCount > 0 || doneJustNowCount > 0;
+                indicator.style.display = hasIndicator ? '' : 'none';
+                if (runningCount > 0 || finalizingCount > 0) {
+                  indicator.textContent = `${runningCount} running / ${finalizingCount} finalizing`;
+                } else {
+                  indicator.textContent = `Done just now (${doneJustNowCount})`;
+                }
               }
-              // Trigger re-render to show updated subagent data in bubble
               scheduleRenderFromState();
               break;
             }
-
+            case 'subagentStateDelta': {
+              const sess = getSessionState(message.sessionId || activeSessionId);
+              if (sess && Array.isArray(sess.activeSubagents)) {
+                const idx = sess.activeSubagents.findIndex((a) => a?.sessionId === message.agentSessionId);
+                if (idx >= 0) {
+                  const cur = sess.activeSubagents[idx] || {};
+                  sess.activeSubagents[idx] = {
+                    ...cur,
+                    state: typeof message.to === 'string' ? message.to : cur.state,
+                    isDone: message.to === 'done'
+                  };
+                }
+              }
+              scheduleRenderFromState();
+              break;
+            }
             case 'resetUiState': {
                 const incomingSessionId = message.sessionId || message.sessionID || '';
                 const hydrated = Boolean(activeSessionId && incomingSessionId && activeSessionId === incomingSessionId && hydratedSessions.has(activeSessionId));
@@ -5665,6 +5663,22 @@ window.addEventListener('message', (event) => {
                 logSessionState(sessionId, 'assistantMessageMeta');
                 break;
             }
+            case 'assistantPhase': {
+                const sessionId = getEventSessionId(message, 'assistantPhase');
+                if (!sessionId) break;
+                const session = getSessionState(sessionId, true);
+                if (!session.meta) session.meta = {};
+                if (!session.meta.assistantPhases) session.meta.assistantPhases = {};
+                const msgId = typeof message.messageId === 'string' ? message.messageId : '';
+                if (msgId) {
+                    session.meta.assistantPhases[msgId] = {
+                        phase: message.phase || '',
+                        lane: message.lane || 'unknown',
+                        ts: typeof message.ts === 'number' ? message.ts : Date.now()
+                    };
+                }
+                break;
+            }
             case 'chatChunk': {
                 const sessionId = getEventSessionId(message, 'chatChunk');
                 if (!sessionId) break;
@@ -5680,6 +5694,17 @@ window.addEventListener('message', (event) => {
                 window.__oc?.renderFromState?.();
                 scrollToBottom();
                 logSessionState(sessionId, 'chatChunk');
+                break;
+            }
+            case 'turnFinalizePhase': {
+                const sessionId = getEventSessionId(message, 'turnFinalizePhase');
+                if (!sessionId) break;
+                const session = getSessionState(sessionId, true);
+                if (!session.meta) session.meta = {};
+                session.meta.turnFinalizePhase = message.phase || '';
+                if (message.phase === 'finalize_done') {
+                    setBusy(false);
+                }
                 break;
             }
             case 'chatDone': {
@@ -7415,3 +7440,4 @@ function showPermissionOverlay(payload) {
     };
     renderPermissionOverlayModal();
 }
+
