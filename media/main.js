@@ -4509,7 +4509,8 @@ function handleAssistantMeta(sessionId, message) {
                     return;
                 }
                 console.log(`[ASSIST_META] replace mode | key=${targetId} | textLen=${typeof message.lastText === 'string' ? message.lastText.length : 0} | streaming=true`);
-                const nextText = typeof message.lastText === 'string' ? message.lastText : target.text;
+                const hasNonEmptyLastText = typeof message.lastText === 'string' && message.lastText.trim().length > 0;
+                const nextText = hasNonEmptyLastText ? message.lastText : target.text;
                 const normalized = typeof nextText === 'string' ? nextText.trim() : '';
                 const hasStatusChange = normalized.length > 0 && normalized !== 'Thinking...';
                 if (hasStatusChange) {
@@ -4606,12 +4607,9 @@ function handleChatChunk(sessionId, message) {
             }
             if (!target.meta) target.meta = {};
             if (!target.meta.textSegments) { target.meta.textSegments = []; target.meta.currentSegment = ''; }
-            // Append chunk to currentSegment
-            target.meta.currentSegment = (target.meta.currentSegment || '') + chunkText;
-            // Synthesize target.text from all segments + current (for renderAssistantMarkdown)
-            target.text = [...(target.meta.textSegments || []), target.meta.currentSegment]
-              .filter(s => s.length > 0)
-              .join('\n\n');
+            // Keep only latest chunk (no accumulation)
+            target.meta.currentSegment = chunkText;
+            target.text = target.meta.currentSegment || '';
             if (!target.text) target.text = 'Thinking...';
             target.meta = { ...target.meta, isThinking: true };
             vscode.postMessage({ type: 'ui-debug', payload: ['handleChatChunk', 'appended', targetId] });
@@ -4632,11 +4630,12 @@ function handleChatChunk(sessionId, message) {
         if (msg.text === 'Thinking...') {
             msg.text = '';
         }
-        // Finalize any remaining currentSegment
-        if (msg.meta && msg.meta.currentSegment && msg.meta.currentSegment.trim()) {
-            msg.meta.textSegments = [...(msg.meta.textSegments || []), msg.meta.currentSegment];
-            msg.meta.currentSegment = '';
-            msg.text = msg.meta.textSegments.join('\n\n');
+        // Keep final text as the latest segment only (no cumulative merge)
+        if (msg.meta) {
+            const latest = typeof msg.meta.currentSegment === 'string' ? msg.meta.currentSegment : '';
+            msg.meta.textSegments = latest ? [latest] : [];
+            msg.meta.currentSegment = latest;
+            msg.text = latest || msg.text || '';
         }
         // For subagents: snapshot into meta before clearing
         if (session.activeSubagents && session.activeSubagents.length > 0) {

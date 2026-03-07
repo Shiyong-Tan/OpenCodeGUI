@@ -1249,9 +1249,6 @@ ${attachmentLines.join('\n')}`
                         );
 
                         OpenCodeClient.outputChannel.appendLine(`[BRIDGE] Chat done`);
-                        if (this.currentSessionId) {
-                            this.flushAssistantBufferToWebview(this.currentSessionId, liveWebview);
-                        }
                         const doneAssistantMsgId = this.currentSessionId
                             ? this.client.getTurnAssistantMsgId(this.currentSessionId)
                             : undefined;
@@ -3921,14 +3918,13 @@ ${attachmentLines.join('\n')}`
             const sessionId = event.sessionId || this.currentSessionId;
             if (sessionId) {
                 this.appendAssistantBuffer(sessionId, event.text);
-                // Push accumulated text to webview immediately for real-time streaming
+                // Push latest chunk to webview (no cumulative text)
                 const liveWebview = this._view?.webview || webview;
-                const accumulated = this.assistantTextBufferBySession.get(sessionId) ?? '';
                 liveWebview?.postMessage({
                     type: 'assistantMessageMeta',
                     sessionId,
                     tmpKey: this.pendingAssistantTmpKeyBySession?.get(sessionId),
-                    lastText: accumulated,
+                    lastText: event.text,
                     isStatusUpdate: false
                 });
             }
@@ -3953,11 +3949,6 @@ ${attachmentLines.join('\n')}`
             const doneAssistantMsgId = this.currentSessionId
                 ? this.client.getTurnAssistantMsgId(this.currentSessionId)
                 : undefined;
-            // Flush any buffered text before chatDone
-            if (this.currentSessionId) {
-                this.flushAssistantBufferToWebview(this.currentSessionId, liveWebview);
-            }
-
             liveWebview.postMessage({
                 type: 'chatDone',
                 sessionId: this.currentSessionId,
