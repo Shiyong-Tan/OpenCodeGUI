@@ -4416,11 +4416,12 @@ ${attachmentLines.join('\n')}`
 
     private mergeSessionMessagesById(baseMessages: SessionMessage[], incomingMessages: SessionMessage[]): SessionMessage[] {
         const merged: SessionMessage[] = Array.isArray(baseMessages) ? [...baseMessages] : [];
-        const seenIds = new Set<string>();
+        const indexById = new Map<string, number>();
 
-        for (const message of merged) {
+        for (let i = 0; i < merged.length; i += 1) {
+            const message = merged[i];
             if (typeof message?.id === 'string' && message.id) {
-                seenIds.add(message.id);
+                indexById.set(message.id, i);
             }
         }
 
@@ -4433,16 +4434,58 @@ ${attachmentLines.join('\n')}`
                 continue;
             }
             const messageId = typeof message.id === 'string' ? message.id : '';
-            if (messageId && seenIds.has(messageId)) {
+            if (messageId && indexById.has(messageId)) {
+                const idx = indexById.get(messageId)!;
+                const prev = merged[idx];
+                // Same ID means same logical message; prefer the latest payload text/meta.
+                merged[idx] = {
+                    ...prev,
+                    ...message,
+                    id: messageId,
+                    role: message.role || prev.role,
+                    text: typeof message.text === 'string' && message.text.length ? message.text : prev.text
+                };
                 continue;
             }
             if (messageId) {
-                seenIds.add(messageId);
+                indexById.set(messageId, merged.length);
             }
             merged.push(message);
         }
 
-        return merged;
+        return this.normalizeDisplayMessagesForSnapshot(merged);
+    }
+
+    private normalizeDisplayMessagesForSnapshot(messages: SessionMessage[]): SessionMessage[] {
+        if (!Array.isArray(messages) || messages.length === 0) return [];
+        const normalized: SessionMessage[] = [];
+        let pendingAssistant: SessionMessage | null = null;
+        const flushAssistant = () => {
+            if (pendingAssistant) {
+                normalized.push(pendingAssistant);
+                pendingAssistant = null;
+            }
+        };
+        for (const msg of messages) {
+            if (!msg || typeof msg.text !== 'string') continue;
+            let role: 'user' | 'assistant' | null = null;
+            if (msg.role === 'assistant') role = 'assistant';
+            if (msg.role === 'user') role = 'user';
+            if (!role) continue;
+            if (role === 'user' && msg.meta?.syntheticUser === true) continue;
+            const text = role === 'user' ? this.stripModeInjectionBlock(msg.text) : msg.text;
+            if (!text.trim()) continue;
+            const next = { ...msg, role, text };
+            if (role === 'user') {
+                flushAssistant();
+                normalized.push(next);
+                continue;
+            }
+            // Keep only the last assistant within the current user turn window.
+            pendingAssistant = next;
+        }
+        flushAssistant();
+        return normalized;
     }
 
     private formatSession(exportData: any): { title: string; messages: SessionMessage[] } {
@@ -4563,11 +4606,25 @@ ${attachmentLines.join('\n')}`
             const isAutoResumeText = role === 'user' && text.trimStart().startsWith('[OC_UI_AUTORESUME');
             const isBoulderContinuation = role === 'user' && text.includes('[SYSTEM DIRECTIVE: OH-MY-OPENCODE - BOULDER CONTINUATION]');
             const isSyntheticUser = role === 'user' && (isAutoResumeText || isBoulderContinuation || mode === 'compaction' || agent === 'compaction');
+            if (isSyntheticUser) {
+                continue;
+            }
+            const displayText = role === 'user' ? this.stripModeInjectionBlock(text) : text;
+            if (!displayText.trim()) continue;
             const messageIndex = this.client.registerMessage(resolvedId);
-            messages.push({ role, text, id: resolvedId, messageIndex, meta: isSyntheticUser ? { syntheticUser: true } : undefined });
+            messages.push({ role, text: displayText, id: resolvedId, messageIndex });
         }
 
         return { title, messages };
+    }
+
+    private stripModeInjectionBlock(input: string): string {
+        if (!input) return '';
+        // Remove [analyze-mode]/[search-mode] injected block through trailing separator line,
+        // plus trailing blank lines that belong to the injected section.
+        let output = input.replace(/^\[(analyze-mode|search-mode)\][\s\S]*?^\s*---\s*(?:\r?\n(?:\s*\r?\n)*)?/im, '');
+        output = output.replace(/^\s*\r?\n/, '');
+        return output;
     }
 
     private resetSessionState(): void {

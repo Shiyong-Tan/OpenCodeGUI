@@ -1,4 +1,4 @@
-const vscode = acquireVsCodeApi();
+﻿const vscode = acquireVsCodeApi();
 
 const md = window.markdownit({
     linkify: true,
@@ -750,7 +750,7 @@ function upsertMessage(session, payload) {
     const text = typeof payload.text === 'string' ? payload.text : '';
     const normalizedText = text.trimStart();
     const isSystemDcpMessage = payload.role === 'system'
-        && normalizedText.startsWith('▣')
+        && normalizedText.startsWith('â–£')
         && normalizedText.includes('DCP');
     if (isSystemDcpMessage) {
         vscode.postMessage({
@@ -2568,7 +2568,7 @@ document.addEventListener('DOMContentLoaded', () => {
             : '<div class="quota-tooltip-row">Quota unavailable</div>';
         quotaTooltipEl.innerHTML = `
             <div class="quota-tooltip-header">
-                <span class="quota-tooltip-title"><span class="quota-title-icon">◔</span>Rate limits remaining</span>
+                <span class="quota-tooltip-title"><span class="quota-title-icon">â—”</span>Rate limits remaining</span>
             </div>
             ${body}
         `;
@@ -2836,7 +2836,7 @@ function renderMessageElement(message, renderedSet) {
 
         const header = document.createElement('div');
         header.className = 'plan-file-card-header';
-        header.textContent = '📋 Plan File';
+        header.textContent = 'Plan File';
         container.appendChild(header);
 
         const body = document.createElement('div');
@@ -3174,7 +3174,7 @@ function renderMessageElement(message, renderedSet) {
             undoBtn.className = 'undo-btn';
             undoBtn.type = 'button';
             undoBtn.title = 'Undo to this message';
-            undoBtn.textContent = '↺';
+            undoBtn.textContent = 'â†º';
             undoBtn.addEventListener('click', () => {
                 if (isBusy) return;
                 const sessionId = activeSessionId;
@@ -3221,7 +3221,7 @@ function renderMessageElement(message, renderedSet) {
                 item.className = `todo-item todo-${status}`;
                 const check = document.createElement('span');
                 check.className = 'todo-check';
-                check.textContent = status === 'completed' ? '✓' : status === 'cancelled' ? '✗' : status === 'in_progress' ? '◎' : '○';
+                check.textContent = status === 'completed' ? 'âœ“' : status === 'cancelled' ? 'âœ—' : status === 'in_progress' ? 'â—Ž' : 'â—‹';
                 const label = document.createElement('span');
                 label.className = 'todo-content';
                 label.textContent = todo.content;
@@ -3281,13 +3281,11 @@ function stripSystemInjections(text) {
         if (!text) return text;
         let s = text;
 
-        // Template A: [analyze-mode] block (11 lines)
-        const templateA = '[analyze-mode]\nANALYSIS MODE. Gather context before diving deep:\nCONTEXT GATHERING (parallel):\n- 1-2 explore agents (codebase patterns, implementations)\n- 1-2 librarian agents (if external library involved)\n- Direct tools: Grep, AST-grep, LSP for targeted searches\nIF COMPLEX - DO NOT STRUGGLE ALONE. Consult specialists:\n- **Oracle**: Conventional problems (architecture, debugging, complex logic)\n- **Artistry**: Non-conventional problems (different approach needed)\nSYNTHESIZE findings before proceeding.\n---';
-        s = s.replace(templateA, '');
-
-        // Template B: [search-mode] block (6 lines)
-        const templateB = '[search-mode]\nMAXIMIZE SEARCH EFFORT. Launch multiple background agents IN PARALLEL:\n- explore agents (codebase patterns, file structures, ast-grep)\n- librarian agents (remote repos, official docs, GitHub examples)\nPlus direct tools: Grep, ripgrep (rg), ast-grep (sg)\nNEVER stop at first result - be exhaustive.';
-        s = s.replace(templateB, '');
+        // Remove injected mode blocks (including trailing blank lines).
+        const modeBlockRe = /^\[(analyze-mode|search-mode)\][\s\S]*?^\s*---\s*(?:\r?\n(?:\s*\r?\n)*)?/im;
+        while (modeBlockRe.test(s)) {
+            s = s.replace(modeBlockRe, '');
+        }
 
         // Marker-range hiding (inclusive removal)
         s = hideMarkerRanges(s);
@@ -3304,7 +3302,7 @@ function shouldHideDcpUiMessage(message) {
     }
     const raw = typeof message?.text === 'string' ? message.text : '';
     if (!raw) return false;
-    return raw.trimStart().includes('▣ DCP');
+    return raw.trimStart().includes('\u25A3 DCP');
 }
 
     function renderSegmentElement(session, segment, renderedSet, renderKey) {
@@ -3416,7 +3414,7 @@ function shouldHideDcpUiMessage(message) {
                     renderAssistantMarkdown(content, msg);
                 } else {
                     const rawText = msg.text || '';
-                    const trimmedText = isUser ? rawText.replace(/^(\r?\n)+/, '') : rawText;
+                    const trimmedText = isUser ? stripSystemInjections(rawText.replace(/^(\r?\n)+/, '')) : rawText;
                     content.textContent = trimmedText;
                 }
                 entry.appendChild(content);
@@ -4199,7 +4197,7 @@ function shouldHideDcpUiMessage(message) {
                 removeBtn.className = 'session-item-delete session-item-delete-icon';
                 removeBtn.setAttribute('aria-label', 'Delete session');
                 removeBtn.setAttribute('title', 'Delete session');
-                removeBtn.textContent = '×';
+                removeBtn.textContent = 'Ã—';
                 removeBtn.addEventListener('click', (event) => {
                     event.preventDefault();
                     event.stopPropagation();
@@ -4250,7 +4248,7 @@ function shouldHideDcpUiMessage(message) {
                 const removeBtn = document.createElement('button');
                 removeBtn.type = 'button';
                 removeBtn.className = 'attachment-image-remove';
-                removeBtn.textContent = '×';
+                removeBtn.textContent = 'Ã—';
                 removeBtn.addEventListener('click', (event) => {
                     event.preventDefault();
                     event.stopPropagation();
@@ -4273,7 +4271,7 @@ function shouldHideDcpUiMessage(message) {
 
             const icon = document.createElement('span');
             icon.className = 'attachment-file-icon';
-            icon.textContent = '📄';
+            icon.textContent = 'ðŸ“„';
 
             const text = document.createElement('span');
             text.className = 'attachment-image-label';
@@ -4282,7 +4280,7 @@ function shouldHideDcpUiMessage(message) {
             const removeBtn = document.createElement('button');
             removeBtn.type = 'button';
             removeBtn.className = 'attachment-image-remove';
-            removeBtn.textContent = '×';
+            removeBtn.textContent = 'Ã—';
             removeBtn.addEventListener('click', (event) => {
                 event.preventDefault();
                 event.stopPropagation();
@@ -5324,7 +5322,7 @@ window.addEventListener('message', (event) => {
                         
                         const rawText = item.text || '';
                         const cleanedText = role === 'user'
-                            ? rawText.replace(/^(\r?\n)+/, '')
+                            ? stripSystemInjections(rawText.replace(/^(\r?\n)+/, ''))
                             : rawText;
                         upsertMessage(session, {
                             id: key,
