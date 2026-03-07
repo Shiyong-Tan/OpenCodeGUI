@@ -903,43 +903,30 @@ function rebuildHiddenSetFromTimeline(session) {
     let skippedCount = 0;
     
     for (const [noticeKey, segment] of session.segmentsByNoticeKey) {
-        // Only process collapsed segments (always true in current impl)
         if (!segment.collapsed) continue;
-        
-        const normalized = normalizeSegmentMembersFromTimeline(
-            session,
-            segment.anchorMsgId,
-            segment.endMsgId,
-            segment.memberMsgIds,
-            noticeKey
-        );
-        if (!normalized.anchorMsgId) {
+
+        const memberMsgIds = Array.isArray(segment.memberMsgIds)
+            ? segment.memberMsgIds.filter((id) => typeof id === 'string' && id.startsWith('msg_'))
+            : [];
+        if (memberMsgIds.length === 0) {
             vscode.postMessage({
                 type: 'ui-debug',
-                payload: ['[WV][SEG_SKIP_ANCHOR_MISSING]',
-                    `noticeKey=${noticeKey}`,
-                    `anchorMsgId=${segment.anchorMsgId}`]
+                payload: ['[WV][SEG_SKIP_EMPTY_MEMBERS]', `noticeKey=${noticeKey}`]
             });
             skippedCount++;
             continue;
         }
 
-        segment.anchorMsgId = normalized.anchorMsgId;
-        segment.endMsgId = normalized.endMsgId || normalized.anchorMsgId;
-        const memberMsgIds = normalized.memberMsgIds;
+        // Derive anchor/end from authoritative members. Do not depend on timeline presence.
+        segment.anchorMsgId = memberMsgIds[0];
+        segment.endMsgId = memberMsgIds[memberMsgIds.length - 1];
         segment.memberMsgIds = memberMsgIds;
-        
-        if (memberMsgIds.length === 0) {
-            skippedCount++;
-            continue;
-        }
-        
-        // Hide ALL members INCLUDING the anchor
+
         for (const msgId of memberMsgIds) {
             if (typeof msgId === 'string' && msgId.startsWith('system:undo-seg:')) continue;
+            if (!session.messagesById.has(msgId)) continue;
             session.hiddenSet.add(msgId);
         }
-        
         processedCount++;
     }
 
@@ -1110,35 +1097,23 @@ function applyHydratedSegments(session, segments, hasSegments = true) {
     
     // Insert all hydrated segments
     for (const seg of segments) {
-        if (!seg.noticeKey || !seg.anchorMsgId) {
+        const memberMsgIds = Array.isArray(seg.memberMsgIds)
+            ? seg.memberMsgIds.filter((id) => typeof id === 'string' && id.startsWith('msg_'))
+            : [];
+        if (!seg.noticeKey || memberMsgIds.length === 0) {
             vscode.postMessage({
                 type: 'ui-debug',
                 payload: ['[WV][SEG_HYDRATE_SKIP]', 'missing-required-fields', 
                     `noticeKey=${seg.noticeKey || 'null'}`,
-                    `anchorMsgId=${seg.anchorMsgId || 'null'}`]
+                    `members=${memberMsgIds.length}`]
             });
             continue;
         }
-        const normalized = normalizeSegmentMembersFromTimeline(
-            session,
-            seg.anchorMsgId,
-            seg.endMsgId || seg.anchorMsgId,
-            seg.memberMsgIds,
-            seg.noticeKey
-        );
-        if (!normalized.anchorMsgId) {
-            vscode.postMessage({
-                type: 'ui-debug',
-                payload: ['[WV][SEG_HYDRATE_SKIP]', 'anchor-not-in-timeline', `noticeKey=${seg.noticeKey}`]
-            });
-            continue;
-        }
-        
         session.segmentsByNoticeKey.set(seg.noticeKey, {
             noticeKey: seg.noticeKey,
-            anchorMsgId: normalized.anchorMsgId,
-            endMsgId: normalized.endMsgId || normalized.anchorMsgId,
-            memberMsgIds: normalized.memberMsgIds,
+            anchorMsgId: memberMsgIds[0],
+            endMsgId: memberMsgIds[memberMsgIds.length - 1],
+            memberMsgIds,
             restoreAllowed: seg.restoreAllowed === true,
             collapsed: true,  // Always collapsed (not persisted)
             createdAt: seg.createdAt || Date.now()
@@ -2902,7 +2877,7 @@ function renderMessageElement(message, renderedSet) {
 
             const title = document.createElement('div');
             title.className = 'reverted-segment-title';
-            title.textContent = `Reverted segment (${total} messages)`;
+            title.textContent = `Reverted segment (${available} messages)`;
 
             const actions = document.createElement('div');
             actions.className = 'reverted-segment-actions';
@@ -6296,20 +6271,23 @@ window.addEventListener('message', (event) => {
                         || (anchorForUpsert ? `system:undo:${anchorForUpsert}` : `system:undo:unknown:${Date.now()}`);
                     let endForUpsert = segPayload?.endMessageId || segPayload?.endMsgId || anchorForUpsert;
                     const applied = segPayload?.applied ?? true;
-                    const shouldComputeMembers = Boolean(found && applied);
                     const payloadMemberMsgIds = Array.isArray(segPayload?.messageIds)
                         ? segPayload.messageIds.filter((id) => typeof id === 'string' && id.startsWith('msg_'))
                         : [];
-                    const normalizedUpsert = shouldComputeMembers
-                        ? normalizeSegmentMembersFromTimeline(session, anchorForUpsert, endForUpsert, payloadMemberMsgIds, upsertNoticeKey)
-                        : {
-                            anchorMsgId: resolveSegmentMessageId(session, anchorForUpsert),
-                            endMsgId: resolveSegmentMessageId(session, endForUpsert) || resolveSegmentMessageId(session, anchorForUpsert),
-                            memberMsgIds: []
-                        };
-                    const normalizedAnchorForUpsert = normalizedUpsert.anchorMsgId || anchorForUpsert;
-                    const normalizedEndForUpsert = normalizedUpsert.endMsgId || normalizedAnchorForUpsert;
-                    let memberMsgIds = normalizedUpsert.memberMsgIds;
+                    let memberMsgIds = payloadMemberMsgIds;
+                    if (!memberMsgIds.length) {
+                        vscode.postMessage({
+                            type: 'ui-debug',
+                            payload: ['[WV][SEG_UPSERT_SKIP]', `noticeKey=${upsertNoticeKey}`, 'reason=empty-messageIds']
+                        });
+                        break;
+                    }
+                    const fallbackAnchor = resolveSegmentMessageId(session, anchorForUpsert) || anchorForUpsert;
+                    const fallbackEnd = resolveSegmentMessageId(session, endForUpsert) || fallbackAnchor;
+                    const normalizedAnchorForUpsert = memberMsgIds[0] || fallbackAnchor;
+                    const normalizedEndForUpsert = memberMsgIds.length
+                        ? memberMsgIds[memberMsgIds.length - 1]
+                        : fallbackEnd;
                     endForUpsert = normalizedEndForUpsert;
                     vscode.postMessage({
                         type: 'ui-debug',

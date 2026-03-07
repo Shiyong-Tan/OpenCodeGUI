@@ -749,9 +749,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         if (!repo) return;
         let headCommit: string | null = null;
         let baseCommit: string | null = null;
+        const turnCommitBase = this.client.getLastTurnCommitBase(sessionId) || null;
         for (let attempt = 0; attempt < 5; attempt++) {
             headCommit = await this.getInternalHeadCommit(repo);
-            if (headCommit) {
+            if (headCommit && turnCommitBase) {
+                baseCommit = turnCommitBase;
+            } else if (headCommit) {
                 baseCommit = await this.getInternalParentCommit(repo, headCommit);
             }
             if (headCommit && baseCommit) break;

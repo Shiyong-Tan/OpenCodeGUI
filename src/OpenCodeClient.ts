@@ -380,6 +380,7 @@ export class OpenCodeClient {
     private subagentToParentSessionMap = new Map<string, string>();
     private lateDiffGraceBySession = new Map<string, { expiresAt: number; timer?: ReturnType<typeof setTimeout> }>();
     private changeListEmittedBySession = new Map<string, boolean>();
+    private lastTurnCommitBaseBySession = new Map<string, string>();
     private readonly resyncCooldownMs = 500;
     private readonly silenceWindowMs = 1800;
     private readonly finalQuietWindowMs = 300;
@@ -2414,6 +2415,19 @@ export class OpenCodeClient {
         // this.logUiDebug(`[DBG_TURN_QUEUE] session=${sessionId} turnKey=${turnKey} added=${changeSpecs.length} total=${next.changes.length}`);
     }
 
+    private mirrorChangesToParentSession(subagentSessionId: string, changeSpecs: FileChangeSpec[]): void {
+        if (!subagentSessionId || !changeSpecs.length) return;
+        const parentSessionId = this.subagentToParentSessionMap.get(subagentSessionId);
+        if (!parentSessionId) return;
+        const parentState = this.turnStateBySession.get(parentSessionId);
+        const turnKey = parentState?.pendingUserLocalKey || parentSessionId;
+        const tmpKey = parentState?.pendingAssistantTmpKey;
+        const assistantId = parentState?.assistantMsgId || parentState?.lastResolvedAssistantMsgId;
+        this.markTurnHasWrites(parentSessionId, 'subagent-file-change');
+        this.queueTurnChanges(parentSessionId, turnKey, tmpKey, assistantId, changeSpecs);
+        this.logUiDebug(`subagent.queue.mirror | subagent=${subagentSessionId} parent=${parentSessionId} specs=${changeSpecs.length}`);
+    }
+
     public queueSubagentChanges(mainSessionId: string, files: any[]): void {
         if (!mainSessionId || !files?.length) return;
         let pending = this.pendingTurnChangesBySession.get(mainSessionId);
@@ -2452,6 +2466,16 @@ export class OpenCodeClient {
         const merged = this.mergeChangeSpecs(pending.changes);
         // this.logUiDebug(`[DBG_TURN_COMMIT] session=${sessionId} turnKey=${turnKey} changes=${merged.length} assistantMsgId=${assistantMsgId || 'null'}`);
         try {
+            try {
+                const repo = await this.gitUndo['repoManager'].resolveRepo(sessionId, turnKey || sessionId);
+                const map = await this.gitUndo['mapStore'].loadSessionMap(sessionId, repo.repoId);
+                const commitBase = map.currentBaseCommit || map.headCommit;
+                if (commitBase) {
+                    this.lastTurnCommitBaseBySession.set(sessionId, commitBase);
+                }
+            } catch {
+                // Best effort only. Sidebar falls back to HEAD^ when unavailable.
+            }
             await this.gitUndo.commitFileChanges(
                 sessionId,
                 turnKey,
@@ -2465,6 +2489,10 @@ export class OpenCodeClient {
         } finally {
             this.pendingTurnChangesBySession.delete(sessionId);
         }
+    }
+
+    public getLastTurnCommitBase(sessionId: string): string | undefined {
+        return this.lastTurnCommitBaseBySession.get(sessionId);
     }
 
     public async revertPendingTurnChangesToCurrentBase(sessionId: string): Promise<void> {
@@ -4820,14 +4848,15 @@ export class OpenCodeClient {
                 if (part?.state?.status === 'completed') {
                     const files = this.extractFilesFromToolPart(part);
                     if (files.length) {
+                        const changeSpecs = this.buildChangeSpecs(files);
                         if (this.shouldQueueTurnChanges(sessionId, source, part?.messageID)) {
                             const turnState = this.turnStateBySession.get(sessionId);
                             const turnKey = turnState?.pendingUserLocalKey || sessionId;
                             const tmpKey = turnState?.pendingAssistantTmpKey;
                             const assistantId = turnState?.assistantMsgId || turnState?.lastResolvedAssistantMsgId;
-                            const changeSpecs = this.buildChangeSpecs(files);
                             this.queueTurnChanges(sessionId, turnKey, tmpKey, assistantId, changeSpecs);
                         }
+                        this.mirrorChangesToParentSession(sessionId, changeSpecs);
                         events.push({ type: 'files', files, sessionId });
                     } else if (part?.tool === 'bash' && sessionId) {
                         const command = part?.state?.input?.command;
@@ -4899,14 +4928,15 @@ export class OpenCodeClient {
                 deletions: entry.deletions
             })) as FileSnapshot[];
             if (files.length) {
+                const changeSpecs = this.buildChangeSpecs(files);
                 if (this.gitUndoAvailable && this.isSessionUndoEnabled(props?.sessionID) && props?.sessionID) {
                     const turnState = this.turnStateBySession.get(sessionId);
                     const turnKey = turnState?.pendingUserLocalKey || sessionId;
                     const tmpKey = turnState?.pendingAssistantTmpKey;
                     const assistantId = turnState?.assistantMsgId || turnState?.lastResolvedAssistantMsgId;
-                    const changeSpecs = this.buildChangeSpecs(files);
                     this.queueTurnChanges(sessionId, turnKey, tmpKey, assistantId, changeSpecs);
                 }
+                this.mirrorChangesToParentSession(sessionId, changeSpecs);
                 events.push({ type: 'files', files, sessionId: props?.sessionID });
             }
             return events;
