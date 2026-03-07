@@ -89,6 +89,7 @@ interface SegmentState {
     anchorMsgId: string;     // Must start with msg_
     endMsgId: string;        // Must start with msg_
     memberMsgIds: string[];  // All msg_* in [anchor, end] interval
+    mergedInvalidSegments?: SegmentState[];
     applied?: boolean;
     restoreAllowed?: boolean;
     collapsed?: boolean;
@@ -1467,6 +1468,24 @@ ${attachmentLines.join('\n')}`
                         anchorMsgId: anchorMsgId,
                         endMsgId: seg.endMsgId || anchorMsgId,
                         memberMsgIds: memberMsgIds,
+                        mergedInvalidSegments: Array.isArray(seg.mergedInvalidSegments)
+                            ? seg.mergedInvalidSegments
+                                .filter((child: SegmentState) => child && typeof child.noticeKey === 'string')
+                                .map((child: SegmentState) => ({
+                                    noticeKey: child.noticeKey,
+                                    anchorMsgId: child.anchorMsgId,
+                                    endMsgId: child.endMsgId,
+                                    memberMsgIds: Array.isArray(child.memberMsgIds)
+                                        ? child.memberMsgIds.filter((id: string) => typeof id === 'string' && id.startsWith('msg_'))
+                                        : [],
+                                    restoreAllowed: child.restoreAllowed,
+                                    collapsed: child.collapsed,
+                                    applied: child.applied,
+                                    mergedInvalidSegments: [],
+                                    createdAt: typeof child.createdAt === 'number' ? child.createdAt : Date.now(),
+                                    updatedAt: typeof child.updatedAt === 'number' ? child.updatedAt : Date.now()
+                                }))
+                            : [],
                         applied: typeof seg.applied === 'boolean' ? seg.applied : undefined,
                         restoreAllowed: nextRestoreAllowed,
                         collapsed: typeof seg.collapsed === 'boolean' ? seg.collapsed : undefined,
@@ -2277,17 +2296,17 @@ ${attachmentLines.join('\n')}`
                         const messageIds = Array.isArray(persistedSegment?.memberMsgIds) && persistedSegment?.memberMsgIds?.length
                             ? persistedSegment.memberMsgIds
                             : (Array.isArray(currentSegment?.messageIds) ? currentSegment?.messageIds : []);
+                        const restoreScope = this.buildRestoreMessageScope(sessionId, noticeKey, messageIds, persistedSegment);
                         const fallbackCommits = Array.isArray(currentSegment?.startCommits) && currentSegment?.startCommits?.length
                             ? currentSegment.startCommits
                             : (currentSegment?.startCommit ? [currentSegment.startCommit] : []);
                         const commitsToClear = sessionId
-                            ? await this.resolveChangeListCommits(sessionId, messageIds, fallbackCommits)
+                            ? await this.resolveChangeListCommits(sessionId, restoreScope.activeRestoreMessageIds, fallbackCommits)
                             : fallbackCommits;
-                            const invalidMessageIds = Array.from(this.getInvalidSegmentMessageIds(sessionId, {
-                                currentNoticeKey: noticeKey,
-                                candidateMessageIds: messageIds
-                            }));
-                            const result = await this.client.restoreFromMessage(anchorMsgId, endMsgId, { messageIds, excludedMessageIds: invalidMessageIds });
+                            const result = await this.client.restoreFromMessage(anchorMsgId, endMsgId, {
+                                messageIds: restoreScope.restoreMessageIds,
+                                excludedMessageIds: restoreScope.invalidMessageIds
+                            });
                         const liveWebview = this._view?.webview || activeWebview;
                         this.uiDebugChannel.appendLine(`[EXT][RESTORE_TX] type=restoredSegment sessionId=${sessionId || 'null'} noticeKey=${noticeKey || 'null'} applied=${result.applied}`);
                         if (result.applied) {
@@ -2559,20 +2578,25 @@ ${attachmentLines.join('\n')}`
                             const messageIds = Array.isArray(persistedSegment?.memberMsgIds) && persistedSegment?.memberMsgIds?.length
                                 ? persistedSegment.memberMsgIds
                                 : (Array.isArray(currentSegment?.messageIds) ? currentSegment?.messageIds : []);
-                            const invalidMessageIds = this.currentSessionId
-                                ? Array.from(this.getInvalidSegmentMessageIds(this.currentSessionId, {
-                                    currentNoticeKey: conflictContext.noticeKey,
-                                    candidateMessageIds: messageIds
-                                }))
-                                : [];
-                            const result = await this.client.restoreFromMessage(conflictContext.startMessageId, conflictContext.endMessageId, { force: true, messageIds, excludedMessageIds: invalidMessageIds });
+                            const restoreScope = this.currentSessionId
+                                ? this.buildRestoreMessageScope(this.currentSessionId, conflictContext.noticeKey, messageIds, persistedSegment)
+                                : { restoreMessageIds: messageIds, invalidMessageIds: [], activeRestoreMessageIds: messageIds };
+                            const result = await this.client.restoreFromMessage(
+                                conflictContext.startMessageId,
+                                conflictContext.endMessageId,
+                                {
+                                    force: true,
+                                    messageIds: restoreScope.restoreMessageIds,
+                                    excludedMessageIds: restoreScope.invalidMessageIds
+                                }
+                            );
                             if (this.currentSessionId && conflictContext.noticeKey) {
                                 const currentSegment = this.client.getRevertedSegment();
                             const fallbackCommits = Array.isArray(currentSegment?.startCommits) && currentSegment?.startCommits?.length
                                 ? currentSegment.startCommits
                                 : (currentSegment?.startCommit ? [currentSegment.startCommit] : []);
                             const commitsToClear = this.currentSessionId
-                                ? await this.resolveChangeListCommits(this.currentSessionId, messageIds, fallbackCommits)
+                                ? await this.resolveChangeListCommits(this.currentSessionId, restoreScope.activeRestoreMessageIds, fallbackCommits)
                                 : fallbackCommits;
                                 await this.applyRestoreSegmentSuccess(
                                     this.currentSessionId,
@@ -3615,6 +3639,30 @@ ${attachmentLines.join('\n')}`
             }
         }
         return invalid;
+    }
+
+    private buildRestoreMessageScope(
+        sessionId: string,
+        noticeKey: string | undefined,
+        baseMessageIds: string[],
+        segment?: SegmentState
+    ): { restoreMessageIds: string[]; invalidMessageIds: string[]; activeRestoreMessageIds: string[] } {
+        const restoreMessageIds = Array.isArray(baseMessageIds)
+            ? Array.from(new Set(baseMessageIds.filter((id) => typeof id === 'string' && id.startsWith('msg_'))))
+            : [];
+        const invalidMessageIds = Array.from(this.getInvalidSegmentMessageIds(sessionId, {
+            currentNoticeKey: noticeKey,
+            candidateMessageIds: restoreMessageIds
+        }));
+        const mergedInvalidIds = Array.isArray(segment?.mergedInvalidSegments)
+            ? segment!.mergedInvalidSegments
+                .flatMap((child) => Array.isArray(child?.memberMsgIds) ? child.memberMsgIds : [])
+                .filter((id): id is string => typeof id === 'string' && id.startsWith('msg_'))
+            : [];
+        const fullInvalidMessageIds = Array.from(new Set([...invalidMessageIds, ...mergedInvalidIds]));
+        const invalidSet = new Set(fullInvalidMessageIds);
+        const activeRestoreMessageIds = restoreMessageIds.filter((id) => !invalidSet.has(id));
+        return { restoreMessageIds, invalidMessageIds: fullInvalidMessageIds, activeRestoreMessageIds };
     }
 
     private async handleChatEvent(event: ChatEvent, webview: vscode.Webview): Promise<void> {

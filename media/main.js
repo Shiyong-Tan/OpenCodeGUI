@@ -885,6 +885,32 @@ function normalizeSegmentMembersFromTimeline(session, anchorMsgId, endMsgId, can
     };
 }
 
+function sanitizeMergedSegmentSnapshot(seg) {
+    if (!seg || typeof seg.noticeKey !== 'string') return null;
+    const memberMsgIds = Array.isArray(seg.memberMsgIds)
+        ? seg.memberMsgIds.filter((id) => typeof id === 'string' && id.startsWith('msg_'))
+        : [];
+    const anchorMsgId = typeof seg.anchorMsgId === 'string' && seg.anchorMsgId.startsWith('msg_')
+        ? seg.anchorMsgId
+        : (memberMsgIds[0] || '');
+    const endMsgId = typeof seg.endMsgId === 'string' && seg.endMsgId.startsWith('msg_')
+        ? seg.endMsgId
+        : (memberMsgIds[memberMsgIds.length - 1] || anchorMsgId);
+    if (!anchorMsgId || memberMsgIds.length === 0) return null;
+    return {
+        noticeKey: seg.noticeKey,
+        anchorMsgId,
+        endMsgId,
+        memberMsgIds,
+        applied: seg.applied ?? true,
+        restoreAllowed: seg.restoreAllowed === false ? false : true,
+        collapsed: seg.collapsed !== false,
+        mergedInvalidSegments: [],
+        createdAt: typeof seg.createdAt === 'number' ? seg.createdAt : Date.now(),
+        updatedAt: typeof seg.updatedAt === 'number' ? seg.updatedAt : Date.now()
+    };
+}
+
 /**
  * Rebuild hiddenSet from all segments in segmentsByNoticeKey
  * This is the ONLY function that determines which messages are hidden
@@ -983,11 +1009,19 @@ function rebuildHiddenSetFromTimeline(session) {
     });
 }
 
-function discardAllSegments(sessionId, reason, mode) {
+function discardAllSegments(sessionId, reason, mode, options = {}) {
     const session = getSessionState(sessionId);
     if (!session) return 0;
+    const anchorMsgId = typeof options.anchorMsgId === 'string' ? options.anchorMsgId : '';
+    const anchorIndex = anchorMsgId ? session.timeline.indexOf(anchorMsgId) : -1;
     let count = 0;
     for (const segment of session.segmentsByNoticeKey.values()) {
+        if (anchorIndex >= 0) {
+            const segAnchorIndex = segment.anchorMsgId ? session.timeline.indexOf(segment.anchorMsgId) : -1;
+            if (segAnchorIndex < 0 || segAnchorIndex >= anchorIndex) {
+                continue;
+            }
+        }
         if (segment.restoreAllowed !== false) {
             segment.restoreAllowed = false;
             count++;
@@ -1009,7 +1043,7 @@ function discardAllSegments(sessionId, reason, mode) {
     }
     vscode.postMessage({
         type: 'ui-debug',
-        payload: ['[WV][SEG_DISCARD]', `reason=${reason}`, `count=${count}`, `sessionId=${sessionId || 'null'}`, `mode=${mode || 'null'}`]
+        payload: ['[WV][SEG_DISCARD]', `reason=${reason}`, `count=${count}`, `sessionId=${sessionId || 'null'}`, `mode=${mode || 'null'}`, `anchorMsgId=${anchorMsgId || 'null'}`, `anchorIndex=${anchorIndex}`]
     });
     return count;
 }
@@ -1109,11 +1143,18 @@ function applyHydratedSegments(session, segments, hasSegments = true) {
             });
             continue;
         }
+        const mergedInvalidSegments = Array.isArray(seg.mergedInvalidSegments)
+            ? seg.mergedInvalidSegments
+                .filter((child) => child && typeof child.noticeKey === 'string')
+                .map((child) => sanitizeMergedSegmentSnapshot(child))
+                .filter(Boolean)
+            : [];
         session.segmentsByNoticeKey.set(seg.noticeKey, {
             noticeKey: seg.noticeKey,
             anchorMsgId: memberMsgIds[0],
             endMsgId: memberMsgIds[memberMsgIds.length - 1],
             memberMsgIds,
+            mergedInvalidSegments,
             restoreAllowed: seg.restoreAllowed === true,
             collapsed: true,  // Always collapsed (not persisted)
             createdAt: seg.createdAt || Date.now()
@@ -1488,6 +1529,11 @@ function applyRevertedSegmentPayload(sessionId, payload, noticeKeyFromCaller) {
     const normalizedAnchorMsgId = normalizedSegment.anchorMsgId || anchorMsgId;
     const normalizedEndMsgId = normalizedSegment.endMsgId || normalizedAnchorMsgId;
     const memberMsgIds = normalizedSegment.memberMsgIds;
+    const mergedInvalidSegments = Array.isArray(payload.mergedInvalidSegments)
+        ? payload.mergedInvalidSegments
+            .map((child) => sanitizeMergedSegmentSnapshot(child))
+            .filter(Boolean)
+        : [];
     
     if (memberMsgIds.length === 0) {
         vscode.postMessage({
@@ -1503,6 +1549,9 @@ function applyRevertedSegmentPayload(sessionId, payload, noticeKeyFromCaller) {
         anchorMsgId: normalizedAnchorMsgId,
         endMsgId: normalizedEndMsgId,
         memberMsgIds,
+        mergedInvalidSegments,
+        applied: payload?.applied ?? true,
+        restoreAllowed: payload?.restoreAllowed === false ? false : true,
         collapsed: true,
         createdAt: Date.now()
     });
@@ -1525,6 +1574,9 @@ function applyRevertedSegmentPayload(sessionId, payload, noticeKeyFromCaller) {
             anchorMsgId: normalizedAnchorMsgId,
             endMsgId: normalizedEndMsgId,
             memberMsgIds,
+            mergedInvalidSegments,
+            applied: payload?.applied ?? true,
+            restoreAllowed: payload?.restoreAllowed === false ? false : true,
             collapsed: true,
             updatedAt: Date.now()
         }
@@ -3174,7 +3226,7 @@ function renderMessageElement(message, renderedSet) {
                     type: 'ui-debug',
                     payload: ['undo.send', 'anchorMsgId', verdict.msgId]
                 });
-                discardAllSegments(sessionId, 'undo', selectedMode || 'unknown');
+                discardAllSegments(sessionId, 'undo', selectedMode || 'unknown', { anchorMsgId: verdict.msgId });
                 handleUndoToMessage(sessionId, verdict.msgId);
                 window.__oc?.renderFromState?.();
                 logSessionState(sessionId, 'UI_UNDO_TO_MESSAGE');
@@ -6300,6 +6352,11 @@ window.addEventListener('message', (event) => {
                     // Merge with any placeholders after anchor within the final range
                     let finalEndMsgId = endForUpsert;
                     let finalMemberMsgIds = memberMsgIds;
+                    let mergedInvalidSegments = Array.isArray(segPayload?.mergedInvalidSegments)
+                        ? segPayload.mergedInvalidSegments
+                            .map((child) => sanitizeMergedSegmentSnapshot(child))
+                            .filter(Boolean)
+                        : [];
                     let mergeApplied = false;
                     const noticeKeyNew = upsertNoticeKey;
                     const msgTimelineIndex = new Map();
@@ -6341,6 +6398,12 @@ window.addEventListener('message', (event) => {
                                 if (!oldSeg) {
                                     i++;
                                     continue;
+                                }
+                                if (oldSeg.restoreAllowed === false) {
+                                    const snapshot = sanitizeMergedSegmentSnapshot(oldSeg);
+                                    if (snapshot) {
+                                        mergedInvalidSegments.push(snapshot);
+                                    }
                                 }
                                 const oldEndIdx = oldSeg.endMsgId
                                     ? getMsgTimelineIndex(oldSeg.endMsgId)
@@ -6475,6 +6538,7 @@ window.addEventListener('message', (event) => {
                         anchorMsgId: normalizedAnchorForUpsert,
                         endMsgId: endForUpsert,
                         memberMsgIds,
+                        mergedInvalidSegments,
                         applied,
                         restoreAllowed,
                         ackOpId: ackOpId || null,
@@ -6498,6 +6562,7 @@ window.addEventListener('message', (event) => {
                             anchorMsgId: normalizedAnchorForUpsert,
                             endMsgId: endForUpsert,
                             memberMsgIds,
+                            mergedInvalidSegments,
                             applied,
                             restoreAllowed,
                             collapsed: true,
@@ -6692,6 +6757,11 @@ window.addEventListener('message', (event) => {
                 
                 const placeholderId = getUndoPlaceholderId(noticeKey);
                 const seg = session.segmentsByNoticeKey.get(noticeKey) || null;
+                const mergedInvalidSegments = Array.isArray(seg?.mergedInvalidSegments)
+                    ? seg.mergedInvalidSegments
+                        .map((child) => sanitizeMergedSegmentSnapshot(child))
+                        .filter(Boolean)
+                    : [];
                 const pIdx = session.timeline.indexOf(placeholderId);
                 let didReplace = false;
                 if (pIdx >= 0 && seg?.anchorMsgId) {
@@ -6699,6 +6769,36 @@ window.addEventListener('message', (event) => {
                     didReplace = true;
                 }
                 session.messagesById.delete(placeholderId);
+
+                for (const child of mergedInvalidSegments) {
+                    session.segmentsByNoticeKey.set(child.noticeKey, {
+                        noticeKey: child.noticeKey,
+                        anchorMsgId: child.anchorMsgId,
+                        endMsgId: child.endMsgId,
+                        memberMsgIds: Array.isArray(child.memberMsgIds) ? child.memberMsgIds : [],
+                        mergedInvalidSegments: [],
+                        applied: child.applied ?? true,
+                        restoreAllowed: child.restoreAllowed === false ? false : true,
+                        collapsed: child.collapsed !== false,
+                        createdAt: typeof child.createdAt === 'number' ? child.createdAt : Date.now()
+                    });
+                    upsertUndoPlaceholder(session, child.noticeKey, child.anchorMsgId, child.endMsgId, child.applied ?? true);
+                    vscode.postMessage({
+                        type: 'undoSegmentUpsert',
+                        sessionId,
+                        segment: {
+                            noticeKey: child.noticeKey,
+                            anchorMsgId: child.anchorMsgId,
+                            endMsgId: child.endMsgId,
+                            memberMsgIds: Array.isArray(child.memberMsgIds) ? child.memberMsgIds : [],
+                            mergedInvalidSegments: [],
+                            applied: child.applied ?? true,
+                            restoreAllowed: child.restoreAllowed === false ? false : true,
+                            collapsed: child.collapsed !== false,
+                            updatedAt: Date.now()
+                        }
+                    });
+                }
 
                 // Delete segment locally
                 const deleted = session.segmentsByNoticeKey.delete(noticeKey);
@@ -6716,7 +6816,8 @@ window.addEventListener('message', (event) => {
                         `noticeKey=${noticeKey}`,
                         `pIdx=${pIdx}`,
                         `segAnchor=${seg?.anchorMsgId || 'null'}`,
-                        `didReplace=${didReplace}`]
+                        `didReplace=${didReplace}`,
+                        `restoredInvalidCount=${mergedInvalidSegments.length}`]
                 });
                 
                 // Rebuild hidden set (this will unhide all messages from this segment)

@@ -123,6 +123,25 @@ In `GitUndoEngine.restoreToMessage`:
    - remove segment from memory/persistence
    - clear changelist reverted flags tied to this segment commit set
 
+### 9.1 Restore With Merged Invalid Segments
+
+When a newer undo segment folds over older invalid segments:
+
+- The parent active segment may carry `mergedInvalidSegments[]` snapshots.
+- These snapshots are UI/persistence metadata only; they do not participate in git restore target selection.
+- On restore success of the parent segment:
+  - restore the parent active messages/files
+  - rehydrate each `mergedInvalidSegments[]` child back into `segmentsByNoticeKey`
+  - recreate its placeholder/card in the webview
+  - keep each child `restoreAllowed=false`
+  - do not reinsert those child messages into the normal message flow
+
+Rules:
+
+- A merged invalid segment must reappear after restore in the same invalid/greyed segment state it had before being folded.
+- A merged invalid segment is not considered "restored" by restoring the parent segment.
+- Parent segment removal must not delete child invalid segment snapshots before they are replayed.
+
 ## 10. Conflict Checks (Undo/Restore)
 
 Both flows run precheck before apply:
@@ -180,6 +199,23 @@ Undo/Restore logic is independent from changelist anchoring, but changelist gene
 5. Bind to display user ID policy.
 6. No-op files are expected to be absent from final changelist.
 
+### 14.1 Change List Rules For Invalid Segments During Restore
+
+Restore must distinguish between:
+
+- active messages actually being restored
+- merged invalid segment messages merely being replayed as invalid cards
+
+Therefore:
+
+- `restoreFromMessage(...)` may receive the full parent segment message set for file restoration planning, with invalid child messages excluded from restore execution.
+- changelist red-flag clearing must use only the active restored message subset.
+- commits belonging to merged invalid segments must keep their reverted/red state after parent restore.
+
+Authoritative rule:
+
+- If an invalid segment still exists after restore, its changelist reverted marker must remain red.
+
 ## 15. Regression Guards
 
 - `OpenCodeClient.undoFromMessage`:
@@ -189,6 +225,7 @@ Undo/Restore logic is independent from changelist anchoring, but changelist gene
   - `restoreAllowed` upsert keeps existing `false` sticky
 - `SidebarProvider.ts`:
   - persisted segment merge keeps `restoreAllowed=false`
+  - restore changelist clearing excludes `mergedInvalidSegments[]`
 
 ## 16. Required Logging
 
