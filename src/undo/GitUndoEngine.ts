@@ -402,6 +402,10 @@ export class GitUndoEngine {
             const updated = this.mapStore.appendEntry({ ...ensured, headCommit: commitHash, currentBaseCommit: commitHash }, entry);
             if (tmpKey) {
                 updated.tmpToCommit[tmpKey] = commitHash;
+                const messageBaseCommit = ensured.currentBaseCommit || ensured.headCommit;
+                if (messageBaseCommit) {
+                    updated.tmpToBaseCommit[tmpKey] = messageBaseCommit;
+                }
             }
             await this.mapStore.saveSessionMap(sessionId, updated);
             this.logger(`commit.ok | sessionId=${sessionId} commitHash=${commitHash} files=${touchedFiles.length}`);
@@ -426,6 +430,10 @@ export class GitUndoEngine {
             let updated = this.mapStore.bindFinalMsg(map, tmpKey, finalMsgId);
             if (userMsgId) {
                 updated.msgToCommit[userMsgId] = commitHash;
+                const baseCommit = updated.tmpToBaseCommit?.[tmpKey];
+                if (baseCommit) {
+                    updated.msgToBaseCommit[userMsgId] = baseCommit;
+                }
             }
             const entryFound = updated.entries.some((entry) => entry.tmpKey === tmpKey && entry.commitHash === commitHash);
             if (!entryFound) {
@@ -434,6 +442,40 @@ export class GitUndoEngine {
             await this.mapStore.saveSessionMap(sessionId, updated);
             this.logger(`finalizeBinding.ok | sessionId=${sessionId} tmpKey=${tmpKey} finalMsgId=${finalMsgId} commitHash=${commitHash}`);
         });
+    }
+
+    private getOrderedCommitsForMessages(
+        map: { msgToCommit: Record<string, string>; entries: SessionEntry[] },
+        messageIds: string[],
+        fallbackCommit: string
+    ): string[] {
+        const uniqueMsgIds = Array.isArray(messageIds)
+            ? Array.from(new Set(messageIds.filter((id) => typeof id === 'string' && id.startsWith('msg_'))))
+            : [];
+        const commits = uniqueMsgIds
+            .map((id) => map.msgToCommit[id])
+            .filter((id): id is string => typeof id === 'string' && id.length > 0);
+        if (!commits.length) {
+            return [fallbackCommit];
+        }
+        const commitOrder = new Map<string, number>();
+        for (let i = 0; i < map.entries.length; i++) {
+            commitOrder.set(map.entries[i].commitHash, i);
+        }
+        return Array.from(new Set(commits)).sort(
+            (a, b) => (commitOrder.get(a) ?? Number.MAX_SAFE_INTEGER) - (commitOrder.get(b) ?? Number.MAX_SAFE_INTEGER)
+        );
+    }
+
+    private getTouchedUnionForCommits(map: { entries: SessionEntry[] }, commits: string[]): string[] {
+        if (!Array.isArray(commits) || !commits.length) return [];
+        const commitSet = new Set(commits);
+        const paths: string[] = [];
+        for (const entry of map.entries) {
+            if (!commitSet.has(entry.commitHash)) continue;
+            paths.push(...(entry.touchedFiles || []));
+        }
+        return unique(paths);
     }
 
     private async getCommitParent(repo: GitRepoRef, commitHash: string): Promise<string | null> {
@@ -704,13 +746,15 @@ export class GitUndoEngine {
             }
             const baseCommit = map.currentBaseCommit || headCommit;
             const preUndoBaseCommit = baseCommit;
-            const parent = await this.getCommitParent(repo, startCommit);
-            const targetCommit = parent || EMPTY_TREE_HASH;
-            if (!parent) {
-            this.logger(`undo.target.no-parent | sessionId=${sessionId} startCommit=${startCommit}`);
+            const messageBaseCommit = map.msgToBaseCommit?.[startMsgId];
+            const targetCommit = messageBaseCommit || (await this.getCommitParent(repo, startCommit)) || EMPTY_TREE_HASH;
+            if (!messageBaseCommit && targetCommit === EMPTY_TREE_HASH) {
+                this.logger(`undo.target.no-parent | sessionId=${sessionId} startCommit=${startCommit}`);
             }
-            const touchedUnion = this.collectTouchedUnion(map, startCommit, headCommit);
-            const fileSet = await this.computeFileSet(repo, targetCommit, headCommit, touchedUnion);
+            const orderedCommits = this.getOrderedCommitsForMessages(map, messageIds, startCommit);
+            const firstCommit = orderedCommits[0] || startCommit;
+            const touchedUnion = this.getTouchedUnionForCommits(map, orderedCommits);
+            const fileSet = await this.computeFileSet(repo, targetCommit, firstCommit, touchedUnion);
             this.logger(`fileSet.beforeApply | size=${fileSet.length}`);
             if (!fileSet.length) {
                 return { conflicts: [], touchedFiles: [], applied: true, reason: 'no-file-set', startCommit, startCommits: [startCommit], restoreCommit: preUndoBaseCommit, undoTargetCommit: targetCommit, fileSet };

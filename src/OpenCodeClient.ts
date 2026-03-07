@@ -2692,10 +2692,7 @@ export class OpenCodeClient {
         }
 
         if (effectiveEndIndex < startIndex) {
-            if (hasActivePrev) {
-                this.logUiDebug(`EXT: undo.recover.tail | startIndex | ${startIndex} | oldEndIndex | ${effectiveEndIndex} | tailIndex | ${tailIndex}`);
-                effectiveEndIndex = tailIndex;
-            }
+            this.logUiDebug(`EXT: undo.noop.empty-range.pre | startIndex | ${startIndex} | effectiveEndIndex | ${effectiveEndIndex} | tailIndex | ${tailIndex}`);
         }
         if (effectiveEndIndex < startIndex) {
             this.logUiDebug(`EXT: undo.noop.empty-range.final | startIndex | ${startIndex} | effectiveEndIndex | ${effectiveEndIndex}`);

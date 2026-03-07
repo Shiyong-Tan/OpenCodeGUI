@@ -4172,7 +4172,7 @@ function shouldHideDcpUiMessage(message) {
                 removeBtn.className = 'session-item-delete session-item-delete-icon';
                 removeBtn.setAttribute('aria-label', 'Delete session');
                 removeBtn.setAttribute('title', 'Delete session');
-                removeBtn.textContent = 'Ã—';
+                removeBtn.textContent = '\u00D7';
                 removeBtn.addEventListener('click', (event) => {
                     event.preventDefault();
                     event.stopPropagation();
@@ -4223,7 +4223,7 @@ function shouldHideDcpUiMessage(message) {
                 const removeBtn = document.createElement('button');
                 removeBtn.type = 'button';
                 removeBtn.className = 'attachment-image-remove';
-                removeBtn.textContent = 'Ã—';
+                removeBtn.textContent = '\u00D7';
                 removeBtn.addEventListener('click', (event) => {
                     event.preventDefault();
                     event.stopPropagation();
@@ -4255,7 +4255,7 @@ function shouldHideDcpUiMessage(message) {
             const removeBtn = document.createElement('button');
             removeBtn.type = 'button';
             removeBtn.className = 'attachment-image-remove';
-            removeBtn.textContent = 'Ã—';
+            removeBtn.textContent = '\u00D7';
             removeBtn.addEventListener('click', (event) => {
                 event.preventDefault();
                 event.stopPropagation();

@@ -44,7 +44,9 @@ export class GitSessionMapStore {
                 currentBaseCommit: undefined,
                 entries: [],
                 tmpToCommit: {},
-                msgToCommit: {}
+                tmpToBaseCommit: {},
+                msgToCommit: {},
+                msgToBaseCommit: {}
             };
         }
         try {
@@ -59,10 +61,15 @@ export class GitSessionMapStore {
                     currentBaseCommit: undefined,
                     entries: [],
                     tmpToCommit: {},
-                    msgToCommit: {}
+                    tmpToBaseCommit: {},
+                    msgToCommit: {},
+                    msgToBaseCommit: {}
                 };
             }
-            return parsed as SessionMap;
+            const normalized = parsed as SessionMap;
+            normalized.tmpToBaseCommit = normalized.tmpToBaseCommit || {};
+            normalized.msgToBaseCommit = normalized.msgToBaseCommit || {};
+            return normalized;
         } catch {
             return {
                 schemaVersion: 1,
@@ -72,7 +79,9 @@ export class GitSessionMapStore {
                 currentBaseCommit: undefined,
                 entries: [],
                 tmpToCommit: {},
-                msgToCommit: {}
+                tmpToBaseCommit: {},
+                msgToCommit: {},
+                msgToBaseCommit: {}
             };
         }
     }
@@ -93,6 +102,7 @@ export class GitSessionMapStore {
     public bindFinalMsg(map: SessionMap, tmpKey: string, finalMsgId: string): SessionMap {
         const commitHash = map.tmpToCommit[tmpKey];
         if (!commitHash) return map;
+        const baseCommit = map.tmpToBaseCommit?.[tmpKey];
         const updatedEntries = map.entries.map((entry) => {
             if (entry.tmpKey === tmpKey && entry.commitHash === commitHash) {
                 return { ...entry, finalAssistantMsgId: finalMsgId };
@@ -105,6 +115,12 @@ export class GitSessionMapStore {
                 ...map.msgToCommit,
                 [finalMsgId]: commitHash
             },
+            msgToBaseCommit: baseCommit
+                ? {
+                    ...(map.msgToBaseCommit || {}),
+                    [finalMsgId]: baseCommit
+                }
+                : (map.msgToBaseCommit || {}),
             entries: updatedEntries
         };
     }

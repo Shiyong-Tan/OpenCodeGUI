@@ -42,7 +42,9 @@ export type SessionMap = {
     currentBaseCommit?: string;
     entries: SessionEntry[];
     tmpToCommit: Record<string, string>;
+    tmpToBaseCommit: Record<string, string>;
     msgToCommit: Record<string, string>;
+    msgToBaseCommit: Record<string, string>;
 };
 
 export type FileChangeSpec =
