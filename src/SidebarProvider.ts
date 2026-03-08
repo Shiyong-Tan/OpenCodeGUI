@@ -3930,7 +3930,10 @@ ${attachmentLines.join('\n')}`
             }
             if (event.type === 'files' && event.files && event.files.length && this.currentSessionId) {
                 const entry = this.subagentProgressBySession.get(event.sessionId!);
-                this.client.queueSubagentChanges(this.currentSessionId, event.files);
+                const isReplay = event.source === 'resync';
+                if (!isReplay) {
+                    this.client.queueSubagentChanges(this.currentSessionId, event.files);
+                }
                 if (entry && event.files && event.files.length && !entry.isDone) {
                     const firstFile = typeof event.files[0] === 'string' ? event.files[0] : (event.files[0] as any).path || '';
                     const filename = firstFile ? pathModule.basename(firstFile) : 'file';
@@ -3940,28 +3943,30 @@ ${attachmentLines.join('\n')}`
                     this.emitSubagentStatus();
                 }
                 const liveWebview = this._view?.webview || webview;
-                liveWebview.postMessage({
-                    type: 'segmentRestoreLock',
-                    sessionId: this.currentSessionId,
-                    reason: 'file-change-detected'
-                });
-                event.files.forEach((file, index) => {
-                    this.tryOpenDiffForEventFile(file, liveWebview, index, this.currentSessionId || '', 'subagent');
-                });
-                
-                // Detect .md files and send plan file card
-                const mdFiles = event.files
-                    .map(f => (typeof f === 'string' ? f : (f as any).path))
-                    .filter((path): path is string => typeof path === 'string' && path.endsWith('.md'));
-                if (mdFiles.length) {
-                    const anchorMessageId = this.client.getTurnAssistantMsgId(this.currentSessionId);
-                    if (anchorMessageId) {
-                        liveWebview.postMessage({
-                            type: 'planFileCard',
-                            files: mdFiles,
-                            anchorMessageId,
-                            sessionId: this.currentSessionId
-                        });
+                if (!isReplay) {
+                    liveWebview.postMessage({
+                        type: 'segmentRestoreLock',
+                        sessionId: this.currentSessionId,
+                        reason: 'file-change-detected'
+                    });
+                    event.files.forEach((file, index) => {
+                        this.tryOpenDiffForEventFile(file, liveWebview, index, this.currentSessionId || '', 'subagent');
+                    });
+                    
+                    // Detect .md files and send plan file card
+                    const mdFiles = event.files
+                        .map(f => (typeof f === 'string' ? f : (f as any).path))
+                        .filter((path): path is string => typeof path === 'string' && path.endsWith('.md'));
+                    if (mdFiles.length) {
+                        const anchorMessageId = this.client.getTurnAssistantMsgId(this.currentSessionId);
+                        if (anchorMessageId) {
+                            liveWebview.postMessage({
+                                type: 'planFileCard',
+                                files: mdFiles,
+                                anchorMessageId,
+                                sessionId: this.currentSessionId
+                            });
+                        }
                     }
                 }
                 // REMOVED: Mid-stream emitDiffFileList call
