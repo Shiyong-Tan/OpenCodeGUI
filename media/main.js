@@ -2791,7 +2791,17 @@ function renderMessageElement(message, renderedSet) {
 
             const summary = document.createElement('summary');
             summary.style.textAlign = 'left';
-            summary.addEventListener('click', () => postOpenGitDiff(normalized, activeSessionId, commitHead, commitBase));
+            summary.addEventListener('click', () => {
+                if (/\.md$/i.test(normalized)) {
+                    vscode.postMessage({
+                        type: 'openFileAtLocation',
+                        path: normalized,
+                        sessionId: activeSessionId || null
+                    });
+                    return;
+                }
+                postOpenGitDiff(normalized, activeSessionId, commitHead, commitBase);
+            });
 
             const baseSpan = document.createElement('span');
             baseSpan.className = 'conflict-card-file';
@@ -2849,44 +2859,6 @@ function renderMessageElement(message, renderedSet) {
         }
 
         container.appendChild(list);
-        chatContainer.appendChild(container);
-        return;
-    }
-
-    if (message.meta?.kind === 'planFile') {
-        const files = Array.isArray(message.meta?.files) ? message.meta.files : [];
-        if (!files.length) return;
-
-        const container = document.createElement('div');
-        container.className = 'plan-file-card';
-        container.dataset.messageId = message.id;
-
-        const header = document.createElement('div');
-        header.className = 'plan-file-card-header';
-        header.textContent = 'Plan File';
-        container.appendChild(header);
-
-        const body = document.createElement('div');
-        body.className = 'plan-file-card-body';
-
-        for (const filePath of files) {
-            if (typeof filePath !== 'string' || !filePath.length) continue;
-
-            const fileSpan = document.createElement('span');
-            fileSpan.className = 'plan-file-name';
-            fileSpan.textContent = filePath;
-            fileSpan.style.cursor = 'pointer';
-            fileSpan.addEventListener('click', () => {
-                vscode.postMessage({
-                    type: 'openFileAtLocation',
-                    filePath: filePath
-                });
-            });
-
-            body.appendChild(fileSpan);
-        }
-
-        container.appendChild(body);
         chatContainer.appendChild(container);
         return;
     }
@@ -6034,34 +6006,6 @@ window.addEventListener('message', (event) => {
                 if (updated) {
                     window.__oc?.renderFromState?.();
                 }
-                break;
-            }
-            case 'planFileCard': {
-                const sessionId = getEventSessionId(message, 'planFileCard');
-                if (!sessionId) break;
-                const session = getSessionState(sessionId, true);
-                const files = Array.isArray(message.files)
-                    ? message.files.filter((item) => typeof item === 'string' && item.length)
-                    : [];
-                const anchorMessageId = message.anchorMessageId || null;
-                if (!files.length || !anchorMessageId) break;
-
-                if (!session.planFileCards) {
-                    session.planFileCards = new Map();
-                }
-                session.planFileCards.set(anchorMessageId, files);
-
-                upsertMessage(session, {
-                    id: `system:planFile:${anchorMessageId}`,
-                    role: 'system',
-                    text: '',
-                    meta: {
-                        kind: 'planFile',
-                        files: files,
-                        anchorMessageId: anchorMessageId
-                    }
-                });
-                window.__oc?.renderFromState?.();
                 break;
             }
             case 'todoUpdate': {

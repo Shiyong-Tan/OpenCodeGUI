@@ -544,7 +544,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const messages = formatted.messages || [];
         const idSet = new Set(messages.map((m) => m.id).filter((id): id is string => typeof id === 'string'));
         const byAnchor = new Map<string, ChangeListRecord[]>();
+        const byId = new Map<string, ChangeListRecord>();
         for (const record of records) {
+            if (record.id) {
+                byId.set(record.id, record);
+            }
             if (!record.anchorMessageId || !idSet.has(record.anchorMessageId)) {
                 continue;
             }
@@ -562,13 +566,35 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const merged: SessionMessage[] = [];
         const seenIds = new Set<string>();
         for (const message of messages) {
+            let nextMessage = message;
+            if (message?.id) {
+                const bound = byId.get(message.id);
+                if (bound) {
+                    nextMessage = {
+                        ...message,
+                        role: 'system',
+                        text: '',
+                        meta: {
+                            ...(message.meta || {}),
+                            kind: 'changeList',
+                            files: bound.files,
+                            source: 'git',
+                            scope: 'turn',
+                            commitHead: bound.commitHead,
+                            commitBase: bound.commitBase,
+                            reverted: bound.reverted === true,
+                            statsByPath: bound.statsByPath || {}
+                        }
+                    };
+                }
+            }
             if (message.id && seenIds.has(message.id)) {
                 continue;
             }
             if (message.id) {
                 seenIds.add(message.id);
             }
-            merged.push(message);
+            merged.push(nextMessage);
             if (!message.id) continue;
             const list = byAnchor.get(message.id);
             if (!list || !list.length) continue;
