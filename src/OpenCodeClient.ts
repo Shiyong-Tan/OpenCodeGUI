@@ -5512,13 +5512,14 @@ export class OpenCodeClient {
     private async sendAutoResumePrompt(sessionId: string): Promise<boolean> {
         if (!sessionId) return false;
         try {
+            const agentMode = this.expectedMainAgentBySession.get(sessionId) || 'plan';
             const payload: any = {
                 parts: [{ type: 'text', text: this.autoResumePrompt }],
-                agent: 'plan'
+                agent: agentMode
             };
             await this.requestJson('POST', `/session/${sessionId}/prompt_async`, payload);
             this.awaitingAutoResumeUserAnchorBySession.add(sessionId);
-            this.logUiDebug(`EXT: autoresume.sent | sessionId=${sessionId}`);
+            this.logUiDebug(`EXT: autoresume.sent | sessionId=${sessionId} | agent=${agentMode}`);
             return true;
         } catch (error) {
             this.logUiDebug(`EXT: autoresume.result | sessionId=${sessionId} | success=false | err=${String(error)}`);
