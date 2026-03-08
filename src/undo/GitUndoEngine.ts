@@ -4,7 +4,7 @@ import * as vscode from 'vscode';
 import { GitRepoManager } from './GitRepoManager';
 import { GitSessionMapStore } from './GitSessionMapStore';
 import { RepoLockManager } from './GitLock';
-import { normalizeRepoPath, normalizeTouchedFiles } from './GitPathUtils';
+import { explainNormalizeRepoPath, normalizeRepoPath, normalizeTouchedFiles } from './GitPathUtils';
 import { runGit } from './GitRunner';
 import {
     ConflictInfo,
@@ -332,10 +332,15 @@ export class GitUndoEngine {
             const flat = flattenChanges(changes);
             const normalizedChanges: FileChangeSpec[] = [];
             const rawPaths: string[] = [];
+            const normalizationTrace: string[] = [];
             for (const item of flat) {
                 if (item.type === 'rename') {
-                    const oldPath = normalizeRepoPath(this.workspaceRoot, item.oldPath);
-                    const newPath = normalizeRepoPath(this.workspaceRoot, item.newPath);
+                    const oldExplain = explainNormalizeRepoPath(this.workspaceRoot, item.oldPath);
+                    const newExplain = explainNormalizeRepoPath(this.workspaceRoot, item.newPath);
+                    normalizationTrace.push(`rename.old raw=${item.oldPath} reason=${oldExplain.reason} normalized=${oldExplain.normalized || 'null'} abs=${oldExplain.abs || 'null'} root=${oldExplain.root || 'null'}`);
+                    normalizationTrace.push(`rename.new raw=${item.newPath} reason=${newExplain.reason} normalized=${newExplain.normalized || 'null'} abs=${newExplain.abs || 'null'} root=${newExplain.root || 'null'}`);
+                    const oldPath = oldExplain.normalized;
+                    const newPath = newExplain.normalized;
                     if (oldPath && newPath) {
                         normalizedChanges.push({ type: 'rename', oldPath, newPath });
                         rawPaths.push(oldPath, newPath);
@@ -343,7 +348,9 @@ export class GitUndoEngine {
                     continue;
                 }
                 if ('path' in item) {
-                    const normalized = normalizeRepoPath(this.workspaceRoot, item.path);
+                    const explain = explainNormalizeRepoPath(this.workspaceRoot, item.path);
+                    normalizationTrace.push(`path raw=${item.path} reason=${explain.reason} normalized=${explain.normalized || 'null'} abs=${explain.abs || 'null'} root=${explain.root || 'null'}`);
+                    const normalized = explain.normalized;
                     if (normalized) {
                         normalizedChanges.push({ type: item.type, path: normalized } as FileChangeSpec);
                         rawPaths.push(normalized);
@@ -351,6 +358,10 @@ export class GitUndoEngine {
                 }
             }
             const touchedFiles = normalizeTouchedFiles(this.workspaceRoot, rawPaths);
+            this.logger(`commit.trace | sessionId=${sessionId} workspaceRoot=${this.workspaceRoot} flat=${flat.length} normalizedChanges=${normalizedChanges.length} rawPaths=${JSON.stringify(rawPaths)} touchedFiles=${JSON.stringify(touchedFiles)}`);
+            for (const trace of normalizationTrace) {
+                this.logger(`commit.trace.path | sessionId=${sessionId} ${trace}`);
+            }
             if (!touchedFiles.length) {
                 this.logger(`commit.noop | reason=no-touched-files sessionId=${sessionId}`);
                 return { touchedFiles };

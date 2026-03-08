@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.1.11
+
+- Reworked subagent support end-to-end: added session ownership tracking, prevented subagent sessions from hijacking the main session, filtered subagents out of the session list, and rendered dedicated subagent activity/status cards in the webview.
+- Stabilized subagent completion and finalization flow: only authoritative final events can finish a subagent, completed cards now collapse cleanly to `Task done.`, and mode/model metadata is recovered reliably from SSE updates.
+- Overhauled assistant streaming rendering: temporary assistant bubbles now refresh using the latest chunk instead of accumulating stale text, final assistant content no longer replays intermediate text, and turn dividers / transient states render more predictably.
+- Hardened user-message filtering so injected system blocks such as analyze/search/BOULDER continuation directives and DCP protocol metadata are stripped from visible chat history while preserving real user prompts.
+- Added and refined todo/question UX: todo updates are rendered as persistent transient cards with clearer status styling, and question cards now use markdown rendering with better overflow handling and more consistent button sizing.
+- Improved code-diff and change-list behavior for multi-agent turns: added grouped diff gating, anchor-readiness retry, late-diff grace handling, better changelist hydration on reload/session switch, and markdown files in change lists now open via preview.
+- Fixed replay/resync behavior for grouped activity: grouped resync plumbing is in place, main-agent final acceptance now waits for OMO Boulder continuation prompts in Atlas/Sisyphus/Hephaestus-style modes, and replayed write/edit/apply_patch tool completions can restore final change-list eligibility without re-triggering full side effects.
+- Corrected undo/restore internals across multiple regressions: baseline/file-set drift was fixed, invalid segments survive merge/restore more safely, segment hydration/count display is more accurate, and changelist baselines align more closely with the actual turn base.
+- Improved persistence and reload behavior: snapshots now better align with display-message flow, persisted change lists rehydrate correctly after reload, transient UI cards were cleaned up, and several glyph/encoding regressions in action icons were fixed.
+- Fixed Windows internal-repo path normalization in undo/change tracking so drive-letter case differences no longer cause touched files to be filtered out before commit generation, and added targeted commit-trace diagnostics to speed up debugging when change-list generation fails.
+
 ## 1.1.9
 
 - Fixed turn-state race when sends are blocked in-flight: `registerPendingUserLocal` no longer starts a new turn and no longer clears finalize waiters/timers for the active turn.

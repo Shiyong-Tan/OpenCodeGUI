@@ -5099,14 +5099,12 @@ export class OpenCodeClient {
                 }
                 const toolName = typeof part?.tool === 'string' ? part.tool : '';
                 if (part?.state?.status === 'completed' && sessionId) {
-                    if (source !== 'resync') {
-                        if (['apply_patch', 'edit', 'write'].includes(toolName)) {
-                            this.markTurnHasWrites(sessionId, `tool:${toolName}`);
-                        } else if (toolName === 'bash') {
-                            const command = part?.state?.input?.command;
-                            if (!this.isBashCommandReadOnly(command)) {
-                                this.markTurnHasWrites(sessionId, 'tool:bash');
-                            }
+                    if (['apply_patch', 'edit', 'write'].includes(toolName)) {
+                        this.markTurnHasWrites(sessionId, `tool:${toolName}`);
+                    } else if (toolName === 'bash' && source !== 'resync') {
+                        const command = part?.state?.input?.command;
+                        if (!this.isBashCommandReadOnly(command)) {
+                            this.markTurnHasWrites(sessionId, 'tool:bash');
                         }
                     }
                 }
