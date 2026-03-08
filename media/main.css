@@ -1793,13 +1793,6 @@ select#mode-select {
 .message.bot.thinking {
     color: var(--vscode-descriptionForeground);
     font-style: italic;
-    animation: pulse 1.5s infinite;
-}
-
-@keyframes pulse {
-    0% { opacity: 0.5; }
-    50% { opacity: 1; }
-    100% { opacity: 0.5; }
 }
 
 /* Streaming content should render in normal style, not inherited italic */
@@ -1973,14 +1966,24 @@ select#mode-select {
    UI Consolidation V2 - Wave 1/2/3 Additions
    ============================================================================================== */
 
-/* --- Streaming Animation --- */
-@keyframes bubble-pulse {
-  0% { box-shadow: 0 0 0 0px rgba(0, 122, 204, 0.2); }
-  100% { box-shadow: 0 0 0 10px rgba(0, 122, 204, 0); }
+/* --- Streaming Animation (border only; keep body/text stable) --- */
+@keyframes thinking-border-blink {
+  0% {
+    border-color: var(--vscode-widget-border);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12), 0 0 0 0 rgba(0, 122, 204, 0);
+  }
+  50% {
+    border-color: #3ea6ff;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12), 0 0 0 2px rgba(62, 166, 255, 0.45);
+  }
+  100% {
+    border-color: var(--vscode-widget-border);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12), 0 0 0 0 rgba(0, 122, 204, 0);
+  }
 }
 
 .message.streaming {
-  animation: bubble-pulse 3s infinite;
+  animation: thinking-border-blink 1.35s ease-in-out infinite;
 }
 
 /* --- Subagent Cards (Alias/New) --- */

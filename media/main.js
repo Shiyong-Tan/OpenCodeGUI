@@ -7189,7 +7189,11 @@ function renderQuestionOverlayModal() {
 
     const prompt = document.createElement('div');
     prompt.className = 'question-card-question';
-    renderMarkdownInto(prompt, current.prompt || '');
+    renderAssistantMarkdown(prompt, {
+        role: 'assistant',
+        text: current.prompt || '',
+        meta: { isThinking: false }
+    });
     prompt.classList.add('markdown-body');
     card.appendChild(prompt);
 
