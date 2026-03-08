@@ -1989,7 +1989,7 @@ select#mode-select {
 }
 
 .message.streaming {
-  border: 2px solid transparent;
+  border: 1px solid transparent;
   background:
     linear-gradient(var(--vscode-editor-inactiveSelectionBackground), var(--vscode-editor-inactiveSelectionBackground)) padding-box,
     conic-gradient(
