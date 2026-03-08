@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.1.12
+
+- Refined transient task UI: reduced oversized subagent/todo status circles, added a `Todo list` title, normalized its typography, and improved icon/text alignment for todo rows.
+- Limited input-box `Tab` mode switching to the `plan` and `build` modes only, avoiding accidental cycling into unrelated modes during prompt entry.
+
 ## 1.1.11
 
 - Reworked subagent support end-to-end: added session ownership tracking, prevented subagent sessions from hijacking the main session, filtered subagents out of the session list, and rendered dedicated subagent activity/status cards in the webview.

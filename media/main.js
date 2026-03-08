@@ -3061,11 +3061,11 @@ function renderMessageElement(message, renderedSet) {
                  header.className = 'subagent-inline-header';
                  const titleText = (typeof agent.title === 'string' && agent.title.trim()) ? agent.title.trim() : 'Subagent';
                  const headerIcon = document.createElement('span');
+                 headerIcon.className = 'subagent-inline-icon';
                  const stateForIcon = typeof agent.state === 'string' ? agent.state : (agent.isDone === true ? 'done' : 'running');
                  const doneForIcon = stateForIcon === 'done';
                  headerIcon.textContent = doneForIcon ? '\u25CF' : '\u25CB';
                  headerIcon.style.color = doneForIcon ? '#22c55e' : '#f59e0b';
-                 headerIcon.style.marginRight = '6px';
                  header.appendChild(headerIcon);
                  header.appendChild(document.createTextNode(`Subagent ${index + 1}: ${titleText}`));
                  entry.appendChild(header);
@@ -3213,6 +3213,10 @@ function renderMessageElement(message, renderedSet) {
             Array.isArray(message.meta?.todos) && message.meta.todos.length > 0) {
             const todoCard = document.createElement('div');
             todoCard.className = 'todo-list';
+            const todoTitle = document.createElement('div');
+            todoTitle.className = 'todo-title';
+            todoTitle.textContent = 'Todo list';
+            todoCard.appendChild(todoTitle);
             for (const todo of message.meta.todos) {
                 if (!todo || typeof todo.content !== 'string') continue;
                 const item = document.createElement('div');
@@ -4839,7 +4843,7 @@ function handleChatDone(sessionId, message) {
     input.addEventListener('keydown', (e) => {
         if (e.key === 'Tab' && document.activeElement === input) {
             e.preventDefault();
-            const modeItems = Array.isArray(modes) && modes.length ? modes : ['plan', 'build'];
+            const modeItems = ['plan', 'build'].filter((mode) => Array.isArray(modes) ? modes.includes(mode) : true);
             const currentIndex = modeItems.indexOf(modeSelect.value);
             const nextIndex = currentIndex >= 0 ? ((currentIndex + 1) % modeItems.length) : 0;
             const nextMode = modeItems[nextIndex] || 'plan';
