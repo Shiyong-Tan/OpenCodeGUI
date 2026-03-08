@@ -116,6 +116,7 @@ export type ChatEvent = {
     isDone?: boolean;
     phase?: 'assistant_progress' | 'assistant_final_candidate' | 'assistant_final_accepted';
     lane?: EventLane;
+    source?: EventSource;
 };
 type PendingQuestionControl = {
     callId: string;
@@ -267,6 +268,16 @@ type AntigravityOAuthConstants = {
     clientSecret: string;
 };
 
+type PendingMainFinalGate = {
+    messageId: string;
+    messageIndex: number;
+    parentId?: string;
+    completedAt?: number;
+    finish?: string;
+    source: EventSource;
+    createdAt: number;
+};
+
 export class OpenCodeClient {
     public static outputChannel = vscode.window.createOutputChannel("OpenCode CLI");
     private currentChild?: cp.ChildProcess;
@@ -335,6 +346,9 @@ export class OpenCodeClient {
     private finalizingMsgIdBySession = new Map<string, string>();
     private turnFinalQuietTimersBySession = new Map<string, NodeJS.Timeout>();
     private readonly expectedMainAgentBySession = new Map<string, string>();
+    private readonly mainFinalDelayMs = 5000;
+    private readonly pendingMainFinalGateBySession = new Map<string, PendingMainFinalGate>();
+    private readonly pendingMainFinalTimerBySession = new Map<string, NodeJS.Timeout>();
     private readonly sessionIdleReceivedBySession = new Set<string>();
     private turnFinalWaitersBySession = new Map<string, Array<() => void>>();
     private turnFinalResolvedBySession = new Set<string>();
@@ -407,6 +421,8 @@ export class OpenCodeClient {
     private readonly restartCooldownMs = 60000;
     private readonly maxRestartsPerWindow = 3;
     private readonly turnAnchorOverrideWindowMs = 120000;
+    private readonly groupedResyncActivityEnabled = false;
+    private readonly replayMirroredChangeIdsBySession = new Map<string, Set<string>>();
 
     public resetSessionState(): void {
         this.currentSessionId = undefined;
@@ -487,6 +503,7 @@ export class OpenCodeClient {
         }
         this.lateDiffGraceBySession.clear();
         this.changeListEmittedBySession.clear();
+        this.replayMirroredChangeIdsBySession.clear();
     }
 
     constructor() {
@@ -648,6 +665,11 @@ export class OpenCodeClient {
             clearTimeout(timer);
         }
         this.turnFinalQuietTimersBySession.clear();
+        for (const timer of this.pendingMainFinalTimerBySession.values()) {
+            clearTimeout(timer);
+        }
+        this.pendingMainFinalTimerBySession.clear();
+        this.pendingMainFinalGateBySession.clear();
         this.turnFinalAtBySession.clear();
         this.turnFinalMsgIdBySession.clear();
         this.finalizingMsgIdBySession.clear();
@@ -677,6 +699,7 @@ export class OpenCodeClient {
     }
 
     private clearFinalizeSessionState(sessionId: string, reason: 'turn-start' | 'turn-finish'): void {
+        this.clearPendingMainFinalGate(sessionId, `clear:${reason}`);
         this.turnFinalAtBySession.delete(sessionId);
         this.turnFinalMsgIdBySession.delete(sessionId);
         this.finalizingMsgIdBySession.delete(sessionId);
@@ -718,6 +741,103 @@ export class OpenCodeClient {
         this.pendingQuestionCallIdsBySession.delete(sessionId);
         this.pendingPermissionIdsBySession.delete(sessionId);
         this.toolStatusBySession.delete(sessionId);
+    }
+
+    private isDelayedMainFinalMode(sessionId: string | undefined): boolean {
+        if (!sessionId) return false;
+        const mode = (this.expectedMainAgentBySession.get(sessionId) || '').toLowerCase();
+        if (!mode) return false;
+        return mode.includes('sisyphus') || mode.includes('hephaestus') || mode.includes('atlas');
+    }
+
+    private isBoulderContinuationText(text: string): boolean {
+        if (!text) return false;
+        return text.includes('[SYSTEM DIRECTIVE: OH-MY-OPENCODE - BOULDER CONTINUATION]')
+            && text.includes('<!-- OMO_INTERNAL_INITIATOR -->');
+    }
+
+    private clearPendingMainFinalGate(sessionId: string | undefined, reason: string): void {
+        if (!sessionId) return;
+        const timer = this.pendingMainFinalTimerBySession.get(sessionId);
+        if (timer) {
+            clearTimeout(timer);
+            this.pendingMainFinalTimerBySession.delete(sessionId);
+        }
+        const pending = this.pendingMainFinalGateBySession.get(sessionId);
+        if (pending) {
+            this.pendingMainFinalGateBySession.delete(sessionId);
+            this.logUiDebug(`EXT: turn.final.pending.clear | sessionId=${sessionId} | msgId=${pending.messageId} | reason=${reason}`);
+        }
+    }
+
+    private emitAcceptedFinalMetaNow(
+        sessionId: string,
+        messageId: string,
+        messageIndex: number,
+        source: EventSource,
+        parentId: string | undefined,
+        completedAt: number | undefined,
+        finish: string | undefined,
+        lane: EventLane,
+        reason: string
+    ): void {
+        const phase = lane === 'subagent' ? 'subagent-final-accepted' : 'turn-final-accepted';
+        const shouldEmit = source === 'sse' && this.shouldEmitFinalMeta(sessionId, messageId, completedAt, finish, source);
+        if (!shouldEmit) return;
+        if (!this.consumePhaseOnce(sessionId, messageId, phase)) return;
+        const out: ChatEvent[] = [];
+        this.emitAssistantPhase(out, {
+            sessionId,
+            messageId,
+            parentId,
+            source,
+            lane,
+            phase: 'assistant_final_accepted',
+            reason
+        });
+        out.push({
+            type: 'assistantMessageMeta',
+            sessionId,
+            assistantMsgId: messageId,
+            messageId,
+            messageIndex,
+            tmpKey: this.getPendingAssistantTmpKey(sessionId),
+            source,
+        });
+        this.emitChatEvents(out);
+    }
+
+    private armPendingMainFinalGate(
+        sessionId: string,
+        payload: PendingMainFinalGate
+    ): void {
+        this.clearPendingMainFinalGate(sessionId, 'replace');
+        this.pendingMainFinalGateBySession.set(sessionId, payload);
+        this.logUiDebug(`EXT: turn.final.pending.start | sessionId=${sessionId} | msgId=${payload.messageId} | delayMs=${this.mainFinalDelayMs}`);
+        const timer = setTimeout(() => {
+            this.pendingMainFinalTimerBySession.delete(sessionId);
+            const pending = this.pendingMainFinalGateBySession.get(sessionId);
+            if (!pending || pending.messageId !== payload.messageId) return;
+            this.pendingMainFinalGateBySession.delete(sessionId);
+            if (!this.turnStateBySession.has(sessionId) || this.turnFinalResolvedBySession.has(sessionId)) {
+                this.logUiDebug(`EXT: turn.final.pending.drop | sessionId=${sessionId} | msgId=${payload.messageId} | reason=state-closed`);
+                return;
+            }
+            this.logUiDebug(`EXT: turn.final.pending.timeout-accept | sessionId=${sessionId} | msgId=${payload.messageId}`);
+            this.markTurnFinal(sessionId, payload.messageId, payload.source);
+            this.emitAcceptedFinalMetaNow(
+                sessionId,
+                payload.messageId,
+                payload.messageIndex,
+                payload.source,
+                payload.parentId,
+                payload.completedAt,
+                payload.finish,
+                'main',
+                'turn-final-accepted-delayed'
+            );
+        }, this.mainFinalDelayMs);
+        this.pendingMainFinalTimerBySession.set(sessionId, timer);
     }
 
     public startTurn(sessionId: string, pendingUserLocalKey: string): void {
@@ -963,6 +1083,42 @@ export class OpenCodeClient {
         }
         this.logUiDebug(`[DIFF_GATE] decision | sessionId=${sessionId} action=deny reason=no-grouped-pending-turn-changes`);
         return false;
+    }
+
+    private getGroupedSseFreshness(sessionId: string): number | undefined {
+        if (!sessionId) return undefined;
+        if (!this.groupedResyncActivityEnabled) {
+            return this.lastSseAtBySession.get(sessionId);
+        }
+        if (this.subagentToParentSessionMap.has(sessionId)) {
+            return this.lastSseAtBySession.get(sessionId);
+        }
+        const relatedIds = this.getRelatedSessionIds(sessionId);
+        let maxSseAt: number | undefined;
+        for (const id of relatedIds) {
+            const sseAt = this.lastSseAtBySession.get(id);
+            if (typeof sseAt !== 'number') continue;
+            maxSseAt = maxSseAt === undefined ? sseAt : Math.max(maxSseAt, sseAt);
+        }
+        return maxSseAt;
+    }
+
+    private getGroupedProgressFreshness(sessionId: string): number | undefined {
+        if (!sessionId) return undefined;
+        if (!this.groupedResyncActivityEnabled) {
+            return this.lastProgressAtBySession.get(sessionId);
+        }
+        if (this.subagentToParentSessionMap.has(sessionId)) {
+            return this.lastProgressAtBySession.get(sessionId);
+        }
+        const relatedIds = this.getRelatedSessionIds(sessionId);
+        let maxProgressAt: number | undefined;
+        for (const id of relatedIds) {
+            const progressAt = this.lastProgressAtBySession.get(id);
+            if (typeof progressAt !== 'number') continue;
+            maxProgressAt = maxProgressAt === undefined ? progressAt : Math.max(maxProgressAt, progressAt);
+        }
+        return maxProgressAt;
     }
 
     /**
@@ -1311,6 +1467,11 @@ export class OpenCodeClient {
         if (!sessionId || !msgId) return;
         if (!this.isSessionAwaitingFinal(sessionId)) return;
         if ((this.turnRecoveryModeBySession.get(sessionId) || 'sse') !== 'resync') return;
+        if (this.subagentToParentSessionMap.has(sessionId)) {
+            const rootSessionId = this.subagentToParentSessionMap.get(sessionId) || sessionId;
+            this.logUiDebug(`EXT: resync.root.recover.blocked | rootSessionId=${rootSessionId} | targetSessionId=${sessionId} | reason=subagent-final | source=sse`);
+            return;
+        }
         const finalMsgId = this.getFinalizingMsgId(sessionId);
         if (finalMsgId && finalMsgId !== msgId) return;
         const nextEpoch = (this.turnResyncEpochBySession.get(sessionId) || 0) + 1;
@@ -1326,6 +1487,11 @@ export class OpenCodeClient {
         if ((this.turnRecoveryModeBySession.get(sessionId) || 'sse') !== 'resync') return;
         if (!this.turnStateBySession.has(sessionId)) return;
         if (this.turnFinalAtBySession.has(sessionId)) return;
+        if (this.subagentToParentSessionMap.has(sessionId)) {
+            const rootSessionId = this.subagentToParentSessionMap.get(sessionId) || sessionId;
+            this.logUiDebug(`EXT: resync.root.recover.blocked | rootSessionId=${rootSessionId} | targetSessionId=${sessionId} | reason=subagent-sse | source=sse`);
+            return;
+        }
         const nextEpoch = (this.turnResyncEpochBySession.get(sessionId) || 0) + 1;
         this.turnResyncEpochBySession.set(sessionId, nextEpoch);
         this.turnRecoveryModeBySession.set(sessionId, 'sse');
@@ -1346,6 +1512,7 @@ export class OpenCodeClient {
     private resolveTurnFinal(sessionId: string, reason: string): void {
         if (!sessionId) return;
         if (this.turnFinalResolvedBySession.has(sessionId)) return;
+        this.clearPendingMainFinalGate(sessionId, `resolved:${reason}`);
         this.turnFinalResolvedBySession.add(sessionId);
         this.stopNonFinalResyncLoop(sessionId, `resolved:${reason}`);
         this.stopRescueWatchdog(sessionId, reason);
@@ -1450,6 +1617,22 @@ export class OpenCodeClient {
         if (this.hasInteractiveBlocker(sessionId)) {
             this.logUiDebug(`EXT: rescue.pause | sessionId=${sessionId} | reason=interactive-blocker`);
             return;
+        }
+        if (this.groupedResyncActivityEnabled) {
+            const groupedSseAt = this.getGroupedSseFreshness(sessionId) || 0;
+            const groupedProgressAt = this.getGroupedProgressFreshness(sessionId) || 0;
+            const activeAt = Math.max(groupedSseAt, groupedProgressAt);
+            const rootSseAt = this.lastSseAtBySession.get(sessionId) || 0;
+            const rootProgressAt = this.lastProgressAtBySession.get(sessionId) || 0;
+            const rootActiveAt = Math.max(rootSseAt, rootProgressAt);
+            if (activeAt && (Date.now() - activeAt < this.rescueStartDelayMs)) {
+                if (rootActiveAt && (Date.now() - rootActiveAt >= this.rescueStartDelayMs)) {
+                    this.logUiDebug(`EXT: rescue.defer.override | sessionId=${sessionId} | reason=root-stale`);
+                } else {
+                    this.logUiDebug(`EXT: rescue.defer | sessionId=${sessionId} | reason=grouped-activity`);
+                    return;
+                }
+            }
         }
         const existing = this.turnRescueTimerBySession.get(sessionId);
         if (existing) {
@@ -2415,10 +2598,40 @@ export class OpenCodeClient {
         // this.logUiDebug(`[DBG_TURN_QUEUE] session=${sessionId} turnKey=${turnKey} added=${changeSpecs.length} total=${next.changes.length}`);
     }
 
-    private mirrorChangesToParentSession(subagentSessionId: string, changeSpecs: FileChangeSpec[]): void {
+    // Canonical live ingestion path for subagent→parent change tracking.
+    // Replay (`source='resync'`) must never feed parent pending changes.
+    private mirrorChangesToParentSession(subagentSessionId: string, changeSpecs: FileChangeSpec[], source: EventSource = 'sse'): void {
         if (!subagentSessionId || !changeSpecs.length) return;
+        if (source === 'resync') return;
         const parentSessionId = this.subagentToParentSessionMap.get(subagentSessionId);
         if (!parentSessionId) return;
+        const replayKey = `${parentSessionId}::${subagentSessionId}`;
+        const seen = this.replayMirroredChangeIdsBySession.get(replayKey) || new Set<string>();
+        const fingerprint = changeSpecs
+            .map((spec) => {
+                if (spec.type === 'multi') {
+                    return spec.items
+                        .map((item) => {
+                            if ('path' in item) return `${item.type}:${item.path}`;
+                            if ('oldPath' in item && 'newPath' in item) return `${item.type}:${item.oldPath}->${item.newPath}`;
+                            return `${item.type}:unknown`;
+                        })
+                        .join(',');
+                }
+                if (spec.type === 'rename') return `${spec.type}:${spec.oldPath}->${spec.newPath}`;
+                return `${spec.type}:${spec.path}`;
+            })
+            .sort()
+            .join('|');
+        if (seen.has(fingerprint)) {
+            return;
+        }
+        seen.add(fingerprint);
+        if (seen.size > 2000) {
+            seen.clear();
+            seen.add(fingerprint);
+        }
+        this.replayMirroredChangeIdsBySession.set(replayKey, seen);
         const parentState = this.turnStateBySession.get(parentSessionId);
         const turnKey = parentState?.pendingUserLocalKey || parentSessionId;
         const tmpKey = parentState?.pendingAssistantTmpKey;
@@ -2428,6 +2641,7 @@ export class OpenCodeClient {
         this.logUiDebug(`subagent.queue.mirror | subagent=${subagentSessionId} parent=${parentSessionId} specs=${changeSpecs.length}`);
     }
 
+    // UI-driven helper for live subagent file events (SidebarProvider). Replay should not invoke this path.
     public queueSubagentChanges(mainSessionId: string, files: any[]): void {
         if (!mainSessionId || !files?.length) return;
         let pending = this.pendingTurnChangesBySession.get(mainSessionId);
@@ -4466,8 +4680,16 @@ export class OpenCodeClient {
     private mapServerEventToChatEvents(type: string, props: any, source: EventSource = 'sse'): ChatEvent[] {
         const events: ChatEvent[] = [];
         const normalized = this.normalizeEvent(type, props, source);
-        if (normalized.sessionId) {
+        const sessionId = normalized.sessionId;
+        if (sessionId) {
             this.logUiDebug(`EXT: event.normalized | type=${normalized.type} | lane=${normalized.lane} | sessionId=${normalized.sessionId} | messageId=${normalized.messageId || 'null'} | parentId=${normalized.parentId || 'null'} | finish=${normalized.finish || 'null'} | partType=${normalized.partType || 'null'} | source=${normalized.source}`);
+        }
+        if (source === 'resync' && sessionId && (type === 'files' || type === 'diff' || type === 'toolPatch')) {
+            const rootSessionId = this.subagentToParentSessionMap.get(sessionId) || sessionId;
+            if (this.subagentToParentSessionMap.has(sessionId)) {
+                this.logUiDebug(`EXT: resync.subagent.sideeffect.suppressed | rootSessionId=${rootSessionId} | targetSessionId=${sessionId} | reason=resync-sideeffect-protection | source=resync`);
+                return [];
+            }
         }
         if (type === 'session.created' || type === 'session.updated') {
             if (props?.info?.id) {
@@ -4478,6 +4700,7 @@ export class OpenCodeClient {
                     agent: typeof props.info?.agent === 'string' ? props.info.agent : undefined,
                     modelID: typeof props.info?.modelID === 'string' ? props.info.modelID : undefined,
                     providerID: typeof props.info?.providerID === 'string' ? props.info.providerID : undefined,
+                    source,
                 });
             }
             return events;
@@ -4499,7 +4722,8 @@ export class OpenCodeClient {
                     permission,
                     patterns,
                     metadata: props?.metadata,
-                    callId: typeof props?.tool?.callID === 'string' ? props.tool.callID : undefined
+                    callId: typeof props?.tool?.callID === 'string' ? props.tool.callID : undefined,
+                    source,
                 });
             }
             return events;
@@ -4515,7 +4739,8 @@ export class OpenCodeClient {
                     sessionId,
                     permissionId: requestId,
                     requestId,
-                    response: reply === 'always' || reply === 'reject' ? reply : 'once'
+                    response: reply === 'always' || reply === 'reject' ? reply : 'once',
+                    source,
                 });
             }
             return events;
@@ -4546,7 +4771,8 @@ export class OpenCodeClient {
 						mode,
 						agent,
 						modelID,
-						providerID,
+					providerID,
+					source,
 					});
 				}
 			}
@@ -4593,7 +4819,7 @@ export class OpenCodeClient {
             }
             if (role === 'user' && messageId && source === 'sse') {
                 if (shouldEmitUserMessageEvent) {
-                    events.push({ type: 'message', text: messageId, sessionId });
+                    events.push({ type: 'message', text: messageId, sessionId , source });
                 }
             }
             if (role === 'assistant' && messageId) {
@@ -4634,9 +4860,23 @@ export class OpenCodeClient {
                     if (sessionId && !isSubagentLane) {
                         this.maybeBackfillTurnUserAnchor(sessionId, info);
                         if (this.shouldAcceptTurnCompletionFinal(sessionId, info)) {
-                            this.logUiDebug(`EXT: turn.final.accept | sessionId=${sessionId} | msgId=${messageId} | finish=${String(info?.finish || '')} | source=${source}`);
-                            this.markTurnFinal(sessionId, messageId, source);
-                            acceptedFinal = true;
+                            if (source === 'sse' && this.isDelayedMainFinalMode(sessionId)) {
+                                this.armPendingMainFinalGate(sessionId, {
+                                    messageId,
+                                    messageIndex,
+                                    parentId: typeof info?.parentID === 'string' ? info.parentID : undefined,
+                                    completedAt,
+                                    finish: typeof info?.finish === 'string' ? info.finish : undefined,
+                                    source,
+                                    createdAt: Date.now()
+                                });
+                                this.logUiDebug(`EXT: turn.final.defer | sessionId=${sessionId} | msgId=${messageId} | mode=${this.expectedMainAgentBySession.get(sessionId) || 'unknown'} | source=${source}`);
+                            } else {
+                                this.clearPendingMainFinalGate(sessionId, 'immediate-accept');
+                                this.logUiDebug(`EXT: turn.final.accept | sessionId=${sessionId} | msgId=${messageId} | finish=${String(info?.finish || '')} | source=${source}`);
+                                this.markTurnFinal(sessionId, messageId, source);
+                                acceptedFinal = true;
+                            }
                         } else {
                             this.logUiDebug(`EXT: turn.final.skip | sessionId=${sessionId} | msgId=${messageId} | finish=${String(info?.finish || '')} | source=${source}`);
                         }
@@ -4667,7 +4907,8 @@ export class OpenCodeClient {
                             assistantMsgId: messageId,
                             messageId,
                             messageIndex,
-                            tmpKey: this.getPendingAssistantTmpKey(sessionId)
+                            tmpKey: this.getPendingAssistantTmpKey(sessionId),
+                            source,
                         });
                     }
                 }
@@ -4705,7 +4946,8 @@ export class OpenCodeClient {
                         title: questionOverlay.title,
                         prompt: questionOverlay.prompt,
                         options: questionOverlay.options,
-                        questions: questionOverlay.questions
+                        questions: questionOverlay.questions,
+                        source,
                     });
                 }
             }
@@ -4713,6 +4955,11 @@ export class OpenCodeClient {
                 const msgId = typeof part?.messageID === 'string' ? part.messageID : '';
                 const knownLenBefore = msgId ? (this.assistantTextLengths.get(msgId) || 0) : 0;
                 const roleForMsg = msgId ? this.messageRoleById.get(msgId) : undefined;
+                const partTextForGate = this.extractTextPayload(part?.text);
+                if (source === 'sse' && sessionId && this.pendingMainFinalGateBySession.has(sessionId) && this.isBoulderContinuationText(partTextForGate)) {
+                    this.clearPendingMainFinalGate(sessionId, 'boulder-continuation');
+                    this.logUiDebug(`EXT: turn.final.pending.cancel | sessionId=${sessionId} | reason=boulder-continuation`);
+                }
                 if (source === 'sse' && sessionId && msgId && roleForMsg === 'user') {
                     const partText = typeof part?.text === 'string' ? part.text : '';
                     if (this.isAutoResumePromptText(partText)) {
@@ -4725,7 +4972,7 @@ export class OpenCodeClient {
                             this.setDisplayTurnUserMsgId(sessionId, msgId, 'user-part-ack');
                         }
                         this.markSessionProgress(sessionId, 'user-part-ack', msgId);
-                        events.push({ type: 'message', text: msgId, sessionId });
+                        events.push({ type: 'message', text: msgId, sessionId , source });
                         this.logUiDebug(`EXT: user.ack.part.accept | sessionId=${sessionId} | msgId=${msgId} | reason=role-user`);
                     }
                     return events;
@@ -4796,12 +5043,13 @@ export class OpenCodeClient {
                             assistantMsgId: part?.messageID,
                             lastText: 'Finalizing the response...',
                             tmpKey: this.getPendingAssistantTmpKey(sessionId),
-                            isStatusUpdate: true
+                            isStatusUpdate: true,
+                            source,
                         });
                     }
                     this.assistantStatusCleared.add(msgId);
                 }
-                events.push({ type: 'text', text: chunk, sessionId, assistantMsgId: part?.messageID, tmpKey: this.getPendingAssistantTmpKey(sessionId) });
+                events.push({ type: 'text', text: chunk, sessionId, assistantMsgId: part?.messageID, tmpKey: this.getPendingAssistantTmpKey(sessionId) , source });
             }
             if (part?.type === 'tool') {
                 const messageId = typeof part?.messageID === 'string' ? part.messageID : undefined;
@@ -4831,7 +5079,7 @@ export class OpenCodeClient {
                 if (statusText && source !== 'resync') {
                     const resolvedId = this.getTurnAssistantMsgId(sessionId);
                     const assistantMsgId = resolvedId || part?.messageID;
-                    events.push({ type: 'assistantMessageMeta', sessionId, assistantMsgId, lastText: statusText, tmpKey: this.getPendingAssistantTmpKey(sessionId), isStatusUpdate: true });
+                    events.push({ type: 'assistantMessageMeta', sessionId, assistantMsgId, lastText: statusText, tmpKey: this.getPendingAssistantTmpKey(sessionId), isStatusUpdate: true , source });
                 }
                 if (typeof sessionId === 'string' && this.subagentToParentSessionMap.has(sessionId)) {
                     const status = part?.state?.status;
@@ -4845,6 +5093,7 @@ export class OpenCodeClient {
                                 input: part?.state?.input,
                                 output: part?.state?.output,
                             },
+                            source,
                         });
                     }
                 }
@@ -4866,7 +5115,7 @@ export class OpenCodeClient {
                     const todos = part?.state?.metadata?.todos;
                     if (Array.isArray(todos) && todos.length > 0 && sessionId) {
                         const msgId = this.getTurnAssistantMsgId(sessionId) || part?.messageID || '';
-                        events.push({ type: 'todoUpdate', todos, sessionId, assistantMsgId: msgId });
+                        events.push({ type: 'todoUpdate', todos, sessionId, assistantMsgId: msgId , source });
                     }
                 }
                 if (source === 'sse' && sessionId && toolState.becameTerminal && !this.hasPendingOrRunningTools(sessionId) && !this.turnFinalResolvedBySession.has(sessionId)) {
@@ -4883,8 +5132,8 @@ export class OpenCodeClient {
                             const assistantId = turnState?.assistantMsgId || turnState?.lastResolvedAssistantMsgId;
                             this.queueTurnChanges(sessionId, turnKey, tmpKey, assistantId, changeSpecs);
                         }
-                        this.mirrorChangesToParentSession(sessionId, changeSpecs);
-                        events.push({ type: 'files', files, sessionId });
+                        this.mirrorChangesToParentSession(sessionId, changeSpecs, source);
+                        events.push({ type: 'files', files, sessionId , source });
                     } else if (part?.tool === 'bash' && sessionId) {
                         const command = part?.state?.input?.command;
                         const cwd = this.lastCwdBySession.get(sessionId);
@@ -4900,15 +5149,15 @@ export class OpenCodeClient {
                             }
                         }
                     }
-                }
             }
+        }
         if (part?.type === 'tool' && part?.tool === 'apply_patch') {
             const patchText = part?.state?.input?.patchText || part?.state?.input?.patch;
             const relatedIds = this.getRelatedSessionIds(sessionId);
             const allowDiff = Boolean(sessionId && (this.hasGroupedActiveTurnWrites(sessionId) || this.hasGroupedPendingTurnChanges(sessionId)));
             this.logUiDebug(`[DIFF_GATE] apply_patch allowDiff check | sessionId=${sessionId} relatedCount=${relatedIds.length} relatedIds=[${relatedIds.join(',')}] allowDiff=${allowDiff}`);
             if (patchText && allowDiff) {
-                events.push({ type: 'toolPatch', text: patchText, sessionId });
+                events.push({ type: 'toolPatch', text: patchText, sessionId , source });
             }
         }
         if ((part?.type === 'diff' || part?.type === 'patch') && typeof part?.text === 'string') {
@@ -4924,11 +5173,12 @@ export class OpenCodeClient {
                 this.logUiDebug(`[LATE_DIFF] event in grace window | sessionId=${sessionId} eventType=${part?.type}`);
             }
             if (allowDiff) {
-                events.push({ type: 'diff', text: part.text, sessionId });
+                events.push({ type: 'diff', text: part.text, sessionId , source });
             }
         }
         return events;
     }
+
     if (type === 'session.diff' && Array.isArray(props?.diff)) {
         if (props?.sessionID && this.canceledActiveTurnBySession.get(props.sessionID) === true) {
             return events;
@@ -4963,8 +5213,8 @@ export class OpenCodeClient {
                     const assistantId = turnState?.assistantMsgId || turnState?.lastResolvedAssistantMsgId;
                     this.queueTurnChanges(sessionId, turnKey, tmpKey, assistantId, changeSpecs);
                 }
-                this.mirrorChangesToParentSession(sessionId, changeSpecs);
-                events.push({ type: 'files', files, sessionId: props?.sessionID });
+                this.mirrorChangesToParentSession(sessionId, changeSpecs, source);
+                events.push({ type: 'files', files, sessionId: props?.sessionID , source });
             }
             return events;
         }
@@ -4987,7 +5237,7 @@ export class OpenCodeClient {
                 return events;
             }
             if (message) {
-                events.push({ type: 'error', text: message, sessionId: props?.sessionID });
+                events.push({ type: 'error', text: message, sessionId: props?.sessionID , source });
             }
             return events;
         }
@@ -5419,46 +5669,132 @@ export class OpenCodeClient {
 
     private async resyncForChatResolve(sessionId: string, reason = 'resolve'): Promise<void> {
         if (!sessionId) return;
-        const inflight = this.resyncInFlightBySession.get(sessionId);
-        if (inflight) {
-            await inflight.catch(() => undefined);
-            return;
-        }
-        const resyncEpoch = this.beginResyncRecovery(sessionId, reason);
-        const startedAt = Date.now();
-        this.task1Metrics.resyncRecoveryAttempts += 1;
-        this.logUiDebug(`EXT: resyncResolve.start | sessionId=${sessionId} | epoch=${resyncEpoch}`);
-        const task = this.resyncLimited(sessionId, resyncEpoch)
-            .then(async (summary) => {
-                const elapsedMs = Date.now() - startedAt;
-                if (summary.replayedFinal > 0) {
-                    this.task1Metrics.resyncRecoverySuccess += 1;
-                }
-                this.logUiDebug(
-                    `EXT: resyncResolve.done | sessionId=${sessionId} | epoch=${resyncEpoch} | replayedFinal=${summary.replayedFinal} | replayedTools=${summary.replayedTools} | elapsedMs=${elapsedMs}`
-                );
-                await this.updateResyncStallState(sessionId, summary, reason);
-            })
-            .catch((error) => {
-                this.logUiDebug(`EXT: resyncResolve.fail | sessionId=${sessionId} | epoch=${resyncEpoch} | err=${String(error)}`);
-            })
-            .finally(() => {
-                this.resyncInFlightBySession.delete(sessionId);
-                this.resyncCooldownUntilBySession.set(sessionId, Date.now() + this.resyncCooldownMs);
-                this.armNonFinalResyncLoop(sessionId, `post-resolve:${reason}`);
-            });
 
-        this.resyncInFlightBySession.set(sessionId, task);
-        await task;
+        const rootSessionId = this.subagentToParentSessionMap.get(sessionId) || sessionId;
+        const targetSessionIds = this.groupedResyncActivityEnabled
+            ? this.getRelatedSessionIds(rootSessionId)
+            : [sessionId];
+
+        if (this.groupedResyncActivityEnabled) {
+            this.logUiDebug(
+                `EXT: resync.group.activity | rootSessionId=${rootSessionId} | targetSessionId=${sessionId} | reason=${reason} | source=resync | targetCount=${targetSessionIds.length}`
+            );
+        }
+
+        for (const targetSessionId of targetSessionIds) {
+            if (!targetSessionId) continue;
+            let blockedBySubagent = false;
+            if (!this.subagentToParentSessionMap.has(targetSessionId)) {
+                const subagents = Array.from(this.subagentToParentSessionMap.entries())
+                    .filter(([, parentId]) => parentId === targetSessionId)
+                    .map(([subId]) => subId);
+                for (const subId of subagents) {
+                    if (this.resyncInFlightBySession.has(subId)) {
+                        const blockRootId = this.subagentToParentSessionMap.get(targetSessionId) || targetSessionId;
+                        this.logUiDebug(
+                            `EXT: resync.root.recover.blocked | rootSessionId=${blockRootId} | targetSessionId=${targetSessionId} | reason=subagent-resync-active | source=resync`
+                        );
+                        blockedBySubagent = true;
+                        break;
+                    }
+                }
+            }
+            if (blockedBySubagent) {
+                continue;
+            }
+
+            const inflight = this.resyncInFlightBySession.get(targetSessionId);
+            if (inflight) {
+                await inflight.catch(() => undefined);
+                continue;
+            }
+
+            const resyncEpoch = this.beginResyncRecovery(targetSessionId, reason);
+            const startedAt = Date.now();
+            if (this.groupedResyncActivityEnabled) {
+                this.logUiDebug(
+                    `EXT: resync.group.activity | rootSessionId=${rootSessionId} | targetSessionId=${targetSessionId} | reason=${reason} | source=resync`
+                );
+            }
+            this.task1Metrics.resyncRecoveryAttempts += 1;
+            this.logUiDebug(`EXT: resyncResolve.start | sessionId=${targetSessionId} | epoch=${resyncEpoch}`);
+            const task = this.resyncLimited(targetSessionId, resyncEpoch)
+                .then(async (summary) => {
+                    const elapsedMs = Date.now() - startedAt;
+                    if (summary.replayedFinal > 0) {
+                        this.task1Metrics.resyncRecoverySuccess += 1;
+                    }
+                    this.logUiDebug(
+                        `EXT: resyncResolve.done | sessionId=${targetSessionId} | epoch=${resyncEpoch} | replayedFinal=${summary.replayedFinal} | replayedTools=${summary.replayedTools} | elapsedMs=${elapsedMs}`
+                    );
+                    await this.updateResyncStallState(targetSessionId, summary, reason);
+                })
+                .catch((error) => {
+                    this.logUiDebug(`EXT: resyncResolve.fail | sessionId=${targetSessionId} | epoch=${resyncEpoch} | err=${String(error)}`);
+                })
+                .finally(() => {
+                    this.resyncInFlightBySession.delete(targetSessionId);
+                    this.resyncCooldownUntilBySession.set(targetSessionId, Date.now() + this.resyncCooldownMs);
+                    this.armNonFinalResyncLoop(targetSessionId, `post-resolve:${reason}`);
+                });
+
+            this.resyncInFlightBySession.set(targetSessionId, task);
+            await task;
+        }
     }
 
     private shouldReplayResyncMessage(sessionId: string, info: any): boolean {
         if (!sessionId || !info) return false;
+
+        const result = this.shouldReplayResyncMessageInternal(sessionId, info);
+        const rootSessionId = this.subagentToParentSessionMap.get(sessionId) || sessionId;
+        if (this.subagentToParentSessionMap.has(sessionId)) {
+            const marker = result ? 'resync.subagent.replay.accept' : 'resync.subagent.replay.skip';
+            this.logUiDebug(`EXT: ${marker} | rootSessionId=${rootSessionId} | targetSessionId=${sessionId} | reason=filter-rules | source=resync`);
+        }
+        return result;
+    }
+
+    private shouldReplayResyncMessageInternal(sessionId: string, info: any): boolean {
+        if (!sessionId || !info) return false;
+
+        // Session-local subagent replay filter rules (Task 3)
+        const isSubagent = this.subagentToParentSessionMap.has(sessionId);
+        if (isSubagent) {
+            // Exclude summary=true and mode=compaction for subagent replay
+            if (info?.summary === true) return false;
+            if (info?.mode === 'compaction') return false;
+
+            // Session-local anchor checks (prioritized)
+            const userMsgId = this.currentTurnUserMsgIdBySession.get(sessionId);
+            const parentId = info?.parentID;
+            const pendingUser = this.pendingUserMsgIdBySession.get(sessionId);
+
+            // 1. Current-turn anchor match
+            if (userMsgId && parentId === userMsgId) return true;
+
+            // 2. Pending-user anchor match
+            if (pendingUser && parentId === pendingUser) return true;
+
+            // 3. Conservative time fallback when both anchors missing
+            if (!userMsgId && !pendingUser) {
+                const createdAt = info?.time?.created;
+                const startedAt = this.currentTurnStartedAtBySession.get(sessionId);
+                if (typeof startedAt === 'number' && typeof createdAt === 'number') {
+                    if (createdAt >= startedAt - 2000 && info?.role === 'assistant') {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        // Main-session logic (unchanged)
         const userMsgId = this.currentTurnUserMsgIdBySession.get(sessionId);
         const parentId = info?.parentID;
-        const createdAt = info?.time?.created;
         if (userMsgId && parentId === userMsgId) return true;
         if (this.isCompactionSummaryInfo(info)) return false;
+        const createdAt = info?.time?.created;
         const startedAt = this.currentTurnStartedAtBySession.get(sessionId);
         if (typeof startedAt === 'number' && typeof createdAt === 'number') {
             if (createdAt >= startedAt - 2000 && info?.role === 'assistant') {
@@ -5507,6 +5843,8 @@ export class OpenCodeClient {
             result.newestObservedMsgId = newestObserved;
         }
         this.logUiDebug(`EXT: resync.fetch.path | sessionId=${sessionId} | source=${source} | anchor=${anchorMsgId || 'null'} | anchorHit=${String(anchorHit)} | recentCount=${recentList.length} | usedCount=${list.length}`);
+        const rootIdForFetch = this.subagentToParentSessionMap.get(sessionId) || sessionId;
+        this.logUiDebug(`EXT: resync.group.fetch | rootSessionId=${rootIdForFetch} | targetSessionId=${sessionId} | reason=resync-limited | source=${source}`);
 
         // Pre-scan: find the last stop-final message
         let lastStopFinalId: string | undefined;
