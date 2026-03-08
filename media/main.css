@@ -1966,24 +1966,32 @@ select#mode-select {
    UI Consolidation V2 - Wave 1/2/3 Additions
    ============================================================================================== */
 
-/* --- Streaming Animation (border only; keep body/text stable) --- */
-@keyframes thinking-border-blink {
-  0% {
-    border-color: var(--vscode-widget-border);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12), 0 0 0 0 rgba(0, 122, 204, 0);
-  }
-  50% {
-    border-color: #3ea6ff;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12), 0 0 0 2px rgba(62, 166, 255, 0.45);
-  }
-  100% {
-    border-color: var(--vscode-widget-border);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12), 0 0 0 0 rgba(0, 122, 204, 0);
-  }
+/* --- Streaming Animation (flowing border only; no bubble rotation) --- */
+@property --thinking-ring-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+@keyframes thinking-border-flow {
+  0% { --thinking-ring-angle: 0deg; }
+  100% { --thinking-ring-angle: 360deg; }
 }
 
 .message.streaming {
-  animation: thinking-border-blink 1.35s ease-in-out infinite;
+  border: 2px solid transparent;
+  background:
+    linear-gradient(var(--vscode-editor-inactiveSelectionBackground), var(--vscode-editor-inactiveSelectionBackground)) padding-box,
+    conic-gradient(
+      from var(--thinking-ring-angle),
+      rgba(100, 190, 255, 0.12) 0deg,
+      rgba(100, 190, 255, 0.28) 90deg,
+      rgba(110, 198, 255, 1) 140deg,
+      rgba(100, 190, 255, 0.34) 190deg,
+      rgba(100, 190, 255, 0.12) 270deg,
+      rgba(100, 190, 255, 0.12) 360deg
+    ) border-box;
+  animation: thinking-border-flow 3.8s linear infinite;
 }
 
 /* --- Subagent Cards (Alias/New) --- */
