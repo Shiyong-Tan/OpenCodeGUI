@@ -104,6 +104,7 @@ export type ChatEvent = {
     response?: PermissionReply;
     metadata?: any;
     actionLabel?: string;
+    secondaryActionLabel?: string;
     isSyntheticUser?: boolean;
     isStatusUpdate?: boolean;
     todos?: Array<{content: string; status: string; priority: string}>;
@@ -349,6 +350,9 @@ export class OpenCodeClient {
     private readonly mainFinalDelayMs = 5000;
     private readonly pendingMainFinalGateBySession = new Map<string, PendingMainFinalGate>();
     private readonly pendingMainFinalTimerBySession = new Map<string, NodeJS.Timeout>();
+    private readonly finishedMainAgentBySession = new Map<string, string>();
+    private readonly finishedTurnAtBySession = new Map<string, number>();
+    private readonly lateContinuationGuardWindowMs = 30000;
     private readonly sessionIdleReceivedBySession = new Set<string>();
     private turnFinalWaitersBySession = new Map<string, Array<() => void>>();
     private turnFinalResolvedBySession = new Set<string>();
@@ -670,6 +674,8 @@ export class OpenCodeClient {
         }
         this.pendingMainFinalTimerBySession.clear();
         this.pendingMainFinalGateBySession.clear();
+        this.finishedMainAgentBySession.clear();
+        this.finishedTurnAtBySession.clear();
         this.turnFinalAtBySession.clear();
         this.turnFinalMsgIdBySession.clear();
         this.finalizingMsgIdBySession.clear();
@@ -747,13 +753,31 @@ export class OpenCodeClient {
         if (!sessionId) return false;
         const mode = (this.expectedMainAgentBySession.get(sessionId) || '').toLowerCase();
         if (!mode) return false;
-        return mode.includes('sisyphus') || mode.includes('hephaestus') || mode.includes('atlas');
+        return mode.includes('sisyphus') || mode.includes('hephaestus') || mode.includes('atlas') || mode.includes('build');
     }
 
     private isBoulderContinuationText(text: string): boolean {
         if (!text) return false;
         return text.includes('[SYSTEM DIRECTIVE: OH-MY-OPENCODE - BOULDER CONTINUATION]')
             && text.includes('<!-- OMO_INTERNAL_INITIATOR -->');
+    }
+
+    private shouldStopLateBoulderContinuation(sessionId: string | undefined): boolean {
+        if (!sessionId) return false;
+        if (this.turnStateBySession.has(sessionId)) return false;
+        const mode = (this.finishedMainAgentBySession.get(sessionId) || '').toLowerCase();
+        if (!mode) return false;
+        const eligible = mode.includes('sisyphus') || mode.includes('hephaestus') || mode.includes('atlas') || mode.includes('build');
+        if (!eligible) return false;
+        const finishedAt = this.finishedTurnAtBySession.get(sessionId) || 0;
+        if (!finishedAt) return false;
+        return (Date.now() - finishedAt) <= this.lateContinuationGuardWindowMs;
+    }
+
+    private stopLateBoulderContinuation(sessionId: string): void {
+        this.logUiDebug(`EXT: continuation.stop.after-final | sessionId=${sessionId} | action=abort | windowMs=${this.lateContinuationGuardWindowMs}`);
+        this.canceledActiveTurnBySession.set(sessionId, true);
+        void this.requestJson('POST', `/session/${sessionId}/abort`, {});
     }
 
     private clearPendingMainFinalGate(sessionId: string | undefined, reason: string): void {
@@ -844,6 +868,8 @@ export class OpenCodeClient {
         if (!sessionId) return;
         this.changeListEmittedBySession.delete(sessionId);
         this.canceledActiveTurnBySession.set(sessionId, false);
+        this.finishedMainAgentBySession.delete(sessionId);
+        this.finishedTurnAtBySession.delete(sessionId);
         this.currentTurnUserMsgIdBySession.delete(sessionId);
         this.displayTurnUserMsgIdBySession.delete(sessionId);
         this.currentTurnAssistantMsgIdBySession.delete(sessionId);
@@ -943,6 +969,14 @@ export class OpenCodeClient {
 
     public finishTurn(sessionId: string): void {
         if (!sessionId) return;
+        const finishedMode = this.expectedMainAgentBySession.get(sessionId);
+        if (finishedMode) {
+            this.finishedMainAgentBySession.set(sessionId, finishedMode);
+            this.finishedTurnAtBySession.set(sessionId, Date.now());
+        } else {
+            this.finishedMainAgentBySession.delete(sessionId);
+            this.finishedTurnAtBySession.delete(sessionId);
+        }
         const avgFinalAcceptLatencyMs = this.task1Metrics.finalAcceptCount > 0
             ? Math.round(this.task1Metrics.finalAcceptLatencyTotalMs / this.task1Metrics.finalAcceptCount)
             : 0;
@@ -4959,6 +4993,9 @@ export class OpenCodeClient {
                 if (source === 'sse' && sessionId && this.pendingMainFinalGateBySession.has(sessionId) && this.isBoulderContinuationText(partTextForGate)) {
                     this.clearPendingMainFinalGate(sessionId, 'boulder-continuation');
                     this.logUiDebug(`EXT: turn.final.pending.cancel | sessionId=${sessionId} | reason=boulder-continuation`);
+                } else if (source === 'sse' && sessionId && this.isBoulderContinuationText(partTextForGate) && this.shouldStopLateBoulderContinuation(sessionId)) {
+                    this.stopLateBoulderContinuation(sessionId);
+                    return events;
                 }
                 if (source === 'sse' && sessionId && msgId && roleForMsg === 'user') {
                     const partText = typeof part?.text === 'string' ? part.text : '';
@@ -5599,7 +5636,8 @@ export class OpenCodeClient {
                     sessionId,
                     title: 'Session may be stuck',
                     text: 'This session appears to be unresponsive. Please reload the extension and continue.',
-                    actionLabel: 'Reload Window'
+                    actionLabel: 'Reload Window',
+                    secondaryActionLabel: 'Keep waiting'
                 }
             ]);
             this.logUiDebug(`EXT: autoresume.hardstop | sessionId=${sessionId} | action=cancel+reload-card | epochs=${epochs} | stallMs=${stallMs}`);
