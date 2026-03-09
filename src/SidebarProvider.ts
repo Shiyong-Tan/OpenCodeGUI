@@ -2199,6 +2199,10 @@ ${attachmentLines.join('\n')}`
                     const cancelOpId = typeof data.opId === 'string' ? data.opId : undefined;
                     if (cancelSessionId) {
                         this.client.cancelTurn(cancelSessionId, cancelOpId);
+                        this.sendInFlightBySession.delete(cancelSessionId);
+                        this.pendingLocalKeyBySession.delete(cancelSessionId);
+                        this.pendingAssistantTmpKeyBySession.delete(cancelSessionId);
+                        activeWebview.postMessage({ type: 'turnInFlight', sessionId: cancelSessionId, inFlight: false });
                     }
                     if (this.pendingClientMessageId) {
                         await this.handleAbortedMessage(this.pendingClientMessageId, activeWebview);
