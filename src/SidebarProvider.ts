@@ -537,7 +537,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             if (meta?.parentID && canceledUserIds.has(meta.parentID)) return false;
             return true;
         });
-        formatted = { ...formatted, messages: filteredMessages };
+        formatted = { ...formatted, messages: this.normalizeDisplayMessagesForSnapshot(filteredMessages) };
         const records = await this.readChangeLists(sessionId);
         if (!records.length) return formatted;
 
@@ -619,7 +619,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
         }
 
-        return { ...formatted, messages: merged };
+        return { ...formatted, messages: this.normalizeDisplayMessagesForSnapshot(merged) };
+    }
+
+    private buildSnapshotSessionPayload(sessionPayload: { type: string; sessionId: string; title: string; messages: SessionMessage[]; segments?: any[] }) {
+        return {
+            ...sessionPayload,
+            messages: this.normalizeDisplayMessagesForSnapshot(sessionPayload.messages || [])
+        };
     }
 
     private extractLastLine(text: string): string {
@@ -1812,7 +1819,7 @@ ${attachmentLines.join('\n')}`
                                     const snapshotObj = {
                                         sessionId: targetSessionId,
                                         exportedAt: Date.now(),
-                                        sessionData: sessionPayload
+                                        sessionData: this.buildSnapshotSessionPayload(sessionPayload)
                                     };
                                     await this.writeSnapshotAtomic(targetSessionId, snapshotObj);
                                 } catch (err) {
@@ -1896,7 +1903,7 @@ ${attachmentLines.join('\n')}`
                                 const snapshotObj = {
                                     sessionId: targetSessionId,
                                     exportedAt: Date.now(),
-                                    sessionData: sessionPayload
+                                    sessionData: this.buildSnapshotSessionPayload(sessionPayload)
                                 };
                                 await this.writeSnapshotAtomic(targetSessionId, snapshotObj);
                             } catch (err) {
@@ -3004,7 +3011,7 @@ ${attachmentLines.join('\n')}`
                                 const snapshotObj = {
                                     sessionId: recentSessionId,
                                     exportedAt: Date.now(),
-                                    sessionData: sessionPayload
+                                    sessionData: this.buildSnapshotSessionPayload(sessionPayload)
                                 };
                                 const bytes = await this.writeSnapshotAtomic(recentSessionId, snapshotObj);
                                 this.uiDebugChannel.appendLine(`[EXT][SNAP_SAVE] sessionId=${recentSessionId} file=${this.getSnapshotFile(recentSessionId)} bytes=${bytes}`);
@@ -4061,7 +4068,8 @@ ${attachmentLines.join('\n')}`
                 sessionId: event.sessionId,
                 title: event.title || 'Session may be stuck',
                 message: event.text || 'This session appears to be unresponsive. Please reload the extension and continue.',
-                actionLabel: event.actionLabel || 'Reload Window'
+                actionLabel: event.actionLabel || 'Reload Window',
+                secondaryActionLabel: event.secondaryActionLabel || 'Keep waiting'
             });
             return;
         }
@@ -5049,11 +5057,13 @@ ${attachmentLines.join('\n')}`
             </head>
             <body>
                 <div class="session-header">
-                    <span class="session-title" id="session-title">New Session</span>
-                    <span class="server-status-dot status-connected" id="server-status-dot" title="Connected"></span>
-                    <span class="pending-indicator hidden" id="pending-indicator"></span>
-                    <span class="subagent-indicator hidden" id="subagent-indicator"></span>
-                    <span class="undo-status hidden" id="undo-status">Undo not available</span>
+                    <div class="session-header-left">
+                        <span class="server-status-dot status-connected" id="server-status-dot" title="Connected"></span>
+                        <span class="session-title" id="session-title">New Session</span>
+                        <span class="pending-indicator hidden" id="pending-indicator"></span>
+                        <span class="subagent-indicator hidden" id="subagent-indicator"></span>
+                        <span class="undo-status hidden" id="undo-status">Undo not available</span>
+                    </div>
                     <div class="session-controls">
                         <button class="icon-btn" id="new-session-btn" title="New Session">
                             <svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M14 7v1H8v6H7V8H1V7h6V1h1v6h6z"/></svg>

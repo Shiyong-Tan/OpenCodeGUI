@@ -17,12 +17,18 @@ body {
 /* --- Session Header --- */
 .session-header {
     display: flex;
-    justify-content: space-between;
     align-items: center;
     padding: 8px 12px;
     border-bottom: 1px solid var(--vscode-widget-border);
     flex-shrink: 0;
     min-height: 24px;
+}
+
+.session-header-left {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    flex: 1 1 auto;
 }
 
 .session-title {
@@ -32,9 +38,8 @@ body {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    max-width: 60%;
     min-width: 0;
-    flex: 0 1 60%;
+    flex: 1 1 auto;
     cursor: pointer;
 }
 
@@ -48,7 +53,7 @@ body {
     border-radius: 50%;
     background: #22c55e;
     display: inline-block;
-    margin-left: 8px;
+    margin-right: 8px;
     flex: 0 0 auto;
 }
 
@@ -104,6 +109,7 @@ body {
 .session-controls {
     display: flex;
     gap: 4px;
+    margin-left: 8px;
 }
 
 /* --- Sessions Panel --- */
