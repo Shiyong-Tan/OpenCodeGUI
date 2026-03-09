@@ -1,10 +1,10 @@
 {
   "name": "opencode-gui",
-  "displayName": "OpenCode UI",
+  "displayName": "OpenCode UI - AI Coding Agent",
   "publisher": "TanShiyong",
-  "description": "VSCode extension for OpenCode CLI",
+  "description": "VS Code UI for OpenCode CLI with subagents, code diff, change lists, and undo/restore.",
   "icon": "media/marketplace-icon.png",
-  "version": "1.1.12",
+  "version": "1.1.13",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -15,6 +15,20 @@
   },
   "categories": [
     "Other"
+  ],
+  "keywords": [
+    "opencode",
+    "open code",
+    "ai coding",
+    "code agent",
+    "ai assistant",
+    "coding assistant",
+    "developer tools",
+    "cli tools",
+    "ai dev tools",
+    "ai development",
+    "llm",
+    "openai"
   ],
   "activationEvents": [
     "onCommand:opencode.checkVersion",

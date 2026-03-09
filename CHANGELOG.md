@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.1.13
+
+- Improved Marketplace metadata for discoverability: added targeted search keywords for OpenCode, AI coding, code agents, and developer tooling.
+- Updated extension listing copy with a more descriptive display name and clearer description focused on OpenCode CLI, subagents, code diff, change lists, and undo/restore.
+- Refined README top section so Marketplace visitors can understand the core workflow and key features more quickly without relying on animated demos.
+
 ## 1.1.12
 
 - Refined transient task UI: reduced oversized subagent/todo status circles, added a `Todo list` title, normalized its typography, and improved icon/text alignment for todo rows.
