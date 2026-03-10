@@ -410,6 +410,7 @@ export class OpenCodeClient {
     private readonly sseDrainPass2DelayMs = 1000;
     private readonly settleNoDeltaThreshold = 3;
     private readonly autoResumePrompt = '[OC_UI_AUTORESUME v1]\nRe-read the last user request and finish the remaining steps.';
+    private readonly stopContinuationPrompt = '/stop-continuation';
     private readonly autoResumeEpochThreshold = 5;
     private readonly autoResumeStallMs = 100000;
     private readonly autoResumeWarnMs = 180000;
@@ -756,10 +757,19 @@ export class OpenCodeClient {
         return mode.includes('sisyphus') || mode.includes('hephaestus') || mode.includes('atlas') || mode.includes('build');
     }
 
-    private isBoulderContinuationText(text: string): boolean {
+    private isOmoContinuationText(text: string): boolean {
         if (!text) return false;
+        if (!text.includes('<!-- OMO_INTERNAL_INITIATOR -->')) return false;
         return text.includes('[SYSTEM DIRECTIVE: OH-MY-OPENCODE - BOULDER CONTINUATION]')
-            && text.includes('<!-- OMO_INTERNAL_INITIATOR -->');
+            || text.includes('[SYSTEM DIRECTIVE: OH-MY-OPENCODE - TODO CONTINUATION]');
+    }
+
+    private isStopContinuationPromptText(text: unknown): boolean {
+        return typeof text === 'string'
+            && (
+                text.trim() === this.stopContinuationPrompt
+                || (text.includes('<auto-slash-command>') && text.includes('/stop-continuation Command'))
+            );
     }
 
     private shouldStopLateBoulderContinuation(sessionId: string | undefined): boolean {
@@ -774,10 +784,30 @@ export class OpenCodeClient {
         return (Date.now() - finishedAt) <= this.lateContinuationGuardWindowMs;
     }
 
-    private stopLateBoulderContinuation(sessionId: string): void {
-        this.logUiDebug(`EXT: continuation.stop.after-final | sessionId=${sessionId} | action=abort | windowMs=${this.lateContinuationGuardWindowMs}`);
-        this.canceledActiveTurnBySession.set(sessionId, true);
-        void this.requestJson('POST', `/session/${sessionId}/abort`, {});
+    private shouldSendStopContinuationOnFinal(sessionId: string | undefined, source: EventSource): boolean {
+        if (!sessionId) return false;
+        if (source !== 'sse') return false;
+        return this.isDelayedMainFinalMode(sessionId);
+    }
+
+    private async sendStopContinuationPrompt(sessionId: string): Promise<boolean> {
+        if (!sessionId) return false;
+        try {
+            const agentMode =
+                this.finishedMainAgentBySession.get(sessionId)
+                || this.expectedMainAgentBySession.get(sessionId)
+                || 'plan';
+            const payload: any = {
+                parts: [{ type: 'text', text: this.stopContinuationPrompt }],
+                agent: agentMode
+            };
+            await this.requestJson('POST', `/session/${sessionId}/prompt_async`, payload);
+            this.logUiDebug(`EXT: continuation.stop.sent | sessionId=${sessionId} | agent=${agentMode}`);
+            return true;
+        } catch (error) {
+            this.logUiDebug(`EXT: continuation.stop.fail | sessionId=${sessionId} | err=${String(error)}`);
+            return false;
+        }
     }
 
     private clearPendingMainFinalGate(sessionId: string | undefined, reason: string): void {
@@ -1403,6 +1433,9 @@ export class OpenCodeClient {
             this.turnSettleStableCountBySession.set(sessionId, 0);
             this.turnSettleLastFingerprintBySession.delete(sessionId);
             this.turnSettleNoDeltaCountBySession.set(sessionId, 0);
+        }
+        if (this.shouldSendStopContinuationOnFinal(sessionId, source)) {
+            void this.sendStopContinuationPrompt(sessionId);
         }
         this.scheduleTurnFinalQuiet(sessionId);
     }
@@ -2908,6 +2941,20 @@ export class OpenCodeClient {
         this.revertedSegment = segment;
     }
 
+    private isValidActiveRevertedSegmentForUndo(prevSeg: RevertedSegment | undefined, startIndex: number): prevSeg is RevertedSegment {
+        if (!prevSeg || !prevSeg.isActive || prevSeg.discarded) return false;
+        const memberMsgIds = Array.isArray(prevSeg.messageIds)
+            ? prevSeg.messageIds.filter((id) => typeof id === 'string' && id.startsWith('msg_'))
+            : [];
+        if (!memberMsgIds.length) return false;
+        const prevStartIndex = typeof prevSeg.startMessageIndex === 'number'
+            ? prevSeg.startMessageIndex
+            : this.messageIndexById.get(prevSeg.startMessageId);
+        if (typeof prevStartIndex !== 'number') return false;
+        if (prevStartIndex <= startIndex) return false;
+        return memberMsgIds.every((id) => typeof this.messageIndexById.get(id) === 'number');
+    }
+
     public async undoFromMessage(startMessageId: string, options?: { force?: boolean; excludedMessageIds?: string[] }): Promise<{ conflicts: ConflictDetail[]; touchedFiles: string[]; applied: boolean; reason?: string }> {
         const force = options?.force === true;
         const excludedMessageIds = new Set(
@@ -2925,7 +2972,7 @@ export class OpenCodeClient {
         const tailIndex = this.messageOrder.length ? this.messageOrder.length - 1 : startIndex;
         let effectiveEndIndex = tailIndex;
         const prevSeg = this.revertedSegment;
-        const hasActivePrev = Boolean(prevSeg && prevSeg.isActive && !prevSeg.discarded);
+        const hasActivePrev = this.isValidActiveRevertedSegmentForUndo(prevSeg, startIndex);
         let prevStartIndex: number | undefined;
         let prevEndIndex: number | undefined;
         let canMergePrev = false;
@@ -4990,19 +5037,23 @@ export class OpenCodeClient {
                 const knownLenBefore = msgId ? (this.assistantTextLengths.get(msgId) || 0) : 0;
                 const roleForMsg = msgId ? this.messageRoleById.get(msgId) : undefined;
                 const partTextForGate = this.extractTextPayload(part?.text);
-                if (source === 'sse' && sessionId && this.pendingMainFinalGateBySession.has(sessionId) && this.isBoulderContinuationText(partTextForGate)) {
+                if (source === 'sse' && sessionId && this.pendingMainFinalGateBySession.has(sessionId) && this.isOmoContinuationText(partTextForGate)) {
                     this.clearPendingMainFinalGate(sessionId, 'boulder-continuation');
                     this.logUiDebug(`EXT: turn.final.pending.cancel | sessionId=${sessionId} | reason=boulder-continuation`);
-                } else if (source === 'sse' && sessionId && this.isBoulderContinuationText(partTextForGate) && this.shouldStopLateBoulderContinuation(sessionId)) {
-                    this.stopLateBoulderContinuation(sessionId);
+                } else if (source === 'sse' && sessionId && this.isOmoContinuationText(partTextForGate) && this.shouldStopLateBoulderContinuation(sessionId)) {
+                    void this.sendStopContinuationPrompt(sessionId);
                     return events;
                 }
                 if (source === 'sse' && sessionId && msgId && roleForMsg === 'user') {
                     const partText = typeof part?.text === 'string' ? part.text : '';
-                    if (this.isAutoResumePromptText(partText)) {
+                    if (
+                        this.isAutoResumePromptText(partText) ||
+                        this.isStopContinuationPromptText(partText) ||
+                        this.isOmoContinuationText(partText)
+                    ) {
                         this.setCurrentTurnUserMsgId(sessionId, msgId, 'autoresume-user');
                         this.markSessionProgress(sessionId, 'autoresume-user-seen', msgId);
-                        this.logUiDebug(`EXT: user.ack.part.skip | sessionId=${sessionId} | msgId=${msgId} | reason=autoresume-hidden`);
+                        this.logUiDebug(`EXT: user.ack.part.skip | sessionId=${sessionId} | msgId=${msgId} | reason=control-hidden`);
                     } else {
                         this.setCurrentTurnUserMsgId(sessionId, msgId, 'user-ack');
                         if (!this.hasDisplayTurnUserMsgId(sessionId)) {

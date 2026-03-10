@@ -169,6 +169,41 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return state === 'done' || state === 'failed' || state === 'cancelled' || state === 'dismissed';
     }
 
+    private syncClientRevertedSegmentFromUndoSegments(sessionId: string): void {
+        const segMap = this.undoSegmentsBySession.get(sessionId);
+        if (!segMap || segMap.size === 0) {
+            this.client.setRevertedSegment(undefined);
+            return;
+        }
+        const activeSegments = Array.from(segMap.values())
+            .filter((seg) => seg.restoreAllowed === true)
+            .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
+        const seg = activeSegments[0];
+        if (!seg) {
+            this.client.setRevertedSegment(undefined);
+            return;
+        }
+        const memberMsgIds = Array.isArray(seg.memberMsgIds)
+            ? seg.memberMsgIds.filter((id) => typeof id === 'string' && id.startsWith('msg_'))
+            : [];
+        const startMessageId = seg.anchorMsgId || memberMsgIds[0] || '';
+        const endMessageId = seg.endMsgId || memberMsgIds[memberMsgIds.length - 1] || startMessageId;
+        const startMessageIndex = this.client.getMessageIndex(startMessageId);
+        const endMessageIndex = this.client.getMessageIndex(endMessageId);
+        this.client.setRevertedSegment({
+            isActive: true,
+            discarded: false,
+            startMessageId,
+            startMessageIndex: typeof startMessageIndex === 'number' ? startMessageIndex : 0,
+            endMessageId,
+            endMessageIndex: typeof endMessageIndex === 'number' ? endMessageIndex : (typeof startMessageIndex === 'number' ? startMessageIndex : 0),
+            opIds: [],
+            collapsed: true,
+            conflicts: [],
+            messageIds: memberMsgIds
+        });
+    }
+
     private transitionSubagentState(sessionId: string, entry: { state?: SubagentLifecycleState; isDone?: boolean; finalReason?: string; lastEventAt?: number }, to: SubagentLifecycleState, reason: string): void {
         const from = entry.state || (entry.isDone ? 'done' : 'queued');
         if (from === to) return;
@@ -627,6 +662,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             ...sessionPayload,
             messages: this.normalizeDisplayMessagesForSnapshot(sessionPayload.messages || [])
         };
+    }
+
+    private isHiddenControlAssistantText(text: string): boolean {
+        const trimmed = String(text || '').trim();
+        return trimmed.includes('All continuation mechanisms have been stopped for this session')
+            || trimmed.includes('All continuation mechanisms stopped for this session:');
     }
 
     private extractLastLine(text: string): string {
@@ -1714,10 +1755,10 @@ ${attachmentLines.join('\n')}`
                         } else {
                             this.revertedSegmentHistory = [];
                         }
-                        if (persisted?.segment) {
+                        if (persisted?.segment && persisted.segment.isActive === true && persisted.discarded !== true) {
                             this.client.setRevertedSegment({
-                                isActive: Boolean(persisted.segment.isActive),
-                                discarded: Boolean(persisted.discarded),
+                                isActive: true,
+                                discarded: false,
                                 startMessageId: persisted.segment.startMessageId || targetSessionId,
                                 startMessageIndex: persisted.segment.startMessageIndex ?? 0,
                                 endMessageId: persisted.segment.endMessageId || targetSessionId,
@@ -1728,9 +1769,12 @@ ${attachmentLines.join('\n')}`
                                 messageIds: persisted.segment.messageIds,
                                 operationId: persisted.segment.operationId
                             });
+                        } else {
+                            this.client.setRevertedSegment(undefined);
                         }
 
                         const segMap = this.undoSegmentsBySession.get(targetSessionId);
+                        this.syncClientRevertedSegmentFromUndoSegments(targetSessionId);
                         const segments = segMap ? Array.from(segMap.values()) : [];
 
                         let baseTitle = 'Session';
@@ -2966,10 +3010,10 @@ ${attachmentLines.join('\n')}`
                             } else {
                                 this.revertedSegmentHistory = [];
                             }
-                            if (persisted?.segment) {
+                            if (persisted?.segment && persisted.segment.isActive === true && persisted.discarded !== true) {
                                 this.client.setRevertedSegment({
-                                    isActive: Boolean(persisted.segment.isActive),
-                                    discarded: Boolean(persisted.discarded),
+                                    isActive: true,
+                                    discarded: false,
                                     startMessageId: persisted.segment.startMessageId || recentSessionId,
                                     startMessageIndex: persisted.segment.startMessageIndex ?? 0,
                                     endMessageId: persisted.segment.endMessageId || recentSessionId,
@@ -2980,8 +3024,11 @@ ${attachmentLines.join('\n')}`
                                     messageIds: persisted.segment.messageIds,
                                     operationId: persisted.segment.operationId
                                 });
+                            } else {
+                                this.client.setRevertedSegment(undefined);
                             }
                             const segMap = this.undoSegmentsBySession.get(recentSessionId);
+                            this.syncClientRevertedSegmentFromUndoSegments(recentSessionId);
                             const segments = segMap ? Array.from(segMap.values()) : [];
 
                         // this.uiDebugChannel.appendLine(
@@ -4787,6 +4834,7 @@ ${attachmentLines.join('\n')}`
             if (role === 'user' && msg.meta?.syntheticUser === true) continue;
             const text = role === 'user' ? this.stripModeInjectionBlock(msg.text) : msg.text;
             if (!text.trim()) continue;
+            if (role === 'assistant' && this.isHiddenControlAssistantText(text)) continue;
             const next = { ...msg, role, text };
             if (role === 'user') {
                 flushAssistant();
@@ -4916,13 +4964,24 @@ ${attachmentLines.join('\n')}`
             const mode = typeof message?.info?.mode === 'string' ? message.info.mode.toLowerCase() : '';
             const agent = typeof message?.info?.agent === 'string' ? message.info.agent.toLowerCase() : '';
             const isAutoResumeText = role === 'user' && text.trimStart().startsWith('[OC_UI_AUTORESUME');
-            const isBoulderContinuation = role === 'user' && text.includes('[SYSTEM DIRECTIVE: OH-MY-OPENCODE - BOULDER CONTINUATION]');
-            const isSyntheticUser = role === 'user' && (isAutoResumeText || isBoulderContinuation || mode === 'compaction' || agent === 'compaction');
+            const isStopContinuationText = role === 'user' && (
+                text.trim() === '/stop-continuation'
+                || (text.includes('<auto-slash-command>') && text.includes('/stop-continuation Command'))
+            );
+            const isOmoContinuation =
+                role === 'user'
+                && text.includes('<!-- OMO_INTERNAL_INITIATOR -->')
+                && (
+                    text.includes('[SYSTEM DIRECTIVE: OH-MY-OPENCODE - BOULDER CONTINUATION]')
+                    || text.includes('[SYSTEM DIRECTIVE: OH-MY-OPENCODE - TODO CONTINUATION]')
+                );
+            const isSyntheticUser = role === 'user' && (isAutoResumeText || isStopContinuationText || isOmoContinuation || mode === 'compaction' || agent === 'compaction');
             if (isSyntheticUser) {
                 continue;
             }
             const displayText = role === 'user' ? this.stripModeInjectionBlock(text) : text;
             if (!displayText.trim()) continue;
+            if (role === 'assistant' && this.isHiddenControlAssistantText(displayText)) continue;
             const messageIndex = this.client.registerMessage(resolvedId);
             messages.push({ role, text: displayText, id: resolvedId, messageIndex });
         }

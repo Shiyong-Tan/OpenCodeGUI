@@ -335,14 +335,22 @@ function showStallCard(payload) {
     const actions = document.createElement('div');
     actions.className = 'question-card-actions';
 
-    const button = document.createElement('button');
-    button.className = 'conflict-card-btn question-card-btn question-card-submit';
-    button.textContent = payload?.actionLabel || 'Reload Window';
-    button.addEventListener('click', () => {
+    const secondaryButton = document.createElement('button');
+    secondaryButton.className = 'conflict-card-btn question-card-btn';
+    secondaryButton.textContent = payload?.secondaryActionLabel || 'Keep waiting';
+    secondaryButton.addEventListener('click', () => {
+        closeStallCard();
+    });
+
+    const primaryButton = document.createElement('button');
+    primaryButton.className = 'conflict-card-btn question-card-btn question-card-submit';
+    primaryButton.textContent = payload?.actionLabel || 'Reload Window';
+    primaryButton.addEventListener('click', () => {
         vscode.postMessage({ type: 'reloadWindow', sessionId: activeSessionId });
     });
 
-    actions.appendChild(button);
+    actions.appendChild(secondaryButton);
+    actions.appendChild(primaryButton);
     card.appendChild(title);
     card.appendChild(prompt);
     card.appendChild(actions);
@@ -911,6 +919,26 @@ function sanitizeMergedSegmentSnapshot(seg) {
     };
 }
 
+function isHiddenControlUserText(text) {
+    if (typeof text !== 'string') return false;
+    const trimmed = text.trim();
+    if (trimmed.startsWith('[OC_UI_AUTORESUME')) return true;
+    if (trimmed === '/stop-continuation') return true;
+    if (trimmed.includes('<auto-slash-command>') && trimmed.includes('/stop-continuation Command')) return true;
+    return text.includes('<!-- OMO_INTERNAL_INITIATOR -->')
+        && (
+            text.includes('[SYSTEM DIRECTIVE: OH-MY-OPENCODE - BOULDER CONTINUATION]')
+            || text.includes('[SYSTEM DIRECTIVE: OH-MY-OPENCODE - TODO CONTINUATION]')
+        );
+}
+
+function isHiddenControlAssistantText(text) {
+    if (typeof text !== 'string') return false;
+    const trimmed = text.trim();
+    return trimmed.includes('All continuation mechanisms have been stopped for this session')
+        || trimmed.includes('All continuation mechanisms stopped for this session:');
+}
+
 /**
  * Rebuild hiddenSet from all segments in segmentsByNoticeKey
  * This is the ONLY function that determines which messages are hidden
@@ -964,7 +992,7 @@ function rebuildHiddenSetFromTimeline(session) {
             session.hiddenSet.add(msgId);
             continue;
         }
-        if (typeof message.text === 'string' && message.text.trimStart().startsWith('[OC_UI_AUTORESUME')) {
+        if (isHiddenControlUserText(message.text)) {
             session.hiddenSet.add(msgId);
         }
     }
@@ -2727,6 +2755,38 @@ document.addEventListener('DOMContentLoaded', () => {
         return div;
     }
 
+    function renderNestedInvalidSegmentElement(session, segment) {
+        const card = document.createElement('div');
+        card.className = 'reverted-segment nested-invalid-segment';
+
+        const header = document.createElement('div');
+        header.className = 'reverted-segment-header';
+
+        const title = document.createElement('div');
+        title.className = 'reverted-segment-title';
+        const memberMsgIds = Array.isArray(segment?.memberMsgIds) ? segment.memberMsgIds : [];
+        const available = memberMsgIds.filter((id) => session?.messagesById?.has(id)).length;
+        title.textContent = `Reverted segment (${available} messages)`;
+        header.appendChild(title);
+        card.appendChild(header);
+
+        const ruleLine = document.createElement('div');
+        ruleLine.className = segment?.restoreAllowed === false ? 'reverted-segment-discarded' : 'reverted-segment-hint';
+        ruleLine.textContent = segment?.restoreAllowed === false
+            ? 'Segment discarded and unrestorable.'
+            : 'You are allowed to restore this segment until the next build prompt.';
+        card.appendChild(ruleLine);
+
+        if (available < memberMsgIds.length) {
+            const warning = document.createElement('div');
+            warning.className = 'reverted-segment-warning';
+            warning.textContent = 'Some messages are no longer available.';
+            card.appendChild(warning);
+        }
+
+        return card;
+    }
+
 function renderMessageElement(message, renderedSet) {
     if (renderedSet.has(message.id)) {
         console.warn('[Render] duplicate message skipped', message.id);
@@ -2960,7 +3020,7 @@ function renderMessageElement(message, renderedSet) {
                 card.appendChild(warning);
             }
 
-            if (!collapsed && total > 0 && session) {
+            if (!collapsed && session) {
                 const nestedWrap = document.createElement('div');
                 nestedWrap.className = 'reverted-segment-body';
                 for (const id of memberMsgIds) {
@@ -2968,7 +3028,17 @@ function renderMessageElement(message, renderedSet) {
                     if (!msg) continue;
                     nestedWrap.appendChild(renderNestedMessageElement(msg));
                 }
-                card.appendChild(nestedWrap);
+                const mergedInvalidSegments = Array.isArray(segment?.mergedInvalidSegments)
+                    ? segment.mergedInvalidSegments
+                        .map((child) => sanitizeMergedSegmentSnapshot(child))
+                        .filter(Boolean)
+                    : [];
+                for (const child of mergedInvalidSegments) {
+                    nestedWrap.appendChild(renderNestedInvalidSegmentElement(session, child));
+                }
+                if (nestedWrap.childNodes.length > 0) {
+                    card.appendChild(nestedWrap);
+                }
             }
 
             content.appendChild(card);
@@ -3297,6 +3367,49 @@ function stripSystemInjections(text) {
         s = s.replace(/\n{3,}/g, '\n\n').trim();
 
     return s;
+}
+
+function collapseSessionDataMessagesForDisplay(messages) {
+    if (!Array.isArray(messages) || messages.length === 0) return [];
+    const collapsed = [];
+    let pendingAssistant = null;
+
+    const flushAssistant = () => {
+        if (pendingAssistant) {
+            collapsed.push(pendingAssistant);
+            pendingAssistant = null;
+        }
+    };
+
+    for (const item of messages) {
+        if (!item || !item.id) continue;
+        const role = item.role;
+        const meta = item.meta || {};
+        if (role === 'system') {
+            if (meta.kind === 'changeList') {
+                flushAssistant();
+                collapsed.push(item);
+            }
+            continue;
+        }
+        if (role === 'user') {
+            if (meta.syntheticUser === true || isHiddenControlUserText(item.text || '')) continue;
+            const text = stripSystemInjections((item.text || '').replace(/^(\r?\n)+/, ''));
+            if (!text.trim()) continue;
+            flushAssistant();
+            collapsed.push({ ...item, text });
+            continue;
+        }
+        if (role === 'assistant') {
+            const text = item.text || '';
+            if (isHiddenControlAssistantText(text)) continue;
+            if (!text.trim()) continue;
+            pendingAssistant = { ...item, text };
+        }
+    }
+
+    flushAssistant();
+    return collapsed;
 }
 
 function shouldHideDcpUiMessage(message) {
@@ -5299,7 +5412,7 @@ window.addEventListener('message', (event) => {
                     session.nextOrder = 0;
                     
                     // Load messages into timeline
-                    const sessionMessages = Array.isArray(message.messages) ? message.messages : [];
+                    const sessionMessages = collapseSessionDataMessagesForDisplay(Array.isArray(message.messages) ? message.messages : []);
                     for (const item of sessionMessages) {
                         if (!item || !item.id) continue;
                         
@@ -5437,7 +5550,6 @@ window.addEventListener('message', (event) => {
                     });
                     
                     hydratedSessions.add(sessionId);
-                    scrollToBottom();
                     closeSessionPanel();
                     updateSendGate();
                     
@@ -5448,6 +5560,9 @@ window.addEventListener('message', (event) => {
                     });
                 } finally {
                     window.__oc?.renderFromState?.();
+                    requestAnimationFrame(() => {
+                        scrollToBottom();
+                    });
                 }
                 break;
             }
@@ -6042,8 +6157,10 @@ window.addEventListener('message', (event) => {
                     });
                     break;
                 }
-                // Filter BOULDER CONTINUATION messages
-                if (message.message && message.message.role === 'user' && message.message.text && message.message.text.includes('[SYSTEM DIRECTIVE: OH-MY-OPENCODE - BOULDER CONTINUATION]')) {
+                if (message.message && message.message.role === 'user' && isHiddenControlUserText(message.message.text || '')) {
+                    break;
+                }
+                if (message.message && message.message.role === 'assistant' && isHiddenControlAssistantText(message.message.text || '')) {
                     break;
                 }
                 if (message.message && message.message.id) {
@@ -6116,8 +6233,10 @@ window.addEventListener('message', (event) => {
                 const sessionId = getEventSessionId(message, 'messageAppend');
                 if (!sessionId) break;
                 const session = getSessionState(sessionId, true);
-                // Filter BOULDER CONTINUATION messages
-                if (message.message && message.message.role === 'user' && message.message.text && message.message.text.includes('[SYSTEM DIRECTIVE: OH-MY-OPENCODE - BOULDER CONTINUATION]')) {
+                if (message.message && message.message.role === 'user' && isHiddenControlUserText(message.message.text || '')) {
+                    break;
+                }
+                if (message.message && message.message.role === 'assistant' && isHiddenControlAssistantText(message.message.text || '')) {
                     break;
                 }
                 if (message.message && message.message.id) {
@@ -6328,6 +6447,12 @@ window.addEventListener('message', (event) => {
                     };
                     const anchorIdx = normalizedAnchorForUpsert ? getMsgTimelineIndex(normalizedAnchorForUpsert) : -1;
                     const newEndIdx = endForUpsert ? getMsgTimelineIndex(endForUpsert) : -1;
+                    const payloadVisibleIndices = memberMsgIds
+                        .map((id) => getMsgTimelineIndex(id))
+                        .filter((idx) => idx >= 0);
+                    const payloadEndIdx = payloadVisibleIndices.length
+                        ? Math.max(...payloadVisibleIndices)
+                        : -1;
 
                     vscode.postMessage({
                         type: 'ui-debug',
@@ -6336,13 +6461,17 @@ window.addEventListener('message', (event) => {
                             `newEndIdx=${newEndIdx}`]
                     });
 
-                    if (anchorIdx >= 0 && newEndIdx >= 0) {
-                        let maxEndIdx = newEndIdx;
+                    if (anchorIdx >= 0) {
+                        let maxEndIdx = payloadEndIdx >= 0 ? payloadEndIdx : newEndIdx;
+                        if (maxEndIdx < anchorIdx) {
+                            maxEndIdx = anchorIdx;
+                        }
                         const noticeKeysToDelete = [];
                         const placeholderIdxToDelete = [];
+                        const mergedMemberMsgIds = new Set(memberMsgIds);
                         let i = anchorIdx + 1;
 
-                        while (i <= maxEndIdx) {
+                        while (i <= maxEndIdx && i < session.timeline.length) {
                             const id = session.timeline[i];
                             if (typeof id === 'string' && id.startsWith('system:undo-seg:')) {
                                 const oldNoticeKey = id.slice('system:undo-seg:'.length);
@@ -6355,11 +6484,17 @@ window.addEventListener('message', (event) => {
                                     i++;
                                     continue;
                                 }
+                                const oldMemberMsgIds = Array.isArray(oldSeg.memberMsgIds)
+                                    ? oldSeg.memberMsgIds.filter((msgId) => typeof msgId === 'string' && msgId.startsWith('msg_'))
+                                    : [];
                                 if (oldSeg.restoreAllowed === false) {
                                     const snapshot = sanitizeMergedSegmentSnapshot(oldSeg);
                                     if (snapshot) {
                                         mergedInvalidSegments.push(snapshot);
                                     }
+                                }
+                                for (const oldMsgId of oldMemberMsgIds) {
+                                    mergedMemberMsgIds.add(oldMsgId);
                                 }
                                 const oldEndIdx = oldSeg.endMsgId
                                     ? getMsgTimelineIndex(oldSeg.endMsgId)
@@ -6437,19 +6572,42 @@ window.addEventListener('message', (event) => {
                                 });
                             }
 
-                            const slice = session.timeline.slice(anchorIdx, maxEndIdx + 1);
-                            finalMemberMsgIds = slice.filter((id) => typeof id === 'string' && id.startsWith('msg_'));
-                            if (finalMemberMsgIds.length) {
-                                finalEndMsgId = finalMemberMsgIds[finalMemberMsgIds.length - 1];
-                                vscode.postMessage({
-                                    type: 'ui-debug',
-                                    payload: ['[WV][MERGE_MEMBERS]',
-                                        `count=${finalMemberMsgIds.length}`,
-                                        `first=${finalMemberMsgIds[0] || 'null'}`,
-                                        `last=${finalMemberMsgIds[finalMemberMsgIds.length - 1] || 'null'}`]
-                                });
+                            finalMemberMsgIds = Array.from(mergedMemberMsgIds);
+                            const candidateEndIds = [endForUpsert];
+                            for (const oldNoticeKey of uniqueNoticeKeys) {
+                                const oldSeg = session.segmentsByNoticeKey.get(oldNoticeKey);
+                                if (oldSeg?.endMsgId) {
+                                    candidateEndIds.push(oldSeg.endMsgId);
+                                }
+                            }
+                            let farthestEndId = endForUpsert;
+                            let farthestEndIdx = endForUpsert ? getMsgTimelineIndex(endForUpsert) : -1;
+                            for (const candidateId of candidateEndIds) {
+                                const candidateIdx = candidateId ? getMsgTimelineIndex(candidateId) : -1;
+                                if (candidateIdx > farthestEndIdx) {
+                                    farthestEndIdx = candidateIdx;
+                                    farthestEndId = candidateId;
+                                }
+                            }
+
+                            if (maxEndIdx >= anchorIdx) {
+                                const slice = session.timeline.slice(anchorIdx, maxEndIdx + 1);
+                                const visibleMergedMsgIds = slice.filter((id) => typeof id === 'string' && id.startsWith('msg_'));
+                                if (visibleMergedMsgIds.length) {
+                                    finalEndMsgId = farthestEndId || finalMemberMsgIds[finalMemberMsgIds.length - 1] || finalEndMsgId;
+                                    vscode.postMessage({
+                                        type: 'ui-debug',
+                                        payload: ['[WV][MERGE_MEMBERS]',
+                                            `count=${finalMemberMsgIds.length}`,
+                                            `first=${finalMemberMsgIds[0] || 'null'}`,
+                                            `last=${finalMemberMsgIds[finalMemberMsgIds.length - 1] || 'null'}`,
+                                            `end=${finalEndMsgId || 'null'}`]
+                                    });
+                                } else {
+                                    mergeApplied = false;
+                                }
                             } else {
-                                mergeApplied = false;
+                                finalEndMsgId = farthestEndId || finalMemberMsgIds[finalMemberMsgIds.length - 1] || finalEndMsgId;
                             }
 
                             vscode.postMessage({
