@@ -3369,7 +3369,7 @@ function stripSystemInjections(text) {
     return s;
 }
 
-function collapseSessionDataMessagesForDisplay(messages) {
+function collapseSessionDataMessagesForDisplay(messages, anchorMsgIds = new Set()) {
     if (!Array.isArray(messages) || messages.length === 0) return [];
     const collapsed = [];
     let pendingAssistant = null;
@@ -3404,6 +3404,11 @@ function collapseSessionDataMessagesForDisplay(messages) {
             const text = item.text || '';
             if (isHiddenControlAssistantText(text)) continue;
             if (!text.trim()) continue;
+            if (anchorMsgIds.has(item.id)) {
+                flushAssistant();
+                collapsed.push({ ...item, text });
+                continue;
+            }
             pendingAssistant = { ...item, text };
         }
     }
@@ -5412,7 +5417,15 @@ window.addEventListener('message', (event) => {
                     session.nextOrder = 0;
                     
                     // Load messages into timeline
-                    const sessionMessages = collapseSessionDataMessagesForDisplay(Array.isArray(message.messages) ? message.messages : []);
+                    const segmentAnchorMsgIds = new Set(
+                        (Array.isArray(message.segments) ? message.segments : [])
+                            .map((seg) => seg?.anchorMsgId)
+                            .filter((id) => typeof id === 'string' && id.startsWith('msg_'))
+                    );
+                    const sessionMessages = collapseSessionDataMessagesForDisplay(
+                        Array.isArray(message.messages) ? message.messages : [],
+                        segmentAnchorMsgIds
+                    );
                     for (const item of sessionMessages) {
                         if (!item || !item.id) continue;
                         
@@ -6469,6 +6482,7 @@ window.addEventListener('message', (event) => {
                         const noticeKeysToDelete = [];
                         const placeholderIdxToDelete = [];
                         const mergedMemberMsgIds = new Set(memberMsgIds);
+                        const mergedChildSegments = [];
                         let i = anchorIdx + 1;
 
                         while (i <= maxEndIdx && i < session.timeline.length) {
@@ -6484,6 +6498,7 @@ window.addEventListener('message', (event) => {
                                     i++;
                                     continue;
                                 }
+                                mergedChildSegments.push(oldSeg);
                                 const oldMemberMsgIds = Array.isArray(oldSeg.memberMsgIds)
                                     ? oldSeg.memberMsgIds.filter((msgId) => typeof msgId === 'string' && msgId.startsWith('msg_'))
                                     : [];
@@ -6574,8 +6589,7 @@ window.addEventListener('message', (event) => {
 
                             finalMemberMsgIds = Array.from(mergedMemberMsgIds);
                             const candidateEndIds = [endForUpsert];
-                            for (const oldNoticeKey of uniqueNoticeKeys) {
-                                const oldSeg = session.segmentsByNoticeKey.get(oldNoticeKey);
+                            for (const oldSeg of mergedChildSegments) {
                                 if (oldSeg?.endMsgId) {
                                     candidateEndIds.push(oldSeg.endMsgId);
                                 }
@@ -6590,24 +6604,40 @@ window.addEventListener('message', (event) => {
                                 }
                             }
 
+                            const mergedInvalidMsgIds = new Set(
+                                mergedInvalidSegments.flatMap((child) => Array.isArray(child?.memberMsgIds) ? child.memberMsgIds : [])
+                                    .filter((id) => typeof id === 'string' && id.startsWith('msg_'))
+                            );
+                            const activeMergedMsgIds = finalMemberMsgIds.filter((id) => !mergedInvalidMsgIds.has(id));
+                            const activeMergedVisibleIndices = activeMergedMsgIds
+                                .map((id) => getMsgTimelineIndex(id))
+                                .filter((idx) => idx >= 0);
+                            const farthestActiveVisibleIdx = activeMergedVisibleIndices.length
+                                ? Math.max(...activeMergedVisibleIndices)
+                                : -1;
+                            const farthestActiveVisibleId = farthestActiveVisibleIdx >= 0
+                                ? session.timeline[farthestActiveVisibleIdx]
+                                : null;
+
                             if (maxEndIdx >= anchorIdx) {
                                 const slice = session.timeline.slice(anchorIdx, maxEndIdx + 1);
                                 const visibleMergedMsgIds = slice.filter((id) => typeof id === 'string' && id.startsWith('msg_'));
                                 if (visibleMergedMsgIds.length) {
-                                    finalEndMsgId = farthestEndId || finalMemberMsgIds[finalMemberMsgIds.length - 1] || finalEndMsgId;
+                                    finalEndMsgId = farthestActiveVisibleId || farthestEndId || activeMergedMsgIds[activeMergedMsgIds.length - 1] || finalMemberMsgIds[finalMemberMsgIds.length - 1] || finalEndMsgId;
                                     vscode.postMessage({
                                         type: 'ui-debug',
                                         payload: ['[WV][MERGE_MEMBERS]',
                                             `count=${finalMemberMsgIds.length}`,
                                             `first=${finalMemberMsgIds[0] || 'null'}`,
                                             `last=${finalMemberMsgIds[finalMemberMsgIds.length - 1] || 'null'}`,
+                                            `activeLast=${activeMergedMsgIds[activeMergedMsgIds.length - 1] || 'null'}`,
                                             `end=${finalEndMsgId || 'null'}`]
                                     });
                                 } else {
                                     mergeApplied = false;
                                 }
                             } else {
-                                finalEndMsgId = farthestEndId || finalMemberMsgIds[finalMemberMsgIds.length - 1] || finalEndMsgId;
+                                finalEndMsgId = farthestActiveVisibleId || farthestEndId || activeMergedMsgIds[activeMergedMsgIds.length - 1] || finalMemberMsgIds[finalMemberMsgIds.length - 1] || finalEndMsgId;
                             }
 
                             vscode.postMessage({

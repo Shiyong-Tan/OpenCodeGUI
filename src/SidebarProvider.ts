@@ -2389,7 +2389,7 @@ ${attachmentLines.join('\n')}`
                             ? await this.resolveChangeListCommits(sessionId, restoreScope.activeRestoreMessageIds, fallbackCommits)
                             : fallbackCommits;
                             const result = await this.client.restoreFromMessage(anchorMsgId, endMsgId, {
-                                messageIds: restoreScope.restoreMessageIds,
+                                messageIds: restoreScope.activeRestoreMessageIds,
                                 excludedMessageIds: restoreScope.invalidMessageIds
                             });
                         const liveWebview = this._view?.webview || activeWebview;
@@ -2671,7 +2671,7 @@ ${attachmentLines.join('\n')}`
                                 conflictContext.endMessageId,
                                 {
                                     force: true,
-                                    messageIds: restoreScope.restoreMessageIds,
+                                    messageIds: restoreScope.activeRestoreMessageIds,
                                     excludedMessageIds: restoreScope.invalidMessageIds
                                 }
                             );

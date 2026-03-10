@@ -826,7 +826,21 @@ export class GitUndoEngine {
         const repo = await this.repoManager.resolveRepo(sessionId, msgId);
         return this.lockManager.withRepoLock(repo, this.logger, async () => {
             const map = await this.mapStore.loadSessionMap(sessionId, repo.repoId);
-            let restoreCommit = map.msgToCommit[msgId];
+            const uniqueMsgIds = Array.isArray(messageIds)
+                ? Array.from(new Set(messageIds.filter((id) => typeof id === 'string' && id.startsWith('msg_'))))
+                : [];
+            const commits = uniqueMsgIds
+                .map((id) => map.msgToCommit[id])
+                .filter((id): id is string => typeof id === 'string' && id.length > 0);
+            const commitOrder = new Map<string, number>();
+            for (let i = 0; i < map.entries.length; i++) {
+                const entry = map.entries[i];
+                commitOrder.set(entry.commitHash, i);
+            }
+            const orderedCommits = commits.length
+                ? Array.from(new Set(commits)).sort((a, b) => (commitOrder.get(a) ?? Number.MAX_SAFE_INTEGER) - (commitOrder.get(b) ?? Number.MAX_SAFE_INTEGER))
+                : [];
+            let restoreCommit = orderedCommits.length ? orderedCommits[orderedCommits.length - 1] : map.msgToCommit[msgId];
             let effectiveMsgId = msgId;
             if (!restoreCommit) {
                 const fallback = this.resolveMappedMsgId(map, msgId, messageIds, 'backward');
@@ -844,28 +858,19 @@ export class GitUndoEngine {
                 this.logger(`restore.missing | reason=missing-commit sessionId=${sessionId} msgId=${msgId}`);
                 return { conflicts: [], touchedFiles: [], applied: false };
             }
-            const uniqueMsgIds = Array.isArray(messageIds)
-                ? Array.from(new Set(messageIds.filter((id) => typeof id === 'string' && id.startsWith('msg_'))))
-                : [];
-            const commits = uniqueMsgIds
-                .map((id) => map.msgToCommit[id])
-                .filter((id): id is string => typeof id === 'string' && id.length > 0);
-            const commitOrder = new Map<string, number>();
-            for (let i = 0; i < map.entries.length; i++) {
-                const entry = map.entries[i];
-                commitOrder.set(entry.commitHash, i);
-            }
-            const orderedCommits = commits.length
-                ? Array.from(new Set(commits)).sort((a, b) => (commitOrder.get(a) ?? Number.MAX_SAFE_INTEGER) - (commitOrder.get(b) ?? Number.MAX_SAFE_INTEGER))
-                : [restoreCommit];
+            const effectiveOrderedCommits = orderedCommits.length ? orderedCommits : [restoreCommit];
+            this.logger(
+                `restore.trace | sessionId=${sessionId} inputMsgId=${msgId} effectiveMsgId=${effectiveMsgId} ` +
+                `messageCount=${uniqueMsgIds.length} orderedCommits=${effectiveOrderedCommits.join(',')} chosenRestoreCommit=${restoreCommit}`
+            );
 
-            const firstCommit = orderedCommits[0];
+            const firstCommit = effectiveOrderedCommits[0];
             const parent = await this.getCommitParent(repo, firstCommit);
             const baseCommit = parent || map.baselineCommit || firstCommit;
             const precheckCommit = map.currentBaseCommit || baseCommit;
 
             let fileSet: string[] = [];
-            for (const commitHash of orderedCommits) {
+            for (const commitHash of effectiveOrderedCommits) {
                 const parentCommit = await this.getCommitParent(repo, commitHash);
                 if (parentCommit) {
                     const diffResult = await runGit(repo, ['diff', '--name-only', `${parentCommit}..${commitHash}`]);
@@ -884,6 +889,7 @@ export class GitUndoEngine {
                 }
             }
             fileSet = unique(fileSet);
+            this.logger(`restore.trace.files | sessionId=${sessionId} chosenRestoreCommit=${restoreCommit} fileSet=${fileSet.join(',')}`);
             this.logger(`fileSet.beforeApply | size=${fileSet.length}`);
             if (!fileSet.length) {
                 return { conflicts: [], touchedFiles: [], applied: true };
