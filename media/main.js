@@ -925,6 +925,7 @@ function isHiddenControlUserText(text) {
     if (trimmed.startsWith('[OC_UI_AUTORESUME')) return true;
     if (trimmed === '/stop-continuation') return true;
     if (trimmed.includes('<auto-slash-command>') && trimmed.includes('/stop-continuation Command')) return true;
+    if (trimmed.includes('<command-instruction>') && trimmed.toLowerCase().includes('stop all continuation mechanisms')) return true;
     return text.includes('<!-- OMO_INTERNAL_INITIATOR -->')
         && (
             text.includes('[SYSTEM DIRECTIVE: OH-MY-OPENCODE - BOULDER CONTINUATION]')
@@ -935,8 +936,10 @@ function isHiddenControlUserText(text) {
 function isHiddenControlAssistantText(text) {
     if (typeof text !== 'string') return false;
     const trimmed = text.trim();
+    const lower = trimmed.toLowerCase();
     return trimmed.includes('All continuation mechanisms have been stopped for this session')
-        || trimmed.includes('All continuation mechanisms stopped for this session:');
+        || trimmed.includes('All continuation mechanisms stopped for this session:')
+        || (lower.includes('continuation') && lower.includes('stopped'));
 }
 
 /**
@@ -5417,15 +5420,22 @@ window.addEventListener('message', (event) => {
                     session.nextOrder = 0;
                     
                     // Load messages into timeline
-                    const segmentAnchorMsgIds = new Set(
-                        (Array.isArray(message.segments) ? message.segments : [])
-                            .map((seg) => seg?.anchorMsgId)
-                            .filter((id) => typeof id === 'string' && id.startsWith('msg_'))
-                    );
-                    const sessionMessages = collapseSessionDataMessagesForDisplay(
-                        Array.isArray(message.messages) ? message.messages : [],
-                        segmentAnchorMsgIds
-                    );
+                    const rawSessionMessages = Array.isArray(message.messages) ? message.messages : [];
+                    const sessionMessages = message?.meta?.source === 'snapshot'
+                        ? rawSessionMessages.filter((item) => {
+                            if (!item || !item.id) return false;
+                            if (item.role === 'user' && isHiddenControlUserText(item.text || '')) return false;
+                            if (item.role === 'assistant' && isHiddenControlAssistantText(item.text || '')) return false;
+                            return true;
+                        })
+                        : collapseSessionDataMessagesForDisplay(
+                            rawSessionMessages,
+                            new Set(
+                                (Array.isArray(message.segments) ? message.segments : [])
+                                    .map((seg) => seg?.anchorMsgId)
+                                    .filter((id) => typeof id === 'string' && id.startsWith('msg_'))
+                            )
+                        );
                     for (const item of sessionMessages) {
                         if (!item || !item.id) continue;
                         

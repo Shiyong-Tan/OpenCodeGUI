@@ -666,8 +666,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     private isHiddenControlAssistantText(text: string): boolean {
         const trimmed = String(text || '').trim();
+        const lower = trimmed.toLowerCase();
         return trimmed.includes('All continuation mechanisms have been stopped for this session')
-            || trimmed.includes('All continuation mechanisms stopped for this session:');
+            || trimmed.includes('All continuation mechanisms stopped for this session:')
+            || (lower.includes('continuation') && lower.includes('stopped'));
+    }
+
+    private isHiddenControlUserText(text: string): boolean {
+        const raw = String(text || '');
+        const trimmed = raw.trim();
+        if (!trimmed) return false;
+        if (trimmed.startsWith('[OC_UI_AUTORESUME')) return true;
+        if (trimmed === '/stop-continuation') return true;
+        if (trimmed.includes('<auto-slash-command>') && trimmed.includes('/stop-continuation Command')) return true;
+        if (trimmed.includes('<command-instruction>') && trimmed.toLowerCase().includes('stop all continuation mechanisms')) return true;
+        return raw.includes('<!-- OMO_INTERNAL_INITIATOR -->')
+            && (
+                raw.includes('[SYSTEM DIRECTIVE: OH-MY-OPENCODE - BOULDER CONTINUATION]')
+                || raw.includes('[SYSTEM DIRECTIVE: OH-MY-OPENCODE - TODO CONTINUATION]')
+            );
     }
 
     private extractLastLine(text: string): string {
@@ -4811,18 +4828,10 @@ ${attachmentLines.join('\n')}`
     private normalizeDisplayMessagesForSnapshot(messages: SessionMessage[]): SessionMessage[] {
         if (!Array.isArray(messages) || messages.length === 0) return [];
         const normalized: SessionMessage[] = [];
-        let pendingAssistant: SessionMessage | null = null;
-        const flushAssistant = () => {
-            if (pendingAssistant) {
-                normalized.push(pendingAssistant);
-                pendingAssistant = null;
-            }
-        };
         for (const msg of messages) {
             if (!msg || typeof msg.text !== 'string') continue;
             if (msg.role === 'system') {
                 if (msg.meta?.kind === 'changeList') {
-                    flushAssistant();
                     normalized.push(msg);
                 }
                 continue;
@@ -4834,17 +4843,10 @@ ${attachmentLines.join('\n')}`
             if (role === 'user' && msg.meta?.syntheticUser === true) continue;
             const text = role === 'user' ? this.stripModeInjectionBlock(msg.text) : msg.text;
             if (!text.trim()) continue;
+            if (role === 'user' && this.isHiddenControlUserText(text)) continue;
             if (role === 'assistant' && this.isHiddenControlAssistantText(text)) continue;
-            const next = { ...msg, role, text };
-            if (role === 'user') {
-                flushAssistant();
-                normalized.push(next);
-                continue;
-            }
-            // Keep only the last assistant within the current user turn window.
-            pendingAssistant = next;
+            normalized.push({ ...msg, role, text });
         }
-        flushAssistant();
         return normalized;
     }
 
@@ -4964,10 +4966,7 @@ ${attachmentLines.join('\n')}`
             const mode = typeof message?.info?.mode === 'string' ? message.info.mode.toLowerCase() : '';
             const agent = typeof message?.info?.agent === 'string' ? message.info.agent.toLowerCase() : '';
             const isAutoResumeText = role === 'user' && text.trimStart().startsWith('[OC_UI_AUTORESUME');
-            const isStopContinuationText = role === 'user' && (
-                text.trim() === '/stop-continuation'
-                || (text.includes('<auto-slash-command>') && text.includes('/stop-continuation Command'))
-            );
+            const isStopContinuationText = role === 'user' && this.isHiddenControlUserText(text);
             const isOmoContinuation =
                 role === 'user'
                 && text.includes('<!-- OMO_INTERNAL_INITIATOR -->')

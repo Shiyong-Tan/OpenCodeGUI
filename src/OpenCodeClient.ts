@@ -769,6 +769,7 @@ export class OpenCodeClient {
             && (
                 text.trim() === this.stopContinuationPrompt
                 || (text.includes('<auto-slash-command>') && text.includes('/stop-continuation Command'))
+                || (text.includes('<command-instruction>') && text.toLowerCase().includes('stop all continuation mechanisms'))
             );
     }
 
