@@ -332,6 +332,7 @@ export class OpenCodeClient {
     private displayTurnUserMsgIdBySession = new Map<string, string>();
     private hiddenControlUserMsgIdsBySession = new Map<string, Set<string>>();
     private hiddenControlAssistantMsgIdsBySession = new Map<string, Set<string>>();
+    private pendingStopContinuationUserBySession = new Map<string, number>();
     private currentTurnAssistantMsgIdBySession = new Map<string, string>();
     private currentTurnStartedAtBySession = new Map<string, number>();
     private lastSseAtBySession = new Map<string, number>();
@@ -456,6 +457,7 @@ export class OpenCodeClient {
         this.displayTurnUserMsgIdBySession.clear();
         this.hiddenControlUserMsgIdsBySession.clear();
         this.hiddenControlAssistantMsgIdsBySession.clear();
+        this.pendingStopContinuationUserBySession.clear();
         this.currentTurnAssistantMsgIdBySession.clear();
         this.currentTurnStartedAtBySession.clear();
         this.lastSseAtBySession.clear();
@@ -807,6 +809,7 @@ export class OpenCodeClient {
                 agent: agentMode
             };
             await this.requestJson('POST', `/session/${sessionId}/prompt_async`, payload);
+            this.pendingStopContinuationUserBySession.set(sessionId, Date.now());
             this.logUiDebug(`EXT: continuation.stop.sent | sessionId=${sessionId} | agent=${agentMode}`);
             return true;
         } catch (error) {
@@ -1041,6 +1044,7 @@ export class OpenCodeClient {
         this.displayTurnUserMsgIdBySession.delete(sessionId);
         this.hiddenControlUserMsgIdsBySession.delete(sessionId);
         this.hiddenControlAssistantMsgIdsBySession.delete(sessionId);
+        this.pendingStopContinuationUserBySession.delete(sessionId);
         this.currentTurnAssistantMsgIdBySession.delete(sessionId);
         this.currentTurnStartedAtBySession.delete(sessionId);
         this.lastSseAtBySession.delete(sessionId);
@@ -1402,6 +1406,24 @@ export class OpenCodeClient {
         if (this.turnStateBySession.has(sessionId)) return false;
         if (!this.turnFinalAtBySession.has(sessionId)) return false;
         return true;
+    }
+
+    private shouldSuppressStopContinuationAssistant(sessionId: string | undefined): boolean {
+        if (!sessionId) return false;
+        if (this.turnStateBySession.has(sessionId)) return false;
+        if (!this.turnFinalAtBySession.has(sessionId)) return false;
+        const sentAt = this.pendingStopContinuationUserBySession.get(sessionId) || 0;
+        if (!sentAt) return false;
+        return (Date.now() - sentAt) <= 15000;
+    }
+
+    private shouldSuppressPendingStopControlUser(sessionId: string | undefined): boolean {
+        if (!sessionId) return false;
+        if (this.turnStateBySession.has(sessionId)) return false;
+        if (!this.turnFinalAtBySession.has(sessionId)) return false;
+        const sentAt = this.pendingStopContinuationUserBySession.get(sessionId) || 0;
+        if (!sentAt) return false;
+        return (Date.now() - sentAt) <= 15000;
     }
 
     public setCurrentTurnAssistantMsgId(sessionId: string, assistantMsgId: string, reason = 'unknown'): void {
@@ -4919,15 +4941,21 @@ export class OpenCodeClient {
                 }
             }
             if (sessionId && role === 'user' && typeof messageId === 'string' && source === 'sse') {
+                if (this.shouldSuppressPendingStopControlUser(sessionId)) {
+                    this.pendingStopContinuationUserBySession.delete(sessionId);
+                    this.rememberHiddenControlUserMsgId(sessionId, messageId);
+                    this.logUiDebug(`EXT: user.ack.updated.skip | sessionId=${sessionId} | msgId=${messageId} | reason=stop-control-pending`);
+                    shouldEmitUserMessageEvent = false;
+                }
                 const isAutoResumeAnchor = this.awaitingAutoResumeUserAnchorBySession.has(sessionId);
                 const isSyntheticUser = isAutoResumeAnchor || this.isSyntheticUserMessageInfo(info);
-                if (this.turnStateBySession.has(sessionId)) {
+                if (shouldEmitUserMessageEvent && this.turnStateBySession.has(sessionId)) {
                     this.setCurrentTurnUserMsgId(sessionId, messageId, isSyntheticUser ? 'synthetic-override' : 'sse-user-message');
                     if (!isSyntheticUser && !this.hasDisplayTurnUserMsgId(sessionId)) {
                         this.setDisplayTurnUserMsgId(sessionId, messageId, 'sse-user-message');
                     }
                 }
-                if (isAutoResumeAnchor) {
+                if (shouldEmitUserMessageEvent && isAutoResumeAnchor) {
                     this.setCurrentTurnUserMsgId(sessionId, messageId, 'autoresume-user-anchor');
                     this.awaitingAutoResumeUserAnchorBySession.delete(sessionId);
                     this.markSessionProgress(sessionId, 'autoresume-user-anchor', messageId);
@@ -4955,6 +4983,11 @@ export class OpenCodeClient {
             if (role === 'assistant' && messageId) {
                 const isSubagentLane = typeof sessionId === 'string' && this.subagentToParentSessionMap.has(sessionId);
                 const lane: EventLane = isSubagentLane ? 'subagent' : (sessionId === this.currentSessionId || this.turnStateBySession.has(sessionId || '') ? 'main' : 'unknown');
+                if (sessionId && this.shouldSuppressStopContinuationAssistant(sessionId)) {
+                    this.rememberHiddenControlAssistantMsgId(sessionId, messageId);
+                    this.logUiDebug(`EXT: assistant.updated.skip | sessionId=${sessionId} | msgId=${messageId} | reason=stop-control-window`);
+                    return events;
+                }
                 if (sessionId && typeof info?.parentID === 'string' && this.shouldSuppressHiddenControlAssistant(sessionId, info.parentID)) {
                     this.rememberHiddenControlAssistantMsgId(sessionId, messageId);
                     this.logUiDebug(`EXT: assistant.updated.skip | sessionId=${sessionId} | msgId=${messageId} | reason=hidden-control-parent`);
