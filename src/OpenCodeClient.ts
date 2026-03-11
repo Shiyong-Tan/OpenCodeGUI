@@ -331,6 +331,7 @@ export class OpenCodeClient {
     private currentTurnUserMsgIdBySession = new Map<string, string>();
     private displayTurnUserMsgIdBySession = new Map<string, string>();
     private hiddenControlUserMsgIdsBySession = new Map<string, Set<string>>();
+    private hiddenControlAssistantMsgIdsBySession = new Map<string, Set<string>>();
     private currentTurnAssistantMsgIdBySession = new Map<string, string>();
     private currentTurnStartedAtBySession = new Map<string, number>();
     private lastSseAtBySession = new Map<string, number>();
@@ -454,6 +455,7 @@ export class OpenCodeClient {
         this.currentTurnUserMsgIdBySession.clear();
         this.displayTurnUserMsgIdBySession.clear();
         this.hiddenControlUserMsgIdsBySession.clear();
+        this.hiddenControlAssistantMsgIdsBySession.clear();
         this.currentTurnAssistantMsgIdBySession.clear();
         this.currentTurnStartedAtBySession.clear();
         this.lastSseAtBySession.clear();
@@ -906,6 +908,7 @@ export class OpenCodeClient {
         this.currentTurnUserMsgIdBySession.delete(sessionId);
         this.displayTurnUserMsgIdBySession.delete(sessionId);
         this.hiddenControlUserMsgIdsBySession.delete(sessionId);
+        this.hiddenControlAssistantMsgIdsBySession.delete(sessionId);
         this.currentTurnAssistantMsgIdBySession.delete(sessionId);
         this.clearFinalizeSessionState(sessionId, 'turn-start');
         const now = Date.now();
@@ -1037,6 +1040,7 @@ export class OpenCodeClient {
         this.currentTurnUserMsgIdBySession.delete(sessionId);
         this.displayTurnUserMsgIdBySession.delete(sessionId);
         this.hiddenControlUserMsgIdsBySession.delete(sessionId);
+        this.hiddenControlAssistantMsgIdsBySession.delete(sessionId);
         this.currentTurnAssistantMsgIdBySession.delete(sessionId);
         this.currentTurnStartedAtBySession.delete(sessionId);
         this.lastSseAtBySession.delete(sessionId);
@@ -1374,6 +1378,22 @@ export class OpenCodeClient {
     private isHiddenControlUserMsgId(sessionId: string | undefined, userMsgId: string | undefined): boolean {
         if (!sessionId || !userMsgId) return false;
         return this.hiddenControlUserMsgIdsBySession.get(sessionId)?.has(userMsgId) === true;
+    }
+
+    private rememberHiddenControlAssistantMsgId(sessionId: string, assistantMsgId: string): void {
+        if (!sessionId || !assistantMsgId || !assistantMsgId.startsWith('msg_')) return;
+        const set = this.hiddenControlAssistantMsgIdsBySession.get(sessionId) || new Set<string>();
+        set.add(assistantMsgId);
+        if (set.size > 50) {
+            const first = set.values().next();
+            if (!first.done) set.delete(first.value);
+        }
+        this.hiddenControlAssistantMsgIdsBySession.set(sessionId, set);
+    }
+
+    private isHiddenControlAssistantMsgId(sessionId: string | undefined, assistantMsgId: string | undefined): boolean {
+        if (!sessionId || !assistantMsgId) return false;
+        return this.hiddenControlAssistantMsgIdsBySession.get(sessionId)?.has(assistantMsgId) === true;
     }
 
     private shouldSuppressHiddenControlAssistant(sessionId: string | undefined, parentUserMsgId: string | undefined): boolean {
@@ -4936,6 +4956,7 @@ export class OpenCodeClient {
                 const isSubagentLane = typeof sessionId === 'string' && this.subagentToParentSessionMap.has(sessionId);
                 const lane: EventLane = isSubagentLane ? 'subagent' : (sessionId === this.currentSessionId || this.turnStateBySession.has(sessionId || '') ? 'main' : 'unknown');
                 if (sessionId && typeof info?.parentID === 'string' && this.shouldSuppressHiddenControlAssistant(sessionId, info.parentID)) {
+                    this.rememberHiddenControlAssistantMsgId(sessionId, messageId);
                     this.logUiDebug(`EXT: assistant.updated.skip | sessionId=${sessionId} | msgId=${messageId} | reason=hidden-control-parent`);
                     return events;
                 }
@@ -5038,6 +5059,10 @@ export class OpenCodeClient {
             const messageId = typeof part?.messageID === 'string' ? part.messageID : '';
             if (source === 'sse' && typeof sessionId === 'string' && messageId.startsWith('msg_')) {
                 this.lastObservedMsgIdBySession.set(sessionId, messageId);
+            }
+            if (this.isHiddenControlAssistantMsgId(sessionId, messageId)) {
+                this.logUiDebug(`EXT: assistant.part.skip | sessionId=${sessionId || 'null'} | msgId=${messageId || 'null'} | reason=hidden-control-assistant`);
+                return events;
             }
             if (this.isIgnoredSummaryMessage(sessionId, messageId)) {
                 return events;
