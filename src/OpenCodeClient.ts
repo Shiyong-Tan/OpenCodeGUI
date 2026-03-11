@@ -2618,6 +2618,38 @@ export class OpenCodeClient {
         return [abs];
     }
 
+    private extractWrittenPathsFromBashCommand(command: unknown, cwd: string | undefined): string[] {
+        if (typeof command !== 'string' || !command.trim()) return [];
+        const paths = new Set<string>();
+        const normalized = command.trim();
+        const pushPath = (rawPath: string | undefined) => {
+            if (!rawPath) return;
+            const trimmed = rawPath.replace(/^['"]|['"]$/g, '').trim();
+            if (!trimmed) return;
+            const abs = path.isAbsolute(trimmed)
+                ? trimmed
+                : (cwd ? path.join(cwd, trimmed) : trimmed);
+            paths.add(abs);
+        };
+
+        const pathCallRegex = /Path\(\s*r?["']([^"'`]+)["']\s*\)/g;
+        for (const match of normalized.matchAll(pathCallRegex)) {
+            pushPath(match[1]);
+        }
+
+        const openRegex = /open\(\s*r?["']([^"'`]+)["']\s*,\s*["'](?:w|a|x|wb|ab|xb)["']/g;
+        for (const match of normalized.matchAll(openRegex)) {
+            pushPath(match[1]);
+        }
+
+        const redirectRegex = /(?:^|[^\w])(?:>|>>)\s*["']?([^\s"'`|;]+)["']?/g;
+        for (const match of normalized.matchAll(redirectRegex)) {
+            pushPath(match[1]);
+        }
+
+        return Array.from(paths);
+    }
+
     private normalizeIncomingFileSnapshots(files: any[]): FileSnapshot[] {
         const normalized: FileSnapshot[] = [];
         for (const raw of files || []) {
@@ -5315,14 +5347,18 @@ export class OpenCodeClient {
                     } else if (part?.tool === 'bash' && sessionId) {
                         const command = part?.state?.input?.command;
                         const cwd = this.lastCwdBySession.get(sessionId);
+                        const writePaths = this.extractWrittenPathsFromBashCommand(command, cwd);
                         const deletePaths = this.extractDeletedPathsFromCommand(command, cwd);
-                        if (deletePaths.length) {
+                        if (writePaths.length || deletePaths.length) {
                             if (this.shouldQueueTurnChanges(sessionId, source, part?.messageID)) {
                                 const turnState = this.turnStateBySession.get(sessionId);
                                 const turnKey = turnState?.pendingUserLocalKey || sessionId;
                                 const tmpKey = turnState?.pendingAssistantTmpKey;
                                 const assistantId = turnState?.assistantMsgId || turnState?.lastResolvedAssistantMsgId;
-                                const changeSpecs = deletePaths.map((filePath: string) => ({ type: 'delete', path: filePath } as FileChangeSpec));
+                                const changeSpecs = [
+                                    ...writePaths.map((filePath: string) => ({ type: 'update', path: filePath } as FileChangeSpec)),
+                                    ...deletePaths.map((filePath: string) => ({ type: 'delete', path: filePath } as FileChangeSpec))
+                                ];
                                 this.queueTurnChanges(sessionId, turnKey, tmpKey, assistantId, changeSpecs);
                             }
                         }
