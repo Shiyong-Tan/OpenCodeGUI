@@ -3376,6 +3376,7 @@ function collapseSessionDataMessagesForDisplay(messages, anchorMsgIds = new Set(
     if (!Array.isArray(messages) || messages.length === 0) return [];
     const collapsed = [];
     let pendingAssistant = null;
+    const hiddenControlUserIds = new Set();
 
     const flushAssistant = () => {
         if (pendingAssistant) {
@@ -3396,7 +3397,10 @@ function collapseSessionDataMessagesForDisplay(messages, anchorMsgIds = new Set(
             continue;
         }
         if (role === 'user') {
-            if (meta.syntheticUser === true || isHiddenControlUserText(item.text || '')) continue;
+            if (meta.syntheticUser === true || isHiddenControlUserText(item.text || '')) {
+                hiddenControlUserIds.add(item.id);
+                continue;
+            }
             const text = stripSystemInjections((item.text || '').replace(/^(\r?\n)+/, ''));
             if (!text.trim()) continue;
             flushAssistant();
@@ -3406,6 +3410,13 @@ function collapseSessionDataMessagesForDisplay(messages, anchorMsgIds = new Set(
         if (role === 'assistant') {
             const text = item.text || '';
             if (isHiddenControlAssistantText(text)) continue;
+            const parentId =
+                (typeof item.parentId === 'string' && item.parentId)
+                || (typeof item.parentID === 'string' && item.parentID)
+                || (typeof meta.parentId === 'string' && meta.parentId)
+                || (typeof meta.parentID === 'string' && meta.parentID)
+                || '';
+            if (parentId && hiddenControlUserIds.has(parentId)) continue;
             if (!text.trim()) continue;
             if (anchorMsgIds.has(item.id)) {
                 flushAssistant();
