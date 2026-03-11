@@ -4,7 +4,7 @@
   "publisher": "TanShiyong",
   "description": "VS Code UI for OpenCode CLI with subagents, code diff, change lists, and undo/restore.",
   "icon": "media/marketplace-icon.png",
-  "version": "1.1.13",
+  "version": "1.1.16",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -93,11 +93,7 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
-    "task1:check": "node scripts/task1-check.js",
-    "task11:check": "node scripts/task11-check.js",
-    "task12:check": "node scripts/task12-check.js",
-    "task13:check": "node scripts/task13-check.js"
+    "watch": "tsc -watch -p ./"
   },
   "devDependencies": {
     "@types/vscode": "^1.80.0",

@@ -8,6 +8,15 @@ All notable changes to this project will be documented in this file.
 - Updated extension listing copy with a more descriptive display name and clearer description focused on OpenCode CLI, subagents, code diff, change lists, and undo/restore.
 - Refined README top section so Marketplace visitors can understand the core workflow and key features more quickly without relying on animated demos.
 
+## 1.1.15
+
+- Hardened undo/restore after reload: fixed stale active-segment state, corrected segment hydration, and aligned restore commit selection with the effective restore message set.
+- Fixed merged segment behavior across active/invalid child segments so UI merge, restore boundaries, and invalid-child recovery stay consistent after nested undo operations.
+- Changed snapshot persistence to keep only visible timeline messages plus change-list/segment state, and restored snapshot timelines strictly by saved snapshot message order/IDs.
+- Filtered continuation control noise more aggressively: hidden `/stop-continuation` command wrappers and `continuation ... stopped` assistant replies no longer pollute live chat, snapshots, or reload results.
+- Refined delayed-final and continuation guards so post-final control rounds are suppressed without hiding normal `OC_UI_AUTORESUME` follow-up assistant activity.
+- Fixed cancel/send flow so a new prompt can be sent immediately after stopping a running turn, without getting blocked by stale in-flight state.
+
 ## 1.1.12
 
 - Refined transient task UI: reduced oversized subagent/todo status circles, added a `Todo list` title, normalized its typography, and improved icon/text alignment for todo rows.

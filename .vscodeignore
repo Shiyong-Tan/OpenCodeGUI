@@ -5,3 +5,54 @@
 hello_world
 
 .vscode
+
+# source files (not needed in extension package)
+src/**
+scripts/**
+tsconfig.json
+
+# development configs
+.vscode/**
+.git/**
+.gitignore
+.npmignore
+
+# logs
+*.log
+OpenCode*.log
+stderr.txt
+
+# temporary / debug files
+_tmp_*
+debug-webview.html
+hello_world.py
+
+# documentation not needed at runtime
+IssueNotSolved.md
+RESYNC_RESCUE_DESIGN.md
+UNDO_RESTORE_DESIGN.md
+grouped-resync-activity.md
+sse_resync.md
+
+# local config
+config.json
+
+# tests
+test/**
+tests/**
+
+# node modules (vsce will bundle only needed deps)
+node_modules/.bin/**
+node_modules/typescript/**
+
+# build artifacts not needed
+*.map
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+nul
+opencode-gui@*
+
+extension/**

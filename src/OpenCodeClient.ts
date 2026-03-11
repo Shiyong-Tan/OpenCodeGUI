@@ -330,6 +330,7 @@ export class OpenCodeClient {
     private pendingAssistantMsgIdBySession = new Map<string, string>();
     private currentTurnUserMsgIdBySession = new Map<string, string>();
     private displayTurnUserMsgIdBySession = new Map<string, string>();
+    private hiddenControlUserMsgIdsBySession = new Map<string, Set<string>>();
     private currentTurnAssistantMsgIdBySession = new Map<string, string>();
     private currentTurnStartedAtBySession = new Map<string, number>();
     private lastSseAtBySession = new Map<string, number>();
@@ -452,6 +453,7 @@ export class OpenCodeClient {
         this.pendingAssistantMsgIdBySession.clear();
         this.currentTurnUserMsgIdBySession.clear();
         this.displayTurnUserMsgIdBySession.clear();
+        this.hiddenControlUserMsgIdsBySession.clear();
         this.currentTurnAssistantMsgIdBySession.clear();
         this.currentTurnStartedAtBySession.clear();
         this.lastSseAtBySession.clear();
@@ -903,6 +905,7 @@ export class OpenCodeClient {
         this.finishedTurnAtBySession.delete(sessionId);
         this.currentTurnUserMsgIdBySession.delete(sessionId);
         this.displayTurnUserMsgIdBySession.delete(sessionId);
+        this.hiddenControlUserMsgIdsBySession.delete(sessionId);
         this.currentTurnAssistantMsgIdBySession.delete(sessionId);
         this.clearFinalizeSessionState(sessionId, 'turn-start');
         const now = Date.now();
@@ -1033,6 +1036,7 @@ export class OpenCodeClient {
         this.pendingAssistantMsgIdBySession.delete(sessionId);
         this.currentTurnUserMsgIdBySession.delete(sessionId);
         this.displayTurnUserMsgIdBySession.delete(sessionId);
+        this.hiddenControlUserMsgIdsBySession.delete(sessionId);
         this.currentTurnAssistantMsgIdBySession.delete(sessionId);
         this.currentTurnStartedAtBySession.delete(sessionId);
         this.lastSseAtBySession.delete(sessionId);
@@ -1354,6 +1358,30 @@ export class OpenCodeClient {
 
     private hasDisplayTurnUserMsgId(sessionId: string): boolean {
         return this.displayTurnUserMsgIdBySession.has(sessionId);
+    }
+
+    private rememberHiddenControlUserMsgId(sessionId: string, userMsgId: string): void {
+        if (!sessionId || !userMsgId || !userMsgId.startsWith('msg_')) return;
+        const set = this.hiddenControlUserMsgIdsBySession.get(sessionId) || new Set<string>();
+        set.add(userMsgId);
+        if (set.size > 50) {
+            const first = set.values().next();
+            if (!first.done) set.delete(first.value);
+        }
+        this.hiddenControlUserMsgIdsBySession.set(sessionId, set);
+    }
+
+    private isHiddenControlUserMsgId(sessionId: string | undefined, userMsgId: string | undefined): boolean {
+        if (!sessionId || !userMsgId) return false;
+        return this.hiddenControlUserMsgIdsBySession.get(sessionId)?.has(userMsgId) === true;
+    }
+
+    private shouldSuppressHiddenControlAssistant(sessionId: string | undefined, parentUserMsgId: string | undefined): boolean {
+        if (!sessionId || !parentUserMsgId) return false;
+        if (!this.isHiddenControlUserMsgId(sessionId, parentUserMsgId)) return false;
+        if (this.turnStateBySession.has(sessionId)) return false;
+        if (!this.turnFinalAtBySession.has(sessionId)) return false;
+        return true;
     }
 
     public setCurrentTurnAssistantMsgId(sessionId: string, assistantMsgId: string, reason = 'unknown'): void {
@@ -4907,6 +4935,10 @@ export class OpenCodeClient {
             if (role === 'assistant' && messageId) {
                 const isSubagentLane = typeof sessionId === 'string' && this.subagentToParentSessionMap.has(sessionId);
                 const lane: EventLane = isSubagentLane ? 'subagent' : (sessionId === this.currentSessionId || this.turnStateBySession.has(sessionId || '') ? 'main' : 'unknown');
+                if (sessionId && typeof info?.parentID === 'string' && this.shouldSuppressHiddenControlAssistant(sessionId, info.parentID)) {
+                    this.logUiDebug(`EXT: assistant.updated.skip | sessionId=${sessionId} | msgId=${messageId} | reason=hidden-control-parent`);
+                    return events;
+                }
                 if (sessionId && typeof info?.parentID === 'string') {
                     const currentUser = this.currentTurnUserMsgIdBySession.get(sessionId);
                     if (currentUser && info.parentID === currentUser) {
@@ -5047,11 +5079,12 @@ export class OpenCodeClient {
                 }
                 if (source === 'sse' && sessionId && msgId && roleForMsg === 'user') {
                     const partText = typeof part?.text === 'string' ? part.text : '';
-                    if (
-                        this.isAutoResumePromptText(partText) ||
-                        this.isStopContinuationPromptText(partText) ||
-                        this.isOmoContinuationText(partText)
-                    ) {
+                    const isAutoResumeControl = this.isAutoResumePromptText(partText);
+                    const isHiddenStopControl = this.isStopContinuationPromptText(partText) || this.isOmoContinuationText(partText);
+                    if (isAutoResumeControl || isHiddenStopControl) {
+                        if (isHiddenStopControl) {
+                            this.rememberHiddenControlUserMsgId(sessionId, msgId);
+                        }
                         this.setCurrentTurnUserMsgId(sessionId, msgId, 'autoresume-user');
                         this.markSessionProgress(sessionId, 'autoresume-user-seen', msgId);
                         this.logUiDebug(`EXT: user.ack.part.skip | sessionId=${sessionId} | msgId=${msgId} | reason=control-hidden`);

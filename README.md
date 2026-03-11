@@ -1,5 +1,9 @@
 # OpenCode GUI
 
+
+[![Installs](https://img.shields.io/visual-studio-marketplace/i/TanShiyong.opencode-gui?style=flat-square&logo=visualstudiocode&label=Installs)](https://marketplace.visualstudio.com/items?itemName=TanShiyong.opencode-gui)
+[![Version](https://img.shields.io/visual-studio-marketplace/v/TanShiyong.opencode-gui?style=flat-square&logo=visualstudiocode&label=Version)](https://marketplace.visualstudio.com/items?itemName=TanShiyong.opencode-gui)
+
 OpenCode GUI is a powerful Visual Studio Code extension that brings the capabilities of the OpenCode CLI directly into your editor through a sleek, interactive sidebar.
 
 OpenCode GUI is a VS Code UI for OpenCode CLI focused on real coding workflows rather than chat-only interactions.
@@ -46,6 +50,12 @@ If you already use OpenCode CLI and want a stronger in-editor workflow, this ext
   + **Session History**: Full history of all changes tracked per session
 
 ## Installation
+
+
+### From VS Code Marketplace
+
+[![Install from VS Code Marketplace](https://img.shields.io/badge/VS%20Code-Install%20Extension-0098FF?logo=visualstudiocode&style=flat-square)](https://marketplace.visualstudio.com/items?itemName=TanShiyong.opencode-gui)
+
 
 ### Prerequisites
 
