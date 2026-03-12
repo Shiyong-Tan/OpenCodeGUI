@@ -5794,7 +5794,7 @@ window.addEventListener('message', (event) => {
             case 'assistantMessageMeta': {
                 const sessionId = getEventSessionId(message, 'assistantMessageMeta');
                 if (!sessionId) break;
-                const session = getSessionState(sessionId, true);
+                const session = getSessionState(sessionId, false);
                 if (session?.canceledActiveTurn) {
                     vscode.postMessage({
                         type: 'ui-debug',
@@ -5802,7 +5802,33 @@ window.addEventListener('message', (event) => {
                     });
                     break;
                 }
-                logIdCandidates('[DBG_META]', message, sessionId, activeSessionId);
+                const allowedSessionIds = Array.isArray(message?.allowedSessionIds)
+                    ? message.allowedSessionIds.filter(id => typeof id === 'string' && id.length)
+                    : [];
+                const isAllowedSession = !allowedSessionIds.length || allowedSessionIds.includes(sessionId);
+                vscode.postMessage({
+                    type: 'ui-debug',
+                    payload: [
+                        '[WV][ASSIST_META_GATE]',
+                        `current=${activeSessionId || 'null'}`,
+                        `meta=${sessionId}`,
+                        `allowedCount=${allowedSessionIds.length}`,
+                        `isAllowed=${isAllowedSession}`,
+                        `assistantMsgId=${message?.assistantMsgId || message?.messageId || 'null'}`
+                    ]
+                });
+                if (!isAllowedSession) {
+                    vscode.postMessage({
+                        type: 'ui-debug',
+                        payload: [
+                            '[WV][ASSIST_META_BLOCKED]',
+                            `current=${activeSessionId || 'null'}`,
+                            `meta=${sessionId}`,
+                            `allowed=${allowedSessionIds.join(',') || 'none'}`
+                        ]
+                    });
+                    break;
+                }
                 handleAssistantMeta(sessionId, message);
                 // Removed: reconcilePendingSegments - new system uses applyHydratedSegments
                 window.__oc?.renderFromState?.();
