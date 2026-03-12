@@ -657,10 +657,68 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return { ...formatted, messages: this.normalizeDisplayMessagesForSnapshot(merged) };
     }
 
-    private buildSnapshotSessionPayload(sessionPayload: { type: string; sessionId: string; title: string; messages: SessionMessage[]; segments?: any[] }) {
+    private collectSegmentVisibleMemberMessageIds(segments: any[] | undefined): Set<string> {
+        const memberIds = new Set<string>();
+        for (const segment of Array.isArray(segments) ? segments : []) {
+            const ids = Array.isArray(segment?.memberMsgIds) ? segment.memberMsgIds : [];
+            for (const id of ids) {
+                if (typeof id === 'string' && id.startsWith('msg_')) {
+                    memberIds.add(id);
+                }
+            }
+        }
+        return memberIds;
+    }
+
+    private collectVisibleSnapshotMessages(messages: SessionMessage[] | undefined): SessionMessage[] {
+        const visibleMessages: SessionMessage[] = [];
+        for (const message of Array.isArray(messages) ? messages : []) {
+            if (!message || typeof message.id !== 'string' || !message.id) continue;
+            const text = typeof message.text === 'string' ? message.text : '';
+            if (message.role === 'user' && this.isHiddenControlUserText(text)) continue;
+            if (message.role === 'assistant' && this.isHiddenControlAssistantText(text)) continue;
+            visibleMessages.push(message);
+        }
+        return visibleMessages;
+    }
+
+    private buildSnapshotSessionPayload(
+        sessionPayload: { type: string; sessionId: string; title: string; messages: SessionMessage[]; segments?: any[]; meta?: any },
+        segmentMemberMessages: SessionMessage[] = []
+    ) {
+        const timelineMessages = this.collectVisibleSnapshotMessages(sessionPayload.messages);
+        const timelineIds = timelineMessages
+            .map((message) => (typeof message?.id === 'string' ? message.id : ''))
+            .filter((id): id is string => Boolean(id));
+        const mergedMessages: SessionMessage[] = [];
+        const seenIds = new Set<string>();
+        const pushMessage = (message: SessionMessage | null | undefined) => {
+            if (!message) return;
+            const messageId = typeof message.id === 'string' ? message.id : '';
+            if (!messageId || seenIds.has(messageId)) return;
+            const text = typeof message.text === 'string' ? message.text : '';
+            if (message.role === 'user' && this.isHiddenControlUserText(text)) return;
+            if (message.role === 'assistant' && this.isHiddenControlAssistantText(text)) return;
+            mergedMessages.push(message);
+            seenIds.add(messageId);
+        };
+        for (const message of timelineMessages) {
+            pushMessage(message);
+        }
+        for (const message of Array.isArray(segmentMemberMessages) ? segmentMemberMessages : []) {
+            pushMessage(message);
+        }
+        const segmentBackingMessageIds = mergedMessages
+            .map((message) => (typeof message?.id === 'string' ? message.id : ''))
+            .filter((id): id is string => Boolean(id) && !timelineIds.includes(id));
         return {
             ...sessionPayload,
-            messages: this.normalizeDisplayMessagesForSnapshot(sessionPayload.messages || [])
+            messages: mergedMessages,
+            meta: {
+                ...(sessionPayload.meta || {}),
+                timelineMessageIds: timelineIds,
+                segmentBackingMessageIds
+            }
         };
     }
 
@@ -1802,12 +1860,8 @@ ${attachmentLines.join('\n')}`
                             const snap = await this.readSnapshot(targetSessionId);
                             if (snap?.obj?.sessionData) {
                                 const snapPayload = snap.obj.sessionData;
-                                const snapshotFormatted = await this.injectChangeLists(targetSessionId, {
-                                    title: snapPayload.title || baseTitle,
-                                    messages: Array.isArray(snapPayload.messages) ? snapPayload.messages : []
-                                });
-                                const snapshotMessages = snapshotFormatted.messages;
-                                baseTitle = snapshotFormatted.title || baseTitle;
+                                const snapshotMessages = Array.isArray(snapPayload.messages) ? snapPayload.messages : [];
+                                baseTitle = snapPayload.title || baseTitle;
                                 baseMessages = snapshotMessages;
                                 const payload = {
                                     type: 'sessionData',
@@ -1862,8 +1916,17 @@ ${attachmentLines.join('\n')}`
                                 sessionId: targetSessionId,
                                 title: baseTitle,
                                 messages: mergedMessages,
-                                segments
+                                segments,
+                                meta: {
+                                    timelineMessageIds: this.collectVisibleSnapshotMessages(mergedMessages)
+                                        .map((message) => (typeof message?.id === 'string' ? message.id : ''))
+                                        .filter((id): id is string => Boolean(id))
+                                }
                             };
+                            const segmentMemberMessages = this.formatMessagesByIds(
+                                recentExport,
+                                this.collectSegmentVisibleMemberMessageIds(segments)
+                            );
 
                             const sent = postSessionData(sessionPayload, 'recent');
                             if (sent && mergedMessages.length > 0) {
@@ -1880,7 +1943,7 @@ ${attachmentLines.join('\n')}`
                                     const snapshotObj = {
                                         sessionId: targetSessionId,
                                         exportedAt: Date.now(),
-                                        sessionData: this.buildSnapshotSessionPayload(sessionPayload)
+                                        sessionData: this.buildSnapshotSessionPayload(sessionPayload, segmentMemberMessages)
                                     };
                                     await this.writeSnapshotAtomic(targetSessionId, snapshotObj);
                                 } catch (err) {
@@ -1953,8 +2016,17 @@ ${attachmentLines.join('\n')}`
                             sessionId: targetSessionId,
                             title: formatted.title,
                             messages: formatted.messages,
-                            segments
+                            segments,
+                            meta: {
+                                timelineMessageIds: this.collectVisibleSnapshotMessages(formatted.messages)
+                                    .map((message) => (typeof message?.id === 'string' ? message.id : ''))
+                                    .filter((id): id is string => Boolean(id))
+                            }
                         };
+                        const segmentMemberMessages = this.formatMessagesByIds(
+                            exportData,
+                            this.collectSegmentVisibleMemberMessageIds(segments)
+                        );
                         const sent = postSessionData(sessionPayload, 'full');
                         if (sent && formatted.messages.length > 0) {
                             sessionDataSent = true;
@@ -1964,7 +2036,7 @@ ${attachmentLines.join('\n')}`
                                 const snapshotObj = {
                                     sessionId: targetSessionId,
                                     exportedAt: Date.now(),
-                                    sessionData: this.buildSnapshotSessionPayload(sessionPayload)
+                                    sessionData: this.buildSnapshotSessionPayload(sessionPayload, segmentMemberMessages)
                                 };
                                 await this.writeSnapshotAtomic(targetSessionId, snapshotObj);
                             } catch (err) {
@@ -2953,16 +3025,18 @@ ${attachmentLines.join('\n')}`
                             try {
                                 const snap = await this.readSnapshot(recentSessionId);
                                 if (snap?.obj?.sessionData) {
-                                    const snapshotFormatted = await this.injectChangeLists(recentSessionId, {
-                                        title: snap.obj.sessionData?.title || 'Session',
-                                        messages: Array.isArray(snap.obj.sessionData?.messages) ? snap.obj.sessionData.messages : []
-                                    });
+                                    const segMap = this.undoSegmentsBySession.get(recentSessionId);
+                                    const segments = segMap ? Array.from(segMap.values()) : [];
+                                    const snapshotMessages = Array.isArray(snap.obj.sessionData?.messages)
+                                        ? snap.obj.sessionData.messages
+                                        : [];
                                     const payload = {
                                         ...snap.obj.sessionData,
-                                        title: snapshotFormatted.title,
-                                        messages: snapshotFormatted.messages
+                                        title: snap.obj.sessionData?.title || 'Session',
+                                        messages: snapshotMessages
                                     };
                                     payload.meta = {
+                                        ...(snap.obj.sessionData?.meta || {}),
                                         source: 'snapshot',
                                         reason: 'export_failed',
                                         stderrLastLine: normalized.stderrLastLine || ''
@@ -3009,8 +3083,6 @@ ${attachmentLines.join('\n')}`
 
                         if (!snapshotLoaded) {
                             const exportData = normalized.data;
-                            const formattedRaw = this.formatSession(exportData);
-                            const formatted = await this.injectChangeLists(recentSessionId, formattedRaw);
                             this.currentSessionId = recentSessionId;
                             this.trackUserOwnedSession(this.currentSessionId);
                             this.client.setSessionId(this.currentSessionId);
@@ -3047,6 +3119,8 @@ ${attachmentLines.join('\n')}`
                             const segMap = this.undoSegmentsBySession.get(recentSessionId);
                             this.syncClientRevertedSegmentFromUndoSegments(recentSessionId);
                             const segments = segMap ? Array.from(segMap.values()) : [];
+                            const formattedRaw = this.formatSession(exportData);
+                            const formatted = await this.injectChangeLists(recentSessionId, formattedRaw);
 
                         // this.uiDebugChannel.appendLine(
                         //     `[EXT][SEG_HYDRATE_LOAD] sessionId=${recentSessionId} found=${segments.length} ` +
@@ -3068,8 +3142,17 @@ ${attachmentLines.join('\n')}`
                                 sessionId: recentSessionId,
                                 title: formatted.title,
                                 messages: formatted.messages,
-                                segments: segments  // Simplified segment array (no complex mapping)
+                                segments: segments,  // Simplified segment array (no complex mapping)
+                                meta: {
+                                    timelineMessageIds: this.collectVisibleSnapshotMessages(formatted.messages)
+                                        .map((message) => (typeof message?.id === 'string' ? message.id : ''))
+                                        .filter((id): id is string => Boolean(id))
+                                }
                             };
+                            const segmentMemberMessages = this.formatMessagesByIds(
+                                exportData,
+                                this.collectSegmentVisibleMemberMessageIds(segments)
+                            );
                             
                             liveWebview.postMessage(sessionPayload);
                             if (formatted.messages.length > 0) {
@@ -3079,7 +3162,7 @@ ${attachmentLines.join('\n')}`
                                 const snapshotObj = {
                                     sessionId: recentSessionId,
                                     exportedAt: Date.now(),
-                                    sessionData: this.buildSnapshotSessionPayload(sessionPayload)
+                                    sessionData: this.buildSnapshotSessionPayload(sessionPayload, segmentMemberMessages)
                                 };
                                 const bytes = await this.writeSnapshotAtomic(recentSessionId, snapshotObj);
                                 this.uiDebugChannel.appendLine(`[EXT][SNAP_SAVE] sessionId=${recentSessionId} file=${this.getSnapshotFile(recentSessionId)} bytes=${bytes}`);
@@ -3125,10 +3208,10 @@ ${attachmentLines.join('\n')}`
                     // Try to load this session's data
                     try {
                         const exportResult = await this.client.exportSession(this.currentSessionId);
-                        const formattedRaw = this.formatSession(exportResult);
-                        const formatted = await this.injectChangeLists(this.currentSessionId, formattedRaw);
                         const segMap = this.undoSegmentsBySession.get(this.currentSessionId);
                         const segments = segMap ? Array.from(segMap.values()) : [];
+                        const formattedRaw = this.formatSession(exportResult);
+                        const formatted = await this.injectChangeLists(this.currentSessionId, formattedRaw);
 
                         const liveWebview = this._view?.webview || webview;
                         liveWebview.postMessage({
@@ -3136,7 +3219,12 @@ ${attachmentLines.join('\n')}`
                             sessionId: this.currentSessionId,
                             title: formatted.title,
                             messages: formatted.messages,
-                            segments: segments
+                            segments: segments,
+                            meta: {
+                                timelineMessageIds: this.collectVisibleSnapshotMessages(formatted.messages)
+                                    .map((message) => (typeof message?.id === 'string' ? message.id : ''))
+                                    .filter((id): id is string => Boolean(id))
+                            }
                         });
                         this.uiDebugChannel.appendLine(`[EXT][AUTO_SELECT_LOADED] sessionId=${this.currentSessionId} messages=${formatted.messages.length}`);
                     } catch (err) {
@@ -3145,15 +3233,14 @@ ${attachmentLines.join('\n')}`
                         try {
                             const snap = await this.readSnapshot(this.currentSessionId);
                             if (snap?.obj?.sessionData) {
-                                const snapshotFormatted = await this.injectChangeLists(this.currentSessionId, {
-                                    title: snap.obj.sessionData?.title || 'Session',
-                                    messages: Array.isArray(snap.obj.sessionData?.messages) ? snap.obj.sessionData.messages : []
-                                });
+                                const segMap = this.undoSegmentsBySession.get(this.currentSessionId);
+                                const segments = segMap ? Array.from(segMap.values()) : [];
                                 const liveWebview = this._view?.webview || webview;
                                 liveWebview.postMessage({
                                     ...snap.obj.sessionData,
-                                    title: snapshotFormatted.title,
-                                    messages: snapshotFormatted.messages
+                                    title: snap.obj.sessionData?.title || 'Session',
+                                    messages: Array.isArray(snap.obj.sessionData?.messages) ? snap.obj.sessionData.messages : [],
+                                    segments
                                 });
                                 this.uiDebugChannel.appendLine(`[EXT][AUTO_SELECT_SNAP_OK] sessionId=${this.currentSessionId}`);
                             }
@@ -4885,6 +4972,32 @@ ${attachmentLines.join('\n')}`
             normalized.push({ ...msg, role, text });
         }
         return normalized;
+    }
+
+    private formatMessagesByIds(exportData: any, messageIds: Set<string>): SessionMessage[] {
+        if (!(messageIds instanceof Set) || messageIds.size === 0) return [];
+        const rawMessages = Array.isArray(exportData?.messages) ? exportData.messages : [];
+        const formatted: SessionMessage[] = [];
+        const seenIds = new Set<string>();
+        for (const message of rawMessages) {
+            const resolvedId = typeof message?.info?.id === 'string' ? message.info.id : '';
+            if (!resolvedId || !messageIds.has(resolvedId) || seenIds.has(resolvedId)) continue;
+            const role = message?.info?.role === 'user' ? 'user' : message?.info?.role === 'assistant' ? 'assistant' : null;
+            if (!role) continue;
+            const parts = Array.isArray(message?.parts)
+                ? message.parts.filter((part: any) => part.type === 'text' && typeof part.text === 'string')
+                : [];
+            const text = parts.map((part: any) => part.text).join('');
+            if (!text) continue;
+            const displayText = role === 'user' ? this.stripModeInjectionBlock(text) : text;
+            if (!displayText.trim()) continue;
+            if (role === 'user' && this.isHiddenControlUserText(displayText)) continue;
+            if (role === 'assistant' && this.isHiddenControlAssistantText(displayText)) continue;
+            const messageIndex = this.client.registerMessage(resolvedId);
+            formatted.push({ role, text: displayText, id: resolvedId, messageIndex });
+            seenIds.add(resolvedId);
+        }
+        return formatted;
     }
 
     private formatSession(exportData: any): { title: string; messages: SessionMessage[] } {

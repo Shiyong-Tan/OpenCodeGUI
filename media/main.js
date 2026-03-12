@@ -5432,7 +5432,17 @@ window.addEventListener('message', (event) => {
                     
                     // Load messages into timeline
                     const rawSessionMessages = Array.isArray(message.messages) ? message.messages : [];
-                    const sessionMessages = message?.meta?.source === 'snapshot'
+                    const explicitTimelineIds = Array.isArray(message?.meta?.timelineMessageIds)
+                        ? message.meta.timelineMessageIds.filter((id) => typeof id === 'string' && id.length > 0)
+                        : [];
+                    const sessionMessages = explicitTimelineIds.length
+                        ? rawSessionMessages.filter((item) => {
+                            if (!item || !item.id) return false;
+                            if (item.role === 'user' && isHiddenControlUserText(item.text || '')) return false;
+                            if (item.role === 'assistant' && isHiddenControlAssistantText(item.text || '')) return false;
+                            return true;
+                        })
+                        : message?.meta?.source === 'snapshot'
                         ? rawSessionMessages.filter((item) => {
                             if (!item || !item.id) return false;
                             if (item.role === 'user' && isHiddenControlUserText(item.text || '')) return false;
@@ -5479,6 +5489,10 @@ window.addEventListener('message', (event) => {
                             meta: item.meta || {},
                             order: session.nextOrder++
                         });
+                    }
+                    if (explicitTimelineIds.length) {
+                        session.timeline = explicitTimelineIds.filter((id) => session.messagesById.has(id));
+                        logTimelineSnapshot('snapshot-restore', session.timeline, `count=${session.timeline.length}`);
                     }
                     
                     // Snapshot notice if needed
