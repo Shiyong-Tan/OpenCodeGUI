@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.1.17
+
+- Tightened post-final continuation handling so hidden `/stop-continuation` control rounds no longer leak extra visible assistant activity into the UI.
+- Fixed snapshot-adjacent reload behavior for control-noise messages by filtering post-snapshot hidden-control assistants using their hidden user parent relationship instead of letting them attach to the previous visible turn.
+- Improved stop/continuation noise suppression across reload paths so `Stopped.` / similar stop-confirmation replies do not reappear as visible finals after reload.
+- Fixed a timing bug in the stop-continuation guard so the protection survives `finishTurn()` long enough to suppress the control round that arrives immediately after final acceptance.
+- Added bash-tool file-path extraction for common write patterns, including `python Path(...).write_text(...)`, so bash-based file edits are recorded in touched files and final change lists more reliably.
+- Updated Marketplace categories to improve extension discoverability.
+
 ## 1.1.13
 
 - Improved Marketplace metadata for discoverability: added targeted search keywords for OpenCode, AI coding, code agents, and developer tooling.
