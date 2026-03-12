@@ -4165,6 +4165,7 @@ ${attachmentLines.join('\n')}`
             if (event.assistantMsgId && sessionId) {
                 this.uiDebugChannel.appendLine(`[DBG_ASSIST_ID] session=${sessionId} assistantMsgId=${event.assistantMsgId} tmpKey=${tmpKey || 'null'}`);
             }
+            const isSyntheticTurn = this.isCurrentTurnSynthetic(sessionId);
             liveWebview.postMessage({
                 type: 'assistantMessageMeta',
                 messageId: event.messageId,
@@ -4173,7 +4174,9 @@ ${attachmentLines.join('\n')}`
                 sessionId,
                 assistantMsgId: event.assistantMsgId,
                 tmpKey,
-                isStatusUpdate: event.isStatusUpdate
+                isStatusUpdate: event.isStatusUpdate,
+                allowedSessionIds: this.getAssistantMetaAllowedSessionIds(),
+                ...(isSyntheticTurn ? { isSyntheticTurn: true } : {})
             });
             if (sessionId && typeof event.assistantMsgId === 'string' && typeof event.messageIndex === 'number') {
                 liveWebview.postMessage({
@@ -4193,12 +4196,15 @@ ${attachmentLines.join('\n')}`
                 this.appendAssistantBuffer(sessionId, event.text);
                 // Push latest chunk to webview (no cumulative text)
                 const liveWebview = this._view?.webview || webview;
+                const isSyntheticTurn = this.isCurrentTurnSynthetic(sessionId);
                 liveWebview?.postMessage({
                     type: 'assistantMessageMeta',
                     sessionId,
                     tmpKey: this.pendingAssistantTmpKeyBySession?.get(sessionId),
                     lastText: event.text,
-                    isStatusUpdate: false
+                    isStatusUpdate: false,
+                    allowedSessionIds: this.getAssistantMetaAllowedSessionIds(),
+                    ...(isSyntheticTurn ? { isSyntheticTurn: true } : {})
                 });
             }
             return;
@@ -4323,16 +4329,47 @@ ${attachmentLines.join('\n')}`
         this.assistantTextBufferBySession.set(sessionId, next);
     }
 
+    private getAssistantMetaAllowedSessionIds(): string[] {
+        const currentSessionId = this.currentSessionId || '';
+        if (!currentSessionId) {
+            return [];
+        }
+        try {
+            const relatedIds = this.client.getRelatedSessionIds(currentSessionId);
+            return Array.from(new Set([currentSessionId, ...relatedIds].filter(Boolean)));
+        } catch {
+            return currentSessionId ? [currentSessionId] : [];
+        }
+    }
+
+    /**
+     * Check if the current turn for a session is synthetic (hidden-control or stop-continuation).
+     * Returns true only when suppression criteria are met — callers tag assistantMessageMeta
+     * postMessage events with isSyntheticTurn: true so the webview can skip display.
+     * Uses provenance (parent user msg ID linkage), NOT text matching.
+     */
+    private isCurrentTurnSynthetic(sessionId: string | undefined): boolean {
+        if (!sessionId) return false;
+        try {
+            return this.client.isCurrentTurnSyntheticForSession(sessionId);
+        } catch {
+            return false;  // safe default: unknown = visible
+        }
+    }
+
     private flushAssistantBufferToWebview(sessionId: string, webview: vscode.Webview): void {
         const text = this.assistantTextBufferBySession.get(sessionId) || '';
         this.assistantTextBufferBySession.delete(sessionId);
         if (!text) return;
         const tmpKey = this.pendingAssistantTmpKeyBySession.get(sessionId);
+        const isSyntheticTurn = this.isCurrentTurnSynthetic(sessionId);
         webview.postMessage({
             type: 'assistantMessageMeta',
             lastText: text,
             sessionId,
-            tmpKey
+            tmpKey,
+            allowedSessionIds: this.getAssistantMetaAllowedSessionIds(),
+            ...(isSyntheticTurn ? { isSyntheticTurn: true } : {})
         });
     }
 

@@ -5829,6 +5829,23 @@ window.addEventListener('message', (event) => {
                     });
                     break;
                 }
+                const sessionStateForAllowed = getSessionState(sessionId, true);
+
+                // P2: Suppress synthetic auto-continuation turns
+                if (message.isSyntheticTurn === true) {
+                    // State tracking still happens (getSessionState above),
+                    // but skip all display side-effects.
+                    vscode.postMessage({
+                        type: 'ui-debug',
+                        payload: [
+                            '[WV][ASSIST_META_SYNTHETIC_SUPPRESSED]',
+                            `sessionId=${sessionId}`,
+                            `turnId=${message.turnId || 'null'}`,
+                            `msgId=${message.assistantMsgId || message.messageId || 'null'}`
+                        ]
+                    });
+                    break;
+                }
                 handleAssistantMeta(sessionId, message);
                 // Removed: reconcilePendingSegments - new system uses applyHydratedSegments
                 window.__oc?.renderFromState?.();

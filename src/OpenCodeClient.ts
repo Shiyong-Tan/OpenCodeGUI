@@ -1426,6 +1426,27 @@ export class OpenCodeClient {
         return (Date.now() - sentAt) <= 15000;
     }
 
+    /**
+     * Public helper for SidebarProvider: checks if the current turn for a session
+     * is a synthetic/hidden-control turn whose streaming UI events should be suppressed.
+     * Returns true if the turn's parent user message is a hidden-control user msg
+     * (shouldSuppressHiddenControlAssistant) OR a stop-continuation window applies
+     * (shouldSuppressStopContinuationAssistant).
+     * Callers should tag assistantMessageMeta events with isSyntheticTurn: true
+     * when this returns true, so the webview can skip display.
+     */
+    public isCurrentTurnSyntheticForSession(sessionId: string | undefined): boolean {
+        if (!sessionId) return false;
+        const currentUserMsgId = this.currentTurnUserMsgIdBySession.get(sessionId);
+        if (currentUserMsgId && this.shouldSuppressHiddenControlAssistant(sessionId, currentUserMsgId)) {
+            return true;
+        }
+        if (this.shouldSuppressStopContinuationAssistant(sessionId)) {
+            return true;
+        }
+        return false;
+    }
+
     public setCurrentTurnAssistantMsgId(sessionId: string, assistantMsgId: string, reason = 'unknown'): void {
         if (!sessionId || !assistantMsgId || !assistantMsgId.startsWith('msg_')) return;
         const existing = this.currentTurnAssistantMsgIdBySession.get(sessionId);
