@@ -3707,7 +3707,7 @@ export class OpenCodeClient {
                     skipReady: true
                 });
             }
-            await this.ensureServerForWorkspace(conn.lock.workspaceRoot, 'fetch-retry');
+            await this.ensureServer();
             const nextConn = await this.getServerConn(true);
             return this.serverFetch(reqPath, init, {
                 opName,
