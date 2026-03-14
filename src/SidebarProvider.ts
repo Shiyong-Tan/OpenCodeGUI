@@ -128,18 +128,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         try {
             const raw = this._context.globalState.get<string>(this.USER_OWNED_SESSIONS_KEY);
             if (!raw) {
-                this.uiDebugChannel.appendLine('[SidebarProvider] loadUserOwnedSessions: no stored sessions');
+                this.uiDebugChannel?.appendLine('[SidebarProvider] loadUserOwnedSessions: no stored sessions');
                 return;
             }
             const parsed = JSON.parse(raw);
             if (Array.isArray(parsed)) {
                 parsed.forEach((id: string) => this.userOwnedSessionIds.add(id));
-                this.uiDebugChannel.appendLine(`[SidebarProvider] loadUserOwnedSessions: restored ${parsed.length} session(s)`);
+                this.uiDebugChannel?.appendLine(`[SidebarProvider] loadUserOwnedSessions: restored ${parsed.length} session(s)`);
             } else {
-                this.uiDebugChannel.appendLine('[SidebarProvider] loadUserOwnedSessions: invalid format (not an array)');
+                this.uiDebugChannel?.appendLine('[SidebarProvider] loadUserOwnedSessions: invalid format (not an array)');
             }
         } catch (error) {
-            this.uiDebugChannel.appendLine(`[SidebarProvider] loadUserOwnedSessions: failed with error: ${String(error)}`);
+            this.uiDebugChannel?.appendLine(`[SidebarProvider] loadUserOwnedSessions: failed with error: ${String(error)}`);
         }
     }
 
@@ -1054,9 +1054,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     ) {
         this.client = new OpenCodeClient();
         this.client.setStorage(this._context.globalState);
-        void this.loadUserOwnedSessions();
         this.uiDebugChannel = vscode.window.createOutputChannel('OpenCode UI Debug');
         this.client.setUiDebugChannel(this.uiDebugChannel);
+        void this.loadUserOwnedSessions();
         this.client.setServerStatusHandler((status, reason) => {
             this.sendServerStatus(status, reason);
         });
