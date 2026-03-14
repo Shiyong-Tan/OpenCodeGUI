@@ -11,6 +11,10 @@ All notable changes to this project will be documented in this file.
 - Added bash-tool file-path extraction for common write patterns, including `python Path(...).write_text(...)`, so bash-based file edits are recorded in touched files and final change lists more reliably.
 - Updated Marketplace categories to improve extension discoverability.
 
+## 1.1.18
+
+- Stop processing SSE events for a session after finalization, preventing late meta events from creating post-final temporary assistant bubbles.
+
 ## 1.1.13
 
 - Improved Marketplace metadata for discoverability: added targeted search keywords for OpenCode, AI coding, code agents, and developer tooling.

@@ -360,6 +360,7 @@ export class OpenCodeClient {
     private turnFinalWaitersBySession = new Map<string, Array<() => void>>();
     private turnFinalResolvedBySession = new Set<string>();
     private turnFinalSourceBySession = new Map<string, EventSource>();
+    private turnFinishedBySession = new Set<string>();
     private turnRescueTimerBySession = new Map<string, NodeJS.Timeout>();
     private turnRescueRunIdBySession = new Map<string, number>();
     private turnResyncLoopTimerBySession = new Map<string, NodeJS.Timeout>();
@@ -906,6 +907,7 @@ export class OpenCodeClient {
         if (!sessionId) return;
         this.changeListEmittedBySession.delete(sessionId);
         this.canceledActiveTurnBySession.set(sessionId, false);
+        this.turnFinishedBySession.delete(sessionId);
         this.finishedMainAgentBySession.delete(sessionId);
         this.finishedTurnAtBySession.delete(sessionId);
         this.currentTurnUserMsgIdBySession.delete(sessionId);
@@ -1009,6 +1011,7 @@ export class OpenCodeClient {
 
     public finishTurn(sessionId: string): void {
         if (!sessionId) return;
+        this.turnFinishedBySession.add(sessionId);
         const finishedMode = this.expectedMainAgentBySession.get(sessionId);
         if (finishedMode) {
             this.finishedMainAgentBySession.set(sessionId, finishedMode);
@@ -4888,6 +4891,9 @@ export class OpenCodeClient {
         const sessionId = normalized.sessionId;
         if (sessionId) {
             this.logUiDebug(`EXT: event.normalized | type=${normalized.type} | lane=${normalized.lane} | sessionId=${normalized.sessionId} | messageId=${normalized.messageId || 'null'} | parentId=${normalized.parentId || 'null'} | finish=${normalized.finish || 'null'} | partType=${normalized.partType || 'null'} | source=${normalized.source}`);
+        }
+        if (source === 'sse' && sessionId && this.turnFinishedBySession.has(sessionId)) {
+            return events;
         }
         if (source === 'resync' && sessionId && (type === 'files' || type === 'diff' || type === 'toolPatch')) {
             const rootSessionId = this.subagentToParentSessionMap.get(sessionId) || sessionId;
