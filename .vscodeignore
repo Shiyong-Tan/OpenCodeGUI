@@ -1,10 +1,10 @@
 .opencode/**
 
-.sisyphus
+.sisyphus/**
 
 hello_world
 
-.vscode
+.vscode/**
 
 # source files (not needed in extension package)
 src/**
@@ -47,6 +47,7 @@ node_modules/typescript/**
 
 # build artifacts not needed
 *.map
+*.vsix
 
 # OS junk
 .DS_Store
