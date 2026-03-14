@@ -4387,6 +4387,18 @@ export class OpenCodeClient {
         return undefined;
     }
 
+    private formatQuotaWindowLabel(limitWindowSeconds?: number): string | undefined {
+        if (typeof limitWindowSeconds !== 'number' || !Number.isFinite(limitWindowSeconds) || limitWindowSeconds <= 0) {
+            return undefined;
+        }
+        const hours = limitWindowSeconds / 3600;
+        if (hours <= 6) return '5h';
+        if (hours < 24) return `${Math.round(hours)}h`;
+        const days = hours / 24;
+        if (days <= 7) return 'Weekly';
+        return `${Math.round(days)}d`;
+    }
+
     private async fetchOpenAIQuota(): Promise<ModelQuota | null> {
         const auth = await this.readAuthJson();
         const openai = auth?.openai || auth?.codex || auth?.chatgpt || auth?.opencode;
@@ -4413,14 +4425,14 @@ export class OpenCodeClient {
         const rows: ModelQuotaRow[] = [];
         if (primaryRemain !== null) {
             rows.push({
-                label: '5h',
+                label: this.formatQuotaWindowLabel(primary.limit_window_seconds) || 'Usage',
                 remainingPercent: Math.round(primaryRemain),
                 resetText: this.formatReset(primary.reset_at, primary.reset_after_seconds)
             });
         }
         if (secondaryRemain !== null) {
             rows.push({
-                label: 'Weekly',
+                label: this.formatQuotaWindowLabel(secondary.limit_window_seconds) || 'Usage',
                 remainingPercent: Math.round(secondaryRemain),
                 resetText: this.formatReset(secondary.reset_at, secondary.reset_after_seconds)
             });
