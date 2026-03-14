@@ -1733,6 +1733,11 @@ export class OpenCodeClient {
             }
         }
         this.turnSettleStableCountBySession.set(sessionId, stable);
+        if (this.finalizingMsgIdBySession.has(sessionId) && len > 0 && stable >= 1 && !this.hasPendingOrRunningTools(sessionId)) {
+            this.logUiDebug(`EXT: settle.fast | sessionId=${sessionId} | reason=final-locked | msgId=${finalMsgId} | len=${len} | stable=${stable}`);
+            this.resolveTurnFinal(sessionId, 'settle-fast-final-locked');
+            return;
+        }
         const fingerprint = this.getAssistantFingerprint(finalMsgId);
         const prevFingerprint = this.turnSettleLastFingerprintBySession.get(sessionId);
         let noDeltaCount = this.turnSettleNoDeltaCountBySession.get(sessionId) || 0;
@@ -1828,8 +1833,15 @@ export class OpenCodeClient {
         const runId = Date.now();
         this.turnRescueRunIdBySession.set(sessionId, runId);
         this.logUiDebug(`EXT: watchdog.start | sessionId=${sessionId}`);
-        void this.resyncForChatResolve(sessionId, 'watchdog-timeout');
-        this.startRescueTimer(sessionId);
+        void this.resyncForChatResolve(sessionId, 'watchdog-timeout')
+            .finally(() => {
+                if (this.turnFinalAtBySession.has(sessionId)) {
+                    this.logUiDebug(`EXT: watchdog.skip-rearm | sessionId=${sessionId} | reason=final-locked`);
+                    this.scheduleSseDrainConfirm(sessionId);
+                    return;
+                }
+                this.startRescueTimer(sessionId);
+            });
     }
 
     private stopRescueWatchdog(sessionId: string, reason: string): void {
@@ -5975,9 +5987,14 @@ export class OpenCodeClient {
                 .catch((error) => {
                     this.logUiDebug(`EXT: resyncResolve.fail | sessionId=${targetSessionId} | epoch=${resyncEpoch} | err=${String(error)}`);
                 })
-                .finally(() => {
+                .finally(async () => {
                     this.resyncInFlightBySession.delete(targetSessionId);
                     this.resyncCooldownUntilBySession.set(targetSessionId, Date.now() + this.resyncCooldownMs);
+                    if (this.turnFinalAtBySession.has(targetSessionId) && this.finalizingMsgIdBySession.has(targetSessionId)) {
+                        this.logUiDebug(`EXT: resync.settle-handoff | sessionId=${targetSessionId} | reason=final-locked`);
+                        await this.runResyncSettleCheck(targetSessionId, 'resync-final-locked');
+                        return;
+                    }
                     this.armNonFinalResyncLoop(targetSessionId, `post-resolve:${reason}`);
                 });
 
