@@ -5815,6 +5815,13 @@ window.addEventListener('message', (event) => {
                     });
                     break;
                 }
+                if (session?.turnFullyFinalized === true) {
+                    vscode.postMessage({
+                        type: 'ui-debug',
+                        payload: ['assistantMessageMeta', 'drop-turnSealed', `sessionId=${sessionId}`]
+                    });
+                    break;
+                }
                 const allowedSessionIds = Array.isArray(message?.allowedSessionIds)
                     ? message.allowedSessionIds.filter(id => typeof id === 'string' && id.length)
                     : [];
@@ -5890,6 +5897,13 @@ window.addEventListener('message', (event) => {
                     vscode.postMessage({
                         type: 'ui-debug',
                         payload: ['chatChunk', 'drop-canceledActiveTurn', `sessionId=${sessionId}`]
+                    });
+                    break;
+                }
+                if (session?.turnFullyFinalized === true) {
+                    vscode.postMessage({
+                        type: 'ui-debug',
+                        payload: ['chatChunk', 'drop-turnSealed', `sessionId=${sessionId}`]
                     });
                     break;
                 }
@@ -6247,6 +6261,13 @@ window.addEventListener('message', (event) => {
                     vscode.postMessage({
                         type: 'ui-debug',
                         payload: ['messageAppend', 'drop-cancelled', `messageId=${message?.message?.id || 'null'}`]
+                    });
+                    break;
+                }
+                if (session?.turnFullyFinalized === true) {
+                    vscode.postMessage({
+                        type: 'ui-debug',
+                        payload: ['messageAppend', 'drop-turnSealed', `sessionId=${sessionId}`]
                     });
                     break;
                 }
