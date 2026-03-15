@@ -569,6 +569,7 @@ function removeMessageFromSession(session, messageId) {
         session.assistantUpgradeSeen.clear();
     }
     session.activeTurnOpId = null;
+    session.turnFullyFinalized = true;
     window.__oc?.renderFromState?.();
     updateSendGate();
 }
@@ -600,7 +601,7 @@ function getEventMessageId(message) {
 
 function isSendBlockedByPendingState(session) {
     if (!session) return false;
-    return session.turnFullyFinalized === false;
+    return !session.turnFullyFinalized || session.backendTurnInFlight;
 }
 
 function updateSendGate() {
