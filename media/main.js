@@ -600,11 +600,7 @@ function getEventMessageId(message) {
 
 function isSendBlockedByPendingState(session) {
     if (!session) return false;
-    if (session.backendTurnInFlight === true) return true;
-    if (session.thinkingId) return true;
-    if (session.pendingAssistantUpgrade) return true;
-    if (session.awaitingFinalMapBind === true) return true;
-    return false;
+    return session.turnFullyFinalized === false;
 }
 
 function updateSendGate() {
