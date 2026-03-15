@@ -510,7 +510,8 @@ function createSessionState() {
         seenUndoAckOpIds: new Set(),
         pendingUndo: null,
         lastUndoNoticeKey: null,
-        undoAvailable: true
+        undoAvailable: true,
+        turnFullyFinalized: true
     };
 }
 
@@ -4517,6 +4518,7 @@ function applyPromptToSession(sessionId, payload) {
     session.awaitingFinalMapBind = false;
     session.streamMode = null;
     session.backendTurnInFlight = false;
+    session.turnFullyFinalized = false;
     if (session.seenDiffKeys instanceof Set) {
         session.seenDiffKeys.clear();
     }
@@ -5428,6 +5430,7 @@ window.addEventListener('message', (event) => {
                     session.pendingAssistantUpgrade = null;
                     session.awaitingFinalMapBind = false;
                     session.backendTurnInFlight = false;
+                    session.turnFullyFinalized = true;
                     session.nextOrder = 0;
                     
                     // Load messages into timeline
@@ -5907,7 +5910,10 @@ window.addEventListener('message', (event) => {
                 if (!session.meta) session.meta = {};
                 session.meta.turnFinalizePhase = message.phase || '';
                 if (message.phase === 'finalize_done') {
+                    session.turnFullyFinalized = true;
+                    session.backendTurnInFlight = false;
                     setBusy(false);
+                    updateSendGate();
                 }
                 break;
             }
