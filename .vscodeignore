@@ -2,6 +2,8 @@
 
 .sisyphus/**
 
+.tmp-librarian/**
+
 hello_world
 
 .vscode/**
@@ -41,9 +43,11 @@ config.json
 test/**
 tests/**
 
-# node modules (vsce will bundle only needed deps)
+# node modules - exclude devDependencies, keep only runtime deps
 node_modules/.bin/**
+node_modules/@types/**
 node_modules/typescript/**
+node_modules/.package-lock.json
 
 # build artifacts not needed
 *.map
@@ -56,4 +60,21 @@ Thumbs.db
 nul
 opencode-gui@*
 
-extension/**
+# extension package should be clean, exclude unwanted files from it
+extension/*.exe
+extension/*.log
+extension/%TEMP%*
+extension/rustup-init.exe
+
+# root level temp files and executables (should never be packaged)
+*.exe
+%TEMP%*
+rustup-init*
+
+# docs not needed at runtime (keep essential ones)
+extension/TEST_VERIFICATION.md
+extension/release-notes.md
+extension/help.txt
+
+# assets that may be build artifacts
+extension/assets/*.exe

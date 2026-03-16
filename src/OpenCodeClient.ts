@@ -418,6 +418,7 @@ export class OpenCodeClient {
     private readonly autoResumeEpochThreshold = 5;
     private readonly autoResumeStallMs = 100000;
     private readonly autoResumeWarnMs = 180000;
+    private readonly toolRunningAutoResumeMs = 180000;
     private readonly quotaCacheTtlMs = 15000;
     private readonly assistantTextCacheMax = 4000;
     private serverStatus: ServerStatus = 'connected';
@@ -5816,15 +5817,19 @@ export class OpenCodeClient {
 
         const hasRunningTools = this.hasPendingOrRunningTools(sessionId);
         const hasBlocker = this.hasInteractiveBlocker(sessionId);
-        if (hasRunningTools || hasBlocker) {
-            const pauseReason = hasBlocker
-                ? (hasRunningTools ? 'interactive-blocker+tool-running' : 'interactive-blocker')
-                : 'tool-running';
+        const now = Date.now();
+        const lastProgressAt = this.lastProgressAtBySession.get(sessionId) || now;
+        const stallMs = now - lastProgressAt;
+        if (hasBlocker) {
+            const pauseReason = hasRunningTools ? 'interactive-blocker+tool-running' : 'interactive-blocker';
             this.pauseResyncStallTracking(sessionId, pauseReason, progressKey);
             return;
         }
+        if (hasRunningTools && stallMs < this.toolRunningAutoResumeMs) {
+            this.pauseResyncStallTracking(sessionId, 'tool-running', progressKey);
+            return;
+        }
 
-        const now = Date.now();
         if (!this.noProgressSinceBySession.has(sessionId)) {
             this.noProgressSinceBySession.set(sessionId, now);
         }
@@ -5836,9 +5841,6 @@ export class OpenCodeClient {
         if (!this.lastProgressKeyBySession.has(sessionId)) {
             this.lastProgressKeyBySession.set(sessionId, progressKey);
         }
-
-        const lastProgressAt = this.lastProgressAtBySession.get(sessionId) || now;
-        const stallMs = now - lastProgressAt;
 
         if (stallMs >= this.autoResumeWarnMs && !this.stallWarnedBySession.has(sessionId)) {
             this.stallWarnedBySession.add(sessionId);

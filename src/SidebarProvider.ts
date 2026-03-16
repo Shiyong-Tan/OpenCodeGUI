@@ -4213,9 +4213,7 @@ ${attachmentLines.join('\n')}`
 
         if (event.type === 'autoResumeHardStop' && event.sessionId) {
             const liveWebview = this._view?.webview || webview;
-            this.uiDebugChannel.appendLine(`EXT: autoresume.hardstop | sessionId=${event.sessionId} | action=cancel+reload-card`);
-            this.client.cancel();
-            this.client.cancelTurn(event.sessionId);
+            this.uiDebugChannel.appendLine(`EXT: autoresume.hardstop | sessionId=${event.sessionId} | action=show-stall-card`);
             this.sendInFlightBySession.delete(event.sessionId);
             liveWebview.postMessage({ type: 'turnInFlight', sessionId: event.sessionId, inFlight: false });
             liveWebview.postMessage({
