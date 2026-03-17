@@ -373,6 +373,8 @@ export class OpenCodeClient {
     private turnSettleNoDeltaCountBySession = new Map<string, number>();
     private rescueResumeAtBySession = new Map<string, number>();
     private turnRecoveryModeBySession = new Map<string, 'sse' | 'resync'>();
+    private falsePositiveResetCountBySession = new Map<string, number>();
+    private watchdogDrainDelayTimerBySession = new Map<string, NodeJS.Timeout>();
     private turnResyncEpochBySession = new Map<string, number>();
     private toolRunningByMessageId = new Map<string, number>();
     private toolStatusBySession = new Map<string, Map<string, string>>();
@@ -413,6 +415,7 @@ export class OpenCodeClient {
     private readonly sseDrainQuietMs = 800;
     private readonly sseDrainPass2DelayMs = 1000;
     private readonly settleNoDeltaThreshold = 3;
+    private readonly watchdogDrainDelayMs = 10000;
     private readonly autoResumePrompt = '[OC_UI_AUTORESUME v1]\nRe-read the last user request and finish the remaining steps.';
     private readonly stopContinuationPrompt = '/stop-continuation';
     private readonly autoResumeEpochThreshold = 5;
@@ -517,6 +520,8 @@ export class OpenCodeClient {
         this.lateDiffGraceBySession.clear();
         this.changeListEmittedBySession.clear();
         this.replayMirroredChangeIdsBySession.clear();
+        this.watchdogDrainDelayTimerBySession.clear();
+        this.falsePositiveResetCountBySession.clear();
     }
 
     constructor() {
@@ -750,6 +755,12 @@ export class OpenCodeClient {
             clearTimeout(sseDrain);
             this.turnSseDrainTimerBySession.delete(sessionId);
         }
+        const watchdogDelay = this.watchdogDrainDelayTimerBySession.get(sessionId);
+        if (watchdogDelay) {
+            clearTimeout(watchdogDelay);
+            this.watchdogDrainDelayTimerBySession.delete(sessionId);
+        }
+        this.falsePositiveResetCountBySession.delete(sessionId);
         this.turnFinalWaitersBySession.delete(sessionId);
         this.stopRescueWatchdog(sessionId, reason);
 
