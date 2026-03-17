@@ -6071,6 +6071,12 @@ export class OpenCodeClient {
                         await this.runResyncSettleCheck(targetSessionId, 'resync-final-locked');
                         return;
                     }
+                    // Secondary FP detection: turnFinalAt set but finalizingMsgId is NOT set
+                    if (this.turnFinalAtBySession.has(targetSessionId) && !this.finalizingMsgIdBySession.has(targetSessionId)) {
+                        this.logUiDebug(`EXT: fp.detect | sessionId=${targetSessionId} | location=resync-finally | reason=${reason}`);
+                        this.resetFalsePositiveFinal(targetSessionId, `resync:${reason}`);
+                        return;
+                    }
                     this.armNonFinalResyncLoop(targetSessionId, `post-resolve:${reason}`);
                 });
 
