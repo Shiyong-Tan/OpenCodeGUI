@@ -1696,6 +1696,41 @@ export class OpenCodeClient {
         }
     }
 
+    private resetFalsePositiveFinal(sessionId: string, reason: string): void {
+        if (!sessionId) return;
+
+        const resetCount = (this.falsePositiveResetCountBySession.get(sessionId) || 0) + 1;
+        this.falsePositiveResetCountBySession.set(sessionId, resetCount);
+        this.logUiDebug(`EXT: fp.reset | sessionId=${sessionId} | reason=${reason} | resetCount=${resetCount}`);
+
+        // Clear all 6 finalization maps
+        this.turnFinalAtBySession.delete(sessionId);
+        this.finalizingMsgIdBySession.delete(sessionId);
+        this.turnFinalMsgIdBySession.delete(sessionId);
+        this.turnFinalSourceBySession.delete(sessionId);
+        this.turnSseTextAtBySession.delete(sessionId);
+
+        // Clear all 5 settle counters
+        this.turnSettleAttemptsBySession.delete(sessionId);
+        this.turnSettleLastLenBySession.delete(sessionId);
+        this.turnSettleStableCountBySession.delete(sessionId);
+        this.turnSettleLastFingerprintBySession.delete(sessionId);
+        this.turnSettleNoDeltaCountBySession.delete(sessionId);
+
+        // Cancel SSE drain timer
+        const sseDrain = this.turnSseDrainTimerBySession.get(sessionId);
+        if (sseDrain) {
+            clearTimeout(sseDrain);
+            this.turnSseDrainTimerBySession.delete(sessionId);
+        }
+
+        // Stop current watchdog and re-arm rescue timer to wait for true final
+        this.stopRescueWatchdog(sessionId, `fp-reset:${reason}`);
+        this.turnRecoveryModeBySession.set(sessionId, 'sse');
+        this.startRescueTimer(sessionId);
+        this.logUiDebug(`EXT: fp.reset.complete | sessionId=${sessionId} | resetCount=${resetCount} | mode=sse`);
+    }
+
     private scheduleSseDrainConfirm(sessionId: string): void {
         if (!sessionId) return;
         if (this.turnFinalResolvedBySession.has(sessionId)) return;
