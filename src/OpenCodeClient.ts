@@ -1763,6 +1763,12 @@ export class OpenCodeClient {
         if (this.turnFinalResolvedBySession.has(sessionId)) return;
         const finalMsgId = this.getFinalizingMsgId(sessionId);
         if (!finalMsgId) {
+            // FP detection: turnFinalAtBySession set but no finalizingMsgId — false-positive state
+            if (this.turnFinalAtBySession.has(sessionId)) {
+                this.logUiDebug(`EXT: fp.detect | sessionId=${sessionId} | location=settle-check | reason=${reason}`);
+                this.resetFalsePositiveFinal(sessionId, `settle:${reason}`);
+                return;
+            }
             this.startRescueTimer(sessionId);
             return;
         }
