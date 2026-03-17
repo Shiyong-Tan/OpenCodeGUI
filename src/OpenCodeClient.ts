@@ -1882,12 +1882,22 @@ export class OpenCodeClient {
         this.logUiDebug(`EXT: watchdog.start | sessionId=${sessionId}`);
         void this.resyncForChatResolve(sessionId, 'watchdog-timeout')
             .finally(() => {
-                if (this.turnFinalAtBySession.has(sessionId)) {
-                    this.logUiDebug(`EXT: watchdog.skip-rearm | sessionId=${sessionId} | reason=final-locked`);
-                    this.scheduleSseDrainConfirm(sessionId);
-                    return;
-                }
-                this.startRescueTimer(sessionId);
+                const delayTimer = setTimeout(() => {
+                    this.watchdogDrainDelayTimerBySession.delete(sessionId);
+                    if (this.turnFinalResolvedBySession.has(sessionId)) {
+                        this.logUiDebug(`EXT: watchdog.drain-delay.resolved-guard | sessionId=${sessionId} | resolved=true`);
+                        return;
+                    }
+                    if (this.turnFinalAtBySession.has(sessionId)) {
+                        this.logUiDebug(`EXT: watchdog.drain-delay.final-locked | sessionId=${sessionId} | delayMs=${this.watchdogDrainDelayMs}`);
+                        this.scheduleSseDrainConfirm(sessionId);
+                        return;
+                    }
+                    this.logUiDebug(`EXT: watchdog.drain-delay.no-final | sessionId=${sessionId} | delayMs=${this.watchdogDrainDelayMs}`);
+                    this.startRescueTimer(sessionId);
+                }, this.watchdogDrainDelayMs);
+                this.watchdogDrainDelayTimerBySession.set(sessionId, delayTimer);
+                this.logUiDebug(`EXT: watchdog.drain-delay.start | sessionId=${sessionId} | delayMs=${this.watchdogDrainDelayMs}`);
             });
     }
 
