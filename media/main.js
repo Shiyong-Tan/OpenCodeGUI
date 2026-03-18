@@ -1,5 +1,21 @@
 ﻿const vscode = acquireVsCodeApi();
 
+// Global error handler for catching uncaught exceptions
+window.onerror = function (message, source, lineno, colno, error) {
+    vscode.postMessage({
+        type: 'ui-debug',
+        payload: ['[WV][UNCAUGHT_ERROR]', `msg=${String(message)}`, `src=${String(source)}`, `line=${lineno}`, `col=${colno}`, `stack=${String(error?.stack)}`]
+    });
+    return false;
+};
+
+window.onunhandledrejection = function (event) {
+    vscode.postMessage({
+        type: 'ui-debug',
+        payload: ['[WV][UNHANDLED_REJECTION]', `reason=${String(event.reason)}`]
+    });
+};
+
 const md = window.markdownit({
     linkify: true,
     breaks: true,

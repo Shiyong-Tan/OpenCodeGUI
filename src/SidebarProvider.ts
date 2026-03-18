@@ -1860,8 +1860,12 @@ ${attachmentLines.join('\n')}`
                             const snap = await this.readSnapshot(targetSessionId);
                             if (snap?.obj?.sessionData) {
                                 const snapPayload = snap.obj.sessionData;
-                                const snapshotMessages = Array.isArray(snapPayload.messages) ? snapPayload.messages : [];
-                                baseTitle = snapPayload.title || baseTitle;
+                                const snapshotFormatted = await this.injectChangeLists(targetSessionId, {
+                                    title: snapPayload.title || baseTitle,
+                                    messages: Array.isArray(snapPayload.messages) ? snapPayload.messages : []
+                                });
+                                const snapshotMessages = snapshotFormatted.messages;
+                                baseTitle = snapshotFormatted.title || baseTitle;
                                 baseMessages = snapshotMessages;
                                 const payload = {
                                     type: 'sessionData',
@@ -3027,13 +3031,16 @@ ${attachmentLines.join('\n')}`
                                 if (snap?.obj?.sessionData) {
                                     const segMap = this.undoSegmentsBySession.get(recentSessionId);
                                     const segments = segMap ? Array.from(segMap.values()) : [];
-                                    const snapshotMessages = Array.isArray(snap.obj.sessionData?.messages)
-                                        ? snap.obj.sessionData.messages
-                                        : [];
+                                    const snapshotFormatted = await this.injectChangeLists(recentSessionId, {
+                                        title: snap.obj.sessionData?.title || 'Session',
+                                        messages: Array.isArray(snap.obj.sessionData?.messages)
+                                            ? snap.obj.sessionData.messages
+                                            : []
+                                    });
                                     const payload = {
                                         ...snap.obj.sessionData,
-                                        title: snap.obj.sessionData?.title || 'Session',
-                                        messages: snapshotMessages
+                                        title: snapshotFormatted.title,
+                                        messages: snapshotFormatted.messages
                                     };
                                     payload.meta = {
                                         ...(snap.obj.sessionData?.meta || {}),
@@ -3235,11 +3242,17 @@ ${attachmentLines.join('\n')}`
                             if (snap?.obj?.sessionData) {
                                 const segMap = this.undoSegmentsBySession.get(this.currentSessionId);
                                 const segments = segMap ? Array.from(segMap.values()) : [];
+                                const snapshotFormatted = await this.injectChangeLists(this.currentSessionId, {
+                                    title: snap.obj.sessionData?.title || 'Session',
+                                    messages: Array.isArray(snap.obj.sessionData?.messages)
+                                        ? snap.obj.sessionData.messages
+                                        : []
+                                });
                                 const liveWebview = this._view?.webview || webview;
                                 liveWebview.postMessage({
                                     ...snap.obj.sessionData,
-                                    title: snap.obj.sessionData?.title || 'Session',
-                                    messages: Array.isArray(snap.obj.sessionData?.messages) ? snap.obj.sessionData.messages : [],
+                                    title: snapshotFormatted.title,
+                                    messages: snapshotFormatted.messages,
                                     segments
                                 });
                                 this.uiDebugChannel.appendLine(`[EXT][AUTO_SELECT_SNAP_OK] sessionId=${this.currentSessionId}`);
