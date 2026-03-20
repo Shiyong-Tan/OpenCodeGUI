@@ -682,12 +682,36 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return visibleMessages;
     }
 
+    private computeRecentVisibleAppend(snapshotTimelineIdSet: Set<string>, recentFormattedMessages: SessionMessage[]): string[] {
+        const newIds: string[] = [];
+        const seenNewIds = new Set<string>();
+        for (const message of Array.isArray(recentFormattedMessages) ? recentFormattedMessages : []) {
+            if (!message || typeof message.id !== 'string' || !message.id) continue;
+            const id = message.id;
+            if (snapshotTimelineIdSet.has(id)) continue;       // already in snapshot
+            if (seenNewIds.has(id)) continue;                   // internal dedup
+            const text = typeof message.text === 'string' ? message.text : '';
+            if (message.role === 'user' && this.isHiddenControlUserText(text)) continue;
+            if (message.role === 'assistant' && this.isHiddenControlAssistantText(text)) continue;
+            newIds.push(id);
+            seenNewIds.add(id);
+        }
+        return newIds;
+    }
+
     private buildSnapshotSessionPayload(
         sessionPayload: { type: string; sessionId: string; title: string; messages: SessionMessage[]; segments?: any[]; meta?: any },
         segmentMemberMessages: SessionMessage[] = []
     ) {
-        const timelineMessages = this.collectVisibleSnapshotMessages(sessionPayload.messages);
-        const timelineIds = timelineMessages
+        // Honor pre-provided timelineMessageIds (from reload path) to prevent backing message pollution
+        const providedIds = Array.isArray(sessionPayload.meta?.timelineMessageIds) && sessionPayload.meta.timelineMessageIds.length > 0
+            ? (sessionPayload.meta.timelineMessageIds as string[]).filter((id): id is string => typeof id === 'string' && Boolean(id))
+            : null;
+        const providedIdsSet = providedIds ? new Set(providedIds) : null;
+        const timelineMessages = providedIdsSet
+            ? sessionPayload.messages.filter(m => m && typeof m.id === 'string' && providedIdsSet.has(m.id))
+            : this.collectVisibleSnapshotMessages(sessionPayload.messages);
+        const timelineIds = providedIds ?? timelineMessages
             .map((message) => (typeof message?.id === 'string' ? message.id : ''))
             .filter((id): id is string => Boolean(id));
         const mergedMessages: SessionMessage[] = [];
@@ -1854,12 +1878,13 @@ ${attachmentLines.join('\n')}`
 
                         let baseTitle = 'Session';
                         let baseMessages: SessionMessage[] = [];
+                        let snapPayload: any = null;
 
                         const snapshotStart = Date.now();
                         try {
                             const snap = await this.readSnapshot(targetSessionId);
                             if (snap?.obj?.sessionData) {
-                                const snapPayload = snap.obj.sessionData;
+                                snapPayload = snap.obj.sessionData;
                                 const snapshotFormatted = await this.injectChangeLists(targetSessionId, {
                                     title: snapPayload.title || baseTitle,
                                     messages: Array.isArray(snapPayload.messages) ? snapPayload.messages : []
@@ -1915,6 +1940,11 @@ ${attachmentLines.join('\n')}`
                             }
 
                             const mergedMessages = this.mergeSessionMessagesById(baseMessages, formatted.messages);
+                            const snapshotIds = Array.isArray(snapPayload?.meta?.timelineMessageIds)
+                                ? (snapPayload.meta.timelineMessageIds as string[]).filter((id): id is string => typeof id === 'string' && Boolean(id))
+                                : [];
+                            const snapshotIdSet = new Set<string>(snapshotIds);
+                            const newIds = this.computeRecentVisibleAppend(snapshotIdSet, formatted.messages);
                             const sessionPayload = {
                                 type: 'sessionData',
                                 sessionId: targetSessionId,
@@ -1922,9 +1952,7 @@ ${attachmentLines.join('\n')}`
                                 messages: mergedMessages,
                                 segments,
                                 meta: {
-                                    timelineMessageIds: this.collectVisibleSnapshotMessages(mergedMessages)
-                                        .map((message) => (typeof message?.id === 'string' ? message.id : ''))
-                                        .filter((id): id is string => Boolean(id))
+                                    timelineMessageIds: [...snapshotIds, ...newIds]
                                 }
                             };
                             const segmentMemberMessages = this.formatMessagesByIds(
