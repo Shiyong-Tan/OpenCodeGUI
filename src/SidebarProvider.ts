@@ -682,38 +682,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return visibleMessages;
     }
 
-    private computeTimelineMessageIds(
-        messages: SessionMessage[],
-        segments: any[] | undefined
-    ): string[] {
-        const segmentMemberIds = this.collectSegmentVisibleMemberMessageIds(segments);
-        // Preserve anchor IDs even though they're segment members.
-        // Anchor = memberMsgIds[0] of each segment. Without it, webview
-        // hydration fails with "missing-anchor" and undo segments don't render.
-        const anchorIds = new Set<string>();
-        for (const seg of Array.isArray(segments) ? segments : []) {
-            const firstMember = Array.isArray(seg?.memberMsgIds) ? seg.memberMsgIds[0] : undefined;
-            if (typeof firstMember === 'string' && firstMember.startsWith('msg_')) {
-                anchorIds.add(firstMember);
-            }
-        }
-        return this.collectVisibleSnapshotMessages(messages)
-            .map((message) => (typeof message?.id === 'string' ? message.id : ''))
-            .filter((id): id is string => Boolean(id) && (!segmentMemberIds.has(id) || anchorIds.has(id)));
-    }
-
     private buildSnapshotSessionPayload(
         sessionPayload: { type: string; sessionId: string; title: string; messages: SessionMessage[]; segments?: any[]; meta?: any },
-        segmentMemberMessages: SessionMessage[] = [],
-        normalizedTimelineOverride?: string[]
+        segmentMemberMessages: SessionMessage[] = []
     ) {
         const timelineMessages = this.collectVisibleSnapshotMessages(sessionPayload.messages);
-        const timelineIds = (Array.isArray(normalizedTimelineOverride) && normalizedTimelineOverride.length > 0)
-            ? normalizedTimelineOverride.filter((id): id is string =>
-                Boolean(id) &&
-                (id.startsWith('msg_') || id.startsWith('system:changeList:'))
-            )
-            : this.computeTimelineMessageIds(sessionPayload.messages, sessionPayload.segments);
+        const timelineIds = timelineMessages
+            .map((message) => (typeof message?.id === 'string' ? message.id : ''))
+            .filter((id): id is string => Boolean(id));
         const mergedMessages: SessionMessage[] = [];
         const seenIds = new Set<string>();
         const pushMessage = (message: SessionMessage | null | undefined) => {
@@ -1946,7 +1922,9 @@ ${attachmentLines.join('\n')}`
                                 messages: mergedMessages,
                                 segments,
                                 meta: {
-                                    timelineMessageIds: this.computeTimelineMessageIds(mergedMessages, segments)
+                                    timelineMessageIds: this.collectVisibleSnapshotMessages(mergedMessages)
+                                        .map((message) => (typeof message?.id === 'string' ? message.id : ''))
+                                        .filter((id): id is string => Boolean(id))
                                 }
                             };
                             const segmentMemberMessages = this.formatMessagesByIds(
@@ -2044,7 +2022,9 @@ ${attachmentLines.join('\n')}`
                             messages: formatted.messages,
                             segments,
                                 meta: {
-                                    timelineMessageIds: this.computeTimelineMessageIds(formatted.messages, segments)
+                                    timelineMessageIds: this.collectVisibleSnapshotMessages(formatted.messages)
+                                        .map((message) => (typeof message?.id === 'string' ? message.id : ''))
+                                        .filter((id): id is string => Boolean(id))
                                 }
                             };
                             const segmentMemberMessages = this.formatMessagesByIds(
@@ -3171,7 +3151,9 @@ ${attachmentLines.join('\n')}`
                                 messages: formatted.messages,
                                 segments: segments,  // Simplified segment array (no complex mapping)
                             meta: {
-                                timelineMessageIds: this.computeTimelineMessageIds(formatted.messages, segments)
+                                timelineMessageIds: this.collectVisibleSnapshotMessages(formatted.messages)
+                                    .map((message) => (typeof message?.id === 'string' ? message.id : ''))
+                                    .filter((id): id is string => Boolean(id))
                             }
                             };
                             const segmentMemberMessages = this.formatMessagesByIds(
@@ -3246,7 +3228,9 @@ ${attachmentLines.join('\n')}`
                             messages: formatted.messages,
                             segments: segments,
                             meta: {
-                                timelineMessageIds: this.computeTimelineMessageIds(formatted.messages, segments)
+                                timelineMessageIds: this.collectVisibleSnapshotMessages(formatted.messages)
+                                    .map((message) => (typeof message?.id === 'string' ? message.id : ''))
+                                    .filter((id): id is string => Boolean(id))
                             }
                         });
                         this.uiDebugChannel.appendLine(`[EXT][AUTO_SELECT_LOADED] sessionId=${this.currentSessionId} messages=${formatted.messages.length}`);
