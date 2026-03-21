@@ -5559,13 +5559,30 @@ export class OpenCodeClient {
             return events;
         }
         if (type === 'session.error') {
+            const sessionId = normalized.sessionId;
             const errorName = props?.error?.name || props?.error?.data?.name;
             const message = props?.error?.data?.message || props?.error?.message;
+            // Check if user initiated the cancel (not a system abort)
             if (errorName === 'MessageAbortedError') {
+                // Guard: sessionId can be undefined, so check before using
+                if (sessionId && this.canceledActiveTurnBySession.get(sessionId) === true) {
+                    // User cancel: preserve existing behavior (silently drop)
+                    return events;
+                }
+                // Non-user abort: resolve turn immediately (no settle delay)
+                if (sessionId) {
+                    this.logUiDebug(`EXT: session.error.abort.resolve | sessionId=${sessionId} | reason=message_aborted_non_user`);
+                    this.resolveTurnFinal(sessionId, 'session-error-abort');
+                }
                 return events;
             }
+            // General session error: resolve turn immediately (no settle delay)
+            if (sessionId) {
+                this.logUiDebug(`EXT: session.error.resolve | sessionId=${sessionId} | error=${errorName || 'unknown'} | reason=session_error`);
+                this.resolveTurnFinal(sessionId, 'session-error');
+            }
             if (message) {
-                events.push({ type: 'error', text: message, sessionId: props?.sessionID , source });
+                events.push({ type: 'error', text: message, sessionId: props?.sessionID, source });
             }
             return events;
         }
