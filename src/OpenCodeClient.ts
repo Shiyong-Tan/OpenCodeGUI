@@ -409,7 +409,7 @@ export class OpenCodeClient {
     private readonly silenceWindowMs = 1800;
     private readonly finalQuietWindowMs = 300;
     private readonly finalBackfillDeltaMs = 500;
-    private readonly lateDiffGraceMs = 300;
+    private readonly lateDiffGraceMs = 500;
     private readonly rescueStartDelayMs = 20000;
     private readonly resyncLoopDelayMs = 20000;
     private readonly sseDrainQuietMs = 800;
@@ -1068,6 +1068,13 @@ export class OpenCodeClient {
         }
         this.lateDiffGraceBySession.delete(sessionId);
         return false;
+    }
+
+    public wasTurnFinishedRecently(sessionId: string, windowMs: number): boolean {
+        if (!sessionId || !Number.isFinite(windowMs) || windowMs <= 0) return false;
+        const finishedAt = this.finishedTurnAtBySession.get(sessionId);
+        if (!finishedAt) return false;
+        return (Date.now() - finishedAt) <= windowMs;
     }
 
     public finishTurn(sessionId: string): void {

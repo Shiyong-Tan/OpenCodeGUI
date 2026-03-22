@@ -528,8 +528,37 @@ function createSessionState() {
         pendingUndo: null,
         lastUndoNoticeKey: null,
         undoAvailable: true,
-        turnFullyFinalized: true
+        turnFullyFinalized: true,
+        hiddenControlUserIds: new Set(),
+        finalAssistantLock: null
     };
+}
+
+function getMessageParentId(message) {
+    return (
+        (typeof message?.parentId === 'string' && message.parentId) ||
+        (typeof message?.parentID === 'string' && message.parentID) ||
+        (typeof message?.parentMessageId === 'string' && message.parentMessageId) ||
+        (typeof message?.meta?.parentId === 'string' && message.meta.parentId) ||
+        (typeof message?.meta?.parentID === 'string' && message.meta.parentID) ||
+        ''
+    );
+}
+
+function shouldDropHiddenControlAssistant(session, message, source, assistantMsgId) {
+    if (!session) return false;
+    const parentId = getMessageParentId(message);
+    if (!parentId || !session.hiddenControlUserIds?.has?.(parentId)) {
+        return false;
+    }
+    const lockAssistantId = typeof session.finalAssistantLock?.assistantMsgId === 'string'
+        ? session.finalAssistantLock.assistantMsgId
+        : null;
+    vscode.postMessage({
+        type: 'ui-debug',
+        payload: ['[WV][HIDDEN_ASSIST_DROP]', `source=${source || 'unknown'}`, `parentId=${parentId}`, `assistantMsgId=${assistantMsgId || 'null'}`, `lockAssistantId=${lockAssistantId || 'null'}`]
+    });
+    return true;
 }
 
 function getSessionState(sessionId, create = false) {
@@ -4543,6 +4572,7 @@ function applyPromptToSession(sessionId, payload) {
 
     session.currentTurnAssistantMsgId = null;
     session.currentTurnAssistantKey = null;
+    session.finalAssistantLock = null;
     session.pendingAssistantUpgrade = null;
     session.awaitingFinalMapBind = false;
     session.streamMode = null;
@@ -4577,6 +4607,9 @@ function handleAssistantMeta(sessionId, message) {
         const session = getSessionState(sessionId, true);
         const backendId = getEventMessageId(message);
         const msgId = typeof message?.assistantMsgId === 'string' ? message.assistantMsgId : null;
+        if (shouldDropHiddenControlAssistant(session, message, 'assistantMessageMeta', msgId)) {
+            return;
+        }
         if (msgId) {
             session.currentTurnAssistantMsgId = msgId;
         }
@@ -4721,6 +4754,9 @@ function handleChatChunk(sessionId, message) {
         }
 
         const msgId = typeof message?.assistantMsgId === 'string' ? message.assistantMsgId : null;
+        if (shouldDropHiddenControlAssistant(session, message, 'chatChunk', msgId)) {
+            return;
+        }
         if (msgId) {
             session.currentTurnAssistantMsgId = msgId;
         }
@@ -4863,6 +4899,14 @@ function handleChatDone(sessionId, message) {
     }
     if (resolvedFinal && typeof resolvedFinal === 'string') {
         session.streamMode = null;
+        session.finalAssistantLock = {
+            assistantMsgId: resolvedFinal,
+            ts: Date.now()
+        };
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: ['[WV][FINAL_LOCK_SET]', `sessionId=${sessionId}`, `assistantMsgId=${resolvedFinal}`]
+        });
     }
     updateSendGate();
     // 标记下一次 render 时发送 snapshot timeline
@@ -5466,10 +5510,20 @@ window.addEventListener('message', (event) => {
                     session.awaitingFinalMapBind = false;
                     session.backendTurnInFlight = false;
                     session.turnFullyFinalized = true;
+                    session.finalAssistantLock = null;
+                    if (session.hiddenControlUserIds instanceof Set) {
+                        session.hiddenControlUserIds.clear();
+                    }
                     session.nextOrder = 0;
                     
                     // Load messages into timeline
                     const rawSessionMessages = Array.isArray(message.messages) ? message.messages : [];
+                    for (const item of rawSessionMessages) {
+                        if (!item || item.role !== 'user' || typeof item.id !== 'string') continue;
+                        if (isHiddenControlUserText(item.text || '')) {
+                            session.hiddenControlUserIds.add(item.id);
+                        }
+                    }
                     const explicitTimelineIds = Array.isArray(message?.meta?.timelineMessageIds)
                         ? message.meta.timelineMessageIds.filter((id) => typeof id === 'string' && id.length > 0)
                         : [];
@@ -6383,9 +6437,16 @@ window.addEventListener('message', (event) => {
                     break;
                 }
                 if (message.message && message.message.role === 'user' && isHiddenControlUserText(message.message.text || '')) {
+                    if (typeof message.message.id === 'string' && message.message.id.length) {
+                        session.hiddenControlUserIds.add(message.message.id);
+                    }
                     break;
                 }
                 if (message.message && message.message.role === 'assistant' && isHiddenControlAssistantText(message.message.text || '')) {
+                    break;
+                }
+                if (message.message && message.message.role === 'assistant'
+                    && shouldDropHiddenControlAssistant(session, message.message, 'messageAppend', message.message.id)) {
                     break;
                 }
                 if (message.message && message.message.id) {
@@ -6459,9 +6520,16 @@ window.addEventListener('message', (event) => {
                 if (!sessionId) break;
                 const session = getSessionState(sessionId, true);
                 if (message.message && message.message.role === 'user' && isHiddenControlUserText(message.message.text || '')) {
+                    if (typeof message.message.id === 'string' && message.message.id.length) {
+                        session.hiddenControlUserIds.add(message.message.id);
+                    }
                     break;
                 }
                 if (message.message && message.message.role === 'assistant' && isHiddenControlAssistantText(message.message.text || '')) {
+                    break;
+                }
+                if (message.message && message.message.role === 'assistant'
+                    && shouldDropHiddenControlAssistant(session, message.message, 'messageAppend', message.message.id)) {
                     break;
                 }
                 if (message.message && message.message.id) {
@@ -6623,6 +6691,15 @@ window.addEventListener('message', (event) => {
                         || (anchorForUpsert ? `system:undo:${anchorForUpsert}` : `system:undo:unknown:${Date.now()}`);
                     let endForUpsert = segPayload?.endMessageId || segPayload?.endMsgId || anchorForUpsert;
                     const applied = segPayload?.applied ?? true;
+                    if (applied === false) {
+                        vscode.postMessage({
+                            type: 'ui-debug',
+                            payload: ['[WV][SEG_UPSERT_SKIP]', `noticeKey=${upsertNoticeKey}`, 'reason=undo-not-applied']
+                        });
+                        window.__oc?.renderFromState?.();
+                        logSessionState(sessionId, 'revertedSegment.notApplied');
+                        break;
+                    }
                     const payloadMemberMsgIds = Array.isArray(segPayload?.messageIds)
                         ? segPayload.messageIds.filter((id) => typeof id === 'string' && id.startsWith('msg_'))
                         : [];

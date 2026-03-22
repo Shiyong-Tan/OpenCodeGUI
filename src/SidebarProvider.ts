@@ -4597,10 +4597,20 @@ ${attachmentLines.join('\n')}`
             });
             this.tryOpenDiffForEventFile(active, liveWebview, index, event.sessionId || this.currentSessionId || '', 'main');
             const sessionId = event.sessionId || this.currentSessionId;
-            if (sessionId && this.client.isInLateDiffGrace(sessionId)) {
-                this.uiDebugChannel.appendLine(`[LATE_DIFF] event in grace window | sessionId=${sessionId} eventType=files`);
+            const inGrace = Boolean(sessionId && this.client.isInLateDiffGrace(sessionId));
+            const inRecentFinishWindow = Boolean(sessionId && this.client.wasTurnFinishedRecently(sessionId, 5000));
+            if (sessionId && (inGrace || inRecentFinishWindow)) {
+                this.uiDebugChannel.appendLine(
+                    `[LATE_DIFF] event in recovery window | sessionId=${sessionId} eventType=files inGrace=${inGrace} recentFinish=${inRecentFinishWindow}`
+                );
                 if (!this.client.wasChangeListEmitted(sessionId)) {
-                    this.uiDebugChannel.appendLine(`[LATE_DIFF] emitting change-list | sessionId=${sessionId} reason=late-event`);
+                    try {
+                        await this.client.commitPendingTurnChanges(sessionId);
+                        this.uiDebugChannel.appendLine(`[LATE_DIFF] committed pending turn changes | sessionId=${sessionId} reason=late-event-recovery`);
+                    } catch (error) {
+                        this.uiDebugChannel.appendLine(`[LATE_DIFF] commit pending failed | sessionId=${sessionId} err=${String(error)}`);
+                    }
+                    this.uiDebugChannel.appendLine(`[LATE_DIFF] emitting change-list | sessionId=${sessionId} reason=late-event-recovery`);
                     void this.emitDiffFileListWithRetry(sessionId, liveWebview);
                 } else {
                     this.uiDebugChannel.appendLine(`[LATE_DIFF] change-list already emitted | sessionId=${sessionId} skipping=true`);
