@@ -134,6 +134,8 @@ let gitUndoEnabled = false;
 let gitUndoReason = null;
 let baselineReady = true;
 let baselineMessage = null;
+let baselinePreparing = false;
+let baselinePreparingTimer = null;
 let sendBtn = null;
 let sendButtonEl = null;
 let currentModelQuota = null;
@@ -151,6 +153,8 @@ let subagentIntervals = new Map();
 let subagentCardsContainer = null;
 
 const SEND_BLOCK_NOTICE = 'Please wait while the previous response finishes.';
+const BASELINE_PREPARING_NOTICE = 'Preparing git for this session...';
+const BASELINE_PREPARING_MAX_MS = 45000;
 
 function renderHeaderTitle() {
     const titleEl = document.getElementById('session-title');
@@ -296,8 +300,12 @@ function syncModeControlWidth(selectEl, modeItems, selectedMode) {
 
 function setSendBlockedNotice(text) {
     sendBlockedNotice = typeof text === 'string' ? text : '';
-    headerStatusText = sendBlockedNotice ? 'Waiting for previous response...' : '';
-    setHeaderWaitingState(Boolean(sendBlockedNotice));
+    if (baselinePreparing) {
+        headerStatusText = BASELINE_PREPARING_NOTICE;
+    } else {
+        headerStatusText = sendBlockedNotice ? 'Waiting for previous response...' : '';
+    }
+    setHeaderWaitingState(Boolean(sendBlockedNotice) || baselinePreparing);
     renderHeaderTitle();
     const pendingEl = document.getElementById('pending-indicator');
     if (!pendingEl) return;
@@ -534,6 +542,27 @@ function createSessionState() {
     };
 }
 
+function resetBaselinePreparingTimeout() {
+    if (baselinePreparingTimer) {
+        clearTimeout(baselinePreparingTimer);
+        baselinePreparingTimer = null;
+    }
+}
+
+function armBaselinePreparingTimeout() {
+    resetBaselinePreparingTimeout();
+    baselinePreparingTimer = setTimeout(() => {
+        if (!baselinePreparing) return;
+        baselinePreparing = false;
+        setSystemNotice('Git baseline is taking too long. You can continue sending; undo may be unavailable.');
+        updateSendGate();
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: ['baselineStatus', 'fallback-unblock', `timeoutMs=${BASELINE_PREPARING_MAX_MS}`]
+        });
+    }, BASELINE_PREPARING_MAX_MS);
+}
+
 function getMessageParentId(message) {
     return (
         (typeof message?.parentId === 'string' && message.parentId) ||
@@ -657,6 +686,12 @@ function updateSendGate() {
         setSendBlockedNotice('');
         return;
     }
+    if (baselinePreparing) {
+        sendBtn.disabled = true;
+        sendBtn.title = BASELINE_PREPARING_NOTICE;
+        setSendBlockedNotice('');
+        return;
+    }
     if (models.length === 0) {
         sendBtn.disabled = true;
         setSendBlockedNotice('');
@@ -668,7 +703,7 @@ function updateSendGate() {
     if (blocked) {
         sendBtn.title = SEND_BLOCK_NOTICE;
         setSendBlockedNotice(SEND_BLOCK_NOTICE);
-    } else if (sendBtn.title === SEND_BLOCK_NOTICE) {
+    } else if (sendBtn.title === SEND_BLOCK_NOTICE || sendBtn.title === BASELINE_PREPARING_NOTICE) {
         sendBtn.title = '';
         setSendBlockedNotice('');
     }
@@ -4938,6 +4973,10 @@ function handleChatDone(sessionId, message) {
             vscode.postMessage({ type: 'cancel', sessionId: activeSessionId || undefined, opId: activeOpId || undefined });
             return;
         }
+        if (baselinePreparing) {
+            updateSendGate();
+            return;
+        }
         const gateSession = getSessionState(activeSessionId);
         if (isSendBlockedByPendingState(gateSession)) {
             updateSendGate();
@@ -5177,10 +5216,16 @@ window.addEventListener('message', (event) => {
             case 'baselineStatus': {
                 baselineReady = Boolean(message.ready);
                 baselineMessage = typeof message.message === 'string' ? message.message : null;
+                baselinePreparing = !baselineReady && /initializing git baseline/i.test(baselineMessage || '');
+                if (baselinePreparing) {
+                    armBaselinePreparingTimeout();
+                } else {
+                    resetBaselinePreparingTimeout();
+                }
                 setSendEnabled(true);
                 vscode.postMessage({
                     type: 'ui-debug',
-                    payload: ['baselineStatus', 'ready', String(baselineReady), 'message', baselineMessage || 'null']
+                    payload: ['baselineStatus', 'ready', String(baselineReady), 'message', baselineMessage || 'null', 'preparing', String(baselinePreparing)]
                 });
                 break;
             }

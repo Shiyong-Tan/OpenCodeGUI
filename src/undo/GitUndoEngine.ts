@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import * as cp from 'child_process';
 import * as vscode from 'vscode';
 import { GitRepoManager } from './GitRepoManager';
 import { GitSessionMapStore } from './GitSessionMapStore';
@@ -93,7 +94,77 @@ export class GitUndoEngine {
         return `{${merged.join(',')}}`;
     }
 
+    private async listFilesFromWorkspaceGitignore(): Promise<string[] | null> {
+        const gitDir = path.join(this.workspaceRoot, '.git');
+        if (!fs.existsSync(gitDir)) return null;
+        return new Promise((resolve) => {
+            cp.execFile(
+                'git',
+                ['-C', this.workspaceRoot, 'ls-files', '-co', '--exclude-standard', '-z'],
+                { timeout: 20000, windowsHide: true },
+                (err, stdout) => {
+                    if (err) {
+                        this.logger(`baseline.scan.gitLsFiles.fail | err=${String(err)}`);
+                        resolve(null);
+                        return;
+                    }
+                    const raw = String(stdout || '');
+                    const files = raw
+                        .split('\0')
+                        .map((line) => line.trim())
+                        .filter((line) => Boolean(line))
+                        .map((line) => line.replace(/\\/g, '/'));
+                    this.logger(`baseline.scan.gitLsFiles.ok | count=${files.length}`);
+                    resolve(files);
+                }
+            );
+        });
+    }
+
     private async scanBaselineFiles(config: BaselineConfig): Promise<string[]> {
+        const gitListed = await this.listFilesFromWorkspaceGitignore();
+        if (gitListed && gitListed.length) {
+            const fileSet = new Set<string>();
+            let totalBytes = 0;
+            for (const normalized of gitListed) {
+                if (fileSet.has(normalized)) continue;
+                const fsPath = path.join(this.workspaceRoot, normalized);
+                let stat: fs.Stats;
+                try {
+                    stat = await fs.promises.lstat(fsPath);
+                } catch {
+                    continue;
+                }
+                if (stat.isSymbolicLink() || !stat.isFile()) continue;
+                if (stat.size > config.maxFileSizeBytes) continue;
+                if (totalBytes + stat.size > config.maxTotalBytes) {
+                    this.logger(`baseline.maxTotalExceeded | limit=${config.maxTotalBytes}`);
+                    continue;
+                }
+                const ext = path.extname(fsPath).toLowerCase();
+                if (ext && config.denyExts.has(ext)) continue;
+
+                let fd: fs.promises.FileHandle | undefined;
+                try {
+                    fd = await fs.promises.open(fsPath, 'r');
+                    const buffer = Buffer.alloc(8192);
+                    const { bytesRead } = await fd.read(buffer, 0, buffer.length, 0);
+                    const slice = buffer.subarray(0, bytesRead);
+                    if (slice.includes(0)) continue;
+                } catch {
+                    continue;
+                } finally {
+                    if (fd) {
+                        try { await fd.close(); } catch { /* ignore */ }
+                    }
+                }
+
+                fileSet.add(normalized);
+                totalBytes += stat.size;
+            }
+            return Array.from(fileSet);
+        }
+
         const defaults = [
             '**/.git/**',
             '**/.opencode/**',
@@ -196,28 +267,17 @@ export class GitUndoEngine {
         const config = this.getBaselineConfig();
         const baselineFiles = await this.scanBaselineFiles(config);
         this.logger(`baseline.fileCount | sessionId=${tag} count=${baselineFiles.length}`);
-        const filteredFiles: string[] = [];
-        const ignoredSamples: string[] = [];
-        for (const filePath of baselineFiles) {
-            const ignoreResult = await runGit(repo, ['check-ignore', '-q'], { paths: [filePath] });
-            if (ignoreResult.code === 0) {
-                if (ignoredSamples.length < 5) {
-                    ignoredSamples.push(filePath);
-                }
-                continue;
-            }
-            filteredFiles.push(filePath);
-        }
-        const ignoredCount = baselineFiles.length - filteredFiles.length;
-        if (ignoredCount) {
-            this.logger(`baseline.ignore.filtered | sessionId=${tag} count=${ignoredCount}`);
-            if (ignoredSamples.length) {
-                this.logger(`baseline.ignore.sample | sessionId=${tag} items=${ignoredSamples.join(',')}`);
-            }
-        }
-        if (filteredFiles.length) {
-            const addResult = await runGit(repo, ['add'], { paths: filteredFiles });
+        if (baselineFiles.length) {
+            let addResult = await runGit(repo, ['add'], { paths: baselineFiles });
             this.logger(`baseline.add.result | sessionId=${tag} code=${addResult.code} stderr=${addResult.stderr.trim() || 'null'}`);
+            if (addResult.code !== 0) {
+                const cleaned = await this.filterSafeAddPaths(repo, baselineFiles);
+                if (cleaned.length && cleaned.length < baselineFiles.length) {
+                    this.logger(`baseline.add.retry | sessionId=${tag} before=${baselineFiles.length} after=${cleaned.length}`);
+                    addResult = await runGit(repo, ['add'], { paths: cleaned });
+                    this.logger(`baseline.add.retry.result | sessionId=${tag} code=${addResult.code} stderr=${addResult.stderr.trim() || 'null'}`);
+                }
+            }
             if (addResult.code !== 0) {
                 this.logger(`baseline.failed | sessionId=${tag} reason=add-failed`);
                 return null;
@@ -453,6 +513,31 @@ export class GitUndoEngine {
             await this.mapStore.saveSessionMap(sessionId, updated);
             this.logger(`finalizeBinding.ok | sessionId=${sessionId} tmpKey=${tmpKey} finalMsgId=${finalMsgId} commitHash=${commitHash}`);
         });
+    }
+
+    private async filterSafeAddPaths(repo: GitRepoRef, paths: string[]): Promise<string[]> {
+        const out: string[] = [];
+        for (const filePath of paths) {
+            if (!filePath) continue;
+            const normalized = filePath.replace(/\\/g, '/').trim();
+            if (!normalized) continue;
+            const base = path.basename(normalized).toLowerCase();
+            // Windows reserved device names frequently surface as phantom entries.
+            if (base === 'nul' || base === 'con' || base === 'prn' || /^com[1-9]$/.test(base) || /^lpt[1-9]$/.test(base)) {
+                continue;
+            }
+            const absPath = path.join(this.workspaceRoot, normalized);
+            try {
+                const stat = await fs.promises.lstat(absPath);
+                if (!stat.isFile() || stat.isSymbolicLink()) continue;
+            } catch {
+                continue;
+            }
+            const ignoreResult = await runGit(repo, ['check-ignore', '-q'], { paths: [normalized] });
+            if (ignoreResult.code === 0) continue;
+            out.push(normalized);
+        }
+        return out;
     }
 
     private getOrderedCommitsForMessages(

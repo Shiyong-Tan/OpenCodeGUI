@@ -43,6 +43,8 @@ export class GitRepoManager {
     private readonly reposDir: string;
     private readonly indexPath: string;
     private readonly logger: Logger;
+    private static readonly WORKSPACE_IGNORE_BLOCK_START = '# >>> opencode:workspace-gitignore >>>';
+    private static readonly WORKSPACE_IGNORE_BLOCK_END = '# <<< opencode:workspace-gitignore <<<';
 
     constructor(workspaceRoot: string, logger: Logger) {
         this.workspaceRoot = workspaceRoot;
@@ -140,7 +142,51 @@ export class GitRepoManager {
                 () => resolve()
             );
         });
+        await this.syncWorkspaceGitignoreToInternalRepo(gitDir);
         return repoRef;
+    }
+
+    private async syncWorkspaceGitignoreToInternalRepo(gitDir: string): Promise<void> {
+        const workspaceGitignorePath = path.join(this.workspaceRoot, '.gitignore');
+        const excludePath = path.join(gitDir, 'info', 'exclude');
+        let workspaceIgnore = '';
+        try {
+            if (fs.existsSync(workspaceGitignorePath)) {
+                workspaceIgnore = await fs.promises.readFile(workspaceGitignorePath, 'utf-8');
+            }
+        } catch {
+            workspaceIgnore = '';
+        }
+
+        let existingExclude = '';
+        try {
+            if (fs.existsSync(excludePath)) {
+                existingExclude = await fs.promises.readFile(excludePath, 'utf-8');
+            }
+        } catch {
+            existingExclude = '';
+        }
+
+        const blockRegex = new RegExp(
+            `${GitRepoManager.WORKSPACE_IGNORE_BLOCK_START}[\\s\\S]*?${GitRepoManager.WORKSPACE_IGNORE_BLOCK_END}\\n?`,
+            'g'
+        );
+        const cleaned = existingExclude.replace(blockRegex, '').trimEnd();
+        const normalizedIgnore = workspaceIgnore.trim();
+        const block = normalizedIgnore
+            ? `${GitRepoManager.WORKSPACE_IGNORE_BLOCK_START}\n${normalizedIgnore}\n${GitRepoManager.WORKSPACE_IGNORE_BLOCK_END}`
+            : '';
+        const next = block
+            ? `${cleaned ? `${cleaned}\n\n` : ''}${block}\n`
+            : (cleaned ? `${cleaned}\n` : '');
+        if (next === existingExclude) return;
+        try {
+            await fs.promises.mkdir(path.dirname(excludePath), { recursive: true });
+            await fs.promises.writeFile(excludePath, next, 'utf-8');
+            this.logger(`repo.ignore.sync | gitDir=${gitDir} copied=${normalizedIgnore ? 'true' : 'false'}`);
+        } catch (error) {
+            this.logger(`repo.ignore.sync.fail | gitDir=${gitDir} err=${String(error)}`);
+        }
     }
 
     public async resolveRepo(sessionId?: string, turnKey?: string): Promise<GitRepoRef> {
@@ -174,6 +220,7 @@ export class GitRepoManager {
                 indexFile: path.join(gitDir, 'index'),
                 workTree: this.workspaceRoot
             };
+            await this.syncWorkspaceGitignoreToInternalRepo(gitDir);
         }
         this.logger(`resolveRepo | sessionId=${sessionId || 'null'} turnKey=${turnKey || 'null'} repoId=${repoId}`);
         return repoRef;
