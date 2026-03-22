@@ -127,6 +127,7 @@ let hydratedSessions = new Set();
 let allowedDiscardKeys = new Set();
 const pendingDeleteSessionOpBySession = new Map();
 let armedDeleteSessionId = '';
+let shouldEmitSnapshotOnNextRender = false;
 
 const sessionsById = new Map();
 let gitUndoEnabled = false;
@@ -3825,6 +3826,21 @@ function shouldHideDcpUiMessage(message) {
                 payload: ['[WV][CSS_ORDER_SUSPECT]', `selector=${orderedChild.className || 'child'}`, `property=order:${window.getComputedStyle(orderedChild).order}`]
             });
         }
+        // 如果标记为 true，发送当前渲染的 timeline
+        if (shouldEmitSnapshotOnNextRender && activeSessionId) {
+            shouldEmitSnapshotOnNextRender = false;
+            vscode.postMessage({
+                type: 'snapshotTimelineIds',
+                payload: {
+                    sessionId: activeSessionId,
+                    timelineIds: renderKeys.slice()
+                }
+            });
+            vscode.postMessage({
+                type: 'ui-debug',
+                payload: ['[WV][SNAPSHOT_EMIT]', `sessionId=${activeSessionId}`, `count=${renderKeys.length}`]
+            });
+        }
     }
 
     window.__oc = window.__oc || {};
@@ -4849,6 +4865,12 @@ function handleChatDone(sessionId, message) {
         session.streamMode = null;
     }
     updateSendGate();
+    // 标记下一次 render 时发送 snapshot timeline
+    shouldEmitSnapshotOnNextRender = true;
+    vscode.postMessage({
+        type: 'ui-debug',
+        payload: ['[WV][CHATDONE] Will emit snapshot on next render']
+    });
     assertInvariants(sessionId, 'chatDone');
 }
 
@@ -5451,64 +5473,136 @@ window.addEventListener('message', (event) => {
                     const explicitTimelineIds = Array.isArray(message?.meta?.timelineMessageIds)
                         ? message.meta.timelineMessageIds.filter((id) => typeof id === 'string' && id.length > 0)
                         : [];
-                    const sessionMessages = explicitTimelineIds.length
-                        ? rawSessionMessages.filter((item) => {
+                    if (explicitTimelineIds.length) {
+                        // DUAL-LOAD STRATEGY:
+                        // Load 1: Timeline messages only (via upsertMessage which pushes to timeline)
+                        const timelineIdSet = new Set(explicitTimelineIds);
+                        const timelineMessages = rawSessionMessages.filter((item) => {
                             if (!item || !item.id) return false;
+                            if (!timelineIdSet.has(item.id)) return false;
                             if (item.role === 'user' && isHiddenControlUserText(item.text || '')) return false;
                             if (item.role === 'assistant' && isHiddenControlAssistantText(item.text || '')) return false;
                             return true;
-                        })
-                        : message?.meta?.source === 'snapshot'
-                        ? rawSessionMessages.filter((item) => {
-                            if (!item || !item.id) return false;
-                            if (item.role === 'user' && isHiddenControlUserText(item.text || '')) return false;
-                            if (item.role === 'assistant' && isHiddenControlAssistantText(item.text || '')) return false;
-                            return true;
-                        })
-                        : collapseSessionDataMessagesForDisplay(
-                            rawSessionMessages,
-                            new Set(
-                                (Array.isArray(message.segments) ? message.segments : [])
-                                    .map((seg) => seg?.anchorMsgId)
-                                    .filter((id) => typeof id === 'string' && id.startsWith('msg_'))
-                            )
+                        });
+                        for (const item of timelineMessages) {
+                            if (!item || !item.id) continue;
+                            const key = item.id;
+                            if (typeof key !== 'string') continue;
+                            let role = item.role;
+                            if (!role) {
+                                if (key.startsWith('msg_')) {
+                                    role = 'assistant';
+                                } else if (key.startsWith('system:')) {
+                                    role = 'system';
+                                } else {
+                                    vscode.postMessage({
+                                        type: 'ui-debug',
+                                        payload: ['[WV][SESSIONDATA_WARN]', 'missing-role', `id=${key}`]
+                                    });
+                                    continue;
+                                }
+                            }
+                            const rawText = item.text || '';
+                            const cleanedText = role === 'user'
+                                ? stripSystemInjections(rawText.replace(/^(\r?\n)+/, ''))
+                                : rawText;
+                            upsertMessage(session, {
+                                id: key,
+                                role: role,
+                                text: cleanedText,
+                                meta: item.meta || {},
+                                order: session.nextOrder++
+                            });
+                        }
+                        vscode.postMessage({
+                            type: 'ui-debug',
+                            payload: ['[WV][DUAL_LOAD_TIMELINE]', `loaded=${timelineMessages.length}`, `timelineNow=${session.timeline.length}`]
+                        });
+
+                        // Load 2: Backing messages directly to messagesById ONLY (NOT timeline)
+                        const backingIds = new Set(
+                            Array.isArray(message?.meta?.segmentBackingMessageIds)
+                                ? message.meta.segmentBackingMessageIds.filter((id) => typeof id === 'string' && id.length > 0)
+                                : []
                         );
-                    for (const item of sessionMessages) {
-                        if (!item || !item.id) continue;
-                        
-                        const key = item.id;
-                        if (typeof key !== 'string') continue;
-                        
-                        let role = item.role;
-                        if (!role) {
-                            if (key.startsWith('msg_')) {
-                                role = 'assistant';
-                            } else if (key.startsWith('system:')) {
-                                role = 'system';
-                            } else {
-                                vscode.postMessage({
-                                    type: 'ui-debug',
-                                    payload: ['[WV][SESSIONDATA_WARN]', 'missing-role', `id=${key}`]
-                                });
-                                continue;
+                        let backingLoaded = 0;
+                        if (backingIds.size > 0) {
+                            for (const item of rawSessionMessages) {
+                                if (!item?.id || !backingIds.has(item.id) || timelineIdSet.has(item.id)) continue;
+                                if (!session.messagesById.has(item.id)) {
+                                    let role = item.role;
+                                    if (!role) {
+                                        role = item.id.startsWith('msg_') ? 'assistant' : 'system';
+                                    }
+                                    const rawText = item.text || '';
+                                    const cleanedText = role === 'user'
+                                        ? stripSystemInjections(rawText.replace(/^(\r?\n)+/, ''))
+                                        : rawText;
+                                    session.messagesById.set(item.id, {
+                                        id: item.id,
+                                        role: role,
+                                        text: cleanedText,
+                                        meta: item.meta || {}
+                                    });
+                                    backingLoaded++;
+                                }
                             }
                         }
-                        
-                        const rawText = item.text || '';
-                        const cleanedText = role === 'user'
-                            ? stripSystemInjections(rawText.replace(/^(\r?\n)+/, ''))
-                            : rawText;
-                        upsertMessage(session, {
-                            id: key,
-                            role: role,
-                            text: cleanedText,
-                            meta: item.meta || {},
-                            order: session.nextOrder++
+                        vscode.postMessage({
+                            type: 'ui-debug',
+                            payload: ['[WV][DUAL_LOAD_BACKING]', `backingIdsExpected=${backingIds.size}`, `backingLoaded=${backingLoaded}`, `messagesById=${session.messagesById.size}`]
                         });
-                    }
-                    if (explicitTimelineIds.length) {
+
+                        // Reset timeline to explicit IDs only
                         session.timeline = explicitTimelineIds.filter((id) => session.messagesById.has(id));
                         logTimelineSnapshot('snapshot-restore', session.timeline, `count=${session.timeline.length}`);
+                    } else {
+                        // Fallback: no explicit timeline IDs — use old logic
+                        const sessionMessages = message?.meta?.source === 'snapshot'
+                            ? rawSessionMessages.filter((item) => {
+                                if (!item || !item.id) return false;
+                                if (item.role === 'user' && isHiddenControlUserText(item.text || '')) return false;
+                                if (item.role === 'assistant' && isHiddenControlAssistantText(item.text || '')) return false;
+                                return true;
+                            })
+                            : collapseSessionDataMessagesForDisplay(
+                                rawSessionMessages,
+                                new Set(
+                                    (Array.isArray(message.segments) ? message.segments : [])
+                                        .map((seg) => seg?.anchorMsgId)
+                                        .filter((id) => typeof id === 'string' && id.startsWith('msg_'))
+                                )
+                            );
+                        for (const item of sessionMessages) {
+                            if (!item || !item.id) continue;
+                            const key = item.id;
+                            if (typeof key !== 'string') continue;
+                            let role = item.role;
+                            if (!role) {
+                                if (key.startsWith('msg_')) {
+                                    role = 'assistant';
+                                } else if (key.startsWith('system:')) {
+                                    role = 'system';
+                                } else {
+                                    vscode.postMessage({
+                                        type: 'ui-debug',
+                                        payload: ['[WV][SESSIONDATA_WARN]', 'missing-role', `id=${key}`]
+                                    });
+                                    continue;
+                                }
+                            }
+                            const rawText = item.text || '';
+                            const cleanedText = role === 'user'
+                                ? stripSystemInjections(rawText.replace(/^(\r?\n)+/, ''))
+                                : rawText;
+                            upsertMessage(session, {
+                                id: key,
+                                role: role,
+                                text: cleanedText,
+                                meta: item.meta || {},
+                                order: session.nextOrder++
+                            });
+                        }
                     }
                     
                     // Snapshot notice if needed

@@ -810,6 +810,46 @@ export class OpenCodeClient {
         return this.isDelayedMainFinalMode(sessionId);
     }
 
+    private isCopilotProviderId(providerId: string | undefined, fullId: string | undefined): boolean {
+        const provider = (providerId || '').toLowerCase();
+        const full = (fullId || '').toLowerCase();
+        return provider.includes('copilot') || full.includes('copilot');
+    }
+
+    private isOpenCodeFreeModel(model: ModelInfo | undefined): boolean {
+        if (!model) return false;
+        const provider = String(model.providerId || '').toLowerCase();
+        const fullId = String(model.fullId || '').toLowerCase();
+        const name = String(model.name || '').toLowerCase();
+        const id = String(model.id || '').toLowerCase();
+        const isOpenCode = provider === 'opencode' || fullId.startsWith('opencode/');
+        const hasFree = name.includes('free') || fullId.includes('free') || id.includes('free');
+        return isOpenCode && hasFree;
+    }
+
+    private isCopilotFreeModel(model: ModelInfo | undefined): boolean {
+        if (!model) return false;
+        const speed = typeof model.speedMultiplier === 'string'
+            ? model.speedMultiplier.trim().toLowerCase()
+            : '';
+        if (speed !== '0x') return false;
+        return this.isCopilotProviderId(model.providerId, model.fullId);
+    }
+
+    private async pickStopContinuationFreeModel(): Promise<ModelInfo | null> {
+        try {
+            const models = await this.listModels();
+            const opencodeFree = models.find((model) => this.isOpenCodeFreeModel(model));
+            if (opencodeFree) return opencodeFree;
+            const copilotFree = models.find((model) => this.isCopilotFreeModel(model));
+            if (copilotFree) return copilotFree;
+            return null;
+        } catch (error) {
+            this.logUiDebug(`EXT: continuation.stop.model.fail | err=${String(error)}`);
+            return null;
+        }
+    }
+
     private async sendStopContinuationPrompt(sessionId: string): Promise<boolean> {
         if (!sessionId) return false;
         try {
@@ -821,9 +861,18 @@ export class OpenCodeClient {
                 parts: [{ type: 'text', text: this.stopContinuationPrompt }],
                 agent: agentMode
             };
+            const freeModel = await this.pickStopContinuationFreeModel();
+            if (freeModel) {
+                const modelRef = this.parseModelRef(freeModel.fullId);
+                if (modelRef) {
+                    payload.model = modelRef;
+                }
+            }
             await this.requestJson('POST', `/session/${sessionId}/prompt_async`, payload);
             this.pendingStopContinuationUserBySession.set(sessionId, Date.now());
-            this.logUiDebug(`EXT: continuation.stop.sent | sessionId=${sessionId} | agent=${agentMode}`);
+            this.logUiDebug(
+                `EXT: continuation.stop.sent | sessionId=${sessionId} | agent=${agentMode} | model=${payload.model ? (freeModel?.fullId || 'custom') : 'default'}`
+            );
             return true;
         } catch (error) {
             this.logUiDebug(`EXT: continuation.stop.fail | sessionId=${sessionId} | err=${String(error)}`);

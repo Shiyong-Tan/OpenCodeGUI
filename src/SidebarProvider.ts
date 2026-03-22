@@ -341,6 +341,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private pendingBaselineFailed = false;
     private serverStatus: 'connected' | 'reconnecting' | 'error' = 'connected';
     private readonly repoManager: GitRepoManager;
+    private uiTimelineBySession = new Map<string, string[]>();
+    private lastSnapshotPayloadBySession = new Map<string, any>();
+    private lastEmittedChangeListHeadBySession = new Map<string, string>();
     private assistantTextBufferBySession = new Map<string, string>();
     private attachmentCleanupTimer?: NodeJS.Timeout;
     private attachmentCleanupInFlight = false;
@@ -423,7 +426,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private getSnapshotDir(): string {
-        return pathModule.join(this._context.globalStorageUri.fsPath, 'sessionSnapshots', this.getWorkspaceKey());
+        const workspaceRoot = this.getWorkspaceRootPath();
+        return pathModule.join(workspaceRoot, '.opencode', 'sessionSnapshots');
     }
 
     private getSnapshotFile(sessionId: string): string {
@@ -675,7 +679,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         for (const message of Array.isArray(messages) ? messages : []) {
             if (!message || typeof message.id !== 'string' || !message.id) continue;
             const text = typeof message.text === 'string' ? message.text : '';
-            if (message.role === 'user' && this.isHiddenControlUserText(text)) continue;
+            if (message.role === 'user') {
+                const visibleText = this.normalizeUserTextForSnapshot(text);
+                if (!visibleText.trim()) continue;
+                if (this.isHiddenControlUserText(visibleText)) continue;
+            }
             if (message.role === 'assistant' && this.isHiddenControlAssistantText(text)) continue;
             visibleMessages.push(message);
         }
@@ -691,7 +699,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             if (snapshotTimelineIdSet.has(id)) continue;       // already in snapshot
             if (seenNewIds.has(id)) continue;                   // internal dedup
             const text = typeof message.text === 'string' ? message.text : '';
-            if (message.role === 'user' && this.isHiddenControlUserText(text)) continue;
+            if (message.role === 'user') {
+                const visibleText = this.normalizeUserTextForSnapshot(text);
+                if (!visibleText.trim()) continue;
+                if (this.isHiddenControlUserText(visibleText)) continue;
+            }
             if (message.role === 'assistant' && this.isHiddenControlAssistantText(text)) continue;
             newIds.push(id);
             seenNewIds.add(id);
@@ -744,6 +756,149 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 segmentBackingMessageIds
             }
         };
+    }
+
+    private buildSnapshotSessionPayloadAndCache(
+        sessionId: string,
+        sessionPayload: { type: string; sessionId: string; title: string; messages: SessionMessage[]; segments?: any[]; meta?: any },
+        segmentMemberMessages: SessionMessage[] = []
+    ) {
+        const payload = this.buildSnapshotSessionPayload(sessionPayload, segmentMemberMessages);
+        this.lastSnapshotPayloadBySession.set(sessionId, payload);
+        return payload;
+    }
+
+    private async handleSnapshotTimelineIds(payload: any): Promise<void> {
+        if (!payload || !payload.sessionId || !Array.isArray(payload.timelineIds)) {
+            this.uiDebugChannel.appendLine('[EXT][SNAPSHOT_TIMELINE] Invalid payload, ignoring');
+            return;
+        }
+        const { sessionId, timelineIds } = payload;
+        if (sessionId !== this.currentSessionId) {
+            this.uiDebugChannel.appendLine(`[EXT][SNAPSHOT_TIMELINE] Session mismatch, ignoring (current=${this.currentSessionId}, received=${sessionId})`);
+            return;
+        }
+        this.uiTimelineBySession.set(sessionId, timelineIds);
+        this.uiDebugChannel.appendLine(`[EXT][SNAPSHOT_TIMELINE] sessionId=${sessionId}, count=${timelineIds.length}, first10=${(timelineIds as string[]).slice(0, 10).join(',')}`);
+        try {
+            const existing = await this.readSnapshot(sessionId);
+            const snapshotObj = existing?.obj ?? {
+                sessionId,
+                exportedAt: Date.now(),
+                sessionData: this.lastSnapshotPayloadBySession.get(sessionId)
+            };
+            if (!snapshotObj.sessionData) {
+                try {
+                    const exportResult = await this.client.exportSession(sessionId);
+                    const exportData = exportResult && typeof exportResult.code === 'number'
+                        ? (exportResult.code === 0 ? (exportResult.data ?? exportResult) : null)
+                        : exportResult;
+                    if (exportData) {
+                        const formattedRaw = this.formatSession(exportData);
+                        const segMap = this.undoSegmentsBySession.get(sessionId);
+                        const segments = segMap ? Array.from(segMap.values()) : [];
+                        const sessionPayload = {
+                            type: 'sessionData',
+                            sessionId,
+                            title: formattedRaw.title || 'Session',
+                            messages: formattedRaw.messages,
+                            segments,
+                            meta: {
+                                timelineMessageIds: timelineIds
+                            }
+                        };
+                        const segmentMemberMessages = this.formatMessagesByIds(
+                            exportData,
+                            this.collectSegmentVisibleMemberMessageIds(segments)
+                        );
+                        snapshotObj.sessionData = this.buildSnapshotSessionPayloadAndCache(
+                            sessionId,
+                            sessionPayload,
+                            segmentMemberMessages
+                        );
+                        this.uiDebugChannel.appendLine(
+                            `[EXT][SNAPSHOT_TIMELINE] Built missing snapshot payload via exportSession for sessionId=${sessionId}`
+                        );
+                    }
+                } catch (err) {
+                    this.uiDebugChannel.appendLine(
+                        `[EXT][SNAPSHOT_TIMELINE] exportSession error for missing payload sessionId=${sessionId} err=${String(err)}`
+                    );
+                }
+                if (!snapshotObj.sessionData) {
+                    this.uiDebugChannel.appendLine(
+                        `[EXT][SNAPSHOT_TIMELINE] No snapshot payload available for sessionId=${sessionId}, skipping`
+                    );
+                    return;
+                }
+            }
+            const existingMessages: SessionMessage[] = Array.isArray(snapshotObj.sessionData.messages)
+                ? snapshotObj.sessionData.messages
+                : [];
+            const existingIds = new Set(
+                existingMessages
+                    .map((message) => (typeof message?.id === 'string' ? message.id : ''))
+                    .filter((id): id is string => Boolean(id))
+            );
+            const missingTimelineMessages = timelineIds.some((id: string) => !existingIds.has(id));
+            if (missingTimelineMessages) {
+                try {
+                    const exportResult = await this.client.exportSession(sessionId);
+                    const exportData = exportResult && typeof exportResult.code === 'number'
+                        ? (exportResult.code === 0 ? (exportResult.data ?? exportResult) : null)
+                        : exportResult;
+                    if (exportData) {
+                        const formattedRaw = this.formatSession(exportData);
+                        const segMap = this.undoSegmentsBySession.get(sessionId);
+                        const segments = segMap ? Array.from(segMap.values()) : [];
+                        const sessionPayload = {
+                            type: 'sessionData',
+                            sessionId,
+                            title: formattedRaw.title || 'Session',
+                            messages: formattedRaw.messages,
+                            segments,
+                            meta: {
+                                timelineMessageIds: timelineIds
+                            }
+                        };
+                        const segmentMemberMessages = this.formatMessagesByIds(
+                            exportData,
+                            this.collectSegmentVisibleMemberMessageIds(segments)
+                        );
+                        snapshotObj.sessionData = this.buildSnapshotSessionPayloadAndCache(
+                            sessionId,
+                            sessionPayload,
+                            segmentMemberMessages
+                        );
+                    } else {
+                        this.uiDebugChannel.appendLine(
+                            `[EXT][SNAPSHOT_TIMELINE] exportSession failed for sessionId=${sessionId}`
+                        );
+                    }
+                } catch (err) {
+                    this.uiDebugChannel.appendLine(
+                        `[EXT][SNAPSHOT_TIMELINE] exportSession error for sessionId=${sessionId} err=${String(err)}`
+                    );
+                }
+            }
+            if (!snapshotObj.sessionData.meta) {
+                snapshotObj.sessionData.meta = {};
+            }
+            snapshotObj.sessionData.meta.timelineMessageIds = timelineIds;
+            snapshotObj.exportedAt = Date.now();
+            await this.writeSnapshotAtomic(sessionId, snapshotObj);
+            this.uiDebugChannel.appendLine(`[EXT][SNAPSHOT_WRITTEN] sessionId=${sessionId}, timelineCount=${timelineIds.length}`);
+        } catch (error) {
+            this.uiDebugChannel.appendLine(`[EXT][SNAPSHOT_WRITE_ERROR] ${String(error)}`);
+        }
+    }
+
+    private shouldWriteSnapshot(sessionId: string, reason: string): boolean {
+        if (!this.uiTimelineBySession.has(sessionId)) {
+            this.uiDebugChannel.appendLine(`[EXT][SNAP_SAVE_SKIP] sessionId=${sessionId} reason=${reason} detail=missing-ui-timeline`);
+            return false;
+        }
+        return true;
     }
 
     private isHiddenControlAssistantText(text: string): boolean {
@@ -912,13 +1067,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     private async emitDiffFileList(sessionId: string, webview: vscode.Webview): Promise<void> {
         if (!this.gitUndoEnabled || !sessionId) return;
-        if (!this.client.hasActiveTurnWrites(sessionId) && !this.client.hasPendingTurnChanges(sessionId)) {
-            this.uiDebugChannel.appendLine('EXT: diff.skip | reason=no-turn-writes');
-            return;
-        }
-        if (!this.client.markChangeListEmitted(sessionId, 'emit-diff-list')) {
-            return;
-        }
         const repo = await this.resolveInternalRepo(sessionId);
         if (!repo) return;
         let headCommit: string | null = null;
@@ -945,6 +1093,23 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const currentSet = await this.getInternalDiffFileSet(repo, baseCommit, headCommit);
         const files = Array.from(currentSet);
         if (!files.length) return;
+        const alreadyEmitted = this.client.wasChangeListEmitted(sessionId);
+        const lastEmittedHead = this.lastEmittedChangeListHeadBySession.get(sessionId);
+        if (alreadyEmitted && lastEmittedHead === headCommit) {
+            this.uiDebugChannel.appendLine(
+                `[LATE_DIFF] change-list already emitted for same head | sessionId=${sessionId} head=${headCommit} skipping=true`
+            );
+            return;
+        }
+        if (!alreadyEmitted) {
+            if (!this.client.markChangeListEmitted(sessionId, 'emit-diff-list')) {
+                return;
+            }
+        } else {
+            this.uiDebugChannel.appendLine(
+                `[LATE_DIFF] re-emitting change-list for advanced head | sessionId=${sessionId} prevHead=${lastEmittedHead || 'null'} nextHead=${headCommit}`
+            );
+        }
         files.sort();
         const statsByPath = await this.getInternalDiffStats(repo, baseCommit, headCommit);
         const anchorMessageId = this.client.getTurnAssistantMsgId(sessionId);
@@ -974,6 +1139,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             });
             this.uiDebugChannel?.appendLine(`[EXT][COMMIT_BIND] bound | changeListId=${changeListId} anchor=${anchorMessageId} isMsg=${anchorMessageId.startsWith('msg_')} commitHead=${headCommit}`);
         }
+        this.lastEmittedChangeListHeadBySession.set(sessionId, headCommit);
         this.uiDebugChannel?.appendLine(`[EXT][DIFF_LIST] sessionId=${sessionId} count=${files.length} anchor=${anchorMessageId || 'null'}`);
     }
 
@@ -1975,9 +2141,11 @@ ${attachmentLines.join('\n')}`
                                     const snapshotObj = {
                                         sessionId: targetSessionId,
                                         exportedAt: Date.now(),
-                                        sessionData: this.buildSnapshotSessionPayload(sessionPayload, segmentMemberMessages)
+                                        sessionData: this.buildSnapshotSessionPayloadAndCache(targetSessionId, sessionPayload, segmentMemberMessages)
                                     };
-                                    await this.writeSnapshotAtomic(targetSessionId, snapshotObj);
+                                    if (this.shouldWriteSnapshot(targetSessionId, 'selectSession:recent')) {
+                                        await this.writeSnapshotAtomic(targetSessionId, snapshotObj);
+                                    }
                                 } catch (err) {
                                     this.uiDebugChannel.appendLine(`[EXT][SNAP_SAVE_FAIL] sessionId=${targetSessionId} err=${String(err)}`);
                                 }
@@ -2068,9 +2236,11 @@ ${attachmentLines.join('\n')}`
                                 const snapshotObj = {
                                     sessionId: targetSessionId,
                                     exportedAt: Date.now(),
-                                    sessionData: this.buildSnapshotSessionPayload(sessionPayload, segmentMemberMessages)
+                                    sessionData: this.buildSnapshotSessionPayloadAndCache(targetSessionId, sessionPayload, segmentMemberMessages)
                                 };
-                                await this.writeSnapshotAtomic(targetSessionId, snapshotObj);
+                                if (this.shouldWriteSnapshot(targetSessionId, 'selectSession:full')) {
+                                    await this.writeSnapshotAtomic(targetSessionId, snapshotObj);
+                                }
                             } catch (err) {
                                 this.uiDebugChannel.appendLine(`[EXT][SNAP_SAVE_FAIL] sessionId=${targetSessionId} err=${String(err)}`);
                             }
@@ -2853,6 +3023,10 @@ ${attachmentLines.join('\n')}`
                     });
                     break;
                 }
+                case "snapshotTimelineIds": {
+                    await this.handleSnapshotTimelineIds(data.payload);
+                    break;
+                }
                 case "ui-debug": {
                     if (Array.isArray(data.payload)) {
                         const [tag, ...args] = data.payload;
@@ -2861,6 +3035,13 @@ ${attachmentLines.join('\n')}`
                     }
                     break;
                 }
+            }
+        });
+
+        webviewView.onDidChangeVisibility(() => {
+            if (webviewView.visible && this.initPosted) {
+                this.initPosted = false;
+                this.uiDebugChannel.appendLine('[EXT][INIT_RESET] Webview visible after hidden, resetting initPosted');
             }
         });
     }
@@ -3197,10 +3378,12 @@ ${attachmentLines.join('\n')}`
                                 const snapshotObj = {
                                     sessionId: recentSessionId,
                                     exportedAt: Date.now(),
-                                    sessionData: this.buildSnapshotSessionPayload(sessionPayload, segmentMemberMessages)
+                                    sessionData: this.buildSnapshotSessionPayloadAndCache(recentSessionId, sessionPayload, segmentMemberMessages)
                                 };
-                                const bytes = await this.writeSnapshotAtomic(recentSessionId, snapshotObj);
-                                this.uiDebugChannel.appendLine(`[EXT][SNAP_SAVE] sessionId=${recentSessionId} file=${this.getSnapshotFile(recentSessionId)} bytes=${bytes}`);
+                                if (this.shouldWriteSnapshot(recentSessionId, 'sendInit:recent')) {
+                                    const bytes = await this.writeSnapshotAtomic(recentSessionId, snapshotObj);
+                                    this.uiDebugChannel.appendLine(`[EXT][SNAP_SAVE] sessionId=${recentSessionId} file=${this.getSnapshotFile(recentSessionId)} bytes=${bytes}`);
+                                }
                             } catch (err) {
                                 this.uiDebugChannel.appendLine(`[EXT][SNAP_SAVE_FAIL] sessionId=${recentSessionId} err=${String(err)}`);
                             }
@@ -5184,6 +5367,24 @@ ${attachmentLines.join('\n')}`
         let output = input.replace(/^\[(analyze-mode|search-mode)\][\s\S]*?^\s*---\s*(?:\r?\n(?:\s*\r?\n)*)?/im, '');
         output = output.replace(/^\s*\r?\n/, '');
         return output;
+    }
+
+    private stripAttachmentManifest(input: string): string {
+        if (!input) return '';
+        const marker = '---\nAttachments (workspace files; read from disk; DO NOT use any URL):';
+        const start = input.indexOf(marker);
+        if (start === -1) return input;
+        const end = input.indexOf('\n---', start + marker.length);
+        if (end === -1) return input;
+        const before = input.slice(0, start).trimEnd();
+        const after = input.slice(end + '\n---'.length).trimStart();
+        return [before, after].filter(Boolean).join('\n\n');
+    }
+
+    private normalizeUserTextForSnapshot(input: string): string {
+        if (!input) return '';
+        const withoutAttachments = this.stripAttachmentManifest(input);
+        return this.stripModeInjectionBlock(withoutAttachments).trim();
     }
 
     private resetSessionState(): void {
