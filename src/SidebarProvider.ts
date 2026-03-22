@@ -430,6 +430,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return pathModule.join(workspaceRoot, '.opencode', 'sessionSnapshots');
     }
 
+    private getOpencodeDataDir(): string {
+        const workspaceRoot = this.getWorkspaceRootPath();
+        return pathModule.join(workspaceRoot, '.opencode');
+    }
+
     private getSnapshotFile(sessionId: string): string {
         return pathModule.join(this.getSnapshotDir(), `${sessionId}.json`);
     }
@@ -453,11 +458,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private getChangeListDir(): string {
-        return pathModule.join(this._context.globalStorageUri.fsPath, 'sessionChangeLists', this.getWorkspaceKey());
+        return pathModule.join(this.getOpencodeDataDir(), 'sessionChangeLists');
     }
 
     private getCanceledTurnsDir(): string {
-        return pathModule.join(this._context.globalStorageUri.fsPath, 'sessionCanceledTurns', this.getWorkspaceKey());
+        return pathModule.join(this.getOpencodeDataDir(), 'sessionCanceledTurns');
+    }
+
+    private getLegacyWorkspaceDataDir(kind: 'sessionChangeLists' | 'sessionCanceledTurns' | 'revertedSegments'): string {
+        const workspaceRoot = this.getWorkspaceRootPath();
+        const workspaceKey = this.getWorkspaceKeyForRoot(workspaceRoot);
+        return pathModule.join(this._context.globalStoragePath, kind, workspaceKey);
+    }
+
+    private getLegacyChangeListPath(sessionId: string): string {
+        return pathModule.join(this.getLegacyWorkspaceDataDir('sessionChangeLists'), `${sessionId}.json`);
+    }
+
+    private getLegacyCanceledTurnsPath(sessionId: string): string {
+        return pathModule.join(this.getLegacyWorkspaceDataDir('sessionCanceledTurns'), `${sessionId}.json`);
     }
 
     private getChangeListPath(sessionId: string): string {
@@ -470,7 +489,26 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     private async readChangeLists(sessionId: string): Promise<ChangeListRecord[]> {
         const filePath = this.getChangeListPath(sessionId);
-        if (!fs.existsSync(filePath)) return [];
+        if (!fs.existsSync(filePath)) {
+            const legacyPath = this.getLegacyChangeListPath(sessionId);
+            if (fs.existsSync(legacyPath)) {
+                try {
+                    const text = await fs.promises.readFile(legacyPath, 'utf-8');
+                    const parsed = JSON.parse(text);
+                    const records = Array.isArray(parsed) ? parsed : [];
+                    if (records.length > 0) {
+                        await this.writeChangeLists(sessionId, records);
+                        this.uiDebugChannel.appendLine(
+                            `[EXT][CHANGELIST_MIGRATED] sessionId=${sessionId} from=${legacyPath} to=${filePath} records=${records.length}`
+                        );
+                    }
+                    return records;
+                } catch {
+                    return [];
+                }
+            }
+            return [];
+        }
         try {
             const text = await fs.promises.readFile(filePath, 'utf-8');
             const parsed = JSON.parse(text);
@@ -482,7 +520,26 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     private async readCanceledTurns(sessionId: string): Promise<CanceledTurnRecord[]> {
         const filePath = this.getCanceledTurnsPath(sessionId);
-        if (!fs.existsSync(filePath)) return [];
+        if (!fs.existsSync(filePath)) {
+            const legacyPath = this.getLegacyCanceledTurnsPath(sessionId);
+            if (fs.existsSync(legacyPath)) {
+                try {
+                    const text = await fs.promises.readFile(legacyPath, 'utf-8');
+                    const parsed = JSON.parse(text);
+                    const records = Array.isArray(parsed) ? parsed : [];
+                    if (records.length > 0) {
+                        await this.writeCanceledTurns(sessionId, records);
+                        this.uiDebugChannel.appendLine(
+                            `[EXT][CANCELED_TURNS_MIGRATED] sessionId=${sessionId} from=${legacyPath} to=${filePath} records=${records.length}`
+                        );
+                    }
+                    return records;
+                } catch {
+                    return [];
+                }
+            }
+            return [];
+        }
         try {
             const text = await fs.promises.readFile(filePath, 'utf-8');
             const parsed = JSON.parse(text);
@@ -498,8 +555,33 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const filePath = this.getChangeListPath(sessionId);
         const tmpPath = `${filePath}.tmp`;
         const text = JSON.stringify(records, null, 2);
-        await fs.promises.writeFile(tmpPath, text, 'utf-8');
-        await fs.promises.rename(tmpPath, filePath);
+        let lastError: unknown;
+        for (let attempt = 1; attempt <= 2; attempt++) {
+            try {
+                await fs.promises.writeFile(tmpPath, text, 'utf-8');
+                await fs.promises.rename(tmpPath, filePath);
+                if (!fs.existsSync(filePath)) {
+                    throw new Error(`change-list file missing after rename (attempt=${attempt})`);
+                }
+                this.uiDebugChannel.appendLine(
+                    `[EXT][CHANGELIST_WRITE_OK] sessionId=${sessionId} file=${filePath} records=${records.length} bytes=${Buffer.byteLength(text, 'utf-8')} attempt=${attempt}`
+                );
+                return;
+            } catch (error) {
+                lastError = error;
+                this.uiDebugChannel.appendLine(
+                    `[EXT][CHANGELIST_WRITE_FAIL] sessionId=${sessionId} file=${filePath} attempt=${attempt} err=${String(error)}`
+                );
+                try {
+                    if (fs.existsSync(tmpPath)) {
+                        await fs.promises.unlink(tmpPath);
+                    }
+                } catch {
+                    // Best effort tmp cleanup.
+                }
+            }
+        }
+        throw (lastError instanceof Error ? lastError : new Error(String(lastError)));
     }
 
     private async writeCanceledTurns(sessionId: string, records: CanceledTurnRecord[]): Promise<void> {
@@ -521,6 +603,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             records[idx] = { ...records[idx], ...record };
         }
         await this.writeChangeLists(sessionId, records);
+        const persisted = await this.readChangeLists(sessionId);
+        const persistedHit = persisted.some((item) => item.id === record.id);
+        this.uiDebugChannel.appendLine(
+            `[EXT][CHANGELIST_UPSERT] sessionId=${sessionId} id=${record.id} commitHead=${record.commitHead} persisted=${persistedHit} total=${persisted.length}`
+        );
     }
 
     private async upsertCanceledTurn(sessionId: string, record: CanceledTurnRecord): Promise<void> {
@@ -4866,11 +4953,19 @@ ${attachmentLines.join('\n')}`
     }
 
     private getRevertedSegmentStorageDir(): string {
-        return pathModule.join(this._context.globalStorageUri.fsPath, 'revertedSegments', this.getWorkspaceKey());
+        return pathModule.join(this.getOpencodeDataDir(), 'revertedSegments');
+    }
+
+    private getLegacyRevertedSegmentPathCandidates(sessionId: string): string[] {
+        const legacyRoot = this.getLegacyWorkspaceDataDir('revertedSegments');
+        return [
+            pathModule.join(legacyRoot, `${sessionId}.json`),
+            pathModule.join(legacyRoot, 'revertedSegments', `${sessionId}.json`),
+        ];
     }
 
     private getRevertedSegmentPath(sessionId: string): string {
-        return pathModule.join(this.getRevertedSegmentStorageDir(), 'revertedSegments', `${sessionId}.json`);
+        return pathModule.join(this.getRevertedSegmentStorageDir(), `${sessionId}.json`);
     }
 
     private async persistRevertedSegment(
@@ -4879,7 +4974,7 @@ ${attachmentLines.join('\n')}`
         conflicts: ConflictDetail[],
         discarded?: boolean
     ): Promise<void> {
-        const dir = pathModule.join(this.getRevertedSegmentStorageDir(), 'revertedSegments');
+        const dir = this.getRevertedSegmentStorageDir();
         await fs.promises.mkdir(dir, { recursive: true });
         const payload: PersistedRevertedSegment = {
             sessionId,
@@ -4904,6 +4999,22 @@ ${attachmentLines.join('\n')}`
 
     private async loadPersistedSegment(sessionId: string): Promise<PersistedRevertedSegment | undefined> {
         const filePath = this.getRevertedSegmentPath(sessionId);
+        if (!fs.existsSync(filePath)) {
+            for (const legacyPath of this.getLegacyRevertedSegmentPathCandidates(sessionId)) {
+                if (!fs.existsSync(legacyPath)) continue;
+                try {
+                    const rawLegacy = await fs.promises.readFile(legacyPath, 'utf-8');
+                    await fs.promises.mkdir(this.getRevertedSegmentStorageDir(), { recursive: true });
+                    await fs.promises.writeFile(filePath, rawLegacy, 'utf-8');
+                    this.uiDebugChannel.appendLine(
+                        `[EXT][REVERTED_SEGMENT_MIGRATED] sessionId=${sessionId} from=${legacyPath} to=${filePath}`
+                    );
+                    break;
+                } catch {
+                    // Ignore legacy migration failures; treat as missing persisted data.
+                }
+            }
+        }
         if (!fs.existsSync(filePath)) return undefined;
         try {
             const raw = await fs.promises.readFile(filePath, 'utf-8');
