@@ -6,3 +6,16 @@ stderr.txt
 .opencode/undo/
 .opencode
 .tmp-librarian
+TEST_VERIFICATION.md
+_tmp_undo_restore_excerpt.txt
+
+# Local scratch/debug artifacts
+.sisyphus/
+*.log
+*.vsix
+debug-webview.html
+hello_world/
+hello_world.py
+IssueNotSolved.md
+nul
+vitest.config.js.map

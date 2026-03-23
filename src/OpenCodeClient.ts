@@ -371,6 +371,7 @@ export class OpenCodeClient {
     private turnSettleStableCountBySession = new Map<string, number>();
     private turnSettleLastFingerprintBySession = new Map<string, string>();
     private turnSettleNoDeltaCountBySession = new Map<string, number>();
+    private lockedFinalSettleAttemptsBySession = new Map<string, number>();
     private rescueResumeAtBySession = new Map<string, number>();
     private turnRecoveryModeBySession = new Map<string, 'sse' | 'resync'>();
     private falsePositiveResetCountBySession = new Map<string, number>();
@@ -405,7 +406,7 @@ export class OpenCodeClient {
     private lateDiffGraceBySession = new Map<string, { expiresAt: number; timer?: ReturnType<typeof setTimeout> }>();
     private changeListEmittedBySession = new Map<string, boolean>();
     private lastTurnCommitBaseBySession = new Map<string, string>();
-    private readonly resyncCooldownMs = 500;
+    private readonly resyncCooldownMs = 5000;
     private readonly silenceWindowMs = 1800;
     private readonly finalQuietWindowMs = 300;
     private readonly finalBackfillDeltaMs = 500;
@@ -415,6 +416,7 @@ export class OpenCodeClient {
     private readonly sseDrainQuietMs = 800;
     private readonly sseDrainPass2DelayMs = 1000;
     private readonly settleNoDeltaThreshold = 3;
+    private readonly lockedFinalSettleMaxAttempts = 3;
     private readonly watchdogDrainDelayMs = 10000;
     private readonly autoResumePrompt = '[OC_UI_AUTORESUME v1]\nRe-read the last user request and finish the remaining steps.';
     private readonly stopContinuationPrompt = '/stop-continuation';
@@ -487,6 +489,7 @@ export class OpenCodeClient {
         this.turnSettleStableCountBySession.clear();
         this.turnSettleLastFingerprintBySession.clear();
         this.turnSettleNoDeltaCountBySession.clear();
+        this.lockedFinalSettleAttemptsBySession.clear();
         this.rescueResumeAtBySession.clear();
         this.turnRecoveryModeBySession.clear();
         this.turnResyncEpochBySession.clear();
@@ -522,6 +525,7 @@ export class OpenCodeClient {
         this.replayMirroredChangeIdsBySession.clear();
         this.watchdogDrainDelayTimerBySession.clear();
         this.falsePositiveResetCountBySession.clear();
+        this.lockedFinalSettleAttemptsBySession.clear();
     }
 
     constructor() {
@@ -731,6 +735,7 @@ export class OpenCodeClient {
         this.turnSettleStableCountBySession.delete(sessionId);
         this.turnSettleLastFingerprintBySession.delete(sessionId);
         this.turnSettleNoDeltaCountBySession.delete(sessionId);
+        this.lockedFinalSettleAttemptsBySession.delete(sessionId);
         this.rescueResumeAtBySession.delete(sessionId);
         this.expectedMainAgentBySession.delete(sessionId);
         this.sessionIdleReceivedBySession.delete(sessionId);
@@ -1578,6 +1583,7 @@ export class OpenCodeClient {
         }
         if (!lockedMsgId && assistantMsgId) {
             this.finalizingMsgIdBySession.set(sessionId, assistantMsgId);
+            this.lockedFinalSettleAttemptsBySession.set(sessionId, 0);
             this.logUiDebug(`EXT: finalizing.lock | sessionId=${sessionId} | msgId=${assistantMsgId}`);
         }
         const targetMsgId = this.finalizingMsgIdBySession.get(sessionId) || assistantMsgId;
@@ -1744,6 +1750,7 @@ export class OpenCodeClient {
         if (this.turnFinalResolvedBySession.has(sessionId)) return;
         this.clearPendingMainFinalGate(sessionId, `resolved:${reason}`);
         this.turnFinalResolvedBySession.add(sessionId);
+        this.lockedFinalSettleAttemptsBySession.delete(sessionId);
         this.stopNonFinalResyncLoop(sessionId, `resolved:${reason}`);
         this.stopRescueWatchdog(sessionId, reason);
         const waiters = this.turnFinalWaitersBySession.get(sessionId);
@@ -1772,6 +1779,7 @@ export class OpenCodeClient {
         this.turnSettleStableCountBySession.delete(sessionId);
         this.turnSettleLastFingerprintBySession.delete(sessionId);
         this.turnSettleNoDeltaCountBySession.delete(sessionId);
+        this.lockedFinalSettleAttemptsBySession.delete(sessionId);
 
         // Cancel SSE drain timer
         const sseDrain = this.turnSseDrainTimerBySession.get(sessionId);
@@ -1812,7 +1820,18 @@ export class OpenCodeClient {
             this.logUiDebug(`EXT: rescue.pause | sessionId=${sessionId} | reason=interactive-blocker`);
             return;
         }
-        const inFastPath = reason === 'sse-drain' || reason === 'sse-drain-pass2' || reason === 'tool-terminal';
+        const isLockedSettle = reason === 'resync-final-locked';
+        if (isLockedSettle) {
+            const attempts = (this.lockedFinalSettleAttemptsBySession.get(sessionId) || 0) + 1;
+            this.lockedFinalSettleAttemptsBySession.set(sessionId, attempts);
+            this.logUiDebug(`EXT: settle.locked.attempt | sessionId=${sessionId} | attempts=${attempts} | max=${this.lockedFinalSettleMaxAttempts}`);
+            if (attempts >= this.lockedFinalSettleMaxAttempts) {
+                this.logUiDebug(`EXT: settle.locked.reset | sessionId=${sessionId} | attempts=${attempts} | action=fp-reset`);
+                this.resetFalsePositiveFinal(sessionId, `locked-settle-max:${attempts}`);
+                return;
+            }
+        }
+        const inFastPath = reason === 'sse-drain' || reason === 'sse-drain-pass2' || reason === 'tool-terminal' || isLockedSettle;
         if (!inFastPath) {
             await this.resyncForChatResolve(sessionId, `settle:${reason}`);
         }

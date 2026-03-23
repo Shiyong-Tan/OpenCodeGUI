@@ -332,6 +332,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private pendingAssistantTmpKeyBySession = new Map<string, string>();
     private pendingAssistantTmpKeyByLocalKey = new Map<string, string>();
     private pendingLocalKeyBySession = new Map<string, string>();
+    private rawUserTextByLocalKey = new Map<string, string>();
+    private rawUserTextByMsgId = new Map<string, string>();
     private pendingAssistantMessageIdBySession = new Map<string, string>();
     private sendInFlightBySession = new Set<string>();
     private gitUndoEnabled = false;
@@ -600,7 +602,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         if (idx === -1) {
             records.push(record);
         } else {
-            records[idx] = { ...records[idx], ...record };
+            const existing = records[idx];
+            const keepExistingAnchor =
+                typeof existing.anchorMessageId === 'string'
+                && existing.anchorMessageId.startsWith('msg_')
+                && existing.anchorMessageId.length > 0;
+            records[idx] = {
+                ...existing,
+                ...record,
+                anchorMessageId: keepExistingAnchor ? existing.anchorMessageId : record.anchorMessageId
+            };
         }
         await this.writeChangeLists(sessionId, records);
         const persisted = await this.readChangeLists(sessionId);
@@ -798,6 +809,75 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return newIds;
     }
 
+    private getMaxMessageIndex(messages: SessionMessage[]): number | null {
+        let maxIndex: number | null = null;
+        for (const message of Array.isArray(messages) ? messages : []) {
+            if (typeof message?.messageIndex !== 'number' || !Number.isFinite(message.messageIndex)) continue;
+            maxIndex = maxIndex === null ? message.messageIndex : Math.max(maxIndex, message.messageIndex);
+        }
+        return maxIndex;
+    }
+
+    private computeRecentAppendCandidates(
+        snapshotTimelineIdSet: Set<string>,
+        snapshotMaxMessageIndex: number | null,
+        recentFormattedMessages: SessionMessage[]
+    ): SessionMessage[] {
+        const out: SessionMessage[] = [];
+        const seen = new Set<string>();
+        for (const message of Array.isArray(recentFormattedMessages) ? recentFormattedMessages : []) {
+            if (!message || typeof message.id !== 'string' || !message.id) continue;
+            const id = message.id;
+            if (snapshotTimelineIdSet.has(id)) continue;
+            if (seen.has(id)) continue;
+            const text = typeof message.text === 'string' ? message.text : '';
+            if (message.role === 'user') {
+                const visibleText = this.normalizeUserTextForSnapshot(text);
+                if (!visibleText.trim()) continue;
+                if (this.isHiddenControlUserText(visibleText)) continue;
+            }
+            if (message.role === 'assistant' && this.isHiddenControlAssistantText(text)) continue;
+            if (snapshotMaxMessageIndex !== null && typeof message.messageIndex === 'number' && Number.isFinite(message.messageIndex)) {
+                if (message.messageIndex <= snapshotMaxMessageIndex) continue;
+            }
+            out.push(message);
+            seen.add(id);
+        }
+        return out;
+    }
+
+    private enforceUserAssistantPairs(messages: SessionMessage[]): SessionMessage[] {
+        const ordered = [...(Array.isArray(messages) ? messages : [])].sort((a, b) => {
+            const ai = typeof a?.messageIndex === 'number' ? a.messageIndex : Number.MAX_SAFE_INTEGER;
+            const bi = typeof b?.messageIndex === 'number' ? b.messageIndex : Number.MAX_SAFE_INTEGER;
+            return ai - bi;
+        });
+        const paired: SessionMessage[] = [];
+        const seen = new Set<string>();
+        let pendingUser: SessionMessage | null = null;
+        for (const message of ordered) {
+            if (!message || typeof message.id !== 'string' || !message.id) continue;
+            if (message.role === 'user') {
+                pendingUser = message;
+                continue;
+            }
+            if (message.role !== 'assistant') continue;
+            if (!pendingUser || typeof pendingUser.id !== 'string' || !pendingUser.id) {
+                continue;
+            }
+            if (!seen.has(pendingUser.id)) {
+                paired.push(pendingUser);
+                seen.add(pendingUser.id);
+            }
+            if (!seen.has(message.id)) {
+                paired.push(message);
+                seen.add(message.id);
+            }
+            pendingUser = null;
+        }
+        return paired;
+    }
+
     private buildSnapshotSessionPayload(
         sessionPayload: { type: string; sessionId: string; title: string; messages: SessionMessage[]; segments?: any[]; meta?: any },
         segmentMemberMessages: SessionMessage[] = []
@@ -855,126 +935,138 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return payload;
     }
 
+    private normalizeSnapshotStoredMessages(messages: SessionMessage[]): SessionMessage[] {
+        const out: SessionMessage[] = [];
+        const seen = new Set<string>();
+        for (const message of Array.isArray(messages) ? messages : []) {
+            if (!message || typeof message.id !== 'string' || !message.id) continue;
+            if (seen.has(message.id)) continue;
+            const role = message.role === 'user' || message.role === 'assistant' || message.role === 'system'
+                ? message.role
+                : null;
+            if (!role) continue;
+            if (role === 'system' && message.meta?.kind !== 'changeList') continue;
+            if (role === 'user' && this.rawUserTextByMsgId.has(message.id)) {
+                out.push({ ...message, role, text: this.rawUserTextByMsgId.get(message.id) || '' });
+            } else {
+                out.push({ ...message, role, text: typeof message.text === 'string' ? message.text : '' });
+            }
+            seen.add(message.id);
+        }
+        return out;
+    }
+
+    private async appendSnapshotIncremental(
+        sessionId: string,
+        timelineIds: string[],
+        incomingMessages: SessionMessage[],
+        title?: string
+    ): Promise<number> {
+        const existing = await this.readSnapshot(sessionId);
+        const snapshotObj = existing?.obj ?? {
+            sessionId,
+            exportedAt: Date.now(),
+            sessionData: {
+                type: 'sessionData',
+                sessionId,
+                title: title || 'Session',
+                messages: [] as SessionMessage[],
+                segments: [],
+                meta: {
+                    timelineMessageIds: [] as string[],
+                    segmentBackingMessageIds: [] as string[]
+                }
+            }
+        };
+        if (!snapshotObj.sessionData) {
+            snapshotObj.sessionData = {
+                type: 'sessionData',
+                sessionId,
+                title: title || 'Session',
+                messages: [] as SessionMessage[],
+                segments: [],
+                meta: {
+                    timelineMessageIds: [] as string[],
+                    segmentBackingMessageIds: [] as string[]
+                }
+            };
+        }
+        if (typeof title === 'string' && title.trim()) {
+            snapshotObj.sessionData.title = title;
+        }
+        const existingMessages: SessionMessage[] = Array.isArray(snapshotObj.sessionData.messages)
+            ? snapshotObj.sessionData.messages
+            : [];
+        const timelineIdSet = new Set(
+            timelineIds.filter((id): id is string => typeof id === 'string' && Boolean(id))
+        );
+        const combinedById = new Map<string, SessionMessage>();
+        for (const message of this.normalizeSnapshotStoredMessages(existingMessages)) {
+            if (typeof message.id === 'string' && message.id) {
+                combinedById.set(message.id, message);
+            }
+        }
+        for (const message of Array.isArray(incomingMessages) ? incomingMessages : []) {
+            if (!message || typeof message.id !== 'string' || !message.id) continue;
+            if (!timelineIdSet.has(message.id)) continue;
+            combinedById.set(message.id, message);
+        }
+        const nextTimeline = Array.from(timelineIdSet);
+        const nextMessages = nextTimeline
+            .map((id) => combinedById.get(id))
+            .filter((message): message is SessionMessage => Boolean(message));
+        snapshotObj.sessionData.messages = this.normalizeSnapshotStoredMessages(nextMessages);
+        if (!snapshotObj.sessionData.meta) {
+            snapshotObj.sessionData.meta = {};
+        }
+        snapshotObj.sessionData.meta.timelineMessageIds = nextTimeline;
+        snapshotObj.exportedAt = Date.now();
+        const bytes = await this.writeSnapshotAtomic(sessionId, snapshotObj);
+        this.lastSnapshotPayloadBySession.set(sessionId, snapshotObj.sessionData);
+        return bytes;
+    }
+
     private async handleSnapshotTimelineIds(payload: any): Promise<void> {
         if (!payload || !payload.sessionId || !Array.isArray(payload.timelineIds)) {
             this.uiDebugChannel.appendLine('[EXT][SNAPSHOT_TIMELINE] Invalid payload, ignoring');
             return;
         }
-        const { sessionId, timelineIds } = payload;
+        const { sessionId } = payload;
+        const payloadTimelineIds = Array.isArray(payload.timelineIds)
+            ? payload.timelineIds.filter((id: unknown): id is string => typeof id === 'string' && Boolean(id))
+            : [];
         if (sessionId !== this.currentSessionId) {
             this.uiDebugChannel.appendLine(`[EXT][SNAPSHOT_TIMELINE] Session mismatch, ignoring (current=${this.currentSessionId}, received=${sessionId})`);
             return;
         }
-        this.uiTimelineBySession.set(sessionId, timelineIds);
-        this.uiDebugChannel.appendLine(`[EXT][SNAPSHOT_TIMELINE] sessionId=${sessionId}, count=${timelineIds.length}, first10=${(timelineIds as string[]).slice(0, 10).join(',')}`);
         try {
-            const existing = await this.readSnapshot(sessionId);
-            const snapshotObj = existing?.obj ?? {
-                sessionId,
-                exportedAt: Date.now(),
-                sessionData: this.lastSnapshotPayloadBySession.get(sessionId)
-            };
-            if (!snapshotObj.sessionData) {
-                try {
-                    const exportResult = await this.client.exportSession(sessionId);
-                    const exportData = exportResult && typeof exportResult.code === 'number'
-                        ? (exportResult.code === 0 ? (exportResult.data ?? exportResult) : null)
-                        : exportResult;
-                    if (exportData) {
-                        const formattedRaw = this.formatSession(exportData);
-                        const segMap = this.undoSegmentsBySession.get(sessionId);
-                        const segments = segMap ? Array.from(segMap.values()) : [];
-                        const sessionPayload = {
-                            type: 'sessionData',
-                            sessionId,
-                            title: formattedRaw.title || 'Session',
-                            messages: formattedRaw.messages,
-                            segments,
-                            meta: {
-                                timelineMessageIds: timelineIds
-                            }
-                        };
-                        const segmentMemberMessages = this.formatMessagesByIds(
-                            exportData,
-                            this.collectSegmentVisibleMemberMessageIds(segments)
-                        );
-                        snapshotObj.sessionData = this.buildSnapshotSessionPayloadAndCache(
-                            sessionId,
-                            sessionPayload,
-                            segmentMemberMessages
-                        );
-                        this.uiDebugChannel.appendLine(
-                            `[EXT][SNAPSHOT_TIMELINE] Built missing snapshot payload via exportSession for sessionId=${sessionId}`
-                        );
-                    }
-                } catch (err) {
-                    this.uiDebugChannel.appendLine(
-                        `[EXT][SNAPSHOT_TIMELINE] exportSession error for missing payload sessionId=${sessionId} err=${String(err)}`
-                    );
-                }
-                if (!snapshotObj.sessionData) {
-                    this.uiDebugChannel.appendLine(
-                        `[EXT][SNAPSHOT_TIMELINE] No snapshot payload available for sessionId=${sessionId}, skipping`
-                    );
-                    return;
-                }
-            }
-            const existingMessages: SessionMessage[] = Array.isArray(snapshotObj.sessionData.messages)
-                ? snapshotObj.sessionData.messages
+            const incomingMessages = Array.isArray(payload.visibleMessages)
+                ? payload.visibleMessages.filter((message: any): message is SessionMessage => {
+                    const role = message?.role;
+                    return !!message
+                        && typeof message.id === 'string'
+                        && (role === 'user' || role === 'assistant' || role === 'system');
+                })
                 : [];
-            const existingIds = new Set(
-                existingMessages
-                    .map((message) => (typeof message?.id === 'string' ? message.id : ''))
-                    .filter((id): id is string => Boolean(id))
+            const canonicalTimelineIds = incomingMessages
+                .map((message: SessionMessage) => (typeof message.id === 'string' ? message.id : ''))
+                .filter((id: string): id is string => Boolean(id));
+            const timelineIds = canonicalTimelineIds.length > 0 ? canonicalTimelineIds : payloadTimelineIds;
+            if (timelineIds.some((id: string) => id.startsWith('local-') || id.startsWith('tmp:'))) {
+                this.uiDebugChannel.appendLine(
+                    `[EXT][SNAPSHOT_SKIP] sessionId=${sessionId} reason=unresolved-local-id first10=${timelineIds.slice(0, 10).join(',')}`
+                );
+                return;
+            }
+            this.uiTimelineBySession.set(sessionId, timelineIds);
+            this.uiDebugChannel.appendLine(
+                `[EXT][SNAPSHOT_TIMELINE] sessionId=${sessionId}, count=${timelineIds.length}, first10=${timelineIds.slice(0, 10).join(',')} source=${canonicalTimelineIds.length > 0 ? 'visibleMessages' : 'payloadTimelineIds'}`
             );
-            const missingTimelineMessages = timelineIds.some((id: string) => !existingIds.has(id));
-            if (missingTimelineMessages) {
-                try {
-                    const exportResult = await this.client.exportSession(sessionId);
-                    const exportData = exportResult && typeof exportResult.code === 'number'
-                        ? (exportResult.code === 0 ? (exportResult.data ?? exportResult) : null)
-                        : exportResult;
-                    if (exportData) {
-                        const formattedRaw = this.formatSession(exportData);
-                        const segMap = this.undoSegmentsBySession.get(sessionId);
-                        const segments = segMap ? Array.from(segMap.values()) : [];
-                        const sessionPayload = {
-                            type: 'sessionData',
-                            sessionId,
-                            title: formattedRaw.title || 'Session',
-                            messages: formattedRaw.messages,
-                            segments,
-                            meta: {
-                                timelineMessageIds: timelineIds
-                            }
-                        };
-                        const segmentMemberMessages = this.formatMessagesByIds(
-                            exportData,
-                            this.collectSegmentVisibleMemberMessageIds(segments)
-                        );
-                        snapshotObj.sessionData = this.buildSnapshotSessionPayloadAndCache(
-                            sessionId,
-                            sessionPayload,
-                            segmentMemberMessages
-                        );
-                    } else {
-                        this.uiDebugChannel.appendLine(
-                            `[EXT][SNAPSHOT_TIMELINE] exportSession failed for sessionId=${sessionId}`
-                        );
-                    }
-                } catch (err) {
-                    this.uiDebugChannel.appendLine(
-                        `[EXT][SNAPSHOT_TIMELINE] exportSession error for sessionId=${sessionId} err=${String(err)}`
-                    );
-                }
-            }
-            if (!snapshotObj.sessionData.meta) {
-                snapshotObj.sessionData.meta = {};
-            }
-            snapshotObj.sessionData.meta.timelineMessageIds = timelineIds;
-            snapshotObj.exportedAt = Date.now();
-            await this.writeSnapshotAtomic(sessionId, snapshotObj);
-            this.uiDebugChannel.appendLine(`[EXT][SNAPSHOT_WRITTEN] sessionId=${sessionId}, timelineCount=${timelineIds.length}`);
+            const incomingTitle = typeof payload.title === 'string' ? payload.title : undefined;
+            await this.appendSnapshotIncremental(sessionId, timelineIds, incomingMessages, incomingTitle);
+            this.uiDebugChannel.appendLine(
+                `[EXT][SNAPSHOT_WRITTEN] sessionId=${sessionId}, timelineCount=${timelineIds.length}, visibleMessages=${incomingMessages.length}`
+            );
         } catch (error) {
             this.uiDebugChannel.appendLine(`[EXT][SNAPSHOT_WRITE_ERROR] ${String(error)}`);
         }
@@ -1199,9 +1291,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
         files.sort();
         const statsByPath = await this.getInternalDiffStats(repo, baseCommit, headCommit);
-        const anchorMessageId = this.client.getTurnAssistantMsgId(sessionId);
+        const existingRecords = await this.readChangeLists(sessionId);
+        const matchedExisting = existingRecords.find((item) => item.commitHead === headCommit);
+        const liveAnchor = this.client.getTurnAssistantMsgId(sessionId);
+        const anchorMessageId = matchedExisting?.anchorMessageId || liveAnchor;
         const changeListId = headCommit ? `system:changeList:${headCommit}` : `changes:${Date.now()}`;
-        this.uiDebugChannel?.appendLine(`[EXT][COMMIT_BIND] created | sessionId=${sessionId} commit=${headCommit} anchor=${anchorMessageId || 'null'} isMsg=${anchorMessageId?.startsWith('msg_') || false}`);
+        this.uiDebugChannel?.appendLine(`[EXT][COMMIT_BIND] created | sessionId=${sessionId} commit=${headCommit} anchor=${anchorMessageId || 'null'} isMsg=${anchorMessageId?.startsWith('msg_') || false} source=${matchedExisting?.anchorMessageId ? 'existing-record' : 'live-turn'}`);
         webview.postMessage({
             type: 'diffFileList',
             sessionId,
@@ -1582,6 +1677,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         };
                         const clientMessageId = data.clientMessageId || `local-${Date.now()}`;
                         this.pendingClientMessageId = clientMessageId;
+                        this.rawUserTextByLocalKey.set(clientMessageId, userText);
                         const opId = typeof data.opId === 'string' ? data.opId : undefined;
                         if (this.currentSessionId) {
                             activeSendSessionId = this.currentSessionId;
@@ -1768,11 +1864,16 @@ ${attachmentLines.join('\n')}`
                             const pendingLocalKey = this.pendingLocalKeyBySession.get(this.currentSessionId);
                             if (pendingLocalKey) {
                                 this.pendingAssistantTmpKeyByLocalKey.delete(pendingLocalKey);
+                                this.rawUserTextByLocalKey.delete(pendingLocalKey);
                             }
                         }
                         await this.postModelQuota(activeWebview, 'chat-error');
                     } finally {
                         if (activeSendSessionId) {
+                            const pendingLocalKey = this.pendingLocalKeyBySession.get(activeSendSessionId);
+                            if (pendingLocalKey) {
+                                this.rawUserTextByLocalKey.delete(pendingLocalKey);
+                            }
                             this.sendInFlightBySession.delete(activeSendSessionId);
                             this.pendingLocalKeyBySession.delete(activeSendSessionId);
                             this.pendingAssistantTmpKeyBySession.delete(activeSendSessionId);
@@ -2174,6 +2275,13 @@ ${attachmentLines.join('\n')}`
                             );
                         }
 
+                        if (sessionDataSent && Array.isArray(baseMessages) && baseMessages.length > 0) {
+                            this.uiDebugChannel.appendLine(
+                                `[EXT][SESSION_RECENT_SKIP] sessionId=${targetSessionId} reason=snapshot-authoritative messages=${baseMessages.length}`
+                            );
+                            break;
+                        }
+
                         let recentFailedReason = '';
                         const recentStart = Date.now();
                         try {
@@ -2192,12 +2300,17 @@ ${attachmentLines.join('\n')}`
                                 baseTitle = formatted.title;
                             }
 
-                            const mergedMessages = this.mergeSessionMessagesById(baseMessages, formatted.messages);
                             const snapshotIds = Array.isArray(snapPayload?.meta?.timelineMessageIds)
                                 ? (snapPayload.meta.timelineMessageIds as string[]).filter((id): id is string => typeof id === 'string' && Boolean(id))
                                 : [];
                             const snapshotIdSet = new Set<string>(snapshotIds);
-                            const newIds = this.computeRecentVisibleAppend(snapshotIdSet, formatted.messages);
+                            const snapshotMaxMessageIndex = this.getMaxMessageIndex(baseMessages);
+                            const appendCandidates = this.computeRecentAppendCandidates(snapshotIdSet, snapshotMaxMessageIndex, formatted.messages);
+                            const appendMessages = this.enforceUserAssistantPairs(appendCandidates);
+                            const mergedMessages = this.mergeSessionMessagesById(baseMessages, appendMessages);
+                            const newIds = appendMessages
+                                .map((message) => (typeof message?.id === 'string' ? message.id : ''))
+                                .filter((id): id is string => Boolean(id));
                             const sessionPayload = {
                                 type: 'sessionData',
                                 sessionId: targetSessionId,
@@ -2208,11 +2321,6 @@ ${attachmentLines.join('\n')}`
                                     timelineMessageIds: [...snapshotIds, ...newIds]
                                 }
                             };
-                            const segmentMemberMessages = this.formatMessagesByIds(
-                                recentExport,
-                                this.collectSegmentVisibleMemberMessageIds(segments)
-                            );
-
                             const sent = postSessionData(sessionPayload, 'recent');
                             if (sent && mergedMessages.length > 0) {
                                 sessionDataSent = true;
@@ -2224,18 +2332,7 @@ ${attachmentLines.join('\n')}`
                             );
 
                             if (sent) {
-                                try {
-                                    const snapshotObj = {
-                                        sessionId: targetSessionId,
-                                        exportedAt: Date.now(),
-                                        sessionData: this.buildSnapshotSessionPayloadAndCache(targetSessionId, sessionPayload, segmentMemberMessages)
-                                    };
-                                    if (this.shouldWriteSnapshot(targetSessionId, 'selectSession:recent')) {
-                                        await this.writeSnapshotAtomic(targetSessionId, snapshotObj);
-                                    }
-                                } catch (err) {
-                                    this.uiDebugChannel.appendLine(`[EXT][SNAP_SAVE_FAIL] sessionId=${targetSessionId} err=${String(err)}`);
-                                }
+                                this.uiDebugChannel.appendLine(`[EXT][SNAP_SAVE_SKIP] sessionId=${targetSessionId} reason=selectSession:recent disabled=incremental-only`);
                             }
                         } catch (err) {
                             recentFailedReason = this.extractLastLine(String(err));
@@ -2310,27 +2407,12 @@ ${attachmentLines.join('\n')}`
                                         .filter((id): id is string => Boolean(id))
                                 }
                             };
-                            const segmentMemberMessages = this.formatMessagesByIds(
-                                exportData,
-                            this.collectSegmentVisibleMemberMessageIds(segments)
-                        );
                         const sent = postSessionData(sessionPayload, 'full');
                         if (sent && formatted.messages.length > 0) {
                             sessionDataSent = true;
                         }
                         if (sent) {
-                            try {
-                                const snapshotObj = {
-                                    sessionId: targetSessionId,
-                                    exportedAt: Date.now(),
-                                    sessionData: this.buildSnapshotSessionPayloadAndCache(targetSessionId, sessionPayload, segmentMemberMessages)
-                                };
-                                if (this.shouldWriteSnapshot(targetSessionId, 'selectSession:full')) {
-                                    await this.writeSnapshotAtomic(targetSessionId, snapshotObj);
-                                }
-                            } catch (err) {
-                                this.uiDebugChannel.appendLine(`[EXT][SNAP_SAVE_FAIL] sessionId=${targetSessionId} err=${String(err)}`);
-                            }
+                            this.uiDebugChannel.appendLine(`[EXT][SNAP_SAVE_SKIP] sessionId=${targetSessionId} reason=selectSession:full disabled=incremental-only`);
                         }
                         } catch (error) {
                             vscode.window.showErrorMessage(`Failed to load session: ${error}`);
@@ -2620,6 +2702,10 @@ ${attachmentLines.join('\n')}`
                     const cancelSessionId = typeof data.sessionId === 'string' ? data.sessionId : this.currentSessionId;
                     const cancelOpId = typeof data.opId === 'string' ? data.opId : undefined;
                     if (cancelSessionId) {
+                        const pendingLocalKey = this.pendingLocalKeyBySession.get(cancelSessionId);
+                        if (pendingLocalKey) {
+                            this.rawUserTextByLocalKey.delete(pendingLocalKey);
+                        }
                         this.client.cancelTurn(cancelSessionId, cancelOpId);
                         this.sendInFlightBySession.delete(cancelSessionId);
                         this.pendingLocalKeyBySession.delete(cancelSessionId);
@@ -3452,28 +3538,11 @@ ${attachmentLines.join('\n')}`
                                     .filter((id): id is string => Boolean(id))
                             }
                             };
-                            const segmentMemberMessages = this.formatMessagesByIds(
-                                exportData,
-                                this.collectSegmentVisibleMemberMessageIds(segments)
-                            );
-                            
                             liveWebview.postMessage(sessionPayload);
                             if (formatted.messages.length > 0) {
                                 sessionDataSent = true;
                             }
-                            try {
-                                const snapshotObj = {
-                                    sessionId: recentSessionId,
-                                    exportedAt: Date.now(),
-                                    sessionData: this.buildSnapshotSessionPayloadAndCache(recentSessionId, sessionPayload, segmentMemberMessages)
-                                };
-                                if (this.shouldWriteSnapshot(recentSessionId, 'sendInit:recent')) {
-                                    const bytes = await this.writeSnapshotAtomic(recentSessionId, snapshotObj);
-                                    this.uiDebugChannel.appendLine(`[EXT][SNAP_SAVE] sessionId=${recentSessionId} file=${this.getSnapshotFile(recentSessionId)} bytes=${bytes}`);
-                                }
-                            } catch (err) {
-                                this.uiDebugChannel.appendLine(`[EXT][SNAP_SAVE_FAIL] sessionId=${recentSessionId} err=${String(err)}`);
-                            }
+                            this.uiDebugChannel.appendLine(`[EXT][SNAP_SAVE_SKIP] sessionId=${recentSessionId} reason=sendInit:recent disabled=incremental-only`);
                         }
                 } catch (err) {
                     this.uiDebugChannel.appendLine(`[EXT][EXPORT_FAILED] sessionId=${recentSessionId} err=${String(err)}`);
@@ -4658,6 +4727,11 @@ ${attachmentLines.join('\n')}`
                 }
                 this.clientMessageIdMap.delete(localKey);
                 this.clientMessageIdMap.set(event.text, event.text);
+                const rawUserText = this.rawUserTextByLocalKey.get(localKey);
+                if (typeof rawUserText === 'string') {
+                    this.rawUserTextByMsgId.set(event.text, rawUserText);
+                    this.rawUserTextByLocalKey.delete(localKey);
+                }
                 if (this.pendingClientMessageId === localKey) {
                     this.pendingClientMessageId = undefined;
                 }
@@ -5356,6 +5430,7 @@ ${attachmentLines.join('\n')}`
         const exportLines: string[] = [];
         const idRoleMap = new Map<string, Set<string>>();
         const seenIds = new Set<string>();
+        const syntheticUserIds = new Set<string>();
         let duplicateIds = false;
 
         const assistantByParent = new Map<string, any[]>();
@@ -5365,6 +5440,24 @@ ${attachmentLines.join('\n')}`
             const id = msg?.info?.id;
             if (role === 'user' && typeof id === 'string') {
                 userIds.push(id);
+                const parts = Array.isArray(msg?.parts)
+                    ? msg.parts.filter((part: any) => part.type === 'text' && typeof part.text === 'string')
+                    : [];
+                const text = parts.map((part: any) => part.text).join('');
+                const mode = typeof msg?.info?.mode === 'string' ? msg.info.mode.toLowerCase() : '';
+                const agent = typeof msg?.info?.agent === 'string' ? msg.info.agent.toLowerCase() : '';
+                const isAutoResumeText = text.trimStart().startsWith('[OC_UI_AUTORESUME');
+                const isStopContinuationText = this.isHiddenControlUserText(text);
+                const isOmoContinuation =
+                    text.includes('<!-- OMO_INTERNAL_INITIATOR -->')
+                    && (
+                        text.includes('[SYSTEM DIRECTIVE: OH-MY-OPENCODE - BOULDER CONTINUATION]')
+                        || text.includes('[SYSTEM DIRECTIVE: OH-MY-OPENCODE - TODO CONTINUATION]')
+                    );
+                const isSyntheticUser = isAutoResumeText || isStopContinuationText || isOmoContinuation || mode === 'compaction' || agent === 'compaction';
+                if (isSyntheticUser) {
+                    syntheticUserIds.add(id);
+                }
             }
             if (role === 'assistant') {
                 const parentId = msg?.info?.parentID;
@@ -5413,7 +5506,8 @@ ${attachmentLines.join('\n')}`
 
         for (let i = 0; i < rawMessages.length; i++) {
             const message = rawMessages[i];
-            const role = message?.info?.role === 'user' ? 'user' : 'assistant';
+            const rawRole = message?.info?.role;
+            const role = rawRole === 'user' || rawRole === 'assistant' ? rawRole : 'other';
             const messageId = message?.info?.id || '';
             const replyTo = message?.info?.replyTo || message?.info?.reply_to || message?.info?.parent || message?.info?.turnId || '';
             if (messageId) {
@@ -5441,7 +5535,11 @@ ${attachmentLines.join('\n')}`
         // }
 
         for (const message of rawMessages) {
-            const role = message?.info?.role === 'user' ? 'user' : 'assistant';
+            const rawRole = message?.info?.role;
+            if (rawRole !== 'user' && rawRole !== 'assistant') {
+                continue;
+            }
+            const role: 'user' | 'assistant' = rawRole;
             const messageId = message?.info?.id;
             const resolvedId = typeof messageId === 'string' ? messageId : '';
             if (!resolvedId.startsWith('msg_')) {
@@ -5471,11 +5569,21 @@ ${attachmentLines.join('\n')}`
             if (isSyntheticUser) {
                 continue;
             }
+            const parentId =
+                (typeof message?.info?.parentID === 'string' && message.info.parentID)
+                || (typeof message?.info?.parentId === 'string' && message.info.parentId)
+                || '';
+            if (role === 'assistant' && parentId && syntheticUserIds.has(parentId)) {
+                continue;
+            }
             const displayText = role === 'user' ? this.stripModeInjectionBlock(text) : text;
             if (!displayText.trim()) continue;
             if (role === 'assistant' && this.isHiddenControlAssistantText(displayText)) continue;
             const messageIndex = this.client.registerMessage(resolvedId);
-            messages.push({ role, text: displayText, id: resolvedId, messageIndex });
+            const meta: Record<string, unknown> | undefined = role === 'assistant' && parentId
+                ? { parentID: parentId }
+                : undefined;
+            messages.push({ role, text: displayText, id: resolvedId, messageIndex, ...(meta ? { meta } : {}) });
         }
 
         return { title, messages };
@@ -5523,6 +5631,8 @@ ${attachmentLines.join('\n')}`
         this.pendingAssistantTmpKeyByLocalKey.clear();
         this.pendingLocalKeyBySession.clear();
         this.pendingAssistantMessageIdBySession.clear();
+        this.rawUserTextByLocalKey.clear();
+        this.rawUserTextByMsgId.clear();
         this.sendInFlightBySession.clear();
     }
 
@@ -5537,6 +5647,8 @@ ${attachmentLines.join('\n')}`
         this.client.removeMessageId(messageId);
         this.clientMessageIdMap.delete(messageId);
         this.pendingAssistantTmpKeyByLocalKey.delete(messageId);
+        this.rawUserTextByLocalKey.delete(messageId);
+        this.rawUserTextByMsgId.delete(messageId);
         if (this.currentSessionId) {
             const tmpKey = this.pendingAssistantTmpKeyBySession.get(this.currentSessionId);
             if (tmpKey === messageId) {

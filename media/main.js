@@ -538,7 +538,10 @@ function createSessionState() {
         undoAvailable: true,
         turnFullyFinalized: true,
         hiddenControlUserIds: new Set(),
-        finalAssistantLock: null
+        finalAssistantLock: null,
+        snapshotPendingEpoch: 0,
+        snapshotEmittedEpoch: 0,
+        snapshotFinalizeReady: false
     };
 }
 
@@ -3892,18 +3895,60 @@ function shouldHideDcpUiMessage(message) {
         }
         // 如果标记为 true，发送当前渲染的 timeline
         if (shouldEmitSnapshotOnNextRender && activeSessionId) {
+            const activeSession = getSessionOrNull(activeSessionId);
+            if (!activeSession) return;
+            const epochPending = typeof activeSession.snapshotPendingEpoch === 'number' ? activeSession.snapshotPendingEpoch : 0;
+            const epochEmitted = typeof activeSession.snapshotEmittedEpoch === 'number' ? activeSession.snapshotEmittedEpoch : 0;
+            const finalizeReady = activeSession.snapshotFinalizeReady === true;
+            if (!finalizeReady || epochPending <= epochEmitted || activeSession.awaitingFinalMapBind || Boolean(activeSession.pendingAssistantUpgrade)) {
+                vscode.postMessage({
+                    type: 'ui-debug',
+                    payload: [
+                        '[WV][SNAPSHOT_DEFER]',
+                        `sessionId=${activeSessionId}`,
+                        `reason=phase-not-ready`,
+                        `finalizeReady=${String(finalizeReady)}`,
+                        `epochPending=${epochPending}`,
+                        `epochEmitted=${epochEmitted}`,
+                        `awaitingFinalMapBind=${String(Boolean(activeSession.awaitingFinalMapBind))}`,
+                        `pendingAssistantUpgrade=${String(Boolean(activeSession.pendingAssistantUpgrade))}`
+                    ]
+                });
+                return;
+            }
+            const hasUnresolvedIds = renderKeys.some((id) => typeof id === 'string' && (id.startsWith('local-') || id.startsWith('tmp:')));
+            if (hasUnresolvedIds) {
+                vscode.postMessage({
+                    type: 'ui-debug',
+                    payload: ['[WV][SNAPSHOT_DEFER]', `sessionId=${activeSessionId}`, `reason=unresolved-local-id`, `first10=${renderKeys.slice(0, 10).join(',')}`]
+                });
+                return;
+            }
             shouldEmitSnapshotOnNextRender = false;
+            const visibleMessages = renderKeys
+                .map((id) => session.messagesById.get(id))
+                .filter((msg) => msg && typeof msg.id === 'string')
+                .map((msg) => ({
+                    id: msg.id,
+                    role: msg.role,
+                    text: typeof msg.text === 'string' ? msg.text : '',
+                    ...(typeof msg.messageIndex === 'number' ? { messageIndex: msg.messageIndex } : {}),
+                    ...(msg.meta && typeof msg.meta === 'object' ? { meta: msg.meta } : {})
+                }));
             vscode.postMessage({
                 type: 'snapshotTimelineIds',
                 payload: {
                     sessionId: activeSessionId,
-                    timelineIds: renderKeys.slice()
+                    timelineIds: renderKeys.slice(),
+                    visibleMessages
                 }
             });
             vscode.postMessage({
                 type: 'ui-debug',
-                payload: ['[WV][SNAPSHOT_EMIT]', `sessionId=${activeSessionId}`, `count=${renderKeys.length}`]
+                payload: ['[WV][SNAPSHOT_EMIT]', `sessionId=${activeSessionId}`, `count=${renderKeys.length}`, `visibleMessages=${visibleMessages.length}`]
             });
+            activeSession.snapshotEmittedEpoch = epochPending;
+            activeSession.snapshotFinalizeReady = false;
         }
     }
 
@@ -4944,11 +4989,12 @@ function handleChatDone(sessionId, message) {
         });
     }
     updateSendGate();
-    // 标记下一次 render 时发送 snapshot timeline
-    shouldEmitSnapshotOnNextRender = true;
+    // Mark snapshot pending for this turn; actual emit is single-point gated at finalize_done.
+    session.snapshotPendingEpoch = (typeof session.snapshotPendingEpoch === 'number' ? session.snapshotPendingEpoch : 0) + 1;
+    session.snapshotFinalizeReady = false;
     vscode.postMessage({
         type: 'ui-debug',
-        payload: ['[WV][CHATDONE] Will emit snapshot on next render']
+        payload: ['[WV][CHATDONE]', `snapshotPendingEpoch=${session.snapshotPendingEpoch}`]
     });
     assertInvariants(sessionId, 'chatDone');
 }
@@ -6132,8 +6178,15 @@ window.addEventListener('message', (event) => {
                 if (message.phase === 'finalize_done') {
                     session.turnFullyFinalized = true;
                     session.backendTurnInFlight = false;
+                    session.snapshotFinalizeReady = true;
+                    const pendingEpoch = typeof session.snapshotPendingEpoch === 'number' ? session.snapshotPendingEpoch : 0;
+                    const emittedEpoch = typeof session.snapshotEmittedEpoch === 'number' ? session.snapshotEmittedEpoch : 0;
+                    if (pendingEpoch > emittedEpoch) {
+                        shouldEmitSnapshotOnNextRender = true;
+                    }
                     setBusy(false);
                     updateSendGate();
+                    window.__oc?.renderFromState?.();
                 }
                 break;
             }
