@@ -43,7 +43,7 @@ If you already use OpenCode CLI and want a stronger in-editor workflow, this ext
 - **Session Management**: Easily create, view, and switch between different chat sessions.
 - **Model Selection**: Switch between different AI models and variants supported by OpenCode.
 - **File Attachments**: Attach files or images from your clipboard to provide context for your requests.
-- **Undo/Redo Support**: Revert or restore changes made during a session with ease.
+- **Undo/Restore Support**: Revert or restore changes made during a session with ease.
   + **Undo**: Revert AI-generated changes back to any previous state using Git-powered tracking
   + **Restore**: Restore previously undone changes within the same session
   + **Visual Conflict Resolution**: Review and resolve conflicts when undoing changes
@@ -110,7 +110,7 @@ Tip: In VS Code integrated terminal, run `opencode --version` to verify PATH is 
 
 ### From VSIX
 
-1. Download the `opencode-gui-0.0.1.vsix` file.
+1. Download the latest `opencode-gui-<version>.vsix` file.
 2. In VS Code, open the Extensions view (`Ctrl+Shift+X`).
 3. Click on the "..." (Views and More Actions) menu and select "Install from VSIX...".
 4. Select the downloaded file and restart VS Code.
@@ -143,10 +143,10 @@ OpenCode GUI manages the OpenCode background server per workspace using a lock f
 
 OpenCode GUI uses Git to track and manage code changes:
 
-1. **Baseline Tracking**: When a session starts, a baseline Git commit is created
-2. **Change Recording**: Each AI response is tracked with its own Git commit
-3. **Undo**: Reverts workspace files to the baseline commit state
-4. **Restore**: Re-applies previously undone changes from history
+1. **Baseline Preparation**: When a session starts, OpenCode GUI prepares baseline state for Git-backed undo/restore.
+2. **Change Recording**: File changes are tracked per turn and associated with session history.
+3. **Undo**: Reverts workspace files for a selected message segment.
+4. **Restore**: Re-applies previously undone segment changes from history.
 
 > **Note**: All changes are stored locally in `.opencode/` directory. No data is sent to external servers for undo functionality.
 

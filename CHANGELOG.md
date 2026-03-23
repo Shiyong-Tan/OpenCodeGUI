@@ -15,6 +15,15 @@ All notable changes to this project will be documented in this file.
 
 - Stop processing SSE events for a session after finalization, preventing late meta events from creating post-final temporary assistant bubbles.
 
+## 1.1.19
+
+- Stabilized session reload with snapshot-first recovery: reload now restores snapshot timeline as the authoritative base and only appends truly newer messages from recent export.
+- Fixed duplicate/noise message reappearance after reload by tightening append candidate rules (skip pre-snapshot items and unresolved local/tmp IDs).
+- Fixed undo/restore segment ordering after reload/restart by honoring `meta.timelineMessageIds` slot order (`system:undo-seg:*`) and preventing placeholder re-location drift.
+- Hardened segment/changelist anchoring so persisted records keep stable message anchors instead of being rebound to the latest assistant turn.
+- Improved send initialization reliability around baseline/git-prep flow with clearer fallback behavior and fewer blocked-send deadlocks.
+- Improved streaming UX: assistant temporary updates no longer force-scroll the chat when the user has manually scrolled up; auto-scroll resumes near the bottom.
+
 ## 1.1.13
 
 - Improved Marketplace metadata for discoverability: added targeted search keywords for OpenCode, AI coding, code agents, and developer tooling.
