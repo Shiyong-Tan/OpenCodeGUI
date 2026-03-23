@@ -1183,16 +1183,17 @@ function upsertUndoPlaceholder(session, noticeKey, anchorMsgId, endMsgId, applie
     });
 
     const existingIndex = session.timeline.indexOf(placeholderId);
-    if (existingIndex !== -1) {
-        session.timeline.splice(existingIndex, 1);
-    }
-
     const beforeSize = session.timeline.length;
     const anchorIndex = anchorMsgId ? session.timeline.indexOf(anchorMsgId) : -1;
     const endIndex = endMsgId ? session.timeline.indexOf(endMsgId) : -1;
     let action = 'append';
 
-    if (anchorIndex !== -1) {
+    // Keep stable ordering: if a placeholder slot already exists in timeline
+    // (typically from snapshot meta.timelineMessageIds), do not relocate it.
+    if (existingIndex !== -1) {
+        session.timeline[existingIndex] = placeholderId;
+        action = 'keep-existing-slot';
+    } else if (anchorIndex !== -1) {
         session.timeline[anchorIndex] = placeholderId;
         action = 'replace-anchor';
     } else if (endIndex !== -1) {
@@ -5698,8 +5699,15 @@ window.addEventListener('message', (event) => {
                             payload: ['[WV][DUAL_LOAD_BACKING]', `backingIdsExpected=${backingIds.size}`, `backingLoaded=${backingLoaded}`, `messagesById=${session.messagesById.size}`]
                         });
 
-                        // Reset timeline to explicit IDs only
-                        session.timeline = explicitTimelineIds.filter((id) => session.messagesById.has(id));
+                        // Reset timeline to explicit IDs. Keep undo segment slots even before placeholder hydration.
+                        session.timeline = explicitTimelineIds.filter((id) =>
+                            session.messagesById.has(id) || (typeof id === 'string' && id.startsWith('system:undo-seg:'))
+                        );
+                        const undoSlotCount = session.timeline.filter((id) => typeof id === 'string' && id.startsWith('system:undo-seg:')).length;
+                        vscode.postMessage({
+                            type: 'ui-debug',
+                            payload: ['[WV][DUAL_LOAD_TIMELINE_RESET]', `explicit=${explicitTimelineIds.length}`, `kept=${session.timeline.length}`, `undoSlots=${undoSlotCount}`]
+                        });
                         logTimelineSnapshot('snapshot-restore', session.timeline, `count=${session.timeline.length}`);
                     } else {
                         // Fallback: no explicit timeline IDs — use old logic
@@ -5790,21 +5798,25 @@ window.addEventListener('message', (event) => {
                             skipped++;
                             continue;
                         }
-                        if (!seg.anchorMsgId || !msgOnlyTimeline.includes(seg.anchorMsgId)) {
-                            vscode.postMessage({
-                                type: 'ui-debug',
-                                payload: ['[WV][HYDRATE_SEG_SKIP]', 'reason=missing-anchor', `noticeKey=${noticeKey}`]
-                            });
-                            skipped++;
-                            continue;
-                        }
-                        let anchorIdx = session.timeline.indexOf(seg.anchorMsgId);
+                        const timelineSlotId = `system:undo-seg:${noticeKey}`;
+                        let anchorIdx = session.timeline.indexOf(timelineSlotId);
                         if (anchorIdx === -1) {
-                            for (let i = 0; i < session.timeline.length; i++) {
-                                const id = session.timeline[i];
-                                if (id === seg.anchorMsgId) {
-                                    anchorIdx = i;
-                                    break;
+                            if (!seg.anchorMsgId || !msgOnlyTimeline.includes(seg.anchorMsgId)) {
+                                vscode.postMessage({
+                                    type: 'ui-debug',
+                                    payload: ['[WV][HYDRATE_SEG_SKIP]', 'reason=missing-slot-and-anchor', `noticeKey=${noticeKey}`]
+                                });
+                                skipped++;
+                                continue;
+                            }
+                            anchorIdx = session.timeline.indexOf(seg.anchorMsgId);
+                            if (anchorIdx === -1) {
+                                for (let i = 0; i < session.timeline.length; i++) {
+                                    const id = session.timeline[i];
+                                    if (id === seg.anchorMsgId) {
+                                        anchorIdx = i;
+                                        break;
+                                    }
                                 }
                             }
                         }

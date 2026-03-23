@@ -825,9 +825,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     ): SessionMessage[] {
         const out: SessionMessage[] = [];
         const seen = new Set<string>();
-        for (const message of Array.isArray(recentFormattedMessages) ? recentFormattedMessages : []) {
+        const recentList = Array.isArray(recentFormattedMessages) ? recentFormattedMessages : [];
+        let lastSnapshotHitIndex = -1;
+        for (let i = 0; i < recentList.length; i++) {
+            const id = typeof recentList[i]?.id === 'string' ? recentList[i]!.id : '';
+            if (id && snapshotTimelineIdSet.has(id)) {
+                lastSnapshotHitIndex = i;
+            }
+        }
+        for (let i = 0; i < recentList.length; i++) {
+            if (i <= lastSnapshotHitIndex) continue;
+            const message = recentList[i];
             if (!message || typeof message.id !== 'string' || !message.id) continue;
             const id = message.id;
+            if (id.startsWith('local-') || id.startsWith('tmp:')) continue;
             if (snapshotTimelineIdSet.has(id)) continue;
             if (seen.has(id)) continue;
             const text = typeof message.text === 'string' ? message.text : '';
@@ -3387,162 +3398,146 @@ ${attachmentLines.join('\n')}`
         let sessionDataSent = false;
                 if (recentSessionId) {
                     try {
-                        const cwd = workspaceFolder || process.cwd();
-                        // this.uiDebugChannel.appendLine(`[EXT][EXPORT_TRY] sessionId=${recentSessionId} cwd=${cwd} cmd="opencode export ${recentSessionId}"`);
-                        let exportResult: any = null;
-                        let normalized = { ok: false, data: null as any, stderrLastLine: '' };
+                        this.currentSessionId = recentSessionId;
+                        this.trackUserOwnedSession(this.currentSessionId);
+                        this.client.setSessionId(this.currentSessionId);
+                        const liveWebview = this._view?.webview || webview;
                         try {
-                            exportResult = await this.client.exportSession(recentSessionId);
-                            if (exportResult && typeof exportResult.code === 'number') {
-                                normalized.ok = exportResult.code === 0;
-                                normalized.stderrLastLine = this.extractLastLine(exportResult.stderr);
-                                normalized.data = exportResult.data ?? exportResult;
-                            } else {
-                                normalized.ok = true;
-                                normalized.data = exportResult;
-                            }
+                            await this.ensureSessionUndoReady(recentSessionId, liveWebview);
                         } catch (err) {
-                            normalized.ok = false;
-                            normalized.stderrLastLine = this.extractLastLine(String(err));
+                            this.uiDebugChannel.appendLine(`[EXT][UNDO_WARN] ensureSessionUndoReady failed for ${recentSessionId}: ${err}`);
                         }
 
-                        if (!normalized.ok) {
-                            this.uiDebugChannel.appendLine(`[EXT][EXPORT_FAIL] sessionId=${recentSessionId} stderrLastLine=${normalized.stderrLastLine || 'null'}`);
-                            try {
-                                const snap = await this.readSnapshot(recentSessionId);
-                                if (snap?.obj?.sessionData) {
-                                    const segMap = this.undoSegmentsBySession.get(recentSessionId);
-                                    const segments = segMap ? Array.from(segMap.values()) : [];
-                                    const snapshotFormatted = await this.injectChangeLists(recentSessionId, {
-                                        title: snap.obj.sessionData?.title || 'Session',
-                                        messages: Array.isArray(snap.obj.sessionData?.messages)
-                                            ? snap.obj.sessionData.messages
-                                            : []
-                                    });
-                                    const payload = {
-                                        ...snap.obj.sessionData,
-                                        title: snapshotFormatted.title,
-                                        messages: snapshotFormatted.messages
-                                    };
-                                    payload.meta = {
+                        const persisted = await this.loadPersistedSegment(recentSessionId);
+                        if (persisted?.segment?.historySegments) {
+                            this.revertedSegmentHistory = persisted.segment.historySegments;
+                        } else {
+                            this.revertedSegmentHistory = [];
+                        }
+                        if (persisted?.segment && persisted.segment.isActive === true && persisted.discarded !== true) {
+                            this.client.setRevertedSegment({
+                                isActive: true,
+                                discarded: false,
+                                startMessageId: persisted.segment.startMessageId || recentSessionId,
+                                startMessageIndex: persisted.segment.startMessageIndex ?? 0,
+                                endMessageId: persisted.segment.endMessageId || recentSessionId,
+                                endMessageIndex: persisted.segment.endMessageIndex ?? (persisted.segment.startMessageIndex ?? 0),
+                                opIds: persisted.segment.opIds || [],
+                                collapsed: true,
+                                conflicts: persisted.conflicts || [],
+                                messageIds: persisted.segment.messageIds,
+                                operationId: persisted.segment.operationId
+                            });
+                        } else {
+                            this.client.setRevertedSegment(undefined);
+                        }
+
+                        const segMap = this.undoSegmentsBySession.get(recentSessionId);
+                        this.syncClientRevertedSegmentFromUndoSegments(recentSessionId);
+                        const segments = segMap ? Array.from(segMap.values()) : [];
+
+                        let baseTitle = 'Session';
+                        let baseMessages: SessionMessage[] = [];
+                        let snapshotTimelineIds: string[] = [];
+
+                        try {
+                            const snap = await this.readSnapshot(recentSessionId);
+                            if (snap?.obj?.sessionData) {
+                                const snapshotFormatted = await this.injectChangeLists(recentSessionId, {
+                                    title: snap.obj.sessionData?.title || baseTitle,
+                                    messages: Array.isArray(snap.obj.sessionData?.messages)
+                                        ? snap.obj.sessionData.messages
+                                        : []
+                                });
+                                baseTitle = snapshotFormatted.title || baseTitle;
+                                baseMessages = snapshotFormatted.messages;
+                                snapshotTimelineIds = Array.isArray(snap.obj.sessionData?.meta?.timelineMessageIds)
+                                    ? (snap.obj.sessionData.meta.timelineMessageIds as string[])
+                                        .filter((id): id is string => typeof id === 'string' && Boolean(id))
+                                    : this.collectVisibleSnapshotMessages(baseMessages)
+                                        .map((message) => (typeof message?.id === 'string' ? message.id : ''))
+                                        .filter((id): id is string => Boolean(id));
+
+                                const snapshotPayload = {
+                                    type: 'sessionData',
+                                    sessionId: recentSessionId,
+                                    title: baseTitle,
+                                    messages: baseMessages,
+                                    segments,
+                                    meta: {
                                         ...(snap.obj.sessionData?.meta || {}),
                                         source: 'snapshot',
-                                        reason: 'export_failed',
-                                        stderrLastLine: normalized.stderrLastLine || ''
-                                    };
-                                    const liveWebview = this._view?.webview || webview;
-                                    try {
-                                        await this.ensureSessionUndoReady(recentSessionId, liveWebview);
-                                    } catch (err) {
-                                        this.uiDebugChannel.appendLine(`[EXT][UNDO_WARN] ensureSessionUndoReady failed for ${recentSessionId}: ${err}`);
+                                        timelineMessageIds: snapshotTimelineIds
                                     }
-                                    liveWebview.postMessage(payload);
-                                    const payloadMessages = Array.isArray(payload?.messages) ? payload.messages.length : 0;
-                                    if (payloadMessages > 0) {
-                                        sessionDataSent = true;
-                                    }
-                                    this.uiDebugChannel.appendLine(`[EXT][SNAP_LOAD_HIT] sessionId=${recentSessionId} file=${this.getSnapshotFile(recentSessionId)} bytes=${snap.bytes}`);
-                                    this.currentSessionId = recentSessionId;
-                                    this.trackUserOwnedSession(this.currentSessionId);
-                                    this.client.setSessionId(this.currentSessionId);
-                                    snapshotLoaded = true;
-                                } else {
-                                    this.uiDebugChannel.appendLine(`[EXT][SNAP_LOAD_MISS] sessionId=${recentSessionId} file=${this.getSnapshotFile(recentSessionId)}`);
+                                };
+                                liveWebview.postMessage(snapshotPayload);
+                                if (baseMessages.length > 0) {
+                                    sessionDataSent = true;
                                 }
-                            } catch (err) {
-                                this.uiDebugChannel.appendLine(`[EXT][SNAP_LOAD_FAIL] sessionId=${recentSessionId} err=${String(err)}`);
+                                snapshotLoaded = true;
+                                this.uiDebugChannel.appendLine(`[EXT][SNAP_LOAD_HIT] sessionId=${recentSessionId} file=${this.getSnapshotFile(recentSessionId)} bytes=${snap.bytes}`);
+                            } else {
+                                this.uiDebugChannel.appendLine(`[EXT][SNAP_LOAD_MISS] sessionId=${recentSessionId} file=${this.getSnapshotFile(recentSessionId)}`);
                             }
-                            if (sessionDataSent) {
-                                this.uiDebugChannel.appendLine(
-                                    `EXT: export.warn.nonfatal | sessionId=${recentSessionId} | stderrLastLine=${normalized.stderrLastLine || 'null'}`
-                                );
-                                return;
-                            }
-                            const liveWebview = this._view?.webview || webview;
-                            liveWebview.postMessage({
-                                type: 'sessionLoadFailed',
-                                payload: {
-                                    sessionId: recentSessionId,
-                                    reason: 'export_failed_no_snapshot',
-                                    stderrLastLine: normalized.stderrLastLine || ''
-                                }
-                            });
-                            return;
+                        } catch (err) {
+                            this.uiDebugChannel.appendLine(`[EXT][SNAP_LOAD_FAIL] sessionId=${recentSessionId} err=${String(err)}`);
                         }
 
-                        if (!snapshotLoaded) {
-                            const exportData = normalized.data;
-                            this.currentSessionId = recentSessionId;
-                            this.trackUserOwnedSession(this.currentSessionId);
-                            this.client.setSessionId(this.currentSessionId);
-                            const liveWebview = this._view?.webview || webview;
-                            try {
-                                await this.ensureSessionUndoReady(recentSessionId, liveWebview);
-                            } catch (err) {
-                                this.uiDebugChannel.appendLine(`[EXT][UNDO_WARN] ensureSessionUndoReady failed for ${recentSessionId}: ${err}`);
-                            }
-                            const persisted = await this.loadPersistedSegment(recentSessionId);
-                            const historySegments = persisted?.segment?.historySegments || [];
-                            if (persisted?.segment?.historySegments) {
-                                this.revertedSegmentHistory = persisted.segment.historySegments;
-                            } else {
-                                this.revertedSegmentHistory = [];
-                            }
-                            if (persisted?.segment && persisted.segment.isActive === true && persisted.discarded !== true) {
-                                this.client.setRevertedSegment({
-                                    isActive: true,
-                                    discarded: false,
-                                    startMessageId: persisted.segment.startMessageId || recentSessionId,
-                                    startMessageIndex: persisted.segment.startMessageIndex ?? 0,
-                                    endMessageId: persisted.segment.endMessageId || recentSessionId,
-                                    endMessageIndex: persisted.segment.endMessageIndex ?? (persisted.segment.startMessageIndex ?? 0),
-                                    opIds: persisted.segment.opIds || [],
-                                    collapsed: true,
-                                    conflicts: persisted.conflicts || [],
-                                    messageIds: persisted.segment.messageIds,
-                                    operationId: persisted.segment.operationId
-                                });
-                            } else {
-                                this.client.setRevertedSegment(undefined);
-                            }
-                            const segMap = this.undoSegmentsBySession.get(recentSessionId);
-                            this.syncClientRevertedSegmentFromUndoSegments(recentSessionId);
-                            const segments = segMap ? Array.from(segMap.values()) : [];
-                            const formattedRaw = this.formatSession(exportData);
+                        try {
+                            const recentExport = await this.client.exportSessionRecent(recentSessionId, this.recentSessionLoadLimit);
+                            const formattedRaw = this.formatSession(recentExport);
                             const formatted = await this.injectChangeLists(recentSessionId, formattedRaw);
+                            if (formatted.title) {
+                                baseTitle = formatted.title;
+                            }
 
-                        // this.uiDebugChannel.appendLine(
-                        //     `[EXT][SEG_HYDRATE_LOAD] sessionId=${recentSessionId} found=${segments.length} ` +
-                        //     `keys=[${(segMap ? Array.from(segMap.keys()) : []).join(', ')}]`
-                        // );
-                        
-                        // this.uiDebugChannel.appendLine(
-                        //     `[EXT][SEG_HYDRATE_SEND] sessionId=${recentSessionId} count=${segments.length} reason=sendInit`
-                        // );
-                        
-                            const timelineMsgCount = formatted.messages.filter((m) => typeof m.id === 'string' && m.id.startsWith('msg_')).length;
+                            const snapshotIdSet = new Set<string>(snapshotTimelineIds);
+                            const snapshotMaxMessageIndex = this.getMaxMessageIndex(baseMessages);
+                            const appendCandidates = this.computeRecentAppendCandidates(snapshotIdSet, snapshotMaxMessageIndex, formatted.messages);
+                            const appendMessages = this.enforceUserAssistantPairs(appendCandidates);
+                            const mergedMessages = this.mergeSessionMessagesById(baseMessages, appendMessages);
+                            const newIds = appendMessages
+                                .map((message) => (typeof message?.id === 'string' ? message.id : ''))
+                                .filter((id): id is string => Boolean(id));
+                            const timelineIds = [...snapshotTimelineIds, ...newIds];
+
+                            const timelineMsgCount = mergedMessages.filter((m) => typeof m.id === 'string' && m.id.startsWith('msg_')).length;
                             this.uiDebugChannel.appendLine(
-                                `sessionData.send | sessionId | ${recentSessionId} | messagesCount | ${formatted.messages.length} | ` +
+                                `sessionData.send | sessionId | ${recentSessionId} | messagesCount | ${mergedMessages.length} | ` +
                                 `timelineMsgCount | ${timelineMsgCount} | segmentsCount | ${segments.length}`
                             );
-                            
+
                             const sessionPayload = {
                                 type: 'sessionData',
                                 sessionId: recentSessionId,
-                                title: formatted.title,
-                                messages: formatted.messages,
-                                segments: segments,  // Simplified segment array (no complex mapping)
-                            meta: {
-                                timelineMessageIds: this.collectVisibleSnapshotMessages(formatted.messages)
-                                    .map((message) => (typeof message?.id === 'string' ? message.id : ''))
-                                    .filter((id): id is string => Boolean(id))
-                            }
+                                title: baseTitle,
+                                messages: mergedMessages,
+                                segments,
+                                meta: {
+                                    timelineMessageIds: timelineIds
+                                }
                             };
                             liveWebview.postMessage(sessionPayload);
-                            if (formatted.messages.length > 0) {
+                            if (mergedMessages.length > 0) {
                                 sessionDataSent = true;
                             }
                             this.uiDebugChannel.appendLine(`[EXT][SNAP_SAVE_SKIP] sessionId=${recentSessionId} reason=sendInit:recent disabled=incremental-only`);
+                        } catch (err) {
+                            const recentErr = this.extractLastLine(String(err));
+                            this.uiDebugChannel.appendLine(`[EXT][SESSION_RECENT_FAIL] sessionId=${recentSessionId} limit=${this.recentSessionLoadLimit} err=${recentErr || 'null'}`);
+
+                            if (!snapshotLoaded) {
+                                const liveWebview = this._view?.webview || webview;
+                                liveWebview.postMessage({
+                                    type: 'sessionLoadFailed',
+                                    payload: {
+                                        sessionId: recentSessionId,
+                                        reason: 'recent_failed_no_snapshot',
+                                        stderrLastLine: recentErr || ''
+                                    }
+                                });
+                                return;
+                            }
                         }
                 } catch (err) {
                     this.uiDebugChannel.appendLine(`[EXT][EXPORT_FAILED] sessionId=${recentSessionId} err=${String(err)}`);
