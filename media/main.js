@@ -151,6 +151,8 @@ let headerStatusText = '';
 let textMeasureCanvas = null;
 let subagentIntervals = new Map();
 let subagentCardsContainer = null;
+let autoScrollPinnedToBottom = true;
+const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 80;
 
 const SEND_BLOCK_NOTICE = 'Please wait while the previous response finishes.';
 const BASELINE_PREPARING_NOTICE = 'Preparing git for this session...';
@@ -2592,6 +2594,10 @@ document.addEventListener('DOMContentLoaded', () => {
     renderHeaderTitle();
 
     if (chatContainer) {
+        autoScrollPinnedToBottom = isNearBottom(chatContainer);
+        chatContainer.addEventListener('scroll', () => {
+            autoScrollPinnedToBottom = isNearBottom(chatContainer);
+        }, { passive: true });
         chatContainer.addEventListener('click', (event) => {
             const target = event.target;
             if (!(target instanceof Element)) return;
@@ -4383,9 +4389,18 @@ function shouldHideDcpUiMessage(message) {
         }
     }
 
-    function scrollToBottom() {
+    function isNearBottom(container) {
+        if (!container) return true;
+        const remaining = container.scrollHeight - (container.scrollTop + container.clientHeight);
+        return remaining <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX;
+    }
+
+    function scrollToBottom(force = false) {
+        if (!chatContainer) return;
+        if (!force && !autoScrollPinnedToBottom) return;
         requestAnimationFrame(() => {
             chatContainer.scrollTop = chatContainer.scrollHeight;
+            autoScrollPinnedToBottom = true;
         });
     }
 
