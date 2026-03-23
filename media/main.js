@@ -2830,19 +2830,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         div.appendChild(content);
 
-        if (Array.isArray(message.meta?.images) && message.meta.images.length) {
-            const imageWrap = document.createElement('div');
-            imageWrap.className = 'message-images';
-            for (const src of message.meta.images) {
-                if (typeof src !== 'string' || !src.length) continue;
-                const img = document.createElement('img');
-                img.src = src;
-                img.alt = 'Attachment';
-                img.loading = 'lazy';
-                imageWrap.appendChild(img);
-            }
-            div.appendChild(imageWrap);
-        }
+        appendMessageImages(div, message);
 
         return div;
     }
@@ -3295,19 +3283,7 @@ function renderMessageElement(message, renderedSet) {
              content.appendChild(inlineContainer);
         }
 
-        if (Array.isArray(message.meta?.images) && message.meta.images.length) {
-            const imageWrap = document.createElement('div');
-            imageWrap.className = 'message-images';
-            for (const src of message.meta.images) {
-                if (typeof src !== 'string' || !src.length) continue;
-                const img = document.createElement('img');
-                img.src = src;
-                img.alt = 'Attachment';
-                img.loading = 'lazy';
-                imageWrap.appendChild(img);
-            }
-            div.appendChild(imageWrap);
-        }
+        appendMessageImages(div, message);
 
         // Insert turn divider before user messages (except first)
         if (message.role === 'user' && renderedSet && renderedSet.size > 0) {
@@ -3940,7 +3916,7 @@ function shouldHideDcpUiMessage(message) {
                     role: msg.role,
                     text: typeof msg.text === 'string' ? msg.text : '',
                     ...(typeof msg.messageIndex === 'number' ? { messageIndex: msg.messageIndex } : {}),
-                    ...(msg.meta && typeof msg.meta === 'object' ? { meta: msg.meta } : {})
+                    ...(msg.meta && typeof msg.meta === 'object' ? { meta: sanitizeMetaForSnapshot(msg.meta) } : {})
                 }));
             vscode.postMessage({
                 type: 'snapshotTimelineIds',
@@ -5013,6 +4989,54 @@ function handleChatDone(sessionId, message) {
         payload: ['[WV][CHATDONE]', `snapshotPendingEpoch=${session.snapshotPendingEpoch}`]
     });
     assertInvariants(sessionId, 'chatDone');
+}
+
+function sanitizeMetaForSnapshot(meta) {
+    if (!meta || typeof meta !== 'object') return undefined;
+    const out = { ...meta };
+    if (Array.isArray(meta.images)) {
+        const kept = [];
+        let redactedCount = 0;
+        for (const item of meta.images) {
+            if (typeof item !== 'string' || !item) continue;
+            if (item.startsWith('data:image/')) {
+                redactedCount++;
+                continue;
+            }
+            kept.push(item);
+        }
+        if (kept.length > 0) out.images = kept;
+        else delete out.images;
+        if (redactedCount > 0) {
+            out.imageCount = Math.max(Number(out.imageCount) || 0, kept.length + redactedCount);
+            out.imagesRedactedInSnapshot = true;
+        }
+    }
+    return out;
+}
+
+function appendMessageImages(parentEl, message) {
+    const images = Array.isArray(message?.meta?.images) ? message.meta.images : [];
+    if (!images.length) return;
+    const imageWrap = document.createElement('div');
+    imageWrap.className = 'message-images';
+    for (const src of images) {
+        if (typeof src !== 'string' || !src.length) continue;
+        const img = document.createElement('img');
+        img.src = src;
+        img.alt = 'Attachment';
+        img.loading = 'lazy';
+        img.addEventListener('error', () => {
+            const fallback = document.createElement('div');
+            fallback.className = 'message-image-missing';
+            fallback.textContent = 'Image unavailable';
+            if (img.parentElement) img.parentElement.replaceChild(fallback, img);
+        }, { once: true });
+        imageWrap.appendChild(img);
+    }
+    if (imageWrap.children.length > 0) {
+        parentEl.appendChild(imageWrap);
+    }
 }
 
     sendButtonEl = sendBtn;

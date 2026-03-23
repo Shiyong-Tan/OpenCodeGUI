@@ -417,6 +417,14 @@ body {
     display: block;
 }
 
+.message-image-missing {
+    font-size: 12px;
+    color: var(--vscode-descriptionForeground);
+    border: 1px dashed var(--vscode-panel-border);
+    border-radius: 6px;
+    padding: 6px 8px;
+}
+
 .message.diff pre {
     margin: 0;
     white-space: pre;

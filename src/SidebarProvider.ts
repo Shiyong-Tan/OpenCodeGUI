@@ -957,12 +957,40 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 : null;
             if (!role) continue;
             if (role === 'system' && message.meta?.kind !== 'changeList') continue;
+            const normalizedMeta = this.normalizeSnapshotMessageMeta(message.meta);
             if (role === 'user' && this.rawUserTextByMsgId.has(message.id)) {
-                out.push({ ...message, role, text: this.rawUserTextByMsgId.get(message.id) || '' });
+                out.push({ ...message, role, text: this.rawUserTextByMsgId.get(message.id) || '', ...(normalizedMeta ? { meta: normalizedMeta } : {}) });
             } else {
-                out.push({ ...message, role, text: typeof message.text === 'string' ? message.text : '' });
+                out.push({ ...message, role, text: typeof message.text === 'string' ? message.text : '', ...(normalizedMeta ? { meta: normalizedMeta } : {}) });
             }
             seen.add(message.id);
+        }
+        return out;
+    }
+
+    private normalizeSnapshotMessageMeta(meta: any): any {
+        if (!meta || typeof meta !== 'object') return undefined;
+        const out: any = { ...meta };
+        if (Array.isArray(meta.images)) {
+            const sanitizedImages: string[] = [];
+            let redactedCount = 0;
+            for (const item of meta.images) {
+                if (typeof item !== 'string' || !item) continue;
+                if (item.startsWith('data:image/')) {
+                    redactedCount++;
+                    continue;
+                }
+                sanitizedImages.push(item);
+            }
+            if (sanitizedImages.length > 0) {
+                out.images = sanitizedImages;
+            } else {
+                delete out.images;
+            }
+            if (redactedCount > 0) {
+                out.imageCount = Math.max(Number(out.imageCount) || 0, sanitizedImages.length + redactedCount);
+                out.imagesRedactedInSnapshot = true;
+            }
         }
         return out;
     }
