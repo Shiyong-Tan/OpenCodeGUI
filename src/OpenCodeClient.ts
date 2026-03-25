@@ -2582,10 +2582,47 @@ export class OpenCodeClient {
         const resolver = isWin ? 'where' : 'which';
         const target = isWin ? 'opencode.cmd' : 'opencode';
         return new Promise((resolve, reject) => {
-            cp.exec(`${resolver} ${target}`, { encoding: 'utf-8' }, (err: cp.ExecException | null, stdout: string) => {
+            const resolveEnv = this.buildResolverEnv();
+            const rawPath = resolveEnv.Path || resolveEnv.PATH || '';
+            const pathEntries = rawPath
+                .split(';')
+                .map((entry) => entry.trim())
+                .filter(Boolean);
+            const npmPathPresent = pathEntries.some((entry) => /\\AppData\\Roaming\\npm$/i.test(entry));
+            OpenCodeClient.outputChannel.appendLine(
+                `[RESOLVE_BIN] platform=${process.platform} resolver=${resolver} target=${target} pathEntries=${pathEntries.length} npmPathPresent=${npmPathPresent}`
+            );
+            if (!npmPathPresent) {
+                const tail = pathEntries.slice(-8).join(';');
+                OpenCodeClient.outputChannel.appendLine(`[RESOLVE_BIN] pathTail=${tail}`);
+            }
+
+            cp.exec(`${resolver} ${target}`, { encoding: 'utf-8', env: resolveEnv }, (err: cp.ExecException | null, stdout: string, stderr: string) => {
+                if (err) {
+                    OpenCodeClient.outputChannel.appendLine(
+                        `[RESOLVE_BIN] primary.error code=${String((err as NodeJS.ErrnoException).code ?? '')} message=${err.message}`
+                    );
+                }
+                if (stdout) {
+                    OpenCodeClient.outputChannel.appendLine(`[RESOLVE_BIN] primary.stdout=${stdout.trim()}`);
+                }
+                if (stderr) {
+                    OpenCodeClient.outputChannel.appendLine(`[RESOLVE_BIN] primary.stderr=${stderr.trim()}`);
+                }
                 if (err || !stdout) {
                     if (isWin && target === 'opencode.cmd') {
-                        cp.exec(`${resolver} opencode`, { encoding: 'utf-8' }, (fallbackErr: cp.ExecException | null, fallbackOut: string) => {
+                        cp.exec(`${resolver} opencode`, { encoding: 'utf-8', env: resolveEnv }, (fallbackErr: cp.ExecException | null, fallbackOut: string, fallbackErrOut: string) => {
+                            if (fallbackErr) {
+                                OpenCodeClient.outputChannel.appendLine(
+                                    `[RESOLVE_BIN] fallback.error code=${String((fallbackErr as NodeJS.ErrnoException).code ?? '')} message=${fallbackErr.message}`
+                                );
+                            }
+                            if (fallbackOut) {
+                                OpenCodeClient.outputChannel.appendLine(`[RESOLVE_BIN] fallback.stdout=${fallbackOut.trim()}`);
+                            }
+                            if (fallbackErrOut) {
+                                OpenCodeClient.outputChannel.appendLine(`[RESOLVE_BIN] fallback.stderr=${fallbackErrOut.trim()}`);
+                            }
                             if (fallbackErr || !fallbackOut) {
                                 reject('Could not find "opencode" on PATH. Please install it or add it to your PATH.');
                                 return;
@@ -2624,6 +2661,54 @@ export class OpenCodeClient {
                 resolve(resolved);
             });
         });
+    }
+
+    private buildResolverEnv(): NodeJS.ProcessEnv {
+        const env = { ...process.env };
+        if (process.platform !== 'win32') {
+            return env;
+        }
+
+        const processPath = process.env.Path || process.env.PATH || '';
+        const userPath = this.readWindowsRegistryPath('HKCU\\Environment', 'Path');
+        const machinePath = this.readWindowsRegistryPath('HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment', 'Path');
+        const merged = this.mergeWindowsPaths(processPath, userPath, machinePath);
+
+        env.Path = merged;
+        env.PATH = merged;
+        return env;
+    }
+
+    private readWindowsRegistryPath(key: string, valueName: string): string {
+        try {
+            const cmd = `reg query "${key}" /v ${valueName}`;
+            const out = cp.execSync(cmd, { encoding: 'utf-8', windowsHide: true });
+            const lines = out.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+            const row = lines.find((line) => line.includes('REG_EXPAND_SZ') || line.includes('REG_SZ'));
+            if (!row) return '';
+            const parts = row.split(/\s{2,}/).map((part) => part.trim()).filter(Boolean);
+            const raw = parts[parts.length - 1] || '';
+            return raw.replace(/%([^%]+)%/g, (_m, name) => process.env[name] || process.env[name.toUpperCase()] || '');
+        } catch {
+            return '';
+        }
+    }
+
+    private mergeWindowsPaths(...paths: string[]): string {
+        const seen = new Set<string>();
+        const merged: string[] = [];
+        for (const raw of paths) {
+            if (!raw) continue;
+            for (const piece of raw.split(';')) {
+                const entry = piece.trim();
+                if (!entry) continue;
+                const key = entry.toLowerCase();
+                if (seen.has(key)) continue;
+                seen.add(key);
+                merged.push(entry);
+            }
+        }
+        return merged.join(';');
     }
 
     private resolveWindowsCmd(resolvedPath: string): string | undefined {
@@ -7055,6 +7140,30 @@ export class OpenCodeClient {
         };
         const result = await this.requestJson<any>('POST', `/session/${sessionId}/summarize`, payload);
         return Boolean(result);
+    }
+
+    public async fetchSessionUsage(sessionId: string): Promise<{ used: number; size: number; amount: number } | null> {
+        await this.ensureServer();
+        try {
+            const statusMap = await this.requestJson<Record<string, any>>('GET', '/session/status');
+            const status = statusMap?.[sessionId];
+            if (!status || typeof status !== 'object') return null;
+            const usageCarrier = status?.update || status;
+            const usedRaw = usageCarrier?.used ?? status?.used;
+            const sizeRaw = usageCarrier?.size ?? status?.size;
+            const amountRaw = usageCarrier?.cost?.amount ?? status?.cost?.amount;
+            const used = Number(usedRaw);
+            const size = Number(sizeRaw);
+            const amount = Number(amountRaw);
+            if (!Number.isFinite(used) || !Number.isFinite(size) || size <= 0) return null;
+            return {
+                used: used > 0 ? used : 0,
+                size,
+                amount: Number.isFinite(amount) ? amount : 0
+            };
+        } catch {
+            return null;
+        }
     }
 
     public cancel(): void {
