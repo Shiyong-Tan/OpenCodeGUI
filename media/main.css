@@ -189,6 +189,15 @@ body {
     opacity: 0.32;
 }
 
+.header-usage.usage-high {
+    border-color: color-mix(in srgb, var(--vscode-inputValidation-warningBorder) 65%, var(--vscode-widget-border));
+    background: color-mix(in srgb, var(--vscode-inputValidation-warningBackground) 35%, var(--vscode-editorWidget-background));
+}
+
+.header-usage.usage-high .header-usage-fill {
+    background: linear-gradient(90deg, #f59e0b 0%, #f97316 100%);
+}
+
 /* --- Sessions Panel --- */
 .panel-backdrop {
     position: absolute;

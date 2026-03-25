@@ -258,6 +258,7 @@ function renderHeaderUsage() {
     }
     const isCompactionRunning = activeSessionId && compactionRunningBySession.has(activeSessionId);
     const pct = clampPercent((usage.used / usage.size) * 100);
+    usageEl.classList.toggle('usage-high', pct >= 50 && !isCompactionRunning && !usageCompactHoverActive);
     if (isCompactionRunning) {
         usageEl.classList.add('usage-compact-mode');
         usageEl.classList.add('usage-compact-running');

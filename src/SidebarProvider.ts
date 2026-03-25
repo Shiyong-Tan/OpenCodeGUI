@@ -5843,7 +5843,7 @@ ${attachmentLines.join('\n')}`
                         <span class="undo-status hidden" id="undo-status">Undo not available</span>
                     </div>
                     <div class="session-controls">
-                        <button class="header-usage hidden" id="header-usage" title="Session context usage" aria-label="Session context usage">
+                        <button class="header-usage hidden" id="header-usage" aria-label="Session context usage">
                             <span class="header-usage-fill" id="header-usage-fill"></span>
                             <span class="header-usage-label" id="header-usage-label">0%</span>
                         </button>
