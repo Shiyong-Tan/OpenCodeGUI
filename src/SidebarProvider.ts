@@ -1971,6 +1971,16 @@ ${attachmentLines.join('\n')}`
                     } finally {
                         const liveWebview = this._view?.webview || activeWebview;
                         liveWebview.postMessage({ type: 'compactionState', sessionId, running: false });
+                        const refreshedUsage = await this.client.fetchSessionUsage(sessionId);
+                        if (refreshedUsage) {
+                            liveWebview.postMessage({
+                                type: 'sessionUsage',
+                                sessionId,
+                                used: refreshedUsage.used,
+                                size: refreshedUsage.size,
+                                amount: refreshedUsage.amount
+                            });
+                        }
                     }
                     break;
                 }

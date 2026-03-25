@@ -6141,6 +6141,19 @@ window.addEventListener('message', (event) => {
                     compactionRunningBySession.add(sessionId);
                 } else {
                     compactionRunningBySession.delete(sessionId);
+                    const prev = sessionUsageById.get(sessionId);
+                    if (prev) {
+                        sessionUsageById.set(sessionId, {
+                            used: 0,
+                            size: Number(prev.size) > 0 ? Number(prev.size) : getSelectedModelContextLimit(),
+                            amount: Number(prev.amount) || 0
+                        });
+                    } else {
+                        const fallbackSize = getSelectedModelContextLimit();
+                        if (fallbackSize > 0) {
+                            sessionUsageById.set(sessionId, { used: 0, size: fallbackSize, amount: 0 });
+                        }
+                    }
                 }
                 if (sessionId === activeSessionId) {
                     renderHeaderUsage();

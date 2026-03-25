@@ -117,9 +117,9 @@ body {
 .header-usage {
     position: relative;
     width: 66px;
-    height: 22px;
+    height: 20px;
     margin-right: 2px;
-    border: 1px solid var(--vscode-widget-border);
+    border: 1px solid color-mix(in srgb, var(--vscode-widget-border) 35%, var(--vscode-foreground));
     border-radius: 999px;
     background: color-mix(in srgb, var(--vscode-editorWidget-background) 85%, transparent);
     overflow: hidden;
@@ -168,7 +168,7 @@ body {
 }
 
 .header-usage.usage-compact-mode {
-    border-color: color-mix(in srgb, var(--vscode-focusBorder) 60%, var(--vscode-widget-border));
+    border-color: color-mix(in srgb, var(--vscode-focusBorder) 70%, var(--vscode-foreground));
     background: color-mix(in srgb, var(--vscode-list-hoverBackground) 45%, var(--vscode-editorWidget-background));
     cursor: pointer;
 }
@@ -180,7 +180,7 @@ body {
 }
 
 .header-usage.usage-compact-running {
-    border-color: color-mix(in srgb, var(--vscode-inputValidation-warningBorder) 70%, var(--vscode-widget-border));
+    border-color: color-mix(in srgb, var(--vscode-inputValidation-warningBorder) 78%, var(--vscode-foreground));
     background: color-mix(in srgb, var(--vscode-inputValidation-warningBackground) 55%, var(--vscode-editorWidget-background));
 }
 
@@ -190,7 +190,7 @@ body {
 }
 
 .header-usage.usage-high {
-    border-color: color-mix(in srgb, var(--vscode-inputValidation-warningBorder) 65%, var(--vscode-widget-border));
+    border-color: color-mix(in srgb, var(--vscode-inputValidation-warningBorder) 74%, var(--vscode-foreground));
     background: color-mix(in srgb, var(--vscode-inputValidation-warningBackground) 35%, var(--vscode-editorWidget-background));
 }
 
