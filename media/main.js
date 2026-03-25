@@ -148,7 +148,10 @@ let sendBlockedNotice = '';
 let systemNoticeText = '';
 let baseSessionTitle = 'OpenCode: Chat';
 let headerStatusText = '';
+const sessionUsageById = new Map();
 let textMeasureCanvas = null;
+let usageCompactHoverActive = false;
+const compactionRunningBySession = new Set();
 let subagentIntervals = new Map();
 let subagentCardsContainer = null;
 let autoScrollPinnedToBottom = true;
@@ -156,12 +159,122 @@ const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 80;
 
 const SEND_BLOCK_NOTICE = 'Please wait while the previous response finishes.';
 const BASELINE_PREPARING_NOTICE = 'Preparing git for this session...';
+const COMPACTION_RUNNING_NOTICE = 'Compaction is running...';
 const BASELINE_PREPARING_MAX_MS = 45000;
 
 function renderHeaderTitle() {
     const titleEl = document.getElementById('session-title');
     if (!titleEl) return;
     titleEl.textContent = headerStatusText || baseSessionTitle;
+}
+
+function clampPercent(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 0;
+    if (n < 0) return 0;
+    if (n > 100) return 100;
+    return n;
+}
+
+function getSelectedModelContextLimit() {
+    if (!Array.isArray(models) || !selectedModel) return 0;
+    const model = models.find((item) => item && item.fullId === selectedModel);
+    const raw = model?.contextLimit;
+    const limit = Number(raw);
+    return Number.isFinite(limit) && limit > 0 ? limit : 0;
+}
+
+function recomputeSessionUsageFromMessages(session) {
+    if (!session || !session.messagesById) return null;
+    const assistants = [];
+    for (const message of session.messagesById.values()) {
+        if (!message || message.role !== 'assistant') continue;
+        const meta = message.meta || {};
+        assistants.push({
+            tokens: meta.tokens || null,
+            cost: meta.cost,
+            timeCreated: Number(meta.timeCreated || 0),
+            timeCompleted: Number(meta.timeCompleted || 0)
+        });
+    }
+    assistants.sort((a, b) => a.timeCreated - b.timeCreated);
+
+    let cost = 0;
+    let input = 0;
+    let output = 0;
+    let reasoning = 0;
+    let cacheRead = 0;
+    let cacheWrite = 0;
+    let contextUsed = 0;
+
+    for (const info of assistants) {
+        const c = Number(info.cost);
+        if (Number.isFinite(c)) cost += c;
+        const usage = info.tokens || {};
+        if (!usage) continue;
+
+        const uInput = Number(usage.input || 0);
+        const uOutput = Number(usage.output || 0);
+        const uReasoning = Number(usage.reasoning || 0);
+        const uCacheRead = Number((usage.cache && usage.cache.read) || 0);
+        const uCacheWrite = Number((usage.cache && usage.cache.write) || 0);
+        if (uInput + uOutput + uReasoning + uCacheRead + uCacheWrite <= 0) continue;
+
+        contextUsed = uInput + uCacheRead + uCacheWrite + uOutput;
+        input += uInput;
+        output += uOutput;
+        reasoning += uReasoning;
+        cacheRead += uCacheRead;
+        cacheWrite += uCacheWrite;
+    }
+
+    const tokens = input + cacheRead + cacheWrite + output + reasoning;
+    return { used: contextUsed, tokens, amount: cost };
+}
+
+function renderHeaderUsage() {
+    const usageEl = document.getElementById('header-usage');
+    const fillEl = document.getElementById('header-usage-fill');
+    const labelEl = document.getElementById('header-usage-label');
+    if (!usageEl || !fillEl || !labelEl) return;
+    const sid = activeSessionId || '';
+    let usage = sid ? sessionUsageById.get(sid) : null;
+    const contextLimit = getSelectedModelContextLimit();
+    if (usage && Number(usage.size) <= 0 && contextLimit > 0) {
+        usage = { ...usage, size: contextLimit };
+        sessionUsageById.set(sid, usage);
+    }
+    if ((!usage || !Number.isFinite(Number(usage.size)) || Number(usage.size) <= 0) && sid) {
+        const session = getSessionState(sid);
+        const recomputed = recomputeSessionUsageFromMessages(session);
+        if (recomputed && contextLimit > 0) {
+            usage = { used: recomputed.used, size: contextLimit, amount: recomputed.amount };
+        }
+    }
+    if (!usage || Number(usage.size) <= 0) {
+        usageEl.classList.add('hidden');
+        usageCompactHoverActive = false;
+        return;
+    }
+    const isCompactionRunning = activeSessionId && compactionRunningBySession.has(activeSessionId);
+    const pct = clampPercent((usage.used / usage.size) * 100);
+    if (isCompactionRunning) {
+        usageEl.classList.add('usage-compact-mode');
+        usageEl.classList.add('usage-compact-running');
+        fillEl.style.width = '100%';
+        labelEl.textContent = 'Running';
+    } else if (usageCompactHoverActive) {
+        usageEl.classList.add('usage-compact-mode');
+        usageEl.classList.remove('usage-compact-running');
+        fillEl.style.width = '100%';
+        labelEl.textContent = 'Compact';
+    } else {
+        usageEl.classList.remove('usage-compact-mode');
+        usageEl.classList.remove('usage-compact-running');
+        fillEl.style.width = `${pct}%`;
+        labelEl.textContent = `${Math.round(pct)}%`;
+    }
+    usageEl.classList.remove('hidden');
 }
 
 function setHeaderWaitingState(waiting) {
@@ -703,12 +816,23 @@ function updateSendGate() {
         return;
     }
     const session = getSessionState(activeSessionId);
+    const compactionRunning = Boolean(activeSessionId && compactionRunningBySession.has(activeSessionId));
+    if (compactionRunning) {
+        sendBtn.disabled = true;
+        sendBtn.title = COMPACTION_RUNNING_NOTICE;
+        setSendBlockedNotice(COMPACTION_RUNNING_NOTICE);
+        return;
+    }
     const blocked = isSendBlockedByPendingState(session);
     sendBtn.disabled = blocked;
     if (blocked) {
         sendBtn.title = SEND_BLOCK_NOTICE;
         setSendBlockedNotice(SEND_BLOCK_NOTICE);
-    } else if (sendBtn.title === SEND_BLOCK_NOTICE || sendBtn.title === BASELINE_PREPARING_NOTICE) {
+    } else if (
+        sendBtn.title === SEND_BLOCK_NOTICE
+        || sendBtn.title === BASELINE_PREPARING_NOTICE
+        || sendBtn.title === COMPACTION_RUNNING_NOTICE
+    ) {
         sendBtn.title = '';
         setSendBlockedNotice('');
     }
@@ -2592,6 +2716,25 @@ document.addEventListener('DOMContentLoaded', () => {
     const closeSessionsBtn = document.getElementById('close-sessions');
     baseSessionTitle = sessionTitle?.textContent || 'OpenCode: Chat';
     renderHeaderTitle();
+    renderHeaderUsage();
+
+    const usageEl = document.getElementById('header-usage');
+    if (usageEl) {
+        usageEl.addEventListener('mouseenter', () => {
+            usageCompactHoverActive = true;
+            renderHeaderUsage();
+        });
+        usageEl.addEventListener('mouseleave', () => {
+            usageCompactHoverActive = false;
+            renderHeaderUsage();
+        });
+        usageEl.addEventListener('click', () => {
+            if (!usageCompactHoverActive) return;
+            if (activeSessionId && compactionRunningBySession.has(activeSessionId)) return;
+            if (!activeSessionId) return;
+            vscode.postMessage({ type: 'compactSession', sessionId: activeSessionId });
+        });
+    }
 
     if (chatContainer) {
         autoScrollPinnedToBottom = isNearBottom(chatContainer);
@@ -5202,6 +5345,7 @@ function appendMessageImages(parentEl, message) {
     modelSelect.addEventListener('change', (e) => {
         selectedModel = e.target.value;
         updateVariantOptions();
+        renderHeaderUsage();
         if (activeSessionId) {
             // agent timeout notice removed
         }
@@ -5229,6 +5373,7 @@ function appendMessageImages(parentEl, message) {
         activeSessionId = '';
         baseSessionTitle = 'OpenCode: Chat';
         renderHeaderTitle();
+        renderHeaderUsage();
         attachments = [];
         renderAttachments();
         pendingContextItems = [];
@@ -5495,6 +5640,7 @@ window.addEventListener('message', (event) => {
                 renderModelSelect();
                 updateVariantOptions();
                 updateSendQuotaVisual();
+                renderHeaderUsage();
                 break;
             }
             case 'sessionsList': {
@@ -5624,6 +5770,7 @@ window.addEventListener('message', (event) => {
                     activeSessionId = sessionId;
                     baseSessionTitle = message.title || 'OpenCode: Chat';
                     renderHeaderTitle();
+                    renderHeaderUsage();
                     updateUndoStatusDisplay(sessionId);
                     
                     const session = getSessionState(sessionId, true);
@@ -5947,6 +6094,7 @@ window.addEventListener('message', (event) => {
                 if (!sessionId) break;
                 const prevSessionId = activeSessionId;
                 activeSessionId = sessionId;
+                renderHeaderUsage();
                 if (prevSessionId && prevSessionId !== sessionId) {
                     clearQuestionOverlay('session-change');
                     clearPermissionOverlay('session-change');
@@ -5966,6 +6114,37 @@ window.addEventListener('message', (event) => {
                     logSessionState(sessionId, 'flushPendingPrompts');
                 }
                 updateSendGate();
+                break;
+            }
+            case 'sessionUsage': {
+                const sessionId = getEventSessionId(message, 'sessionUsage');
+                if (!sessionId) break;
+                const used = Number(message?.used);
+                const size = Number(message?.size);
+                const amount = Number(message?.amount);
+                sessionUsageById.set(sessionId, {
+                    used: Number.isFinite(used) ? used : 0,
+                    size: Number.isFinite(size) ? size : 0,
+                    amount: Number.isFinite(amount) ? amount : 0
+                });
+                if (sessionId === activeSessionId) {
+                    renderHeaderUsage();
+                }
+                break;
+            }
+            case 'compactionState': {
+                const sessionId = getEventSessionId(message, 'compactionState');
+                if (!sessionId) break;
+                const running = Boolean(message?.running);
+                if (running) {
+                    compactionRunningBySession.add(sessionId);
+                } else {
+                    compactionRunningBySession.delete(sessionId);
+                }
+                if (sessionId === activeSessionId) {
+                    renderHeaderUsage();
+                    updateSendGate();
+                }
                 break;
             }
             case 'prefillInput': {
@@ -7501,6 +7680,7 @@ window.addEventListener('message', (event) => {
                 clearPermissionOverlay('new-session');
                 baseSessionTitle = 'OpenCode: Chat';
                 renderHeaderTitle();
+                renderHeaderUsage();
                 isSwitchingSession = true;
                 updateUndoStatusDisplay(activeSessionId);
                 window.__oc?.renderFromState?.();

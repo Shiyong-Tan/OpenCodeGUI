@@ -17,6 +17,7 @@ export type ModelInfo = {
     fullId: string;
     variants: string[];
     speedMultiplier?: string;
+    contextLimit?: number;
 };
 
 export type AgentInfo = {
@@ -78,7 +79,7 @@ export type PermissionOverlayPayload = {
 };
 
 export type ChatEvent = {
-    type: 'text' | 'session' | 'raw' | 'permission' | 'diff' | 'message' | 'error' | 'tool' | 'toolPatch' | 'files' | 'assistantMessageMeta' | 'assistantPhase' | 'questionOverlay' | 'permissionRequest' | 'permissionReplied' | 'autoResumeStallWarn' | 'autoResumeStallClear' | 'autoResumeHardStop' | 'todoUpdate';
+    type: 'text' | 'session' | 'raw' | 'permission' | 'diff' | 'message' | 'error' | 'tool' | 'toolPatch' | 'files' | 'assistantMessageMeta' | 'assistantPhase' | 'questionOverlay' | 'permissionRequest' | 'permissionReplied' | 'autoResumeStallWarn' | 'autoResumeStallClear' | 'autoResumeHardStop' | 'todoUpdate' | 'sessionUsage';
     text?: string;
     sessionId?: string;
     files?: FileSnapshot[];
@@ -115,6 +116,7 @@ export type ChatEvent = {
     modelID?: string;
     providerID?: string;
     isDone?: boolean;
+    usage?: { used: number; size: number; amount: number };
     phase?: 'assistant_progress' | 'assistant_final_candidate' | 'assistant_final_accepted';
     lane?: EventLane;
     source?: EventSource;
@@ -722,6 +724,67 @@ export class OpenCodeClient {
         this.turnSseDrainTimerBySession.clear();
     }
 
+    private async delay(ms: number): Promise<void> {
+        await new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    public async waitForTurnAssistantMsgId(sessionId: string, pollEveryMs = 500): Promise<string> {
+        const pollMs = Math.max(100, Number.isFinite(pollEveryMs) ? pollEveryMs : 500);
+        while (true) {
+            const assistantMsgId = this.getTurnAssistantMsgId(sessionId);
+            if (typeof assistantMsgId === 'string' && assistantMsgId.startsWith('msg_')) {
+                return assistantMsgId;
+            }
+            await this.delay(pollMs);
+        }
+    }
+
+    public async waitForSessionIdleGate(
+        sessionId: string,
+        options?: { sseWaitMs?: number; pollEveryMs?: number; maxPolls?: number }
+    ): Promise<boolean> {
+        if (!sessionId) return false;
+        const sseWaitMs = Math.max(0, options?.sseWaitMs ?? 2000);
+        const pollEveryMs = Math.max(250, options?.pollEveryMs ?? 2000);
+        const maxPolls = Math.max(1, options?.maxPolls ?? 3);
+
+        if (this.sessionIdleReceivedBySession.has(sessionId)) {
+            this.logUiDebug(`EXT: idle.gate.hit | sessionId=${sessionId} | source=sse-cached`);
+            return true;
+        }
+
+        if (sseWaitMs > 0) {
+            this.logUiDebug(`EXT: idle.gate.wait | sessionId=${sessionId} | stage=sse | waitMs=${sseWaitMs}`);
+            await this.delay(sseWaitMs);
+            if (this.sessionIdleReceivedBySession.has(sessionId)) {
+                this.logUiDebug(`EXT: idle.gate.hit | sessionId=${sessionId} | source=sse-wait`);
+                return true;
+            }
+        }
+
+        for (let attempt = 1; attempt <= maxPolls; attempt++) {
+            if (attempt > 1) {
+                await this.delay(pollEveryMs);
+            }
+            try {
+                const statusMap = await this.requestJson<Record<string, { type?: string }>>('GET', '/session/status');
+                const status = statusMap?.[sessionId];
+                const statusType = typeof status?.type === 'string' ? status.type : '';
+                this.logUiDebug(`EXT: idle.gate.poll | sessionId=${sessionId} | attempt=${attempt}/${maxPolls} | status=${statusType || 'unknown'}`);
+                if (statusType === 'idle') {
+                    this.sessionIdleReceivedBySession.add(sessionId);
+                    this.logUiDebug(`EXT: idle.gate.hit | sessionId=${sessionId} | source=poll`);
+                    return true;
+                }
+            } catch (error) {
+                this.logUiDebug(`EXT: idle.gate.poll.fail | sessionId=${sessionId} | attempt=${attempt}/${maxPolls} | err=${String(error)}`);
+            }
+        }
+
+        this.logUiDebug(`EXT: idle.gate.timeout | sessionId=${sessionId} | sseWaitMs=${sseWaitMs} | pollEveryMs=${pollEveryMs} | maxPolls=${maxPolls}`);
+        return false;
+    }
+
     private clearFinalizeSessionState(sessionId: string, reason: 'turn-start' | 'turn-finish'): void {
         this.clearPendingMainFinalGate(sessionId, `clear:${reason}`);
         this.turnFinalAtBySession.delete(sessionId);
@@ -844,15 +907,26 @@ export class OpenCodeClient {
     private async pickStopContinuationFreeModel(): Promise<ModelInfo | null> {
         try {
             const models = await this.listModels();
-            const opencodeFree = models.find((model) => this.isOpenCodeFreeModel(model));
-            if (opencodeFree) return opencodeFree;
-            const copilotFree = models.find((model) => this.isCopilotFreeModel(model));
-            if (copilotFree) return copilotFree;
-            return null;
+            return this.pickFreeModel(models) ?? null;
         } catch (error) {
             this.logUiDebug(`EXT: continuation.stop.model.fail | err=${String(error)}`);
             return null;
         }
+    }
+
+    public pickFreeModel(models: ModelInfo[], preferredFullId?: string): ModelInfo | undefined {
+        if (!Array.isArray(models) || !models.length) return undefined;
+        if (preferredFullId) {
+            const preferred = models.find((model) => model?.fullId === preferredFullId);
+            if (preferred && (this.isOpenCodeFreeModel(preferred) || this.isCopilotFreeModel(preferred))) {
+                return preferred;
+            }
+        }
+        const opencodeFree = models.find((model) => this.isOpenCodeFreeModel(model));
+        if (opencodeFree) return opencodeFree;
+        const copilotFree = models.find((model) => this.isCopilotFreeModel(model));
+        if (copilotFree) return copilotFree;
+        return undefined;
     }
 
     private async sendStopContinuationPrompt(sessionId: string): Promise<boolean> {
@@ -1748,6 +1822,13 @@ export class OpenCodeClient {
     private resolveTurnFinal(sessionId: string, reason: string): void {
         if (!sessionId) return;
         if (this.turnFinalResolvedBySession.has(sessionId)) return;
+        const resolvedFinalMsgId = this.turnFinalMsgIdBySession.get(sessionId) || this.finalizingMsgIdBySession.get(sessionId);
+        const isSubagentSession = this.subagentToParentSessionMap.has(sessionId);
+        const allowWithoutFinalMsg = reason === 'session-error' || reason === 'session-error-abort' || isSubagentSession;
+        if (!resolvedFinalMsgId && !allowWithoutFinalMsg) {
+            this.logUiDebug(`EXT: turn.resolve.skip | sessionId=${sessionId} | reason=${reason} | guard=missing-final-msg`);
+            return;
+        }
         this.clearPendingMainFinalGate(sessionId, `resolved:${reason}`);
         this.turnFinalResolvedBySession.add(sessionId);
         this.lockedFinalSettleAttemptsBySession.delete(sessionId);
@@ -4129,11 +4210,13 @@ export class OpenCodeClient {
     private getFetchOptionsForPath(method: string, reqPath: string): {
         opName: string;
         timeoutMs: number;
+        noTimeout?: boolean;
         retryOnAbort?: boolean;
         retryTimeoutMs?: number;
     } {
         const messageMatch = /\/session\/[^/]+\/message(?:\?.*)?$/.test(reqPath);
         const promptAsyncMatch = /\/session\/[^/]+\/prompt_async(?:\?.*)?$/.test(reqPath);
+        const summarizeMatch = /\/session\/[^/]+\/summarize(?:\?.*)?$/.test(reqPath);
         const sessionInfoMatch = /\/session\/[^/?]+(?:\?.*)?$/.test(reqPath);
         if (reqPath === '/global/health') {
             return { opName: 'health', timeoutMs: 1000 };
@@ -4158,6 +4241,14 @@ export class OpenCodeClient {
                 timeoutMs: 60000,
                 retryOnAbort: true,
                 retryTimeoutMs: 90000
+            };
+        }
+        if (summarizeMatch) {
+            return {
+                opName: 'session.summarize',
+                timeoutMs: 0,
+                noTimeout: true,
+                retryOnAbort: true
             };
         }
         if (sessionInfoMatch) {
@@ -5054,7 +5145,8 @@ export class OpenCodeClient {
         if (sessionId) {
             this.logUiDebug(`EXT: event.normalized | type=${normalized.type} | lane=${normalized.lane} | sessionId=${normalized.sessionId} | messageId=${normalized.messageId || 'null'} | parentId=${normalized.parentId || 'null'} | finish=${normalized.finish || 'null'} | partType=${normalized.partType || 'null'} | source=${normalized.source}`);
         }
-        if (source === 'sse' && sessionId && this.turnFinishedBySession.has(sessionId)) {
+        const isSessionStatus = type === 'session.status';
+        if (source === 'sse' && sessionId && this.turnFinishedBySession.has(sessionId) && !isSessionStatus) {
             return events;
         }
         if (source === 'resync' && sessionId && (type === 'files' || type === 'diff' || type === 'toolPatch')) {
@@ -5204,6 +5296,27 @@ export class OpenCodeClient {
             if (role === 'assistant' && messageId) {
                 const isSubagentLane = typeof sessionId === 'string' && this.subagentToParentSessionMap.has(sessionId);
                 const lane: EventLane = isSubagentLane ? 'subagent' : (sessionId === this.currentSessionId || this.turnStateBySession.has(sessionId || '') ? 'main' : 'unknown');
+                const tokens = info?.tokens;
+                if (sessionId && tokens && typeof tokens === 'object') {
+                    const input = Number(tokens?.input || 0);
+                    const output = Number(tokens?.output || 0);
+                    const cacheRead = Number(tokens?.cache?.read || 0);
+                    const cacheWrite = Number(tokens?.cache?.write || 0);
+                    const used = input + output + cacheRead + cacheWrite;
+                    if (Number.isFinite(used) && used > 0) {
+                        const amount = Number(info?.cost || 0);
+                        events.push({
+                            type: 'sessionUsage',
+                            sessionId,
+                            usage: {
+                                used,
+                                size: 0,
+                                amount: Number.isFinite(amount) ? amount : 0
+                            },
+                            source
+                        });
+                    }
+                }
                 if (sessionId && this.shouldSuppressStopContinuationAssistant(sessionId)) {
                     this.rememberHiddenControlAssistantMsgId(sessionId, messageId);
                     this.logUiDebug(`EXT: assistant.updated.skip | sessionId=${sessionId} | msgId=${messageId} | reason=stop-control-window`);
@@ -5621,8 +5734,34 @@ export class OpenCodeClient {
             }
             return events;
         }
-        if (type === 'session.status' && props?.sessionID && props?.status?.type === 'idle') {
+        if (type === 'session.status' && props?.sessionID) {
             const sessionId = props.sessionID;
+            const status = props?.status || {};
+            const usageCarrier = status?.update || status;
+            const usageFlag = usageCarrier?.sessionUpdate || status?.type;
+            const usedRaw = usageCarrier?.used ?? status?.used;
+            const sizeRaw = usageCarrier?.size ?? status?.size;
+            const amountRaw = usageCarrier?.cost?.amount ?? status?.cost?.amount;
+            this.logUiDebug(`EXT: session.status.detail | sessionId=${sessionId} | type=${String(status?.type || 'null')} | sessionUpdate=${String(usageCarrier?.sessionUpdate || 'null')} | used=${String(usedRaw ?? 'null')} | size=${String(sizeRaw ?? 'null')} | amount=${String(amountRaw ?? 'null')}`);
+            const hasUsageShape = Number.isFinite(Number(usedRaw)) && Number.isFinite(Number(sizeRaw));
+            const isUsageUpdate =
+                usageFlag === 'usage_update'
+                || hasUsageShape;
+            if (isUsageUpdate) {
+                const used = Number.isFinite(Number(usedRaw)) ? Number(usedRaw) : 0;
+                const size = Number.isFinite(Number(sizeRaw)) ? Number(sizeRaw) : 0;
+                const amount = Number.isFinite(Number(amountRaw)) ? Number(amountRaw) : 0;
+                events.push({
+                    type: 'sessionUsage',
+                    sessionId,
+                    usage: { used, size, amount },
+                    source
+                });
+                // Do not return here; idle and usage may coexist in one status payload.
+            }
+            if (status?.type !== 'idle') {
+                return events;
+            }
             this.sessionIdleReceivedBySession.add(sessionId);
             this.logUiDebug(`EXT: session.idle.received | sessionId=${sessionId}`);
             if (this.canceledActiveTurnBySession.get(sessionId) === true) {
@@ -6806,7 +6945,9 @@ export class OpenCodeClient {
                     const name = typeof model?.name === 'string' ? model.name : `${providerId}/${id}`;
                     const variants = model?.variants ? Object.keys(model.variants) : [];
                     const fullId = providerId ? `${providerId}/${id}` : id;
-                    models.push({ id, providerId, name, fullId, variants });
+                    const contextLimitRaw = model?.limit?.context;
+                    const contextLimit = Number.isFinite(Number(contextLimitRaw)) ? Number(contextLimitRaw) : undefined;
+                    models.push({ id, providerId, name, fullId, variants, contextLimit });
                 }
             }
             if (models.length) {
@@ -6902,6 +7043,20 @@ export class OpenCodeClient {
         return Array.isArray(messages) ? messages : [];
     }
 
+    public async summarizeSession(
+        sessionId: string,
+        options: { providerID: string; modelID: string; auto?: boolean }
+    ): Promise<boolean> {
+        await this.ensureServer();
+        const payload = {
+            providerID: options.providerID,
+            modelID: options.modelID,
+            auto: options.auto === true
+        };
+        const result = await this.requestJson<any>('POST', `/session/${sessionId}/summarize`, payload);
+        return Boolean(result);
+    }
+
     public cancel(): void {
         const sessionId = this.currentSessionId;
         if (!sessionId) return;
@@ -6930,7 +7085,9 @@ export class OpenCodeClient {
                 const name = parsed.name || `${providerId}/${id}`;
                 const variants = parsed.variants ? Object.keys(parsed.variants) : [];
                 const fullId = currentLabel || (providerId && id ? `${providerId}/${id}` : id);
-                models.push({ id, providerId, name, fullId, variants });
+                const contextLimitRaw = parsed?.limit?.context;
+                const contextLimit = Number.isFinite(Number(contextLimitRaw)) ? Number(contextLimitRaw) : undefined;
+                models.push({ id, providerId, name, fullId, variants, contextLimit });
             } catch (error) {
                 OpenCodeClient.outputChannel.appendLine(`[PARSE_ERR] Failed to parse model JSON`);
             }
@@ -6975,7 +7132,7 @@ export class OpenCodeClient {
         const speedMap = new Map<string, string>([
             ['GPT-4.1', '0x'],
             ['GPT-4o', '0x'],
-            ['Grok Code Fast 1', '0x'],
+            ['Grok Code Fast 1', '0.25x'],
             ['Raptor mini (Preview)', '0x'],
             ['Claude Haiku 4.5', '0.33x'],
             ['Claude Opus 4.1', '1x'],
@@ -6987,7 +7144,11 @@ export class OpenCodeClient {
             ['Gemini 2.5 Pro', '1x'],
             ['Gemini 3 Flash', '0.33x'],
             ['Gemini 3 Pro Preview', '1x'],
+            ['Gemini 3.1 Pro Preview', '1x'],
             ['GPT-5', '1x'],
+            ['GPT-5.3-Codex', '1x'],
+            ['GPT-5.4', '1x'],
+            ['GPT-2.3-Codex', '1x'],
             ['GPT-5-Codex (Preview)', '1x'],
             ['GPT-5.1', '1x'],
             ['GPT-5.1-Codex', '1x'],

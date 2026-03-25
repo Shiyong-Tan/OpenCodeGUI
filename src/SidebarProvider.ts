@@ -1814,10 +1814,23 @@ ${attachmentLines.join('\n')}`
                             }
                         );
 
+                        if (this.currentSessionId) {
+                            await this.client.waitForSessionIdleGate(this.currentSessionId, {
+                                sseWaitMs: 2000,
+                                pollEveryMs: 2000,
+                                maxPolls: 3
+                            });
+                        }
+
                         OpenCodeClient.outputChannel.appendLine(`[BRIDGE] Chat done`);
-                        const doneAssistantMsgId = this.currentSessionId
+                        let doneAssistantMsgId = this.currentSessionId
                             ? this.client.getTurnAssistantMsgId(this.currentSessionId)
                             : undefined;
+                        if (this.currentSessionId && !doneAssistantMsgId) {
+                            this.uiDebugChannel.appendLine(`EXT: chatdone.guard.wait-final | sessionId=${this.currentSessionId} | reason=missing-assistant-msg-id`);
+                            doneAssistantMsgId = await this.client.waitForTurnAssistantMsgId(this.currentSessionId, 500);
+                            this.uiDebugChannel.appendLine(`EXT: chatdone.guard.resolved | sessionId=${this.currentSessionId} | assistantMsgId=${doneAssistantMsgId}`);
+                        }
                         liveWebview.postMessage({
                             type: 'chatDone',
                             sessionId: this.currentSessionId,
@@ -1926,6 +1939,39 @@ ${attachmentLines.join('\n')}`
                     this.selectedModel = data.value || undefined;
                     await this._context.globalState.update('opencode.model', this.selectedModel);
                     await this.postModelQuota(activeWebview, 'model-change');
+                    break;
+                }
+                case "compactSession": {
+                    const requestedSessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
+                    const sessionId = requestedSessionId || this.currentSessionId || '';
+                    if (!sessionId) {
+                        this.postAddResponse(activeWebview, 'Compaction skipped: no active session.');
+                        break;
+                    }
+                    const model = this.client.pickFreeModel(this.lastKnownModels, this.selectedModel);
+                    if (!model) {
+                        this.postAddResponse(activeWebview, 'Compaction skipped: no free model available.');
+                        break;
+                    }
+                    const modelRef = this.parseModelRef(model.fullId);
+                    if (!modelRef) {
+                        this.postAddResponse(activeWebview, `Compaction skipped: invalid model id ${model.fullId}.`);
+                        break;
+                    }
+                    activeWebview.postMessage({ type: 'compactionState', sessionId, running: true });
+                    try {
+                        await this.client.summarizeSession(sessionId, {
+                            providerID: modelRef.providerID,
+                            modelID: modelRef.modelID,
+                            auto: false
+                        });
+                        this.postAddResponse(activeWebview, `Compaction started (${model.fullId}).`);
+                    } catch (error) {
+                        this.postAddResponse(activeWebview, `Compaction failed: ${error}`);
+                    } finally {
+                        const liveWebview = this._view?.webview || activeWebview;
+                        liveWebview.postMessage({ type: 'compactionState', sessionId, running: false });
+                    }
                     break;
                 }
                 case "setMode": {
@@ -4298,6 +4344,17 @@ ${attachmentLines.join('\n')}`
             });
             return;
         }
+        if (event.type === 'sessionUsage' && event.sessionId && event.usage) {
+            const liveWebview = this._view?.webview || webview;
+            liveWebview.postMessage({
+                type: 'sessionUsage',
+                sessionId: event.sessionId,
+                used: event.usage.used,
+                size: event.usage.size,
+                amount: event.usage.amount
+            });
+            return;
+        }
         if (event.type === 'session' && event.sessionId) {
             if (!this.isUserOwnedSession(event.sessionId) && this.sendInFlightBySession.has(this.currentSessionId!)) {
                 this.activeSubagentSessionIds.add(event.sessionId);
@@ -4889,6 +4946,13 @@ ${attachmentLines.join('\n')}`
             this.postAddResponse(webview, `Failed to refresh models: ${error}`);
         }
         return [];
+    }
+
+    private parseModelRef(model?: string): { providerID: string; modelID: string } | undefined {
+        if (!model) return undefined;
+        const parts = model.split('/');
+        if (parts.length < 2) return undefined;
+        return { providerID: parts[0], modelID: parts.slice(1).join('/') };
     }
 
     private async postModelQuota(webview: vscode.Webview, reason: string): Promise<void> {
@@ -5603,8 +5667,14 @@ ${attachmentLines.join('\n')}`
             if (!displayText.trim()) continue;
             if (role === 'assistant' && this.isHiddenControlAssistantText(displayText)) continue;
             const messageIndex = this.client.registerMessage(resolvedId);
-            const meta: Record<string, unknown> | undefined = role === 'assistant' && parentId
-                ? { parentID: parentId }
+            const meta: Record<string, unknown> | undefined = role === 'assistant'
+                ? {
+                    ...(parentId ? { parentID: parentId } : {}),
+                    tokens: (message?.info as any)?.tokens,
+                    cost: (message?.info as any)?.cost,
+                    timeCreated: (message?.info as any)?.time?.created,
+                    timeCompleted: (message?.info as any)?.time?.completed
+                }
                 : undefined;
             messages.push({ role, text: displayText, id: resolvedId, messageIndex, ...(meta ? { meta } : {}) });
         }
@@ -5773,6 +5843,10 @@ ${attachmentLines.join('\n')}`
                         <span class="undo-status hidden" id="undo-status">Undo not available</span>
                     </div>
                     <div class="session-controls">
+                        <button class="header-usage hidden" id="header-usage" title="Session context usage" aria-label="Session context usage">
+                            <span class="header-usage-fill" id="header-usage-fill"></span>
+                            <span class="header-usage-label" id="header-usage-label">0%</span>
+                        </button>
                         <button class="icon-btn" id="new-session-btn" title="New Session">
                             <svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M14 7v1H8v6H7V8H1V7h6V1h1v6h6z"/></svg>
                         </button>
