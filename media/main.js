@@ -5037,6 +5037,7 @@ function handleChatChunk(sessionId, message) {
 function handleChatDone(sessionId, message) {
         const session = getSessionState(sessionId);
         if (!session) return;
+        const skipSnapshot = message?.skipSnapshot === true;
         // agent timeout notice removed
     if (session.thinkingId && session.messagesById.has(session.thinkingId)) {
         const msg = session.messagesById.get(session.thinkingId);
@@ -5126,12 +5127,20 @@ function handleChatDone(sessionId, message) {
     }
     updateSendGate();
     // Mark snapshot pending for this turn; actual emit is single-point gated at finalize_done.
-    session.snapshotPendingEpoch = (typeof session.snapshotPendingEpoch === 'number' ? session.snapshotPendingEpoch : 0) + 1;
-    session.snapshotFinalizeReady = false;
-    vscode.postMessage({
-        type: 'ui-debug',
-        payload: ['[WV][CHATDONE]', `snapshotPendingEpoch=${session.snapshotPendingEpoch}`]
-    });
+    if (!skipSnapshot) {
+        session.snapshotPendingEpoch = (typeof session.snapshotPendingEpoch === 'number' ? session.snapshotPendingEpoch : 0) + 1;
+        session.snapshotFinalizeReady = false;
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: ['[WV][CHATDONE]', `snapshotPendingEpoch=${session.snapshotPendingEpoch}`]
+        });
+    } else {
+        session.snapshotFinalizeReady = false;
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: ['[WV][CHATDONE]', `snapshotSkipped=true`, `reason=error-finalize`]
+        });
+    }
     assertInvariants(sessionId, 'chatDone');
 }
 

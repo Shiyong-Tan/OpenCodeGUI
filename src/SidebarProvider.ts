@@ -1889,7 +1889,8 @@ ${attachmentLines.join('\n')}`
                             type: 'chatDone',
                             sessionId: this.currentSessionId,
                             assistantMsgId: doneAssistantMsgId,
-                            lastAssistantMsgId: doneAssistantMsgId
+                            lastAssistantMsgId: doneAssistantMsgId,
+                            skipSnapshot: true
                         });
                         this.emitTurnFinalizePhase(activeWebview, this.currentSessionId, 'stream_done');
                         if (this.currentSessionId) {
@@ -4775,10 +4776,10 @@ ${attachmentLines.join('\n')}`
             if (this.currentSessionId) {
                 this.client.finishTurn(this.currentSessionId);
             }
-                        // Mark all active subagents as done before clearing (error event path)
-                        this.markAllSubagentsTerminal('failed', 'event-error-finalize');
-                        this.emitSubagentStatus();
-                        this.clearSubagentSessions();
+            // Mark all active subagents as done before clearing (error event path)
+            this.markAllSubagentsTerminal('failed', 'event-error-finalize');
+            this.emitSubagentStatus();
+            this.clearSubagentSessions();
 
             const doneAssistantMsgId = this.currentSessionId
                 ? this.client.getTurnAssistantMsgId(this.currentSessionId)
@@ -4787,8 +4788,13 @@ ${attachmentLines.join('\n')}`
                 type: 'chatDone',
                 sessionId: this.currentSessionId,
                 assistantMsgId: doneAssistantMsgId,
-                lastAssistantMsgId: doneAssistantMsgId
+                lastAssistantMsgId: doneAssistantMsgId,
+                skipSnapshot: true
             });
+            this.emitTurnFinalizePhase(liveWebview, this.currentSessionId, 'stream_done');
+            this.emitTurnFinalizePhase(liveWebview, this.currentSessionId, 'commit_done');
+            this.emitTurnFinalizePhase(liveWebview, this.currentSessionId, 'upgrade_done');
+            this.emitTurnFinalizePhase(liveWebview, this.currentSessionId, 'finalize_done');
             return;
         }
 
