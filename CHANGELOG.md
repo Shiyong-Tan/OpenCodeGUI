@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.1.20
+
+- Disabled the header `context usage` compact action while the current session is active/in-flight, preventing compaction requests during an unfinished turn.
+- Added disabled-state styling and guard logic for the compact button to make availability clearer in the UI.
+
 ## 1.1.17
 
 - Tightened post-final continuation handling so hidden `/stop-continuation` control rounds no longer leak extra visible assistant activity into the UI.

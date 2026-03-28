@@ -198,6 +198,11 @@ body {
     background: linear-gradient(90deg, #f59e0b 0%, #f97316 100%);
 }
 
+.header-usage:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
 /* --- Sessions Panel --- */
 .panel-backdrop {
     position: absolute;

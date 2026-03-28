@@ -160,7 +160,16 @@ const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 80;
 const SEND_BLOCK_NOTICE = 'Please wait while the previous response finishes.';
 const BASELINE_PREPARING_NOTICE = 'Preparing git for this session...';
 const COMPACTION_RUNNING_NOTICE = 'Compaction is running...';
+const COMPACTION_ACTIVE_SESSION_NOTICE = 'Compaction is unavailable while this session is active.';
 const BASELINE_PREPARING_MAX_MS = 45000;
+
+function isCompactDisabledForSession(sessionId) {
+    if (!sessionId) return true;
+    if (isBusy) return true;
+    if (compactionRunningBySession.has(sessionId)) return true;
+    const session = getSessionState(sessionId);
+    return isSendBlockedByPendingState(session);
+}
 
 function renderHeaderTitle() {
     const titleEl = document.getElementById('session-title');
@@ -257,6 +266,9 @@ function renderHeaderUsage() {
         return;
     }
     const isCompactionRunning = activeSessionId && compactionRunningBySession.has(activeSessionId);
+    const isCompactDisabled = isCompactDisabledForSession(sid);
+    usageEl.disabled = isCompactDisabled;
+    usageEl.title = isCompactDisabled ? COMPACTION_ACTIVE_SESSION_NOTICE : '';
     const pct = clampPercent((usage.used / usage.size) * 100);
     usageEl.classList.toggle('usage-high', pct >= 50 && !isCompactionRunning && !usageCompactHoverActive);
     if (isCompactionRunning) {
@@ -2731,7 +2743,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
         usageEl.addEventListener('click', () => {
             if (!usageCompactHoverActive) return;
-            if (activeSessionId && compactionRunningBySession.has(activeSessionId)) return;
+            if (isCompactDisabledForSession(activeSessionId || '')) return;
             if (!activeSessionId) return;
             vscode.postMessage({ type: 'compactSession', sessionId: activeSessionId });
         });
