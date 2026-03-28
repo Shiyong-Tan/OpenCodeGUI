@@ -12,19 +12,6 @@ All notable changes to this project will be documented in this file.
 - Reduced snapshot image bloat and added graceful degradation for missing attachments during snapshot load/export paths.
 - Refined Copilot/OpenCode model speed-label mapping behavior to improve model list readability.
 
-## 1.1.17
-
-- Tightened post-final continuation handling so hidden `/stop-continuation` control rounds no longer leak extra visible assistant activity into the UI.
-- Fixed snapshot-adjacent reload behavior for control-noise messages by filtering post-snapshot hidden-control assistants using their hidden user parent relationship instead of letting them attach to the previous visible turn.
-- Improved stop/continuation noise suppression across reload paths so `Stopped.` / similar stop-confirmation replies do not reappear as visible finals after reload.
-- Fixed a timing bug in the stop-continuation guard so the protection survives `finishTurn()` long enough to suppress the control round that arrives immediately after final acceptance.
-- Added bash-tool file-path extraction for common write patterns, including `python Path(...).write_text(...)`, so bash-based file edits are recorded in touched files and final change lists more reliably.
-- Updated Marketplace categories to improve extension discoverability.
-
-## 1.1.18
-
-- Stop processing SSE events for a session after finalization, preventing late meta events from creating post-final temporary assistant bubbles.
-
 ## 1.1.19
 
 - Stabilized session reload with snapshot-first recovery: reload now restores snapshot timeline as the authoritative base and only appends truly newer messages from recent export.
@@ -34,11 +21,18 @@ All notable changes to this project will be documented in this file.
 - Improved send initialization reliability around baseline/git-prep flow with clearer fallback behavior and fewer blocked-send deadlocks.
 - Improved streaming UX: assistant temporary updates no longer force-scroll the chat when the user has manually scrolled up; auto-scroll resumes near the bottom.
 
-## 1.1.13
+## 1.1.18
 
-- Improved Marketplace metadata for discoverability: added targeted search keywords for OpenCode, AI coding, code agents, and developer tooling.
-- Updated extension listing copy with a more descriptive display name and clearer description focused on OpenCode CLI, subagents, code diff, change lists, and undo/restore.
-- Refined README top section so Marketplace visitors can understand the core workflow and key features more quickly without relying on animated demos.
+- Stop processing SSE events for a session after finalization, preventing late meta events from creating post-final temporary assistant bubbles.
+
+## 1.1.17
+
+- Tightened post-final continuation handling so hidden `/stop-continuation` control rounds no longer leak extra visible assistant activity into the UI.
+- Fixed snapshot-adjacent reload behavior for control-noise messages by filtering post-snapshot hidden-control assistants using their hidden user parent relationship instead of letting them attach to the previous visible turn.
+- Improved stop/continuation noise suppression across reload paths so `Stopped.` / similar stop-confirmation replies do not reappear as visible finals after reload.
+- Fixed a timing bug in the stop-continuation guard so the protection survives `finishTurn()` long enough to suppress the control round that arrives immediately after final acceptance.
+- Added bash-tool file-path extraction for common write patterns, including `python Path(...).write_text(...)`, so bash-based file edits are recorded in touched files and final change lists more reliably.
+- Updated Marketplace categories to improve extension discoverability.
 
 ## 1.1.15
 
@@ -48,6 +42,12 @@ All notable changes to this project will be documented in this file.
 - Filtered continuation control noise more aggressively: hidden `/stop-continuation` command wrappers and `continuation ... stopped` assistant replies no longer pollute live chat, snapshots, or reload results.
 - Refined delayed-final and continuation guards so post-final control rounds are suppressed without hiding normal `OC_UI_AUTORESUME` follow-up assistant activity.
 - Fixed cancel/send flow so a new prompt can be sent immediately after stopping a running turn, without getting blocked by stale in-flight state.
+
+## 1.1.13
+
+- Improved Marketplace metadata for discoverability: added targeted search keywords for OpenCode, AI coding, code agents, and developer tooling.
+- Updated extension listing copy with a more descriptive display name and clearer description focused on OpenCode CLI, subagents, code diff, change lists, and undo/restore.
+- Refined README top section so Marketplace visitors can understand the core workflow and key features more quickly without relying on animated demos.
 
 ## 1.1.12
 
@@ -255,7 +255,7 @@ All notable changes to this project will be documented in this file.
 
 ## 1.0.20
 
-- Added “Send to OpenCode UI” context menu actions for editor selections and output (clipboard) selections with tokenized input references.
+- Added "Send to OpenCode UI" context menu actions for editor selections and output (clipboard) selections with tokenized input references.
 - Introduced an always-visible server status dot beside the session title, updated by SSE/health signals with hover status text.
 - Added SSE failure detection with health check, limited resync fallback, and auto-restart attempts to recover from event stream outages.
 
