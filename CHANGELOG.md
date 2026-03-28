@@ -4,8 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## 1.1.20
 
-- Disabled the header `context usage` compact action while the current session is active/in-flight, preventing compaction requests during an unfinished turn.
-- Added disabled-state styling and guard logic for the compact button to make availability clearer in the UI.
+- Added full compaction UX/state flow in header usage: compact trigger, running state feedback, and post-compaction usage refresh.
+- Disabled the header `context usage` compact action while the current session is active/in-flight or otherwise not sendable, with explicit disabled styling and click guards.
+- Improved usage capsule behavior and synchronization: refined hover/warning display logic and stabilized session usage updates in webview.
+- Improved Windows OpenCode binary resolution by merging common PATH/env sources to reduce launch/path-detection failures.
+- Finalized errored turns more reliably and skipped snapshot persistence on error-finalize paths to avoid saving inconsistent turn state.
+- Reduced snapshot image bloat and added graceful degradation for missing attachments during snapshot load/export paths.
+- Refined Copilot/OpenCode model speed-label mapping behavior to improve model list readability.
 
 ## 1.1.17
 
