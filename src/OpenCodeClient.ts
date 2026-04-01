@@ -99,7 +99,7 @@ type ContinuationSuppressionReason =
  * - priorAssistantFinalMsgId: immutable assistant final this continuation follows
  * - continuationSequence: 1..N within the same chain (max N=2 in v1)
  */
-type ContinuationMessageMetadata = {
+export type ContinuationMessageMetadata = {
     continuationChainId: string;
     priorAssistantFinalMsgId: string;
     continuationSequence: number;
@@ -975,25 +975,6 @@ export class OpenCodeClient {
             );
     }
 
-    private shouldStopLateBoulderContinuation(sessionId: string | undefined): boolean {
-        if (!sessionId) return false;
-        if (this.shouldDropLateContinuationByExhaustedPolicy(sessionId)) return false;
-        if (this.turnStateBySession.has(sessionId)) return false;
-        const mode = (this.finishedMainAgentBySession.get(sessionId) || '').toLowerCase();
-        if (!mode) return false;
-        const eligible = mode.includes('sisyphus') || mode.includes('hephaestus') || mode.includes('atlas') || mode.includes('build');
-        if (!eligible) return false;
-        const finishedAt = this.finishedTurnAtBySession.get(sessionId) || 0;
-        if (!finishedAt) return false;
-        return (Date.now() - finishedAt) <= this.lateContinuationGuardWindowMs;
-    }
-
-    private shouldSendStopContinuationOnFinal(sessionId: string | undefined, source: EventSource): boolean {
-        if (!sessionId) return false;
-        if (source !== 'sse') return false;
-        return this.isDelayedMainFinalMode(sessionId);
-    }
-
     private createContinuationChainId(sessionId: string): string {
         this.continuationChainSeq += 1;
         return `cont:${sessionId}:${Date.now()}:${this.continuationChainSeq}`;
@@ -1845,9 +1826,6 @@ export class OpenCodeClient {
             this.turnSettleStableCountBySession.set(sessionId, 0);
             this.turnSettleLastFingerprintBySession.delete(sessionId);
             this.turnSettleNoDeltaCountBySession.set(sessionId, 0);
-        }
-        if (this.shouldSendStopContinuationOnFinal(sessionId, source)) {
-            void this.sendStopContinuationPrompt(sessionId);
         }
         this.scheduleTurnFinalQuiet(sessionId);
     }
@@ -5719,9 +5697,6 @@ export class OpenCodeClient {
                 if (source === 'sse' && sessionId && this.pendingMainFinalGateBySession.has(sessionId) && this.isOmoContinuationText(partTextForGate)) {
                     this.clearPendingMainFinalGate(sessionId, 'boulder-continuation');
                     this.logUiDebug(`EXT: turn.final.pending.cancel | sessionId=${sessionId} | reason=boulder-continuation`);
-                } else if (source === 'sse' && sessionId && this.isOmoContinuationText(partTextForGate) && this.shouldStopLateBoulderContinuation(sessionId)) {
-                    void this.sendStopContinuationPrompt(sessionId);
-                    return events;
                 }
                 if (source === 'sse' && sessionId && msgId && roleForMsg === 'user') {
                     const partText = typeof part?.text === 'string' ? part.text : '';
