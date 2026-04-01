@@ -68,6 +68,113 @@ export type QuestionOverlayPayload = {
 
 export type PermissionReply = 'once' | 'always' | 'reject';
 
+/**
+ * Continuation-turn contract (Task 1 source-of-truth).
+ *
+ * State machine (must be treated as explicit lifecycle states):
+ * sealed -> revive_armed -> bootstrap_buffering -> continuation_active -> continuation_finalized
+ *        \-> invalidated
+ * bootstrap_buffering/continuation_active -> orphaned (10s silence)
+ * any revive-related state -> exhausted (more than 2 continuations)
+ */
+type ContinuationLifecycleState =
+    | 'sealed'
+    | 'revive_armed'
+    | 'bootstrap_buffering'
+    | 'continuation_active'
+    | 'continuation_finalized'
+    | 'orphaned'
+    | 'invalidated'
+    | 'exhausted';
+
+type ContinuationSuppressionReason =
+    | 'submitted-prompt'
+    | 'max-continuations-exhausted'
+    | 'ttl-expired'
+    | 'invalid-state';
+
+/**
+ * Metadata contract for continuation assistant messages.
+ * - continuationChainId: stable identity shared by sealed final + all continuations
+ * - priorAssistantFinalMsgId: immutable assistant final this continuation follows
+ * - continuationSequence: 1..N within the same chain (max N=2 in v1)
+ */
+type ContinuationMessageMetadata = {
+    continuationChainId: string;
+    priorAssistantFinalMsgId: string;
+    continuationSequence: number;
+};
+
+type ContinuationChainRuntime = {
+    continuationChainId: string;
+    priorAssistantFinalMsgId: string;
+    sealedAt: number;
+    state: ContinuationLifecycleState;
+    continuationCount: number;
+    latestContinuationMeta?: ContinuationMessageMetadata;
+    invalidatedReason?: ContinuationSuppressionReason;
+    invalidatedAt?: number;
+};
+
+type ContinuationSlotDisposition = 're-init in continuation' | 'stay cleared' | 'different key';
+
+type ContinuationStateSlotManifestEntry = {
+    slot: string;
+    clearedBy: 'finishTurn' | 'clearFinalizeSessionState' | 'clearSilenceTimer';
+    disposition: ContinuationSlotDisposition;
+    note: string;
+};
+
+export const CONTINUATION_TURN_INVARIANTS = Object.freeze({
+    reviveTtlMs: 30_000,
+    maxContinuationsPerOriginalTurn: 2,
+    suppressionRule: 'suppress only after submitted prompt (typing does not suppress)' as const,
+    exhaustedPolicy: 'log-and-drop' as const,
+    reviveBootstrapBufferWindowMs: 2_000,
+    orphanCleanupTimeoutMs: 10_000,
+});
+
+/**
+ * State-slot manifest for everything cleared by finishTurn() and clearFinalizeSessionState().
+ * Implementers MUST use this as the continuation bootstrap checklist.
+ */
+export const CONTINUATION_STATE_SLOT_MANIFEST: ReadonlyArray<ContinuationStateSlotManifestEntry> = [
+    { slot: 'turnStateBySession', clearedBy: 'finishTurn', disposition: 're-init in continuation', note: 'new TurnState for continuation turn' },
+    { slot: 'pendingTurnChangesBySession', clearedBy: 'finishTurn', disposition: 're-init in continuation', note: 'new pending queue for continuation turn' },
+    { slot: 'turnWriteStateBySession', clearedBy: 'finishTurn', disposition: 'different key', note: 'bind to continuation hidden user anchor turnKey' },
+    { slot: 'activeTurnOpIdBySession', clearedBy: 'finishTurn', disposition: 'stay cleared', note: 'continuation gets a fresh op association' },
+    { slot: 'canceledActiveTurnBySession', clearedBy: 'finishTurn', disposition: 're-init in continuation', note: 'must restart as not canceled' },
+    { slot: 'pendingUserMsgIdBySession', clearedBy: 'finishTurn', disposition: 'different key', note: 'continuation hidden user anchor owns parent link' },
+    { slot: 'pendingAssistantMsgIdBySession', clearedBy: 'finishTurn', disposition: 'different key', note: 'fresh continuation assistant id only' },
+    { slot: 'currentTurnUserMsgIdBySession', clearedBy: 'finishTurn', disposition: 'different key', note: 'new hidden continuation user anchor' },
+    { slot: 'displayTurnUserMsgIdBySession', clearedBy: 'finishTurn', disposition: 'stay cleared', note: 'hidden continuation anchor must stay non-visible' },
+    { slot: 'hiddenControlUserMsgIdsBySession', clearedBy: 'finishTurn', disposition: 're-init in continuation', note: 'new hidden-control scope for continuation' },
+    { slot: 'hiddenControlAssistantMsgIdsBySession', clearedBy: 'finishTurn', disposition: 're-init in continuation', note: 'new hidden assistant suppression scope' },
+    { slot: 'pendingStopContinuationUserBySession', clearedBy: 'finishTurn', disposition: 'stay cleared', note: 'auto stop is not revived in continuation v1' },
+    { slot: 'currentTurnAssistantMsgIdBySession', clearedBy: 'finishTurn', disposition: 'different key', note: 'fresh continuation assistant message id' },
+    { slot: 'currentTurnStartedAtBySession', clearedBy: 'finishTurn', disposition: 're-init in continuation', note: 'new continuation turn start timestamp' },
+    { slot: 'lastSseAtBySession', clearedBy: 'finishTurn', disposition: 're-init in continuation', note: 'resume SSE liveness for continuation turn' },
+    { slot: 'silenceTimerBySession', clearedBy: 'clearSilenceTimer', disposition: 're-init in continuation', note: 'new silence timer schedule per continuation turn' },
+    { slot: 'turnFinalAtBySession', clearedBy: 'clearFinalizeSessionState', disposition: 're-init in continuation', note: 'new final candidate timestamp for continuation terminal phase' },
+    { slot: 'turnFinalMsgIdBySession', clearedBy: 'clearFinalizeSessionState', disposition: 'different key', note: 'must point to continuation assistant id, never sealed final id' },
+    { slot: 'finalizingMsgIdBySession', clearedBy: 'clearFinalizeSessionState', disposition: 'different key', note: 'must lock continuation assistant id only' },
+    { slot: 'turnFinalResolvedBySession', clearedBy: 'clearFinalizeSessionState', disposition: 're-init in continuation', note: 'continuation final resolver must start unresolved' },
+    { slot: 'turnFinalSourceBySession', clearedBy: 'clearFinalizeSessionState', disposition: 're-init in continuation', note: 'rebound to continuation final source' },
+    { slot: 'turnSettleAttemptsBySession', clearedBy: 'clearFinalizeSessionState', disposition: 're-init in continuation', note: 'fresh settle loop counters' },
+    { slot: 'turnSettleLastLenBySession', clearedBy: 'clearFinalizeSessionState', disposition: 're-init in continuation', note: 'fresh settle baseline' },
+    { slot: 'turnSettleStableCountBySession', clearedBy: 'clearFinalizeSessionState', disposition: 're-init in continuation', note: 'fresh settle stability counter' },
+    { slot: 'turnSettleLastFingerprintBySession', clearedBy: 'clearFinalizeSessionState', disposition: 're-init in continuation', note: 'fresh settle fingerprint tracking' },
+    { slot: 'turnSettleNoDeltaCountBySession', clearedBy: 'clearFinalizeSessionState', disposition: 're-init in continuation', note: 'fresh no-delta settle counter' },
+    { slot: 'lockedFinalSettleAttemptsBySession', clearedBy: 'clearFinalizeSessionState', disposition: 're-init in continuation', note: 'locked settle attempts restart per continuation' },
+    { slot: 'turnRescueTimerBySession', clearedBy: 'clearFinalizeSessionState', disposition: 're-init in continuation', note: 'fresh rescue watchdog lifecycle' },
+    { slot: 'turnRescueRunIdBySession', clearedBy: 'clearFinalizeSessionState', disposition: 're-init in continuation', note: 'fresh rescue run ids' },
+    { slot: 'turnSseDrainTimerBySession', clearedBy: 'clearFinalizeSessionState', disposition: 're-init in continuation', note: 'fresh SSE drain timer for continuation settle' },
+    { slot: 'turnRecoveryModeBySession', clearedBy: 'clearFinalizeSessionState', disposition: 're-init in continuation', note: 'continuation starts in explicit recovery mode' },
+    { slot: 'turnResyncEpochBySession', clearedBy: 'clearFinalizeSessionState', disposition: 're-init in continuation', note: 'resync epoch restarts for continuation flow' },
+    { slot: 'finishedTurnAtBySession', clearedBy: 'finishTurn', disposition: 'different key', note: 'sealed timestamp remains chain metadata; continuation timing is separate' },
+    { slot: 'turnFinishedBySession', clearedBy: 'finishTurn', disposition: 'different key', note: 'sealed-turn marker remains conceptually sealed; continuation has independent active state' },
+];
+
 export type PermissionOverlayPayload = {
     sessionId: string;
     permissionId: string;
@@ -120,6 +227,7 @@ export type ChatEvent = {
     phase?: 'assistant_progress' | 'assistant_final_candidate' | 'assistant_final_accepted';
     lane?: EventLane;
     source?: EventSource;
+    continuationMeta?: ContinuationMessageMetadata;
 };
 type PendingQuestionControl = {
     callId: string;
@@ -220,6 +328,8 @@ type TurnState = {
     resolvedUserMsgId?: string;
     lastResolvedAssistantMsgId?: string;
     turnMessageIds?: Set<string>;
+    continuationMeta?: ContinuationMessageMetadata;
+    continuationState?: ContinuationLifecycleState;
 };
 
 type PendingTurnChanges = {
@@ -357,7 +467,9 @@ export class OpenCodeClient {
     private readonly pendingMainFinalTimerBySession = new Map<string, NodeJS.Timeout>();
     private readonly finishedMainAgentBySession = new Map<string, string>();
     private readonly finishedTurnAtBySession = new Map<string, number>();
-    private readonly lateContinuationGuardWindowMs = 30000;
+    private readonly continuationChainsBySession = new Map<string, ContinuationChainRuntime>();
+    private continuationChainSeq = 0;
+    private readonly lateContinuationGuardWindowMs = CONTINUATION_TURN_INVARIANTS.reviveTtlMs;
     private readonly sessionIdleReceivedBySession = new Set<string>();
     private turnFinalWaitersBySession = new Map<string, Array<() => void>>();
     private turnFinalResolvedBySession = new Set<string>();
@@ -422,6 +534,9 @@ export class OpenCodeClient {
     private readonly watchdogDrainDelayMs = 10000;
     private readonly autoResumePrompt = '[OC_UI_AUTORESUME v1]\nRe-read the last user request and finish the remaining steps.';
     private readonly stopContinuationPrompt = '/stop-continuation';
+    private readonly maxContinuationCountPerOriginalTurn = CONTINUATION_TURN_INVARIANTS.maxContinuationsPerOriginalTurn;
+    private readonly continuationBootstrapBufferWindowMs = CONTINUATION_TURN_INVARIANTS.reviveBootstrapBufferWindowMs;
+    private readonly continuationOrphanCleanupTimeoutMs = CONTINUATION_TURN_INVARIANTS.orphanCleanupTimeoutMs;
     private readonly autoResumeEpochThreshold = 5;
     private readonly autoResumeStallMs = 100000;
     private readonly autoResumeWarnMs = 180000;
@@ -862,6 +977,7 @@ export class OpenCodeClient {
 
     private shouldStopLateBoulderContinuation(sessionId: string | undefined): boolean {
         if (!sessionId) return false;
+        if (this.shouldDropLateContinuationByExhaustedPolicy(sessionId)) return false;
         if (this.turnStateBySession.has(sessionId)) return false;
         const mode = (this.finishedMainAgentBySession.get(sessionId) || '').toLowerCase();
         if (!mode) return false;
@@ -876,6 +992,57 @@ export class OpenCodeClient {
         if (!sessionId) return false;
         if (source !== 'sse') return false;
         return this.isDelayedMainFinalMode(sessionId);
+    }
+
+    private createContinuationChainId(sessionId: string): string {
+        this.continuationChainSeq += 1;
+        return `cont:${sessionId}:${Date.now()}:${this.continuationChainSeq}`;
+    }
+
+    private ensureSealedContinuationChain(sessionId: string, sealedAssistantMsgId: string): ContinuationChainRuntime {
+        const existing = this.continuationChainsBySession.get(sessionId);
+        if (existing && existing.priorAssistantFinalMsgId === sealedAssistantMsgId) {
+            existing.state = 'sealed';
+            existing.sealedAt = Date.now();
+            return existing;
+        }
+        const chain: ContinuationChainRuntime = {
+            continuationChainId: this.createContinuationChainId(sessionId),
+            priorAssistantFinalMsgId: sealedAssistantMsgId,
+            sealedAt: Date.now(),
+            state: 'sealed',
+            continuationCount: 0,
+            latestContinuationMeta: {
+                continuationChainId: '',
+                priorAssistantFinalMsgId: sealedAssistantMsgId,
+                continuationSequence: 0,
+            },
+        };
+        chain.latestContinuationMeta!.continuationChainId = chain.continuationChainId;
+        this.continuationChainsBySession.set(sessionId, chain);
+        this.logUiDebug(`EXT: continuation.chain.seed | sessionId=${sessionId} | chainId=${chain.continuationChainId} | priorAssistantFinalMsgId=${sealedAssistantMsgId} | max=${this.maxContinuationCountPerOriginalTurn} | bufferMs=${this.continuationBootstrapBufferWindowMs} | orphanTimeoutMs=${this.continuationOrphanCleanupTimeoutMs}`);
+        return chain;
+    }
+
+    private invalidateContinuationChainForSubmittedPrompt(sessionId: string, trigger: string): void {
+        const chain = this.continuationChainsBySession.get(sessionId);
+        if (!chain) return;
+        chain.state = 'invalidated';
+        chain.invalidatedReason = 'submitted-prompt';
+        chain.invalidatedAt = Date.now();
+        this.logUiDebug(`EXT: continuation.revive.suppress | sessionId=${sessionId} | chainId=${chain.continuationChainId} | reason=submitted-prompt | note=${CONTINUATION_TURN_INVARIANTS.suppressionRule} | trigger=${trigger}`);
+    }
+
+    private shouldDropLateContinuationByExhaustedPolicy(sessionId: string): boolean {
+        const chain = this.continuationChainsBySession.get(sessionId);
+        if (!chain) return false;
+        const exhausted = chain.continuationCount >= this.maxContinuationCountPerOriginalTurn;
+        if (exhausted) {
+            chain.state = 'exhausted';
+            chain.invalidatedReason = 'max-continuations-exhausted';
+            this.logUiDebug(`EXT: continuation.revive.drop | sessionId=${sessionId} | chainId=${chain.continuationChainId} | reason=exhausted | policy=${CONTINUATION_TURN_INVARIANTS.exhaustedPolicy} | max=${this.maxContinuationCountPerOriginalTurn}`);
+        }
+        return exhausted;
     }
 
     private isCopilotProviderId(providerId: string | undefined, fullId: string | undefined): boolean {
@@ -1045,6 +1212,7 @@ export class OpenCodeClient {
 
     public startTurn(sessionId: string, pendingUserLocalKey: string): void {
         if (!sessionId) return;
+        this.invalidateContinuationChainForSubmittedPrompt(sessionId, 'start-turn');
         this.changeListEmittedBySession.delete(sessionId);
         this.canceledActiveTurnBySession.set(sessionId, false);
         this.turnFinishedBySession.delete(sessionId);
@@ -1668,6 +1836,7 @@ export class OpenCodeClient {
         this.turnFinalAtBySession.set(sessionId, Date.now());
         if (targetMsgId) {
             this.turnFinalMsgIdBySession.set(sessionId, targetMsgId);
+            this.ensureSealedContinuationChain(sessionId, targetMsgId);
         }
         this.turnFinalSourceBySession.set(sessionId, source);
         if (!prevMsgId || (targetMsgId && targetMsgId !== prevMsgId)) {
