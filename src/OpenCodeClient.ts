@@ -186,7 +186,7 @@ export type PermissionOverlayPayload = {
 };
 
 export type ChatEvent = {
-    type: 'text' | 'session' | 'raw' | 'permission' | 'diff' | 'message' | 'error' | 'tool' | 'toolPatch' | 'files' | 'assistantMessageMeta' | 'assistantPhase' | 'questionOverlay' | 'permissionRequest' | 'permissionReplied' | 'autoResumeStallWarn' | 'autoResumeStallClear' | 'autoResumeHardStop' | 'todoUpdate' | 'sessionUsage';
+    type: 'text' | 'session' | 'raw' | 'permission' | 'diff' | 'message' | 'error' | 'tool' | 'toolPatch' | 'files' | 'assistantMessageMeta' | 'assistantPhase' | 'questionOverlay' | 'permissionRequest' | 'permissionReplied' | 'autoResumeStallWarn' | 'autoResumeStallClear' | 'autoResumeHardStop' | 'todoUpdate' | 'sessionUsage' | 'turnInFlight' | 'turnResolved';
     text?: string;
     sessionId?: string;
     files?: FileSnapshot[];
@@ -214,6 +214,9 @@ export type ChatEvent = {
     actionLabel?: string;
     secondaryActionLabel?: string;
     isSyntheticUser?: boolean;
+    inFlight?: boolean;
+    ownerMsgId?: string;
+    finalizeReason?: string;
     isStatusUpdate?: boolean;
     todos?: Array<{content: string; status: string; priority: string}>;
     tool?: string;
@@ -335,6 +338,13 @@ type TurnState = {
 type PendingTurnChanges = {
     turnKey: string;
     tmpKey?: string;
+    changes: FileChangeSpec[];
+    lastAssistantMsgId?: string;
+};
+
+type PostFinalWatchState = {
+    ownerMsgId: string;
+    turnKey: string;
     changes: FileChangeSpec[];
     lastAssistantMsgId?: string;
 };
@@ -520,6 +530,8 @@ export class OpenCodeClient {
     private lateDiffGraceBySession = new Map<string, { expiresAt: number; timer?: ReturnType<typeof setTimeout> }>();
     private changeListEmittedBySession = new Map<string, boolean>();
     private lastTurnCommitBaseBySession = new Map<string, string>();
+    private postFinalWatchStateBySession = new Map<string, PostFinalWatchState>();
+    private continuationPersistBySession = new Map<string, Promise<void>>();
     private readonly resyncCooldownMs = 5000;
     private readonly silenceWindowMs = 1800;
     private readonly finalQuietWindowMs = 300;
@@ -639,7 +651,11 @@ export class OpenCodeClient {
         }
         this.lateDiffGraceBySession.clear();
         this.changeListEmittedBySession.clear();
+        this.postFinalWatchStateBySession.clear();
         this.replayMirroredChangeIdsBySession.clear();
+        for (const timer of this.watchdogDrainDelayTimerBySession.values()) {
+            clearTimeout(timer);
+        }
         this.watchdogDrainDelayTimerBySession.clear();
         this.falsePositiveResetCountBySession.clear();
         this.lockedFinalSettleAttemptsBySession.clear();
@@ -954,9 +970,112 @@ export class OpenCodeClient {
 
     private isDelayedMainFinalMode(sessionId: string | undefined): boolean {
         if (!sessionId) return false;
-        const mode = (this.expectedMainAgentBySession.get(sessionId) || '').toLowerCase();
-        if (!mode) return false;
-        return mode.includes('sisyphus') || mode.includes('hephaestus') || mode.includes('atlas') || mode.includes('build');
+        const mode = this.expectedMainAgentBySession.get(sessionId);
+        return this.isDelayedMainFinalModeValue(mode);
+    }
+
+    private isDelayedMainFinalModeValue(mode: string | undefined): boolean {
+        const normalized = (mode || '').toLowerCase();
+        if (!normalized) return false;
+        return normalized.includes('sisyphus') || normalized.includes('hephaestus') || normalized.includes('atlas') || normalized.includes('build');
+    }
+
+    private ensurePostFinalWatchState(sessionId: string, finishedMode?: string): void {
+        if (!sessionId) return;
+        const ownerMsgId = this.turnFinalMsgIdBySession.get(sessionId)
+            || this.finalizingMsgIdBySession.get(sessionId)
+            || this.currentTurnAssistantMsgIdBySession.get(sessionId)
+            || this.turnStateBySession.get(sessionId)?.assistantMsgId;
+        const existing = this.postFinalWatchStateBySession.get(sessionId);
+        if (existing) {
+            if (!existing.turnKey) {
+                existing.turnKey = this.getTurnKeyForSession(sessionId) || sessionId;
+            }
+            if (ownerMsgId && existing.ownerMsgId !== ownerMsgId) {
+                existing.ownerMsgId = ownerMsgId;
+                existing.lastAssistantMsgId = ownerMsgId;
+            }
+            this.postFinalWatchStateBySession.set(sessionId, existing);
+            return;
+        }
+        if (!this.isDelayedMainFinalModeValue(finishedMode)) return;
+        if (!ownerMsgId) return;
+        this.postFinalWatchStateBySession.set(sessionId, {
+            ownerMsgId,
+            turnKey: this.getTurnKeyForSession(sessionId) || sessionId,
+            changes: [],
+            lastAssistantMsgId: ownerMsgId,
+        });
+    }
+
+    private appendPostFinalWatchChanges(sessionId: string, turnKey: string, assistantMsgId: string | undefined, changeSpecs: FileChangeSpec[]): boolean {
+        if (!sessionId || !changeSpecs.length) return false;
+        const existing = this.postFinalWatchStateBySession.get(sessionId);
+        if (!existing) return false;
+        existing.turnKey = existing.turnKey || turnKey || sessionId;
+        if (assistantMsgId) {
+            existing.lastAssistantMsgId = assistantMsgId;
+        }
+        existing.changes.push(...changeSpecs);
+        this.postFinalWatchStateBySession.set(sessionId, existing);
+        void this.persistContinuationState(sessionId, existing.ownerMsgId, 'watching', existing.changes);
+        this.logUiDebug(`EXT: post-final.watch.append | sessionId=${sessionId} | ownerMsgId=${existing.ownerMsgId} | added=${changeSpecs.length} | total=${existing.changes.length}`);
+        return true;
+    }
+
+    private preserveFailedContinuationPendingChanges(sessionId: string): void {
+        if (!sessionId) return;
+        const existing = this.postFinalWatchStateBySession.get(sessionId);
+        if (!existing) return;
+        const pending = this.pendingTurnChangesBySession.get(sessionId);
+        if (pending?.changes?.length) {
+            existing.changes.push(...pending.changes);
+        }
+        existing.lastAssistantMsgId = existing.ownerMsgId;
+        existing.turnKey = existing.turnKey || this.getTurnKeyForSession(sessionId) || sessionId;
+        this.postFinalWatchStateBySession.set(sessionId, existing);
+        void this.persistContinuationState(sessionId, existing.ownerMsgId, 'retry-ready', existing.changes);
+        this.logUiDebug(`EXT: continuation.revive.fail.preserve | sessionId=${sessionId} | ownerMsgId=${existing.ownerMsgId} | preserved=${pending?.changes?.length || 0} | total=${existing.changes.length}`);
+    }
+
+    private persistContinuationState(
+        sessionId: string,
+        ownerMsgId: string | undefined,
+        lifecycleState: 'idle' | 'watching' | 'retry-ready',
+        changes: FileChangeSpec[] = []
+    ): Promise<void> {
+        if (!sessionId || !ownerMsgId || !this.gitUndoAvailable || !this.gitUndo) {
+            return Promise.resolve();
+        }
+        const watchedFiles = normalizeTouchedFiles(this.workspaceRoot, changes.flatMap((change) => {
+            if (change.type === 'rename') {
+                return [change.oldPath, change.newPath];
+            }
+            if ('path' in change) {
+                return [change.path];
+            }
+            return [];
+        }));
+        const previous = this.continuationPersistBySession.get(sessionId) || Promise.resolve();
+        const next = previous
+            .catch(() => undefined)
+            .then(async () => {
+                const repo = await this.gitUndo!['repoManager'].resolveRepo(sessionId);
+                const map = await this.gitUndo!['mapStore'].loadSessionMap(sessionId, repo.repoId);
+                const updated = this.gitUndo!['mapStore'].upsertContinuationState(map, {
+                    ownerMsgId,
+                    lifecycleState,
+                    watchedFiles,
+                });
+                await this.gitUndo!['mapStore'].saveSessionMap(sessionId, updated);
+            })
+            .finally(() => {
+                if (this.continuationPersistBySession.get(sessionId) === next) {
+                    this.continuationPersistBySession.delete(sessionId);
+                }
+            });
+        this.continuationPersistBySession.set(sessionId, next);
+        return next;
     }
 
     private isOmoContinuationText(text: string): boolean {
@@ -982,6 +1101,16 @@ export class OpenCodeClient {
 
     private ensureSealedContinuationChain(sessionId: string, sealedAssistantMsgId: string): ContinuationChainRuntime {
         const existing = this.continuationChainsBySession.get(sessionId);
+        if (existing && existing.state === 'bootstrap_buffering') {
+            existing.state = 'continuation_active';
+            existing.latestContinuationMeta = {
+                continuationChainId: existing.continuationChainId,
+                priorAssistantFinalMsgId: existing.priorAssistantFinalMsgId,
+                continuationSequence: existing.continuationCount,
+            };
+            this.logUiDebug(`EXT: continuation.chain.activate | sessionId=${sessionId} | chainId=${existing.continuationChainId} | continuationMsgId=${sealedAssistantMsgId} | seq=${existing.continuationCount}`);
+            return existing;
+        }
         if (existing && existing.priorAssistantFinalMsgId === sealedAssistantMsgId) {
             existing.state = 'sealed';
             existing.sealedAt = Date.now();
@@ -1024,6 +1153,148 @@ export class OpenCodeClient {
             this.logUiDebug(`EXT: continuation.revive.drop | sessionId=${sessionId} | chainId=${chain.continuationChainId} | reason=exhausted | policy=${CONTINUATION_TURN_INVARIANTS.exhaustedPolicy} | max=${this.maxContinuationCountPerOriginalTurn}`);
         }
         return exhausted;
+    }
+
+    /**
+     * Detects the background completion control signal `[ALL BACKGROUND TASKS COMPLETE]`.
+     * Used as an invisible revive gate — must never appear in visible timeline content.
+     */
+    public isBackgroundCompletionSignal(text: unknown): boolean {
+        if (typeof text !== 'string') return false;
+        const normalized = text.trim();
+        if (normalized === '[ALL BACKGROUND TASKS COMPLETE]') return true;
+        return normalized.includes('[ALL BACKGROUND TASKS COMPLETE]')
+            && normalized.includes('<system-reminder>');
+    }
+
+    /**
+     * Transitions a sealed continuation chain to `revive_armed`.
+     * Only transitions from `sealed` state — invalidated, exhausted, or
+     * any other state is left unchanged.
+     */
+    public handleReviveGate(sessionId: string): void {
+        if (!sessionId) return;
+        const chain = this.continuationChainsBySession.get(sessionId);
+        if (!chain) return;
+        if (chain.state !== 'sealed') {
+            this.logUiDebug(`EXT: continuation.revive.gate.skip | sessionId=${sessionId} | chainId=${chain.continuationChainId} | state=${chain.state} | reason=not-sealed`);
+            return;
+        }
+        chain.state = 'revive_armed';
+        this.logUiDebug(`EXT: continuation.revive.gate | sessionId=${sessionId} | chainId=${chain.continuationChainId} | state=revive_armed`);
+    }
+
+    /**
+     * Bootstraps a new continuation turn by re-initializing turn state
+     * WITHOUT invalidating the continuation chain. This re-enters the
+     * normal assistant pipeline so that msg B gets explicit IDs via
+     * recordAssistantMsgId / markTurnFinal / finishTurn.
+     *
+     * Transitions: `revive_armed` → `bootstrap_buffering`
+     *
+     * Key differences from `startTurn`:
+     * - Does NOT call `invalidateContinuationChainForSubmittedPrompt`
+     * - Does NOT clear post-final watch state
+     * - Increments `continuationCount` on the chain
+     */
+    public bootstrapContinuationTurn(sessionId: string): void {
+        if (!sessionId) return;
+        const chain = this.continuationChainsBySession.get(sessionId);
+        if (!chain || chain.state !== 'revive_armed') {
+            this.logUiDebug(`EXT: continuation.bootstrap.skip | sessionId=${sessionId} | reason=not-revive-armed`);
+            return;
+        }
+
+        chain.state = 'bootstrap_buffering';
+        chain.continuationCount += 1;
+
+        const continuationUserKey = `cont:${sessionId}:${chain.continuationCount}:${Date.now()}`;
+
+        this.changeListEmittedBySession.delete(sessionId);
+        this.canceledActiveTurnBySession.set(sessionId, false);
+        this.turnFinishedBySession.delete(sessionId);
+        this.finishedMainAgentBySession.delete(sessionId);
+        this.finishedTurnAtBySession.delete(sessionId);
+        this.currentTurnUserMsgIdBySession.delete(sessionId);
+        this.displayTurnUserMsgIdBySession.delete(sessionId);
+        this.hiddenControlUserMsgIdsBySession.delete(sessionId);
+        this.hiddenControlAssistantMsgIdsBySession.delete(sessionId);
+        this.currentTurnAssistantMsgIdBySession.delete(sessionId);
+        this.pendingStopContinuationUserBySession.delete(sessionId);
+        this.activeTurnOpIdBySession.delete(sessionId);
+        this.pendingUserMsgIdBySession.delete(sessionId);
+        this.pendingAssistantMsgIdBySession.delete(sessionId);
+
+        this.clearFinalizeSessionState(sessionId, 'turn-start');
+
+        const now = Date.now();
+        this.currentTurnStartedAtBySession.set(sessionId, now);
+        this.lastSseAtBySession.set(sessionId, now);
+        this.lastProgressAtBySession.set(sessionId, now);
+        this.lastProgressKeyBySession.delete(sessionId);
+        this.noProgressEpochsBySession.set(sessionId, 0);
+        this.noProgressSinceBySession.delete(sessionId);
+        this.autoResumeCountBySession.set(sessionId, 0);
+        this.stallWarnedBySession.delete(sessionId);
+        this.turnRecoveryModeBySession.set(sessionId, 'sse');
+        this.turnResyncEpochBySession.set(sessionId, 0);
+
+        this.pendingTurnChangesBySession.delete(sessionId);
+        this.turnStateBySession.set(sessionId, {
+            pendingUserLocalKey: continuationUserKey,
+            pendingAssistantTmpKey: undefined,
+            assistantMsgId: undefined,
+            exportInFlight: false,
+            exportResolved: false,
+            resolvedUserMsgId: undefined,
+            lastResolvedAssistantMsgId: undefined,
+            turnMessageIds: new Set()
+        });
+        this.turnWriteStateBySession.set(sessionId, { turnKey: continuationUserKey, hasWrites: false });
+
+        this.scheduleSilenceResync(sessionId);
+
+        this.logUiDebug(`EXT: continuation.bootstrap | sessionId=${sessionId} | chainId=${chain.continuationChainId} | continuationCount=${chain.continuationCount} | continuationUserKey=${continuationUserKey}`);
+    }
+
+    /**
+     * Handles a failed continuation revive attempt by resetting the chain
+     * back to `sealed` state. This preserves the post-final watch state
+     * under the original owner, allowing another revive attempt.
+     */
+    public handleFailedContinuationRevive(sessionId: string): void {
+        if (!sessionId) return;
+        const chain = this.continuationChainsBySession.get(sessionId);
+        if (!chain) return;
+        if (chain.state !== 'bootstrap_buffering' && chain.state !== 'revive_armed' && chain.state !== 'continuation_active' && chain.state !== 'orphaned') {
+            this.logUiDebug(`EXT: continuation.revive.fail.skip | sessionId=${sessionId} | chainId=${chain.continuationChainId} | state=${chain.state} | reason=unexpected-state`);
+            return;
+        }
+
+        this.preserveFailedContinuationPendingChanges(sessionId);
+        chain.state = 'sealed';
+        chain.sealedAt = Date.now();
+
+        this.turnStateBySession.delete(sessionId);
+        this.pendingTurnChangesBySession.delete(sessionId);
+        this.turnWriteStateBySession.delete(sessionId);
+        this.activeTurnOpIdBySession.delete(sessionId);
+        this.canceledActiveTurnBySession.delete(sessionId);
+        this.pendingUserMsgIdBySession.delete(sessionId);
+        this.pendingAssistantMsgIdBySession.delete(sessionId);
+        this.currentTurnUserMsgIdBySession.delete(sessionId);
+        this.displayTurnUserMsgIdBySession.delete(sessionId);
+        this.hiddenControlUserMsgIdsBySession.delete(sessionId);
+        this.hiddenControlAssistantMsgIdsBySession.delete(sessionId);
+        this.pendingStopContinuationUserBySession.delete(sessionId);
+        this.currentTurnAssistantMsgIdBySession.delete(sessionId);
+        this.currentTurnStartedAtBySession.delete(sessionId);
+        this.lastSseAtBySession.delete(sessionId);
+        this.turnFinishedBySession.delete(sessionId);
+        this.clearSilenceTimer(sessionId);
+        this.clearFinalizeSessionState(sessionId, 'turn-finish');
+
+        this.logUiDebug(`EXT: continuation.revive.fail | sessionId=${sessionId} | chainId=${chain.continuationChainId} | continuationCount=${chain.continuationCount} | state=sealed (retry-ready)`);
     }
 
     private isCopilotProviderId(providerId: string | undefined, fullId: string | undefined): boolean {
@@ -1307,6 +1578,17 @@ export class OpenCodeClient {
 
     public finishTurn(sessionId: string): void {
         if (!sessionId) return;
+
+        const chain = this.continuationChainsBySession.get(sessionId);
+        const isContinuationActive = chain && (chain.state === 'continuation_active' || chain.state === 'bootstrap_buffering' || chain.state === 'revive_armed');
+        const hasAcceptedFinal = this.turnFinalMsgIdBySession.has(sessionId) || this.finalizingMsgIdBySession.has(sessionId);
+        const isCanceled = this.canceledActiveTurnBySession.get(sessionId) === true;
+
+        if (isContinuationActive && (!hasAcceptedFinal || isCanceled)) {
+            this.handleFailedContinuationRevive(sessionId);
+            return;
+        }
+
         this.turnFinishedBySession.add(sessionId);
         const finishedMode = this.expectedMainAgentBySession.get(sessionId);
         if (finishedMode) {
@@ -1331,6 +1613,11 @@ export class OpenCodeClient {
         this.logUiDebug(
             `EXT: metrics.task1 | sessionId=${sessionId} | final_accept_latency_ms=${avgFinalAcceptLatencyMs} | false_done_rate=${falseDoneRate.toFixed(4)} | parent_mismatch_rate=${parentMismatchRate.toFixed(4)} | resync_recovery_rate=${resyncRecoveryRate.toFixed(4)}`
         );
+        this.ensurePostFinalWatchState(sessionId, finishedMode);
+        const postFinal = this.postFinalWatchStateBySession.get(sessionId);
+        if (postFinal) {
+            void this.persistContinuationState(sessionId, postFinal.ownerMsgId, 'watching', postFinal.changes);
+        }
         this.beginLateDiffGrace(sessionId);
         this.turnStateBySession.delete(sessionId);
         this.pendingTurnChangesBySession.delete(sessionId);
@@ -1384,7 +1671,15 @@ export class OpenCodeClient {
     public hasPendingTurnChanges(sessionId: string): boolean {
         if (!sessionId) return false;
         const pending = this.pendingTurnChangesBySession.get(sessionId);
-        return Boolean(pending?.changes?.length);
+        if (pending?.changes?.length) return true;
+        const postFinal = this.postFinalWatchStateBySession.get(sessionId);
+        return Boolean(postFinal?.changes?.length);
+    }
+
+    public isInPostFinalWatchWindow(sessionId: string): boolean {
+        if (!sessionId) return false;
+        if (this.turnStateBySession.has(sessionId)) return false;
+        return this.postFinalWatchStateBySession.has(sessionId);
     }
 
     /**
@@ -1736,6 +2031,10 @@ export class OpenCodeClient {
      */
     public isCurrentTurnSyntheticForSession(sessionId: string | undefined): boolean {
         if (!sessionId) return false;
+        const chain = this.continuationChainsBySession.get(sessionId);
+        if (chain && (chain.state === 'revive_armed' || chain.state === 'bootstrap_buffering' || chain.state === 'continuation_active')) {
+            return false;
+        }
         const currentUserMsgId = this.currentTurnUserMsgIdBySession.get(sessionId);
         if (currentUserMsgId && this.shouldSuppressHiddenControlAssistant(sessionId, currentUserMsgId)) {
             return true;
@@ -1817,7 +2116,11 @@ export class OpenCodeClient {
         this.turnFinalAtBySession.set(sessionId, Date.now());
         if (targetMsgId) {
             this.turnFinalMsgIdBySession.set(sessionId, targetMsgId);
-            this.ensureSealedContinuationChain(sessionId, targetMsgId);
+            if (!this.subagentToParentSessionMap.has(sessionId)) {
+                this.ensureSealedContinuationChain(sessionId, targetMsgId);
+            } else {
+                this.logUiDebug(`EXT: continuation.chain.seed.skip | sessionId=${sessionId} | msgId=${targetMsgId} | reason=subagent-session`);
+            }
         }
         this.turnFinalSourceBySession.set(sessionId, source);
         if (!prevMsgId || (targetMsgId && targetMsgId !== prevMsgId)) {
@@ -1984,6 +2287,15 @@ export class OpenCodeClient {
         const waiters = this.turnFinalWaitersBySession.get(sessionId);
         if (waiters && waiters.length) {
             waiters.splice(0).forEach((fn) => fn());
+        } else if (!isSubagentSession) {
+            this.emitChatEvents([{
+                type: 'turnResolved',
+                sessionId,
+                assistantMsgId: resolvedFinalMsgId,
+                messageId: resolvedFinalMsgId,
+                finalizeReason: reason,
+                source: this.turnFinalSourceBySession.get(sessionId) || 'sse'
+            }]);
         }
     }
 
@@ -2454,6 +2766,37 @@ export class OpenCodeClient {
         const candidate = state?.lastResolvedAssistantMsgId || state?.assistantMsgId;
         if (typeof candidate !== 'string') return undefined;
         return candidate.startsWith('msg_') ? candidate : undefined;
+    }
+
+    public async finalizeTurnBindingFromResolvedAssistant(sessionId: string, assistantMsgId: string): Promise<void> {
+        if (!sessionId || !assistantMsgId || !assistantMsgId.startsWith('msg_')) return;
+        if (!this.gitUndoAvailable) return;
+        const state = this.turnStateBySession.get(sessionId);
+        const tmpKey = state?.pendingAssistantTmpKey;
+        if (!state || !tmpKey) {
+            this.logUiDebug(`EXT: finalizeBinding.direct.skip | sessionId=${sessionId} assistantMsgId=${assistantMsgId} reason=missing-tmpKey`);
+            return;
+        }
+        const userMsgId = this.currentTurnUserMsgIdBySession.get(sessionId);
+        state.lastResolvedAssistantMsgId = assistantMsgId;
+        try {
+            await this.gitUndo?.finalizeBinding(sessionId, tmpKey, assistantMsgId, userMsgId || undefined);
+            this.logUiDebug(`EXT: finalizeBinding.direct.ok | sessionId=${sessionId} assistantMsgId=${assistantMsgId} tmpKey=${tmpKey}`);
+        } catch (error) {
+            this.logUiDebug(`EXT: finalizeBinding.direct.fail | sessionId=${sessionId} assistantMsgId=${assistantMsgId} tmpKey=${tmpKey} err=${String(error)}`);
+        }
+    }
+
+    public async promoteContinuationOwner(sessionId: string, ownerMsgId: string): Promise<void> {
+        if (!sessionId || !ownerMsgId || !ownerMsgId.startsWith('msg_')) return;
+        const postFinal = this.postFinalWatchStateBySession.get(sessionId);
+        const changes = postFinal?.changes || [];
+        await this.persistContinuationState(sessionId, ownerMsgId, 'watching', changes);
+    }
+
+    public async consolidateCurrentContinuationOwner(sessionId: string): Promise<void> {
+        if (!sessionId || !this.gitUndoAvailable || !this.gitUndo) return;
+        await this.gitUndo.consolidateCurrentContinuationOwner(sessionId);
     }
 
     private execute(args: string[]): Promise<string> {
@@ -3231,6 +3574,10 @@ export class OpenCodeClient {
         changeSpecs: FileChangeSpec[]
     ): void {
         if (!sessionId || !turnKey || !changeSpecs.length) return;
+        if (!this.turnStateBySession.has(sessionId)) {
+            this.appendPostFinalWatchChanges(sessionId, turnKey, assistantMsgId, changeSpecs);
+            return;
+        }
         this.markTurnHasWrites(sessionId, 'file-change');
         const existing = this.pendingTurnChangesBySession.get(sessionId);
         if (existing && existing.turnKey !== turnKey) {
@@ -3301,26 +3648,15 @@ export class OpenCodeClient {
     // UI-driven helper for live subagent file events (SidebarProvider). Replay should not invoke this path.
     public queueSubagentChanges(mainSessionId: string, files: any[]): void {
         if (!mainSessionId || !files?.length) return;
-        let pending = this.pendingTurnChangesBySession.get(mainSessionId);
-        if (!pending) {
-            const state = this.turnStateBySession.get(mainSessionId);
-            const turnKey = state?.pendingUserLocalKey || mainSessionId;
-            pending = {
-                turnKey,
-                tmpKey: state?.pendingAssistantTmpKey,
-                changes: [],
-                lastAssistantMsgId: state?.assistantMsgId || state?.lastResolvedAssistantMsgId
-            };
-            this.pendingTurnChangesBySession.set(mainSessionId, pending);
-            this.logUiDebug(`subagent.queue.bootstrap | sessionId=${mainSessionId} turnKey=${turnKey} tmpKey=${pending.tmpKey || 'null'}`);
-        }
         const normalizedFiles = this.normalizeIncomingFileSnapshots(files);
         const changeSpecs = this.buildChangeSpecs(normalizedFiles);
         this.logUiDebug(`subagent.queue.normalize | sessionId=${mainSessionId} raw=${files.length} normalized=${normalizedFiles.length} specs=${changeSpecs.length}`);
         if (!changeSpecs.length) return;
-        this.markTurnHasWrites(mainSessionId, 'subagent-file-change');
-        pending.changes.push(...changeSpecs);
-        this.pendingTurnChangesBySession.set(mainSessionId, pending);
+        const state = this.turnStateBySession.get(mainSessionId);
+        const turnKey = state?.pendingUserLocalKey || mainSessionId;
+        const tmpKey = state?.pendingAssistantTmpKey;
+        const assistantId = state?.assistantMsgId || state?.lastResolvedAssistantMsgId;
+        this.queueTurnChanges(mainSessionId, turnKey, tmpKey, assistantId, changeSpecs);
     }
 
     public async commitPendingTurnChanges(sessionId: string): Promise<void> {
@@ -4626,6 +4962,13 @@ export class OpenCodeClient {
         }
     }
 
+    public addChatEventListener(listener: (event: ChatEvent) => void): () => void {
+        this.eventListeners.add(listener);
+        return () => {
+            this.eventListeners.delete(listener);
+        };
+    }
+
     private makeFinalMetaDedupeKey(sessionId: string | undefined, messageId: string, completedAt: unknown, finish: unknown): string {
         void completedAt;
         void finish;
@@ -5151,13 +5494,20 @@ export class OpenCodeClient {
         }
         const lockedMsgId = this.finalizingMsgIdBySession.get(sessionId);
         const currentUser = this.currentTurnUserMsgIdBySession.get(sessionId);
+        const isContinuationHiddenControlParent =
+            typeof parentId === 'string'
+            && this.isHiddenControlUserMsgId(sessionId, parentId)
+            && (() => {
+                const chain = this.continuationChainsBySession.get(sessionId);
+                return chain?.state === 'bootstrap_buffering' || chain?.state === 'continuation_active' || chain?.state === 'revive_armed';
+            })();
         if (lockedMsgId && msgId && msgId !== lockedMsgId) {
             this.logUiDebug(`EXT: finalizing.ignore | sessionId=${sessionId} | msgId=${msgId} | reason=not-locked`);
             return false;
         }
         if (!lockedMsgId) {
             this.task1Metrics.parentMismatchChecks += 1;
-            if (!(typeof parentId === 'string' && typeof currentUser === 'string' && parentId === currentUser)) {
+            if (!(typeof parentId === 'string' && ((typeof currentUser === 'string' && parentId === currentUser) || isContinuationHiddenControlParent))) {
                 this.task1Metrics.parentMismatchCount += 1;
                 this.logUiDebug(`EXT: finalizing.ignore | sessionId=${sessionId} | msgId=${msgId || 'null'} | reason=parent-mismatch`);
                 return false;
@@ -5376,6 +5726,28 @@ export class OpenCodeClient {
         const sessionId = normalized.sessionId;
         if (sessionId) {
             this.logUiDebug(`EXT: event.normalized | type=${normalized.type} | lane=${normalized.lane} | sessionId=${normalized.sessionId} | messageId=${normalized.messageId || 'null'} | parentId=${normalized.parentId || 'null'} | finish=${normalized.finish || 'null'} | partType=${normalized.partType || 'null'} | source=${normalized.source}`);
+        }
+        // Background completion signal must be intercepted BEFORE the turnFinished guard,
+        // because it arrives during the post-final watch window (after finishTurn).
+        if (source === 'sse' && sessionId && type === 'message.part.updated') {
+            const partForSignal = props?.part;
+            if (partForSignal?.type === 'text') {
+                const signalText = typeof partForSignal?.text === 'string' ? partForSignal.text : '';
+                const signalMsgId = typeof partForSignal?.messageID === 'string' ? partForSignal.messageID : '';
+                if (this.isBackgroundCompletionSignal(signalText)) {
+                    this.handleReviveGate(sessionId);
+                    this.bootstrapContinuationTurn(sessionId);
+                    if (signalMsgId) {
+                        this.rememberHiddenControlUserMsgId(sessionId, signalMsgId);
+                    }
+                    const chain = this.continuationChainsBySession.get(sessionId);
+                    const ownerMsgId = this.postFinalWatchStateBySession.get(sessionId)?.ownerMsgId
+                        || chain?.priorAssistantFinalMsgId;
+                    events.push({ type: 'turnInFlight', sessionId, inFlight: true, ownerMsgId, source });
+                    this.logUiDebug(`EXT: background.complete.signal | sessionId=${sessionId} | msgId=${signalMsgId} | reason=revive-gate-consumed`);
+                    return events;
+                }
+            }
         }
         const isSessionStatus = type === 'session.status';
         if (source === 'sse' && sessionId && this.turnFinishedBySession.has(sessionId) && !isSessionStatus) {
@@ -7314,6 +7686,13 @@ export class OpenCodeClient {
         const sessionId = this.currentSessionId;
         if (!sessionId) return;
         void this.requestJson('POST', `/session/${sessionId}/abort`, {});
+    }
+
+    public async dispose(): Promise<void> {
+        this.resetSessionState();
+        this.eventListeners.clear();
+        this.serverStatusHandler = undefined;
+        await this.shutdownServer();
     }
 
     public async warmServer(): Promise<void> {

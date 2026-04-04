@@ -7,6 +7,7 @@ import { GitSessionMapStore } from './GitSessionMapStore';
 import { RepoLockManager } from './GitLock';
 import { explainNormalizeRepoPath, normalizeRepoPath, normalizeTouchedFiles } from './GitPathUtils';
 import { runGit } from './GitRunner';
+import { resolveCurrentOwnerMsgId } from './ownershipResolver';
 import {
     ConflictInfo,
     EMPTY_TREE_HASH,
@@ -14,6 +15,7 @@ import {
     GitCapabilities,
     GitRepoRef,
     RestoreResult,
+    SessionMap,
     SessionEntry,
     UndoResult
 } from './types';
@@ -510,9 +512,168 @@ export class GitUndoEngine {
             if (!entryFound) {
                 this.logger(`finalizeBinding.orphan | sessionId=${sessionId} tmpKey=${tmpKey} finalMsgId=${finalMsgId}`);
             }
+            updated = await this.foldContinuationOwnerCommit(sessionId, repo, updated, finalMsgId);
             await this.mapStore.saveSessionMap(sessionId, updated);
             this.logger(`finalizeBinding.ok | sessionId=${sessionId} tmpKey=${tmpKey} finalMsgId=${finalMsgId} commitHash=${commitHash}`);
         });
+    }
+
+    public async consolidateCurrentContinuationOwner(sessionId: string): Promise<void> {
+        if (!this.isEnabled() || !sessionId) return;
+        const repo = await this.repoManager.resolveRepo(sessionId, sessionId);
+        await this.lockManager.withRepoLock(repo, this.logger, async () => {
+            const map = await this.mapStore.loadSessionMap(sessionId, repo.repoId);
+            const finalMsgId = map.continuation?.currentOwnerMsgId;
+            if (!finalMsgId) {
+                this.logger(`continuationFold.skip | sessionId=${sessionId} finalMsgId=null reason=missing-current-owner`);
+                return;
+            }
+            const updated = await this.foldContinuationOwnerCommit(sessionId, repo, map, finalMsgId);
+            if (updated !== map) {
+                await this.mapStore.saveSessionMap(sessionId, updated);
+                this.logger(`continuationFold.persisted | sessionId=${sessionId} currentOwner=${finalMsgId}`);
+            }
+        });
+    }
+
+    private async foldContinuationOwnerCommit(
+        sessionId: string,
+        repo: GitRepoRef,
+        map: SessionMap,
+        finalMsgId: string
+    ): Promise<SessionMap> {
+        const continuation = map.continuation;
+        const currentOwnerMsgId = continuation?.currentOwnerMsgId ?? null;
+        const predecessorOwnerMsgId = continuation?.predecessorOwnerMsgId ?? null;
+        this.logger(
+            `continuationFold.inspect | sessionId=${sessionId} finalMsgId=${finalMsgId} currentOwner=${currentOwnerMsgId || 'null'} predecessor=${predecessorOwnerMsgId || 'null'}`
+        );
+        if (!currentOwnerMsgId || currentOwnerMsgId !== finalMsgId || !predecessorOwnerMsgId) {
+            this.logger(
+                `continuationFold.skip | sessionId=${sessionId} finalMsgId=${finalMsgId} reason=owner-mismatch currentOwner=${currentOwnerMsgId || 'null'} predecessor=${predecessorOwnerMsgId || 'null'}`
+            );
+            return map;
+        }
+
+        const currentEntry = map.entries.find((entry: SessionEntry) => {
+            const entryOwner = entry.finalAssistantMsgId || entry.assistantMsgId;
+            return entryOwner === currentOwnerMsgId && typeof entry.turnKey === 'string' && entry.turnKey.startsWith('cont:');
+        });
+        if (!currentEntry) {
+            this.logger(
+                `continuationFold.skip | sessionId=${sessionId} finalMsgId=${finalMsgId} reason=missing-current-cont-entry`
+            );
+            return map;
+        }
+
+        const predecessorCommit = map.msgToCommit[predecessorOwnerMsgId];
+        const currentCommit = map.msgToCommit[currentOwnerMsgId] || currentEntry.commitHash;
+        if (!predecessorCommit || !currentCommit || predecessorCommit === currentCommit) {
+            this.logger(
+                `continuationFold.skip | sessionId=${sessionId} finalMsgId=${finalMsgId} reason=commit-preconditions predecessorCommit=${predecessorCommit || 'null'} currentCommit=${currentCommit || 'null'}`
+            );
+            return map;
+        }
+
+        const predecessorBaseCommit = map.msgToBaseCommit?.[predecessorOwnerMsgId] || await this.getCommitParent(repo, predecessorCommit);
+        if (!predecessorBaseCommit) {
+            this.logger(
+                `continuationFold.skip | sessionId=${sessionId} finalMsgId=${finalMsgId} reason=missing-predecessor-base predecessor=${predecessorOwnerMsgId}`
+            );
+            return map;
+        }
+
+        const watchFiles = Array.isArray(continuation?.postFinalWatchEntries)
+            ? continuation!.postFinalWatchEntries
+                .filter((entry) => entry?.ownerMsgId === currentOwnerMsgId && typeof entry.filePath === 'string')
+                .map((entry) => entry.filePath)
+            : [];
+        const fileSet = unique([
+            ...this.getTouchedUnionForCommits(map, [predecessorCommit, currentCommit]),
+            ...watchFiles
+        ]);
+        if (!fileSet.length) {
+            this.logger(
+                `continuationFold.skip | sessionId=${sessionId} finalMsgId=${finalMsgId} reason=empty-file-set`
+            );
+            return map;
+        }
+
+        const originalHead = map.headCommit || currentCommit;
+        const originalBase = map.currentBaseCommit || currentCommit;
+        const commitMessage = `opencode: ${currentEntry.turnKey || `cont:${sessionId}`} ${Date.now()}`;
+
+        try {
+            const treeResult = await runGit(repo, ['rev-parse', `${currentCommit}^{tree}`]);
+            const currentTree = treeResult.stdout.trim();
+            if (treeResult.code !== 0 || !currentTree) {
+                this.logger(`continuationFold.fail | sessionId=${sessionId} stage=resolve-tree err=${treeResult.stderr.trim() || 'missing-tree'}`);
+                return map;
+            }
+
+            const commitTreeResult = await runGit(
+                repo,
+                ['commit-tree', currentTree, '-p', predecessorBaseCommit, '-m', commitMessage],
+                { commitIdentity: true }
+            );
+            const foldedCommit = commitTreeResult.stdout.trim();
+            if (commitTreeResult.code !== 0 || !foldedCommit) {
+                this.logger(`continuationFold.fail | sessionId=${sessionId} stage=create-commit-tree err=${commitTreeResult.stderr.trim() || 'missing-commit'}`);
+                return map;
+            }
+
+            const moveHead = await runGit(repo, ['update-ref', 'HEAD', foldedCommit, originalHead]);
+            if (moveHead.code !== 0) {
+                this.logger(`continuationFold.fail | sessionId=${sessionId} stage=move-head err=${moveHead.stderr.trim()}`);
+                return map;
+            }
+
+            const rewrittenEntries = map.entries
+                .filter((entry: SessionEntry) => {
+                    const entryOwner = entry.finalAssistantMsgId || entry.assistantMsgId;
+                    return !(entryOwner === predecessorOwnerMsgId && entry.commitHash === predecessorCommit);
+                })
+                .map((entry: SessionEntry) => {
+                    const entryOwner = entry.finalAssistantMsgId || entry.assistantMsgId;
+                    if (entryOwner === currentOwnerMsgId && entry.commitHash === currentCommit) {
+                        return {
+                            ...entry,
+                            commitHash: foldedCommit,
+                            touchedFiles: fileSet,
+                            timestamp: Date.now()
+                        };
+                    }
+                    return entry;
+                });
+
+            const remappedMsgToCommit = { ...(map.msgToCommit || {}) };
+            const remappedMsgToBaseCommit = { ...(map.msgToBaseCommit || {}) };
+            for (const [msgId, commitHash] of Object.entries(map.msgToCommit || {})) {
+                if (commitHash === predecessorCommit || commitHash === currentCommit) {
+                    remappedMsgToCommit[msgId] = foldedCommit;
+                    remappedMsgToBaseCommit[msgId] = predecessorBaseCommit;
+                }
+            }
+            remappedMsgToCommit[currentOwnerMsgId] = foldedCommit;
+            remappedMsgToBaseCommit[currentOwnerMsgId] = predecessorBaseCommit;
+
+            const nextMap: SessionMap = {
+                ...map,
+                entries: rewrittenEntries,
+                headCommit: foldedCommit,
+                currentBaseCommit: foldedCommit,
+                msgToCommit: remappedMsgToCommit,
+                msgToBaseCommit: remappedMsgToBaseCommit,
+            };
+            this.logger(
+                `continuationFold.ok | sessionId=${sessionId} predecessor=${predecessorOwnerMsgId} current=${currentOwnerMsgId} oldCurrentCommit=${currentCommit} foldedCommit=${foldedCommit} base=${predecessorBaseCommit} files=${fileSet.length} originalBase=${originalBase}`
+            );
+            return nextMap;
+        } catch (error) {
+            await runGit(repo, ['update-ref', 'HEAD', originalHead]);
+            this.logger(`continuationFold.fail | sessionId=${sessionId} stage=exception err=${String(error)}`);
+            return map;
+        }
     }
 
     private async filterSafeAddPaths(repo: GitRepoRef, paths: string[]): Promise<string[]> {
@@ -819,6 +980,20 @@ export class GitUndoEngine {
             let startCommit = map.msgToCommit[startMsgId];
             let effectiveStartMsgId = startMsgId;
             if (!startCommit) {
+                const resolvedOwnerMsgId = resolveCurrentOwnerMsgId(map, startMsgId);
+                if (resolvedOwnerMsgId && resolvedOwnerMsgId !== startMsgId) {
+                    const resolvedCommit = map.msgToCommit[resolvedOwnerMsgId];
+                    if (resolvedCommit) {
+                        startCommit = resolvedCommit;
+                        effectiveStartMsgId = resolvedOwnerMsgId;
+                        this.logger(
+                            `undo.owner-resolver | sessionId=${sessionId} requestedMsgId=${startMsgId} ` +
+                            `resolvedMsgId=${effectiveStartMsgId} commit=${startCommit}`
+                        );
+                    }
+                }
+            }
+            if (!startCommit) {
                 const fallback = this.resolveMappedMsgId(map, startMsgId, messageIds, 'forward');
                 if (fallback) {
                     startCommit = fallback.commitHash;
@@ -842,7 +1017,7 @@ export class GitUndoEngine {
             }
             const baseCommit = map.currentBaseCommit || headCommit;
             const preUndoBaseCommit = baseCommit;
-            const messageBaseCommit = map.msgToBaseCommit?.[startMsgId];
+            const messageBaseCommit = map.msgToBaseCommit?.[effectiveStartMsgId];
             const targetCommit = messageBaseCommit || (await this.getCommitParent(repo, startCommit)) || EMPTY_TREE_HASH;
             if (!messageBaseCommit && targetCommit === EMPTY_TREE_HASH) {
                 this.logger(`undo.target.no-parent | sessionId=${sessionId} startCommit=${startCommit}`);
@@ -927,6 +1102,20 @@ export class GitUndoEngine {
                 : [];
             let restoreCommit = orderedCommits.length ? orderedCommits[orderedCommits.length - 1] : map.msgToCommit[msgId];
             let effectiveMsgId = msgId;
+            if (!restoreCommit) {
+                const resolvedOwnerMsgId = resolveCurrentOwnerMsgId(map, msgId);
+                if (resolvedOwnerMsgId && resolvedOwnerMsgId !== msgId) {
+                    const resolvedCommit = map.msgToCommit[resolvedOwnerMsgId];
+                    if (resolvedCommit) {
+                        restoreCommit = resolvedCommit;
+                        effectiveMsgId = resolvedOwnerMsgId;
+                        this.logger(
+                            `restore.owner-resolver | sessionId=${sessionId} requestedMsgId=${msgId} ` +
+                            `resolvedMsgId=${effectiveMsgId} commit=${restoreCommit}`
+                        );
+                    }
+                }
+            }
             if (!restoreCommit) {
                 const fallback = this.resolveMappedMsgId(map, msgId, messageIds, 'backward');
                 if (fallback) {

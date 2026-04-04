@@ -114,6 +114,36 @@ export class OpenCodeDiffProvider implements vscode.TextDocumentContentProvider 
         this.logDiffUpdate(key, filePath, beforeText, afterText, diffText, state.lastChangeRange);
     }
 
+    public async forceOpenFromSnapshot(filePath: string, beforeText: string, afterText: string, diffText?: string): Promise<void> {
+        if (!this.workspaceRoot) return;
+        const key = this.makeKey(filePath);
+        let state = this.stateByKey.get(key);
+        if (!state) {
+            state = {
+                filePath,
+                baseline: beforeText,
+                current: afterText,
+                lastAfter: beforeText,
+                autoFollowEnabled: true
+            };
+        }
+
+        this.cancelAutoWalk(key);
+        state.baseline = beforeText;
+        state.current = afterText;
+        state.lastChangeRange = this.computeLastChangeRange(beforeText, afterText, diffText);
+        state.changeRanges = this.computeChangeRanges(beforeText, afterText, diffText);
+        state.lastAfter = afterText;
+        this.stateByKey.set(key, state);
+
+        this.currentKey = key;
+        await this.openOrFocusDiff(filePath, key);
+        this.emitChange(key);
+        this.revealLastChange(key);
+        this.startAutoWalk(key);
+        this.logDiffUpdate(key, filePath, beforeText, afterText, diffText, state.lastChangeRange);
+    }
+
     public handleVisibleRangeChange(editor: vscode.TextEditor): void {
         const key = this.getKeyFromEditor(editor, 'right');
         if (!key) return;

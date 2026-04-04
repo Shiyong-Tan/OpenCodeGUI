@@ -711,14 +711,17 @@ function shouldDropHiddenControlAssistant(session, message, source, assistantMsg
     if (!parentId || !session.hiddenControlUserIds?.has?.(parentId)) {
         return false;
     }
-    const lockAssistantId = typeof session.finalAssistantLock?.assistantMsgId === 'string'
-        ? session.finalAssistantLock.assistantMsgId
-        : null;
-    vscode.postMessage({
-        type: 'ui-debug',
-        payload: ['[WV][HIDDEN_ASSIST_DROP]', `source=${source || 'unknown'}`, `parentId=${parentId}`, `assistantMsgId=${assistantMsgId || 'null'}`, `lockAssistantId=${lockAssistantId || 'null'}`]
-    });
-    return true;
+    if (isHiddenControlAssistantText(message?.text || message?.lastText || '')) {
+        const lockAssistantId = typeof session.finalAssistantLock?.assistantMsgId === 'string'
+            ? session.finalAssistantLock.assistantMsgId
+            : null;
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: ['[WV][HIDDEN_ASSIST_DROP]', `source=${source || 'unknown'}`, `parentId=${parentId}`, `assistantMsgId=${assistantMsgId || 'null'}`, `lockAssistantId=${lockAssistantId || 'null'}`]
+        });
+        return true;
+    }
+    return false;
 }
 
 function getSessionState(sessionId, create = false) {
@@ -3637,7 +3640,6 @@ function collapseSessionDataMessagesForDisplay(messages, anchorMsgIds = new Set(
                 || (typeof meta.parentId === 'string' && meta.parentId)
                 || (typeof meta.parentID === 'string' && meta.parentID)
                 || '';
-            if (parentId && hiddenControlUserIds.has(parentId)) continue;
             if (!text.trim()) continue;
             if (anchorMsgIds.has(item.id)) {
                 flushAssistant();
@@ -6206,6 +6208,24 @@ window.addEventListener('message', (event) => {
                 if (!sessionId) break;
                 const session = getSessionState(sessionId, true);
                 session.backendTurnInFlight = Boolean(message?.inFlight);
+                if (message?.inFlight) {
+                    session.turnFullyFinalized = false;
+                    session.snapshotFinalizeReady = false;
+                    const ownerMsgId = typeof message?.ownerMsgId === 'string' ? message.ownerMsgId : null;
+                    if (ownerMsgId && session.messagesById.has(ownerMsgId)) {
+                        session.currentTurnAssistantKey = ownerMsgId;
+                        session.currentTurnAssistantMsgId = ownerMsgId;
+                        session.thinkingId = ownerMsgId;
+                        const ownerMsg = session.messagesById.get(ownerMsgId);
+                        if (ownerMsg) {
+                            ownerMsg.meta = {
+                                ...(ownerMsg.meta || {}),
+                                isThinking: true,
+                                statusText: ''
+                            };
+                        }
+                    }
+                }
                 updateSendGate();
                 break;
             }
@@ -6336,7 +6356,7 @@ window.addEventListener('message', (event) => {
                     });
                     break;
                 }
-                if (session?.turnFullyFinalized === true) {
+                if (session?.turnFullyFinalized === true && session?.backendTurnInFlight !== true) {
                     vscode.postMessage({
                         type: 'ui-debug',
                         payload: ['assistantMessageMeta', 'drop-turnSealed', `sessionId=${sessionId}`]
@@ -6421,7 +6441,7 @@ window.addEventListener('message', (event) => {
                     });
                     break;
                 }
-                if (session?.turnFullyFinalized === true) {
+                if (session?.turnFullyFinalized === true && session?.backendTurnInFlight !== true) {
                     vscode.postMessage({
                         type: 'ui-debug',
                         payload: ['chatChunk', 'drop-turnSealed', `sessionId=${sessionId}`]
@@ -6792,7 +6812,7 @@ window.addEventListener('message', (event) => {
                     });
                     break;
                 }
-                if (session?.turnFullyFinalized === true) {
+                if (session?.turnFullyFinalized === true && session?.backendTurnInFlight !== true) {
                     vscode.postMessage({
                         type: 'ui-debug',
                         payload: ['messageAppend', 'drop-turnSealed', `sessionId=${sessionId}`]

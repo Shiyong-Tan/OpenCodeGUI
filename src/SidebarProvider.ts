@@ -6,7 +6,8 @@ import { OpenCodeClient, ChatEvent, ModelInfo, SessionInfo, FileSnapshot, Confli
 import { OpenCodeDiffProvider } from "./OpenCodeDiffProvider";
 import { GitRepoManager } from './undo/GitRepoManager';
 import { runGit } from './undo/GitRunner';
-import { GitRepoRef } from './undo/types';
+import { GitRepoRef, SessionMap } from './undo/types';
+import { resolveCurrentVisibleOwnerMsgId, resolveSessionOwnership } from './undo/ownershipResolver';
 
 type SessionMessage = {
     role: 'user' | 'assistant' | 'system';
@@ -312,15 +313,45 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         webview.postMessage({ type: 'turnFinalizePhase', sessionId, phase, ts: Date.now() });
     }
 
+    private async finalizeResolvedTurn(sessionId: string | undefined, webview: vscode.Webview, assistantMsgId?: string): Promise<void> {
+        if (!sessionId) return;
+        const doneAssistantMsgId = assistantMsgId || this.client.getTurnAssistantMsgId(sessionId) || undefined;
+        webview.postMessage({
+            type: 'chatDone',
+            sessionId,
+            assistantMsgId: doneAssistantMsgId,
+            lastAssistantMsgId: doneAssistantMsgId
+        });
+        this.emitTurnFinalizePhase(webview, sessionId, 'stream_done');
+        this.postMessageIndexMap(webview);
+        await this.client.commitPendingTurnChanges(sessionId);
+        if (doneAssistantMsgId) {
+            await this.client.finalizeTurnBindingFromResolvedAssistant(sessionId, doneAssistantMsgId);
+        }
+        this.emitTurnFinalizePhase(webview, sessionId, 'commit_done');
+        await this.resolvePendingUserUpgrade(sessionId, webview);
+        this.emitTurnFinalizePhase(webview, sessionId, 'upgrade_done');
+        if (doneAssistantMsgId) {
+            await this.client.promoteContinuationOwner(sessionId, doneAssistantMsgId);
+            await this.client.consolidateCurrentContinuationOwner(sessionId);
+        }
+        this.postMessageIndexMap(webview);
+        await this.emitDiffFileListWithRetry(sessionId, webview);
+        this.client.finishTurn(sessionId);
+        this.emitTurnFinalizePhase(webview, sessionId, 'finalize_done');
+    }
+
     private selectedModel?: string;
     private selectedVariant?: string;
     private selectedMode?: string;
     private availableModes: string[] = ['plan', 'build'];
     private pendingClientMessageId?: string;
     private lastDraft?: { text: string; attachments: string[]; model?: string; variant?: string; mode?: string };
+    private draftByLocalKey = new Map<string, { text: string; attachments: string[]; model?: string; variant?: string; mode?: string }>();
     private currentDiffFilePath: string | null = null;
     private diffHashes = new Map<string, { before: string; after: string }>();
     private shownDiffKeysBySession = new Map<string, Set<string>>();
+    private postFinalWatchDiffFocusedBySession = new Set<string>();
     private revertedSegment?: { conflicts: ConflictDetail[]; discarded?: boolean };
     private clientMessageIdMap = new Map<string, string>();
     private revertedSegmentHistory: Array<{ isActive: boolean; discarded: boolean; startMessageId?: string; startMessageIndex?: number; endMessageId?: string; endMessageIndex?: number; collapsed: boolean; messageIds?: string[] }> = [];
@@ -596,28 +627,170 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         await fs.promises.rename(tmpPath, filePath);
     }
 
+    private async readPersistedSessionMap(sessionId: string): Promise<SessionMap | null> {
+        try {
+            const repo = await this.resolveInternalRepo(sessionId);
+            if (!repo) return null;
+            const mapPath = pathModule.join(this.getOpencodeDataDir(), 'git', 'sessions', sessionId, 'map.json');
+            if (!fs.existsSync(mapPath)) return null;
+            const raw = await fs.promises.readFile(mapPath, 'utf-8');
+            const parsed = JSON.parse(raw);
+            if (!parsed || parsed.schemaVersion !== 1) return null;
+            return parsed as SessionMap;
+        } catch {
+            return null;
+        }
+    }
+
+    private async resolveCurrentVisibleOwnerMessageId(sessionId: string, fallbackMessageId?: string): Promise<string | undefined> {
+        if (fallbackMessageId?.startsWith('msg_user_') || fallbackMessageId?.startsWith('msg_system_')) {
+            return fallbackMessageId;
+        }
+        const map = await this.readPersistedSessionMap(sessionId);
+        const resolved = resolveCurrentVisibleOwnerMsgId(map, fallbackMessageId || null);
+        return typeof resolved === 'string' ? resolved : fallbackMessageId;
+    }
+
+    private canonicalizeSnapshotMessagesForCurrentOwner(
+        sessionId: string,
+        messages: SessionMessage[] | undefined,
+        map: SessionMap | null
+    ): SessionMessage[] {
+        if (!Array.isArray(messages) || messages.length === 0) return [];
+        const out: SessionMessage[] = [];
+        const seenIds = new Set<string>();
+        for (const message of messages) {
+            if (!message || typeof message.id !== 'string' || !message.id) continue;
+            const role = message.role;
+            const resolvedMessageId = resolveCurrentVisibleOwnerMsgId(map, message.id) || message.id;
+            if (role === 'assistant' && resolvedMessageId !== message.id) {
+                continue;
+            }
+            const nextMessage: SessionMessage = { ...message };
+            if (role === 'user' && nextMessage.meta && typeof nextMessage.meta === 'object') {
+                const currentAssistantId = typeof nextMessage.meta.assistantId === 'string'
+                    ? nextMessage.meta.assistantId
+                    : undefined;
+                if (currentAssistantId) {
+                    const resolvedAssistantId = resolveCurrentVisibleOwnerMsgId(map, currentAssistantId) || currentAssistantId;
+                    if (resolvedAssistantId !== currentAssistantId) {
+                        nextMessage.meta = {
+                            ...nextMessage.meta,
+                            assistantId: resolvedAssistantId
+                        };
+                    }
+                }
+            }
+            const nextMessageId = typeof nextMessage.id === 'string' ? nextMessage.id : '';
+            if (!nextMessageId || seenIds.has(nextMessageId)) continue;
+            seenIds.add(nextMessageId);
+            out.push(nextMessage);
+        }
+        return out;
+    }
+
+    private async collapseOwnerChangeLists(
+        sessionId: string,
+        records: ChangeListRecord[],
+        anchorMessageId: string,
+        preferredRecord: ChangeListRecord
+    ): Promise<ChangeListRecord[]> {
+        const map = await this.readPersistedSessionMap(sessionId);
+        const ownership = resolveSessionOwnership(map, anchorMessageId);
+        const currentOwnerMsgId = ownership.currentOwnerMsgId;
+        const predecessorOwnerMsgId = ownership.predecessorOwnerMsgId;
+        const currentOwnerIsContinuation = Array.isArray(map?.entries)
+            && !!currentOwnerMsgId
+            && map.entries.some((entry) => {
+                const entryOwner = entry.finalAssistantMsgId || entry.assistantMsgId;
+                return entryOwner === currentOwnerMsgId
+                    && typeof entry.turnKey === 'string'
+                    && entry.turnKey.startsWith('cont:');
+            });
+        this.uiDebugChannel.appendLine(
+            `[EXT][CHANGELIST_OWNER_COLLAPSE_INSPECT] sessionId=${sessionId} anchor=${anchorMessageId} currentOwner=${currentOwnerMsgId || 'null'} predecessor=${predecessorOwnerMsgId || 'null'} isContinuation=${currentOwnerIsContinuation}`
+        );
+        if (!currentOwnerIsContinuation || !currentOwnerMsgId || !predecessorOwnerMsgId || anchorMessageId !== currentOwnerMsgId) {
+            this.uiDebugChannel.appendLine(
+                `[EXT][CHANGELIST_OWNER_COLLAPSE_SKIP] sessionId=${sessionId} anchor=${anchorMessageId} currentOwner=${currentOwnerMsgId || 'null'} predecessor=${predecessorOwnerMsgId || 'null'} reason=preconditions`
+            );
+            return records;
+        }
+
+        const mergeCandidates: ChangeListRecord[] = [];
+        const survivors: ChangeListRecord[] = [];
+        for (const record of records) {
+            const resolvedAnchor = await this.resolveCurrentVisibleOwnerMessageId(sessionId, record.anchorMessageId);
+            if (resolvedAnchor === currentOwnerMsgId) {
+                mergeCandidates.push(record);
+            } else {
+                survivors.push(record);
+            }
+        }
+        if (!mergeCandidates.length) {
+            this.uiDebugChannel.appendLine(
+                `[EXT][CHANGELIST_OWNER_COLLAPSE_SKIP] sessionId=${sessionId} anchor=${anchorMessageId} currentOwner=${currentOwnerMsgId} predecessor=${predecessorOwnerMsgId} reason=no-merge-candidates`
+            );
+            return records;
+        }
+
+        mergeCandidates.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+        const mergedFiles = Array.from(new Set(
+            mergeCandidates.flatMap((record) => Array.isArray(record.files) ? record.files : [])
+        ));
+        const mergedStatsByPath = mergeCandidates.reduce<Record<string, { additions: number | null; deletions: number | null }>>(
+            (acc, record) => ({ ...acc, ...(record.statsByPath || {}) }),
+            {}
+        );
+        const earliest = mergeCandidates[0];
+        const mergedRecord: ChangeListRecord = {
+            id: preferredRecord.id,
+            commitHead: preferredRecord.commitHead,
+            commitBase: earliest?.commitBase || preferredRecord.commitBase,
+            files: mergedFiles,
+            statsByPath: mergedStatsByPath,
+            anchorMessageId: currentOwnerMsgId,
+            createdAt: earliest?.createdAt || preferredRecord.createdAt,
+            reverted: mergeCandidates.every((record) => record.reverted === true) ? true : undefined,
+        };
+        survivors.push(mergedRecord);
+        survivors.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+        this.uiDebugChannel.appendLine(
+            `[EXT][CHANGELIST_OWNER_COLLAPSE] sessionId=${sessionId} owner=${currentOwnerMsgId} predecessor=${predecessorOwnerMsgId} merged=${mergeCandidates.length} resultId=${mergedRecord.id}`
+        );
+        return survivors;
+    }
+
     private async upsertChangeList(sessionId: string, record: ChangeListRecord): Promise<void> {
+        const resolvedAnchorMessageId = await this.resolveCurrentVisibleOwnerMessageId(sessionId, record.anchorMessageId);
+        const nextRecord = {
+            ...record,
+            anchorMessageId: resolvedAnchorMessageId || record.anchorMessageId
+        };
         const records = await this.readChangeLists(sessionId);
-        const idx = records.findIndex((item) => item.id === record.id);
+        const idx = records.findIndex((item) => item.id === nextRecord.id);
         if (idx === -1) {
-            records.push(record);
+            records.push(nextRecord);
         } else {
             const existing = records[idx];
-            const keepExistingAnchor =
-                typeof existing.anchorMessageId === 'string'
-                && existing.anchorMessageId.startsWith('msg_')
-                && existing.anchorMessageId.length > 0;
+            const existingResolvedAnchorMessageId = await this.resolveCurrentVisibleOwnerMessageId(sessionId, existing.anchorMessageId);
             records[idx] = {
                 ...existing,
-                ...record,
-                anchorMessageId: keepExistingAnchor ? existing.anchorMessageId : record.anchorMessageId
+                ...nextRecord,
+                anchorMessageId: nextRecord.anchorMessageId || existingResolvedAnchorMessageId || existing.anchorMessageId
             };
         }
-        await this.writeChangeLists(sessionId, records);
+        const collapsedRecords = await this.collapseOwnerChangeLists(
+            sessionId,
+            records,
+            nextRecord.anchorMessageId,
+            nextRecord
+        );
+        await this.writeChangeLists(sessionId, collapsedRecords);
         const persisted = await this.readChangeLists(sessionId);
-        const persistedHit = persisted.some((item) => item.id === record.id);
+        const persistedHit = persisted.some((item) => item.id === nextRecord.id);
         this.uiDebugChannel.appendLine(
-            `[EXT][CHANGELIST_UPSERT] sessionId=${sessionId} id=${record.id} commitHead=${record.commitHead} persisted=${persistedHit} total=${persisted.length}`
+            `[EXT][CHANGELIST_UPSERT] sessionId=${sessionId} id=${nextRecord.id} commitHead=${nextRecord.commitHead} persisted=${persistedHit} total=${persisted.length}`
         );
     }
 
@@ -683,16 +856,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const byAnchor = new Map<string, ChangeListRecord[]>();
         const byId = new Map<string, ChangeListRecord>();
         for (const record of records) {
-            if (record.id) {
-                byId.set(record.id, record);
+            const resolvedAnchor = await this.resolveCurrentVisibleOwnerMessageId(sessionId, record.anchorMessageId) || record.anchorMessageId;
+            const effectiveRecord = resolvedAnchor !== record.anchorMessageId
+                ? { ...record, anchorMessageId: resolvedAnchor }
+                : record;
+            if (effectiveRecord.id) {
+                byId.set(effectiveRecord.id, effectiveRecord);
             }
-            if (!record.anchorMessageId || !idSet.has(record.anchorMessageId)) {
+            if (!effectiveRecord.anchorMessageId || !idSet.has(effectiveRecord.anchorMessageId)) {
                 continue;
             }
-            if (!byAnchor.has(record.anchorMessageId)) {
-                byAnchor.set(record.anchorMessageId, []);
+            if (!byAnchor.has(effectiveRecord.anchorMessageId)) {
+                byAnchor.set(effectiveRecord.anchorMessageId, []);
             }
-            byAnchor.get(record.anchorMessageId)?.push(record);
+            byAnchor.get(effectiveRecord.anchorMessageId)?.push(effectiveRecord);
         }
         if (!byAnchor.size) return formatted;
 
@@ -889,21 +1066,39 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return paired;
     }
 
-    private buildSnapshotSessionPayload(
+    private async buildSnapshotSessionPayload(
         sessionPayload: { type: string; sessionId: string; title: string; messages: SessionMessage[]; segments?: any[]; meta?: any },
         segmentMemberMessages: SessionMessage[] = []
     ) {
+        const sessionId = sessionPayload.sessionId;
+        const ownershipMap = await this.readPersistedSessionMap(sessionId);
+        const canonicalMessages = this.canonicalizeSnapshotMessagesForCurrentOwner(sessionId, sessionPayload.messages, ownershipMap);
+        const canonicalSegmentMessages = this.canonicalizeSnapshotMessagesForCurrentOwner(sessionId, segmentMemberMessages, ownershipMap);
         // Honor pre-provided timelineMessageIds (from reload path) to prevent backing message pollution
-        const providedIds = Array.isArray(sessionPayload.meta?.timelineMessageIds) && sessionPayload.meta.timelineMessageIds.length > 0
+        const providedIdsRaw = Array.isArray(sessionPayload.meta?.timelineMessageIds) && sessionPayload.meta.timelineMessageIds.length > 0
             ? (sessionPayload.meta.timelineMessageIds as string[]).filter((id): id is string => typeof id === 'string' && Boolean(id))
             : null;
+        let providedIds: string[] | null = null;
+        if (providedIdsRaw) {
+            const mappedIds = await Promise.all(
+                providedIdsRaw.map((id) => this.resolveCurrentVisibleOwnerMessageId(sessionId, id).then((resolved) => resolved || id))
+            );
+            providedIds = Array.from(new Set(mappedIds));
+        }
         const providedIdsSet = providedIds ? new Set(providedIds) : null;
         const timelineMessages = providedIdsSet
-            ? sessionPayload.messages.filter(m => m && typeof m.id === 'string' && providedIdsSet.has(m.id))
-            : this.collectVisibleSnapshotMessages(sessionPayload.messages);
-        const timelineIds = providedIds ?? timelineMessages
+            ? canonicalMessages.filter(m => m && typeof m.id === 'string' && providedIdsSet.has(m.id))
+            : this.collectVisibleSnapshotMessages(canonicalMessages);
+        let timelineIds = providedIds ?? timelineMessages
             .map((message) => (typeof message?.id === 'string' ? message.id : ''))
             .filter((id): id is string => Boolean(id));
+        if (!providedIds) {
+            const mappedTimelineIds = await Promise.all(
+                timelineIds.map((id) => this.resolveCurrentVisibleOwnerMessageId(sessionId, id).then((resolved) => resolved || id))
+            );
+            timelineIds = Array.from(new Set(mappedTimelineIds));
+        }
+        const timelineIdsSet = new Set(timelineIds);
         const mergedMessages: SessionMessage[] = [];
         const seenIds = new Set<string>();
         const pushMessage = (message: SessionMessage | null | undefined) => {
@@ -916,10 +1111,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             mergedMessages.push(message);
             seenIds.add(messageId);
         };
-        for (const message of timelineMessages) {
-            pushMessage(message);
+        if (providedIds) {
+            for (const message of timelineMessages) {
+                pushMessage(message);
+            }
+        } else {
+            for (const message of canonicalMessages) {
+                if (message && typeof message.id === 'string' && timelineIdsSet.has(message.id)) {
+                    pushMessage(message);
+                }
+            }
         }
-        for (const message of Array.isArray(segmentMemberMessages) ? segmentMemberMessages : []) {
+        for (const message of canonicalSegmentMessages) {
             pushMessage(message);
         }
         const segmentBackingMessageIds = mergedMessages
@@ -936,12 +1139,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         };
     }
 
-    private buildSnapshotSessionPayloadAndCache(
+    private async buildSnapshotSessionPayloadAndCache(
         sessionId: string,
         sessionPayload: { type: string; sessionId: string; title: string; messages: SessionMessage[]; segments?: any[]; meta?: any },
         segmentMemberMessages: SessionMessage[] = []
     ) {
-        const payload = this.buildSnapshotSessionPayload(sessionPayload, segmentMemberMessages);
+        const payload = await this.buildSnapshotSessionPayload(sessionPayload, segmentMemberMessages);
         this.lastSnapshotPayloadBySession.set(sessionId, payload);
         return payload;
     }
@@ -1001,6 +1204,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         incomingMessages: SessionMessage[],
         title?: string
     ): Promise<number> {
+        const ownershipMap = await this.readPersistedSessionMap(sessionId);
+        const canonicalIncomingMessages = this.canonicalizeSnapshotMessagesForCurrentOwner(sessionId, incomingMessages, ownershipMap);
+        const canonicalTimelineIds = Array.from(new Set(await Promise.all(
+            timelineIds
+                .filter((id): id is string => typeof id === 'string' && Boolean(id))
+                .map((id) => this.resolveCurrentVisibleOwnerMessageId(sessionId, id).then((resolved) => resolved || id))
+        )));
         const existing = await this.readSnapshot(sessionId);
         const snapshotObj = existing?.obj ?? {
             sessionId,
@@ -1036,16 +1246,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const existingMessages: SessionMessage[] = Array.isArray(snapshotObj.sessionData.messages)
             ? snapshotObj.sessionData.messages
             : [];
+        const canonicalExistingMessages = this.canonicalizeSnapshotMessagesForCurrentOwner(sessionId, existingMessages, ownershipMap);
         const timelineIdSet = new Set(
-            timelineIds.filter((id): id is string => typeof id === 'string' && Boolean(id))
+            canonicalTimelineIds.filter((id): id is string => typeof id === 'string' && Boolean(id))
         );
         const combinedById = new Map<string, SessionMessage>();
-        for (const message of this.normalizeSnapshotStoredMessages(existingMessages)) {
+        for (const message of this.normalizeSnapshotStoredMessages(canonicalExistingMessages)) {
             if (typeof message.id === 'string' && message.id) {
                 combinedById.set(message.id, message);
             }
         }
-        for (const message of Array.isArray(incomingMessages) ? incomingMessages : []) {
+        for (const message of canonicalIncomingMessages) {
             if (!message || typeof message.id !== 'string' || !message.id) continue;
             if (!timelineIdSet.has(message.id)) continue;
             combinedById.set(message.id, message);
@@ -1332,19 +1543,57 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const statsByPath = await this.getInternalDiffStats(repo, baseCommit, headCommit);
         const existingRecords = await this.readChangeLists(sessionId);
         const matchedExisting = existingRecords.find((item) => item.commitHead === headCommit);
+        const ownershipMap = await this.readPersistedSessionMap(sessionId);
         const liveAnchor = this.client.getTurnAssistantMsgId(sessionId);
-        const anchorMessageId = matchedExisting?.anchorMessageId || liveAnchor;
-        const changeListId = headCommit ? `system:changeList:${headCommit}` : `changes:${Date.now()}`;
+        const anchorMessageId = await this.resolveCurrentVisibleOwnerMessageId(
+            sessionId,
+            matchedExisting?.anchorMessageId || liveAnchor || undefined
+        );
+        let mergedFiles = [...files];
+        let mergedStatsByPath = { ...statsByPath };
+        let changeListId = headCommit ? `system:changeList:${headCommit}` : `changes:${Date.now()}`;
+        const currentOwnerMsgId = ownershipMap?.continuation?.currentOwnerMsgId;
+        const predecessorOwnerMsgId = ownershipMap?.continuation?.predecessorOwnerMsgId;
+        const currentOwnerIsContinuation = Array.isArray(ownershipMap?.entries)
+            && !!currentOwnerMsgId
+            && ownershipMap!.entries.some((entry) => {
+                const entryOwner = entry.finalAssistantMsgId || entry.assistantMsgId;
+                return entryOwner === currentOwnerMsgId
+                    && typeof entry.turnKey === 'string'
+                    && entry.turnKey.startsWith('cont:');
+            });
+        if (currentOwnerIsContinuation && anchorMessageId && currentOwnerMsgId === anchorMessageId && predecessorOwnerMsgId) {
+            const recordsForOwner: ChangeListRecord[] = [];
+            for (const record of existingRecords) {
+                const resolvedRecordAnchor = await this.resolveCurrentVisibleOwnerMessageId(sessionId, record.anchorMessageId);
+                if (resolvedRecordAnchor === anchorMessageId) {
+                    recordsForOwner.push(record);
+                }
+            }
+            if (recordsForOwner.length) {
+                const primary = recordsForOwner.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))[0];
+                changeListId = primary.id || changeListId;
+                const orderedFiles = [
+                    ...recordsForOwner.flatMap((record) => Array.isArray(record.files) ? record.files : []),
+                    ...files
+                ].filter((item): item is string => typeof item === 'string' && item.length > 0);
+                mergedFiles = Array.from(new Set(orderedFiles));
+                mergedStatsByPath = recordsForOwner.reduce((acc, record) => ({
+                    ...acc,
+                    ...(record.statsByPath || {})
+                }), { ...mergedStatsByPath });
+            }
+        }
         this.uiDebugChannel?.appendLine(`[EXT][COMMIT_BIND] created | sessionId=${sessionId} commit=${headCommit} anchor=${anchorMessageId || 'null'} isMsg=${anchorMessageId?.startsWith('msg_') || false} source=${matchedExisting?.anchorMessageId ? 'existing-record' : 'live-turn'}`);
         webview.postMessage({
             type: 'diffFileList',
             sessionId,
-            files,
+            files: mergedFiles,
             source: 'git',
             scope: 'turn',
             commitHead: headCommit,
             commitBase: baseCommit,
-            statsByPath,
+            statsByPath: mergedStatsByPath,
             anchorMessageId,
             changeListId
         });
@@ -1353,8 +1602,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 id: changeListId,
                 commitHead: headCommit,
                 commitBase: baseCommit,
-                files,
-                statsByPath,
+                files: mergedFiles,
+                statsByPath: mergedStatsByPath,
                 anchorMessageId,
                 createdAt: Date.now()
             });
@@ -1471,7 +1720,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.client.setServerStatusHandler((status, reason) => {
             this.sendServerStatus(status, reason);
         });
-        void this.client.warmServer();
+        this.client.addChatEventListener((event) => {
+            const liveWebview = this._view?.webview;
+            if (!liveWebview) return;
+            void this.handleChatEvent(event, liveWebview);
+        });
+        if (!process.env.JEST_WORKER_ID) {
+            void this.client.warmServer();
+        }
         process.on('exit', () => { void this.client.shutdownServer(); });
         process.on('SIGINT', () => { void this.client.shutdownServer(); });
         process.on('SIGTERM', () => { void this.client.shutdownServer(); });
@@ -1707,7 +1963,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         this.uiDebugChannel.appendLine(`EXT: send.enter | reqId=${reqId} | sessionId=${this.currentSessionId || 'null'} | hasAttachments=${String(Boolean(attachments.length))} | attachmentsCount=${attachments.length} | attachKeys=${attachKeys}`);
                         const userText = (data.value as string) || '';
                         let modelText = userText;
-                        this.lastDraft = {
+                        const initialDraft = {
                             text: userText,
                             attachments: [],
                             model: this.selectedModel,
@@ -1716,6 +1972,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         };
                         const clientMessageId = data.clientMessageId || `local-${Date.now()}`;
                         this.pendingClientMessageId = clientMessageId;
+                        this.rememberDraft(clientMessageId, initialDraft);
                         this.rawUserTextByLocalKey.set(clientMessageId, userText);
                         const opId = typeof data.opId === 'string' ? data.opId : undefined;
                         if (this.currentSessionId) {
@@ -1808,9 +2065,6 @@ ${attachmentLines.join('\n')}`
                                 variant: this.selectedVariant,
                                 sessionId: this.currentSessionId,
                                 mode: this.selectedMode
-                            },
-                            async (event: ChatEvent) => {
-                                await this.handleChatEvent(event, activeWebview);
                             }
                         );
 
@@ -1855,6 +2109,7 @@ ${attachmentLines.join('\n')}`
                         }
                         if (this.currentSessionId) {
                             this.client.finishTurn(this.currentSessionId);
+                            this.postFinalWatchDiffFocusedBySession.delete(this.currentSessionId);
                         }
                         // Do not force "done" from main finalize; only subagent final-accepted can set done.
                         // Any still-active subagents at this point are treated as cancelled.
@@ -1864,6 +2119,7 @@ ${attachmentLines.join('\n')}`
                         this.emitTurnFinalizePhase(liveWebview, this.currentSessionId, 'finalize_done');
                         await this.postModelQuota(liveWebview, 'chat-done');
                         if (this.pendingClientMessageId) {
+                            this.clearDraft(this.pendingClientMessageId);
                             await this.handleAbortedMessage(this.pendingClientMessageId, liveWebview);
                             this.pendingClientMessageId = undefined;
                         }
@@ -1908,6 +2164,7 @@ ${attachmentLines.join('\n')}`
                         this.clearSubagentSessions();
                         this.emitTurnFinalizePhase(activeWebview, this.currentSessionId, 'finalize_done');
                         if (this.pendingClientMessageId) {
+                            this.clearDraft(this.pendingClientMessageId);
                             await this.handleAbortedMessage(this.pendingClientMessageId, activeWebview);
                             this.pendingClientMessageId = undefined;
                         }
@@ -2782,6 +3039,11 @@ ${attachmentLines.join('\n')}`
                     break;
                 }
                 case "cancel": {
+                    const restoreLocalKey =
+                        this.pendingClientMessageId
+                        || ((typeof data.sessionId === 'string' ? data.sessionId : this.currentSessionId)
+                            ? this.pendingLocalKeyBySession.get((typeof data.sessionId === 'string' ? data.sessionId : this.currentSessionId)!)
+                            : undefined);
                     if (this.currentSessionId) {
                         await this.client.revertPendingTurnChangesToCurrentBase(this.currentSessionId);
                         const canceledAt = Date.now();
@@ -2833,10 +3095,11 @@ ${attachmentLines.join('\n')}`
                         }
                         this.assistantTextBufferBySession.delete(this.currentSessionId);
                     }
-                    if (this.lastDraft) {
+                    const draftToRestore = this.consumeDraft(restoreLocalKey);
+                    if (draftToRestore) {
                         activeWebview.postMessage({
                             type: 'restoreDraft',
-                            payload: { ...this.lastDraft }
+                            payload: draftToRestore
                         });
                     }
                     // Cleanup before chatDone
@@ -2845,6 +3108,7 @@ ${attachmentLines.join('\n')}`
                     }
                     if (this.currentSessionId) {
                         this.client.finishTurn(this.currentSessionId);
+                        this.postFinalWatchDiffFocusedBySession.delete(this.currentSessionId);
                     }
                     this.markAllSubagentsTerminal('cancelled', 'user-cancel');
                     this.emitSubagentStatus();
@@ -3347,7 +3611,8 @@ ${attachmentLines.join('\n')}`
         const storedMode = this._context.globalState.get<string>('opencode.mode');
 
         const allModes = agents
-            .filter((agent) => agent.mode === 'all' && !agent.hidden)
+            // Keep primary agents visible in the mode picker; only hidden agents stay excluded.
+            .filter((agent) => !agent.hidden && (agent.mode === 'all' || agent.mode === 'primary'))
             .map((agent) => agent.id)
             .filter((value, index, arr) => arr.indexOf(value) === index);
         const mergedModes = ['plan', 'build', ...allModes]
@@ -4366,6 +4631,11 @@ ${attachmentLines.join('\n')}`
             });
             return;
         }
+        if (event.type === 'turnResolved' && event.sessionId) {
+            const liveWebview = this._view?.webview || webview;
+            await this.finalizeResolvedTurn(event.sessionId, liveWebview, event.assistantMsgId);
+            return;
+        }
         if (event.type === 'session' && event.sessionId) {
             if (!this.isUserOwnedSession(event.sessionId) && this.sendInFlightBySession.has(this.currentSessionId!)) {
                 this.activeSubagentSessionIds.add(event.sessionId);
@@ -4698,6 +4968,22 @@ ${attachmentLines.join('\n')}`
             return;
         }
 
+        if (event.type === 'turnInFlight' && event.sessionId) {
+            const liveWebview = this._view?.webview || webview;
+            if (event.inFlight === true) {
+                this.sendInFlightBySession.add(event.sessionId);
+            } else {
+                this.sendInFlightBySession.delete(event.sessionId);
+            }
+            liveWebview.postMessage({
+                type: 'turnInFlight',
+                sessionId: event.sessionId,
+                inFlight: event.inFlight === true,
+                ownerMsgId: event.ownerMsgId
+            });
+            return;
+        }
+
         if (event.type === 'assistantMessageMeta' && (event.messageId || event.assistantMsgId)) {
             const liveWebview = this._view?.webview || webview;
             const sessionId = event.sessionId || this.currentSessionId;
@@ -4866,6 +5152,14 @@ ${attachmentLines.join('\n')}`
                         this.uiDebugChannel.appendLine(`[LATE_DIFF] committed pending turn changes | sessionId=${sessionId} reason=late-event-recovery`);
                     } catch (error) {
                         this.uiDebugChannel.appendLine(`[LATE_DIFF] commit pending failed | sessionId=${sessionId} err=${String(error)}`);
+                    }
+                    if (!this.hasRenderableDiffPayload(active)) {
+                        try {
+                            await this.openGitDiffForFile(sessionId, active.filePath, liveWebview);
+                            this.uiDebugChannel.appendLine(`[LATE_DIFF] opened git diff | sessionId=${sessionId} file=${active.filePath}`);
+                        } catch (error) {
+                            this.uiDebugChannel.appendLine(`[LATE_DIFF] open git diff failed | sessionId=${sessionId} file=${active.filePath} err=${String(error)}`);
+                        }
                     }
                     this.uiDebugChannel.appendLine(`[LATE_DIFF] emitting change-list | sessionId=${sessionId} reason=late-event-recovery`);
                     void this.emitDiffFileListWithRetry(sessionId, liveWebview);
@@ -5205,6 +5499,18 @@ ${attachmentLines.join('\n')}`
         await this.client.shutdownServer();
     }
 
+    public async dispose(): Promise<void> {
+        if (this.attachmentCleanupTimer) {
+            clearInterval(this.attachmentCleanupTimer);
+            this.attachmentCleanupTimer = undefined;
+        }
+        if (this.subagentRetentionTimer) {
+            clearTimeout(this.subagentRetentionTimer);
+            this.subagentRetentionTimer = undefined;
+        }
+        await this.client.dispose();
+    }
+
     public async debugPrintTuiControlSchema(): Promise<void> {
         try {
             const summary = await this.client.getTuiControlResponseSchemaSummary();
@@ -5348,7 +5654,18 @@ ${attachmentLines.join('\n')}`
             this.uiDebugChannel.appendLine(`subagent.diff.skipped | lane=${lane} | reason=duplicate | file=${normalized.filePath}`);
             return;
         }
-        this.openDiffForFileChange(normalized, webview, index);
+        const shouldForceFocus =
+            lane === 'subagent'
+            && Boolean(sessionId)
+            && this.client.isInPostFinalWatchWindow(sessionId)
+            && !this.postFinalWatchDiffFocusedBySession.has(sessionId);
+        if (shouldForceFocus && sessionId) {
+            this.postFinalWatchDiffFocusedBySession.add(sessionId);
+            this.forceOpenDiffForFileChange(normalized, webview, index);
+            this.uiDebugChannel.appendLine(`subagent.diff.forcefocus | lane=${lane} | file=${normalized.filePath}`);
+        } else {
+            this.openDiffForFileChange(normalized, webview, index);
+        }
         this.uiDebugChannel.appendLine(`subagent.diff.shown | lane=${lane} | file=${normalized.filePath}`);
     }
 
@@ -5381,6 +5698,29 @@ ${attachmentLines.join('\n')}`
         const diffLen = file.diff ? file.diff.length : 0;
         const basename = pathModule.basename(file.filePath);
         OpenCodeClient.outputChannel.appendLine(`[DIFF] file=${basename} idx=${index} before=${beforeText.length} after=${afterText.length} diff=${diffLen}`);
+    }
+
+    private forceOpenDiffForFileChange(file: FileSnapshot, webview: vscode.Webview, index: number): void {
+        void webview;
+        const isToolUseChange =
+            file.type === 'update' ||
+            file.type === 'create' ||
+            file.type === 'delete' ||
+            typeof file.existsBefore === 'boolean' ||
+            typeof file.existsAfter === 'boolean';
+        if (!isToolUseChange) return;
+        if (typeof file.before !== 'string' || typeof file.after !== 'string') return;
+        const beforeText = this.normalizeText(file.before);
+        const afterText = this.normalizeText(file.after);
+        const beforeHash = this.hashText(beforeText);
+        const afterHash = this.hashText(afterText);
+        this.diffHashes.set(file.filePath, { before: beforeHash, after: afterHash });
+        this.currentDiffFilePath = file.filePath;
+        this.diffProvider.markNextChangeAutoFollow();
+        void this.diffProvider.forceOpenFromSnapshot(file.filePath, beforeText, afterText, file.diff);
+        const diffLen = file.diff ? file.diff.length : 0;
+        const basename = pathModule.basename(file.filePath);
+        OpenCodeClient.outputChannel.appendLine(`[DIFF_FORCE] file=${basename} idx=${index} before=${beforeText.length} after=${afterText.length} diff=${diffLen}`);
     }
 
     private pickActiveFile(files: FileSnapshot[]): { file: FileSnapshot; index: number } | undefined {
@@ -5717,6 +6057,30 @@ ${attachmentLines.join('\n')}`
         const before = input.slice(0, start).trimEnd();
         const after = input.slice(end + '\n---'.length).trimStart();
         return [before, after].filter(Boolean).join('\n\n');
+    }
+
+    private rememberDraft(localKey: string | undefined, draft: { text: string; attachments: string[]; model?: string; variant?: string; mode?: string }): void {
+        this.lastDraft = { ...draft };
+        if (localKey) {
+            this.draftByLocalKey.set(localKey, { ...draft });
+        }
+    }
+
+    private consumeDraft(localKey: string | undefined): { text: string; attachments: string[]; model?: string; variant?: string; mode?: string } | undefined {
+        if (localKey) {
+            const scoped = this.draftByLocalKey.get(localKey);
+            if (scoped) {
+                this.draftByLocalKey.delete(localKey);
+                return { ...scoped };
+            }
+        }
+        return this.lastDraft ? { ...this.lastDraft } : undefined;
+    }
+
+    private clearDraft(localKey: string | undefined): void {
+        if (localKey) {
+            this.draftByLocalKey.delete(localKey);
+        }
     }
 
     private normalizeUserTextForSnapshot(input: string): string {

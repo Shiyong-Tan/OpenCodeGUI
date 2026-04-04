@@ -33,6 +33,23 @@ export type SessionEntry = {
     timestamp: number;
 };
 
+export type ContinuationLifecycleState = 'idle' | 'watching' | 'retry-ready';
+
+export type PostFinalWatchEntry = {
+    filePath: string;
+    observedAt: number;
+    ownerMsgId: string;
+};
+
+export type ContinuationHandoffMetadata = {
+    chainId?: string;
+    currentOwnerMsgId: string;
+    predecessorOwnerMsgId: string | null;
+    continuationSequence: number;
+    lifecycleState: ContinuationLifecycleState;
+    postFinalWatchEntries: PostFinalWatchEntry[];
+};
+
 export type SessionMap = {
     schemaVersion: 1;
     sessionId: string;
@@ -45,6 +62,7 @@ export type SessionMap = {
     tmpToBaseCommit: Record<string, string>;
     msgToCommit: Record<string, string>;
     msgToBaseCommit: Record<string, string>;
+    continuation?: ContinuationHandoffMetadata;
 };
 
 export type FileChangeSpec =
