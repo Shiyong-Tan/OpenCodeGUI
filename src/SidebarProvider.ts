@@ -1518,7 +1518,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             return;
         }
         if (!headCommit || !baseCommit) {
-            this.postAddResponse(webview, 'No baseline available to show changes.');
             return;
         }
         const currentSet = await this.getInternalDiffFileSet(repo, baseCommit, headCommit);

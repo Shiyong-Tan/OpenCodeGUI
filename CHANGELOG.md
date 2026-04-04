@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.3.0
+
+- Added continuation takeover handoff flow so revived sessions can transfer ownership cleanly across the main client, sidebar, diff provider, and undo engine.
+- Added ownership-aware undo resolution to keep restore/undo behavior aligned with the active continuation owner and reduce cross-session ambiguity.
+- Expanded continuation lifecycle coverage with new regression tests for revive, takeover resolution, current-owner routing, post-final watch handling, and end-to-end handoff behavior.
+- Refined continuation revive invariants and stopped auto-sending the continuation stop control message, which reduces accidental extra control rounds.
+- Added a cancel-draft restore fallback so restore operations can recover more reliably when the primary path is unavailable.
+
 ## 1.1.20
 
 - Added full compaction UX/state flow in header usage: compact trigger, running state feedback, and post-compaction usage refresh.
