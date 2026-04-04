@@ -570,6 +570,38 @@ body {
     font-style: normal;
 }
 
+.message-background-subagent-indicator {
+    display: block;
+    position: absolute;
+    width: 10px;
+    height: 10px;
+    right: -16px;
+    bottom: 8px;
+    border-radius: 50%;
+    border: 1.5px solid color-mix(in srgb, var(--vscode-descriptionForeground) 28%, transparent);
+    border-top-color: var(--vscode-textLink-foreground);
+    animation:
+        background-subagent-spin 0.9s linear infinite,
+        background-subagent-fade 3s linear forwards;
+    opacity: 0.9;
+    pointer-events: none;
+}
+
+.message.bot.has-background-subagent-indicator {
+    overflow: visible;
+}
+
+@keyframes background-subagent-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+@keyframes background-subagent-fade {
+    0% { opacity: 0.9; }
+    85% { opacity: 0.9; }
+    100% { opacity: 0; }
+}
+
 .turn-divider {
     border-top: 1px solid var(--vscode-widget-border, rgba(127,127,127,0.2));
     margin: 8px 0 4px 0;
