@@ -337,6 +337,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
         this.postMessageIndexMap(webview);
         await this.emitDiffFileListWithRetry(sessionId, webview);
+        this.sendInFlightBySession.delete(sessionId);
+        webview.postMessage({ type: 'turnInFlight', sessionId, inFlight: false });
         this.client.finishTurn(sessionId);
         this.emitTurnFinalizePhase(webview, sessionId, 'finalize_done');
     }
@@ -1552,6 +1554,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         let mergedFiles = [...files];
         let mergedStatsByPath = { ...statsByPath };
         let changeListId = headCommit ? `system:changeList:${headCommit}` : `changes:${Date.now()}`;
+        const postFinalOverlay = this.client.getPostFinalWatchOverlay(sessionId);
         const currentOwnerMsgId = ownershipMap?.continuation?.currentOwnerMsgId;
         const predecessorOwnerMsgId = ownershipMap?.continuation?.predecessorOwnerMsgId;
         const currentOwnerIsContinuation = Array.isArray(ownershipMap?.entries)
@@ -1583,6 +1586,21 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     ...(record.statsByPath || {})
                 }), { ...mergedStatsByPath });
             }
+        }
+        const overlayApplies = Array.isArray(postFinalOverlay.files)
+            && postFinalOverlay.files.length > 0
+            && (
+                !postFinalOverlay.ownerMsgId
+                || postFinalOverlay.ownerMsgId === anchorMessageId
+                || postFinalOverlay.ownerMsgId === predecessorOwnerMsgId
+                || postFinalOverlay.ownerMsgId === currentOwnerMsgId
+            );
+        if (overlayApplies) {
+            mergedFiles = Array.from(new Set([...mergedFiles, ...postFinalOverlay.files]));
+            mergedStatsByPath = {
+                ...postFinalOverlay.statsByPath,
+                ...mergedStatsByPath
+            };
         }
         this.uiDebugChannel?.appendLine(`[EXT][COMMIT_BIND] created | sessionId=${sessionId} commit=${headCommit} anchor=${anchorMessageId || 'null'} isMsg=${anchorMessageId?.startsWith('msg_') || false} source=${matchedExisting?.anchorMessageId ? 'existing-record' : 'live-turn'}`);
         webview.postMessage({
@@ -4984,6 +5002,17 @@ ${attachmentLines.join('\n')}`
             return;
         }
 
+        if (event.type === 'backgroundActivityPulse' && event.sessionId) {
+            const liveWebview = this._view?.webview || webview;
+            liveWebview.postMessage({
+                type: 'backgroundActivityPulse',
+                sessionId: event.sessionId,
+                assistantMsgId: event.assistantMsgId,
+                ts: Date.now()
+            });
+            return;
+        }
+
         if (event.type === 'assistantMessageMeta' && (event.messageId || event.assistantMsgId)) {
             const liveWebview = this._view?.webview || webview;
             const sessionId = event.sessionId || this.currentSessionId;
@@ -6075,7 +6104,7 @@ ${attachmentLines.join('\n')}`
             }
             return undefined;
         }
-        return this.lastDraft ? { ...this.lastDraft } : undefined;
+        return undefined;
     }
 
     private clearDraft(localKey: string | undefined): void {

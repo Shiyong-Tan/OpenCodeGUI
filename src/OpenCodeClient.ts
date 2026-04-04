@@ -186,7 +186,7 @@ export type PermissionOverlayPayload = {
 };
 
 export type ChatEvent = {
-    type: 'text' | 'session' | 'raw' | 'permission' | 'diff' | 'message' | 'error' | 'tool' | 'toolPatch' | 'files' | 'assistantMessageMeta' | 'assistantPhase' | 'questionOverlay' | 'permissionRequest' | 'permissionReplied' | 'autoResumeStallWarn' | 'autoResumeStallClear' | 'autoResumeHardStop' | 'todoUpdate' | 'sessionUsage' | 'turnInFlight' | 'turnResolved';
+    type: 'text' | 'session' | 'raw' | 'permission' | 'diff' | 'message' | 'error' | 'tool' | 'toolPatch' | 'files' | 'assistantMessageMeta' | 'assistantPhase' | 'questionOverlay' | 'permissionRequest' | 'permissionReplied' | 'autoResumeStallWarn' | 'autoResumeStallClear' | 'autoResumeHardStop' | 'todoUpdate' | 'sessionUsage' | 'turnInFlight' | 'turnResolved' | 'backgroundActivityPulse';
     text?: string;
     sessionId?: string;
     files?: FileSnapshot[];
@@ -527,6 +527,7 @@ export class OpenCodeClient {
     private pendingPermissionIdsBySession = new Map<string, Set<string>>();
     private ignoredSummaryMessageIdsBySession = new Map<string, Set<string>>();
     private subagentToParentSessionMap = new Map<string, string>();
+    private stablePulseRootSessionBySubagent = new Map<string, string>();
     private lateDiffGraceBySession = new Map<string, { expiresAt: number; timer?: ReturnType<typeof setTimeout> }>();
     private changeListEmittedBySession = new Map<string, boolean>();
     private lastTurnCommitBaseBySession = new Map<string, string>();
@@ -644,6 +645,7 @@ export class OpenCodeClient {
         this.pendingQuestionCallIdsBySession.clear();
         this.pendingPermissionIdsBySession.clear();
         this.ignoredSummaryMessageIdsBySession.clear();
+        this.stablePulseRootSessionBySubagent.clear();
         for (const entry of this.lateDiffGraceBySession.values()) {
             if (entry.timer) {
                 clearTimeout(entry.timer);
@@ -1676,6 +1678,34 @@ export class OpenCodeClient {
         return Boolean(postFinal?.changes?.length);
     }
 
+    public getPostFinalWatchOverlay(sessionId: string): { ownerMsgId?: string; files: string[]; statsByPath: Record<string, { additions: number | null; deletions: number | null }> } {
+        if (!sessionId) {
+            return { files: [], statsByPath: {} };
+        }
+        const postFinal = this.postFinalWatchStateBySession.get(sessionId);
+        if (!postFinal?.changes?.length) {
+            return { ownerMsgId: postFinal?.ownerMsgId, files: [], statsByPath: {} };
+        }
+        const rawPaths: string[] = [];
+        for (const change of this.mergeChangeSpecs(postFinal.changes)) {
+            if (change.type === 'rename') {
+                rawPaths.push(change.oldPath, change.newPath);
+            } else if ('path' in change) {
+                rawPaths.push(change.path);
+            }
+        }
+        const files = normalizeTouchedFiles(this.workspaceRoot, rawPaths);
+        const statsByPath = files.reduce<Record<string, { additions: number | null; deletions: number | null }>>((acc, filePath) => {
+            acc[filePath] = acc[filePath] || { additions: null, deletions: null };
+            return acc;
+        }, {});
+        return {
+            ownerMsgId: postFinal.ownerMsgId,
+            files,
+            statsByPath
+        };
+    }
+
     public isInPostFinalWatchWindow(sessionId: string): boolean {
         if (!sessionId) return false;
         if (this.turnStateBySession.has(sessionId)) return false;
@@ -1801,6 +1831,9 @@ export class OpenCodeClient {
     public registerSubagentSession(subagentSessionId: string, parentSessionId: string): void {
         if (!subagentSessionId || !parentSessionId) return;
         this.subagentToParentSessionMap.set(subagentSessionId, parentSessionId);
+        if (!this.stablePulseRootSessionBySubagent.has(subagentSessionId)) {
+            this.stablePulseRootSessionBySubagent.set(subagentSessionId, parentSessionId);
+        }
         this.logUiDebug(`EXT: session.group.register | subagent=${subagentSessionId} | parent=${parentSessionId}`);
     }
 
@@ -2068,6 +2101,22 @@ export class OpenCodeClient {
         const assistantMsgId = this.currentTurnAssistantMsgIdBySession.get(sessionId);
         if (!assistantMsgId) return true;
         return !this.hasSeenFinalForAssistant(sessionId, assistantMsgId);
+    }
+
+    private hasAcceptedFinalAssistantForSession(sessionId: string | undefined): boolean {
+        if (!sessionId) return false;
+        const candidates = [
+            this.turnFinalMsgIdBySession.get(sessionId),
+            this.finalizingMsgIdBySession.get(sessionId),
+            this.currentTurnAssistantMsgIdBySession.get(sessionId),
+            this.turnStateBySession.get(sessionId)?.assistantMsgId
+        ].filter((id): id is string => typeof id === 'string' && id.startsWith('msg_'));
+        for (const messageId of candidates) {
+            if (this.assistantPhaseByMessageId.get(messageId) === 'assistant_final_accepted') {
+                return true;
+            }
+        }
+        return false;
     }
 
     private scheduleSilenceResync(sessionId: string): void {
@@ -5720,12 +5769,35 @@ export class OpenCodeClient {
         return '';
     }
 
+    private resolveBackgroundPulseTarget(sessionId: string): { targetSessionId: string; anchorAssistantId: string | undefined } {
+        const targetSessionId = this.stablePulseRootSessionBySubagent.get(sessionId)
+            || this.subagentToParentSessionMap.get(sessionId)
+            || sessionId;
+        const anchorAssistantId = this.postFinalWatchStateBySession.get(targetSessionId)?.ownerMsgId
+            || this.turnFinalMsgIdBySession.get(targetSessionId)
+            || this.finalizingMsgIdBySession.get(targetSessionId)
+            || this.currentTurnAssistantMsgIdBySession.get(targetSessionId)
+            || this.turnStateBySession.get(targetSessionId)?.assistantMsgId
+            || undefined;
+        return { targetSessionId, anchorAssistantId };
+    }
+
     private mapServerEventToChatEvents(type: string, props: any, source: EventSource = 'sse'): ChatEvent[] {
         const events: ChatEvent[] = [];
         const normalized = this.normalizeEvent(type, props, source);
         const sessionId = normalized.sessionId;
         if (sessionId) {
             this.logUiDebug(`EXT: event.normalized | type=${normalized.type} | lane=${normalized.lane} | sessionId=${normalized.sessionId} | messageId=${normalized.messageId || 'null'} | parentId=${normalized.parentId || 'null'} | finish=${normalized.finish || 'null'} | partType=${normalized.partType || 'null'} | source=${normalized.source}`);
+        }
+        if (source === 'sse' && sessionId) {
+            const { targetSessionId, anchorAssistantId } = this.resolveBackgroundPulseTarget(sessionId);
+            events.push({
+                type: 'backgroundActivityPulse',
+                sessionId: targetSessionId,
+                assistantMsgId: anchorAssistantId,
+                source,
+                lane: normalized.lane
+            });
         }
         // Background completion signal must be intercepted BEFORE the turnFinished guard,
         // because it arrives during the post-final watch window (after finishTurn).

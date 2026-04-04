@@ -666,7 +666,12 @@ function createSessionState() {
         undoAvailable: true,
         turnFullyFinalized: true,
         hiddenControlUserIds: new Set(),
+        earlyFinalAssistantId: null,
         finalAssistantLock: null,
+        backgroundSubagentIndicatorVisible: false,
+        backgroundSubagentIndicatorTimer: null,
+        backgroundSubagentIndicatorUntil: 0,
+        backgroundSubagentIndicatorAnchorId: null,
         snapshotPendingEpoch: 0,
         snapshotEmittedEpoch: 0,
         snapshotFinalizeReady: false
@@ -732,6 +737,109 @@ function getSessionState(sessionId, create = false) {
     return sessionsById.get(sessionId) || null;
 }
 
+function sessionHasActiveBackgroundSubagents(session) {
+    if (!session) {
+        return false;
+    }
+    return typeof session.backgroundSubagentIndicatorUntil === 'number'
+        && session.backgroundSubagentIndicatorUntil > Date.now();
+}
+
+function sessionHasVisibleThinkingAssistant(session) {
+    if (!session?.messagesById) {
+        return false;
+    }
+    for (const message of session.messagesById.values()) {
+        if (message?.role === 'assistant' && message?.meta?.isThinking === true) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function requestBackgroundPulseRender() {
+    if (window.__oc && typeof window.__oc.renderFromState === 'function') {
+        window.__oc.renderFromState('background-pulse');
+        return;
+    }
+    requestAnimationFrame(() => {
+        if (window.__oc && typeof window.__oc.renderFromState === 'function') {
+            window.__oc.renderFromState('background-pulse-raf');
+        }
+    });
+}
+
+function shouldShowBackgroundSubagentIndicator(session, message) {
+    if (!session || !message || message.role !== 'assistant') {
+        return false;
+    }
+    if (message.meta?.isThinking === true) {
+        return false;
+    }
+    if (!sessionHasActiveBackgroundSubagents(session)) {
+        return false;
+    }
+    if (sessionHasVisibleThinkingAssistant(session)) {
+        return false;
+    }
+    const anchoredAssistantId = typeof session.backgroundSubagentIndicatorAnchorId === 'string'
+        ? session.backgroundSubagentIndicatorAnchorId
+        : null;
+    const finalAssistantId = typeof session.finalAssistantLock?.assistantMsgId === 'string'
+        ? session.finalAssistantLock.assistantMsgId
+        : null;
+    const earlyFinalAssistantId = typeof session.earlyFinalAssistantId === 'string'
+        ? session.earlyFinalAssistantId
+        : null;
+    const fallbackAssistantId = finalAssistantId || earlyFinalAssistantId || null;
+    const targetAssistantId = anchoredAssistantId || fallbackAssistantId;
+    const anchorMatches = targetAssistantId ? targetAssistantId === message.id : false;
+    return anchorMatches;
+}
+
+function applyBackgroundSubagentIndicator(session) {
+    const chatContainer = document.getElementById('chat');
+    if (!chatContainer) return;
+    for (const existing of chatContainer.querySelectorAll('.message-background-subagent-indicator')) {
+        existing.remove();
+    }
+    for (const bubble of chatContainer.querySelectorAll('.message.bot.has-background-subagent-indicator')) {
+        bubble.classList.remove('has-background-subagent-indicator');
+    }
+    if (!sessionHasActiveBackgroundSubagents(session)) {
+        return;
+    }
+    if (sessionHasVisibleThinkingAssistant(session)) {
+        return;
+    }
+    const anchoredAssistantId = typeof session?.backgroundSubagentIndicatorAnchorId === 'string'
+        ? session.backgroundSubagentIndicatorAnchorId
+        : null;
+    const finalAssistantId = typeof session?.finalAssistantLock?.assistantMsgId === 'string'
+        ? session.finalAssistantLock.assistantMsgId
+        : null;
+    const earlyFinalAssistantId = typeof session?.earlyFinalAssistantId === 'string'
+        ? session.earlyFinalAssistantId
+        : null;
+    const fallbackAssistantId = finalAssistantId || earlyFinalAssistantId || null;
+    let targetBubble = null;
+    const targetId = anchoredAssistantId || fallbackAssistantId;
+    if (targetId) {
+        targetBubble = chatContainer.querySelector(`.message.bot[data-message-id="${targetId}"]`);
+    }
+    if (!targetBubble) {
+        return;
+    }
+    if (!targetBubble.querySelector('.message-background-subagent-indicator')) {
+        targetBubble.classList.add('has-background-subagent-indicator');
+        const bgIndicator = document.createElement('span');
+        bgIndicator.className = 'message-background-subagent-indicator';
+        bgIndicator.title = 'Background subagent is still running';
+        bgIndicator.setAttribute('aria-label', 'Background subagent is still running');
+        targetBubble.appendChild(bgIndicator);
+    }
+}
+
 function removeMessageFromSession(session, messageId) {
     if (!session || !messageId) return;
     session.messagesById.delete(messageId);
@@ -750,9 +858,49 @@ function removeMessageFromSession(session, messageId) {
     }
 }
 
+function armBackgroundSubagentIndicator(sessionId, anchorAssistantId) {
+    const session = getSessionState(sessionId);
+    if (!session) return;
+    if (session.backgroundSubagentIndicatorVisible) {
+        return;
+    }
+    const now = Date.now();
+    session.backgroundSubagentIndicatorVisible = true;
+    session.backgroundSubagentIndicatorUntil = now + 3000;
+    session.backgroundSubagentIndicatorAnchorId =
+        (typeof anchorAssistantId === 'string' && anchorAssistantId)
+        ||
+        (typeof session.finalAssistantLock?.assistantMsgId === 'string' && session.finalAssistantLock.assistantMsgId)
+        ||
+        (typeof session.earlyFinalAssistantId === 'string' && session.earlyFinalAssistantId)
+        || null;
+    session.backgroundSubagentIndicatorTimer = setTimeout(() => {
+        const latest = getSessionState(sessionId);
+        if (!latest) return;
+        latest.backgroundSubagentIndicatorVisible = false;
+        latest.backgroundSubagentIndicatorUntil = 0;
+        latest.backgroundSubagentIndicatorTimer = null;
+        latest.backgroundSubagentIndicatorAnchorId = null;
+        requestBackgroundPulseRender();
+    }, 3000);
+    requestBackgroundPulseRender();
+}
+
+function clearBackgroundSubagentIndicator(session) {
+    if (!session) return;
+    session.backgroundSubagentIndicatorVisible = false;
+    session.backgroundSubagentIndicatorUntil = 0;
+    session.backgroundSubagentIndicatorAnchorId = null;
+    if (session.backgroundSubagentIndicatorTimer) {
+        clearTimeout(session.backgroundSubagentIndicatorTimer);
+        session.backgroundSubagentIndicatorTimer = null;
+    }
+}
+
     function cancelLocalTurn(sessionId) {
         const session = getSessionState(sessionId);
         if (!session) return;
+    clearBackgroundSubagentIndicator(session);
     const userId = session.lastTurnUserId;
     const assistantId = session.lastTurnAssistantId;
     if (userId) {
@@ -2930,6 +3078,7 @@ document.addEventListener('DOMContentLoaded', () => {
         chatContainer.innerHTML = '';
         const div = document.createElement('div');
         div.className = 'message bot';
+        const session = getSessionState(activeSessionId);
         const content = document.createElement('div');
         content.className = 'message-content';
         content.textContent = 'Hello! I am OpenCode. How can I help you today?';
@@ -3339,6 +3488,15 @@ function renderMessageElement(message, renderedSet) {
             content.textContent = sanitized;
         }
         div.appendChild(content);
+
+        if (shouldShowBackgroundSubagentIndicator(session, message)) {
+            div.classList.add('has-background-subagent-indicator');
+            const bgIndicator = document.createElement('span');
+            bgIndicator.className = 'message-background-subagent-indicator';
+            bgIndicator.title = 'Background subagent is still running';
+            bgIndicator.setAttribute('aria-label', 'Background subagent is still running');
+            div.appendChild(bgIndicator);
+        }
 
         if (message.meta?.isThinking && message.meta?.statusText) {
             // statusText rendered only during streaming.
@@ -3750,8 +3908,26 @@ function shouldHideDcpUiMessage(message) {
         if (segment.isExpanded) {
             const body = document.createElement('div');
             body.className = 'reverted-segment-body';
+            const memberIdSet = segment.memberIds instanceof Set
+                ? segment.memberIds
+                : new Set(
+                    Array.isArray(segment.memberMsgIds)
+                        ? segment.memberMsgIds.filter((id) => typeof id === 'string' && id.startsWith('msg_'))
+                        : []
+                );
+            const orderedMemberIds = [];
+            const seenMemberIds = new Set();
             for (const id of session.timeline) {
-                if (!segment.memberIds.has(id)) continue;
+                if (!memberIdSet.has(id) || seenMemberIds.has(id)) continue;
+                orderedMemberIds.push(id);
+                seenMemberIds.add(id);
+            }
+            for (const id of memberIdSet) {
+                if (seenMemberIds.has(id)) continue;
+                orderedMemberIds.push(id);
+                seenMemberIds.add(id);
+            }
+            for (const id of orderedMemberIds) {
                 const msg = session.messagesById.get(id);
                 if (!msg) continue;
                 const entry = document.createElement('div');
@@ -3961,6 +4137,8 @@ function shouldHideDcpUiMessage(message) {
 
         renderQuestionCardInTimeline();
 
+        applyBackgroundSubagentIndicator(session);
+
         enhanceCodeBlocksWithCopyButtons(chatContainer);
 
         const tables = chatContainer.querySelectorAll('table');
@@ -3992,6 +4170,8 @@ function shouldHideDcpUiMessage(message) {
         const rootsLast10 = formatList(renderKeys.slice(-10));
         const domFirst10 = formatList(domKeys.slice(0, 10));
         const domLast10 = formatList(domKeys.slice(-10));
+
+        applyBackgroundSubagentIndicator(session);
 
         // vscode.postMessage({
         //     type: 'ui-debug',
@@ -4802,6 +4982,7 @@ function applyPromptToSession(sessionId, payload) {
 
     session.currentTurnAssistantMsgId = null;
     session.currentTurnAssistantKey = null;
+    session.earlyFinalAssistantId = null;
     session.finalAssistantLock = null;
     session.pendingAssistantUpgrade = null;
     session.awaitingFinalMapBind = false;
@@ -5130,6 +5311,7 @@ function handleChatDone(sessionId, message) {
     }
     if (resolvedFinal && typeof resolvedFinal === 'string') {
         session.streamMode = null;
+        session.earlyFinalAssistantId = resolvedFinal;
         session.finalAssistantLock = {
             assistantMsgId: resolvedFinal,
             ts: Date.now()
@@ -5579,6 +5761,9 @@ window.addEventListener('message', (event) => {
               const { active, agents, sessionId } = message;
               const sess = getSessionState(sessionId || activeSessionId);
               const incomingAgents = Array.isArray(agents) ? agents : [];
+              const runningCount = typeof message.runningCount === 'number' ? message.runningCount : incomingAgents.filter((a) => a?.state === 'running').length;
+              const finalizingCount = typeof message.finalizingCount === 'number' ? message.finalizingCount : incomingAgents.filter((a) => a?.state === 'finalizing').length;
+              const doneJustNowCount = typeof message.doneJustNowCount === 'number' ? message.doneJustNowCount : incomingAgents.filter((a) => a?.state === 'done').length;
               if (sess) {
                 const currentThinking = sess.thinkingId ? sess.messagesById.get(sess.thinkingId) : null;
                 const previousAgents = Array.isArray(currentThinking?.meta?.subagents)
@@ -5609,9 +5794,6 @@ window.addEventListener('message', (event) => {
 
               const indicator = document.getElementById('subagent-indicator');
               if (indicator) {
-                const runningCount = typeof message.runningCount === 'number' ? message.runningCount : incomingAgents.filter((a) => a?.state === 'running').length;
-                const finalizingCount = typeof message.finalizingCount === 'number' ? message.finalizingCount : incomingAgents.filter((a) => a?.state === 'finalizing').length;
-                const doneJustNowCount = typeof message.doneJustNowCount === 'number' ? message.doneJustNowCount : incomingAgents.filter((a) => a?.state === 'done').length;
                 const hasIndicator = runningCount > 0 || finalizingCount > 0 || doneJustNowCount > 0;
                 indicator.style.display = hasIndicator ? '' : 'none';
                 if (runningCount > 0 || finalizingCount > 0) {
@@ -5621,6 +5803,13 @@ window.addEventListener('message', (event) => {
                 }
               }
               scheduleRenderFromState();
+              break;
+            }
+            case 'backgroundActivityPulse': {
+              const sessionId = getEventSessionId(message, 'backgroundActivityPulse');
+              if (!sessionId) break;
+              const anchorAssistantId = typeof message.assistantMsgId === 'string' ? message.assistantMsgId : null;
+              armBackgroundSubagentIndicator(sessionId, anchorAssistantId);
               break;
             }
             case 'subagentStateDelta': {
@@ -5812,6 +6001,7 @@ window.addEventListener('message', (event) => {
                     session.awaitingFinalMapBind = false;
                     session.backendTurnInFlight = false;
                     session.turnFullyFinalized = true;
+                    session.earlyFinalAssistantId = null;
                     session.finalAssistantLock = null;
                     if (session.hiddenControlUserIds instanceof Set) {
                         session.hiddenControlUserIds.clear();
@@ -6427,6 +6617,12 @@ window.addEventListener('message', (event) => {
                         lane: message.lane || 'unknown',
                         ts: typeof message.ts === 'number' ? message.ts : Date.now()
                     };
+                    if (message.phase === 'assistant_final_accepted') {
+                        session.earlyFinalAssistantId = msgId;
+                        if (sessionHasActiveBackgroundSubagents(session)) {
+                            requestBackgroundPulseRender();
+                        }
+                    }
                 }
                 break;
             }
