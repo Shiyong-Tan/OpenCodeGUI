@@ -4655,6 +4655,15 @@ ${attachmentLines.join('\n')}`
             return;
         }
         if (event.type === 'session' && event.sessionId) {
+            if (!this.isUserOwnedSession(event.sessionId) && !this.currentSessionId) {
+                this.currentSessionId = event.sessionId;
+                this.trackUserOwnedSession(this.currentSessionId);
+                this.client.setSessionId(this.currentSessionId);
+                const liveWebview = this._view?.webview || webview;
+                liveWebview.postMessage({ type: 'sessionId', value: event.sessionId, sessionId: event.sessionId });
+                this.uiDebugChannel.appendLine(`[SidebarProvider] Promoted first session to currentSessionId: ${event.sessionId}`);
+                return;
+            }
             if (!this.isUserOwnedSession(event.sessionId) && this.sendInFlightBySession.has(this.currentSessionId!)) {
                 this.activeSubagentSessionIds.add(event.sessionId);
                 this.client.registerSubagentSession(event.sessionId, this.currentSessionId || '');
