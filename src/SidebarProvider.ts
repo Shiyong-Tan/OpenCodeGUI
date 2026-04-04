@@ -6073,6 +6073,7 @@ ${attachmentLines.join('\n')}`
                 this.draftByLocalKey.delete(localKey);
                 return { ...scoped };
             }
+            return undefined;
         }
         return this.lastDraft ? { ...this.lastDraft } : undefined;
     }
