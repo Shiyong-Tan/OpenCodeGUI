@@ -2151,49 +2151,49 @@ ${attachmentLines.join('\n')}`
                             }
                         }
                     } catch (error) {
+                        const sessionId = activeSendSessionId ?? this.currentSessionId;
                         this.uiDebugChannel.appendLine(`EXT: send.abort | reqId=${reqId} | reason=${String(error)}`);
                         OpenCodeClient.outputChannel.appendLine(`[BRIDGE] Error: ${error}`);
                         vscode.window.showErrorMessage(`OpenCode Error: ${error}`);
-                        this.postAddResponse(activeWebview, `Error: ${error}`);
-                        const doneAssistantMsgId = this.currentSessionId
-                            ? this.client.getTurnAssistantMsgId(this.currentSessionId)
+                        activeWebview.postMessage({ type: 'addResponse', value: `Error: ${error}`, sessionId, skipSnapshot: true });
+                        const doneAssistantMsgId = sessionId
+                            ? this.client.getTurnAssistantMsgId(sessionId)
                             : undefined;
                         activeWebview.postMessage({
                             type: 'chatDone',
-                            sessionId: this.currentSessionId,
+                            sessionId,
                             assistantMsgId: doneAssistantMsgId,
-                            lastAssistantMsgId: doneAssistantMsgId,
-                            skipSnapshot: true
+                            lastAssistantMsgId: doneAssistantMsgId
                         });
-                        this.emitTurnFinalizePhase(activeWebview, this.currentSessionId, 'stream_done');
-                        if (this.currentSessionId) {
-                            await this.client.commitPendingTurnChanges(this.currentSessionId);
-                            this.emitTurnFinalizePhase(activeWebview, this.currentSessionId, 'commit_done');
+                        this.emitTurnFinalizePhase(activeWebview, sessionId, 'stream_done');
+                        if (sessionId) {
+                            await this.client.commitPendingTurnChanges(sessionId);
+                            this.emitTurnFinalizePhase(activeWebview, sessionId, 'commit_done');
                         }
-                        await this.resolvePendingUserUpgrade(this.currentSessionId, activeWebview);
-                        this.emitTurnFinalizePhase(activeWebview, this.currentSessionId, 'upgrade_done');
-                        if (this.currentSessionId) {
-                            this.client.finishTurn(this.currentSessionId);
+                        await this.resolvePendingUserUpgrade(sessionId, activeWebview);
+                        this.emitTurnFinalizePhase(activeWebview, sessionId, 'upgrade_done');
+                        const pendingLocalKey = sessionId ? this.pendingLocalKeyBySession.get(sessionId) : undefined;
+                        if (sessionId && sessionId === this.currentSessionId && pendingLocalKey && this.pendingClientMessageId === pendingLocalKey) {
+                            this.clearDraft(this.pendingClientMessageId);
+                            await this.handleAbortedMessage(this.pendingClientMessageId, activeWebview);
+                            this.pendingClientMessageId = undefined;
+                        }
+                        if (sessionId) {
+                            if (pendingLocalKey) {
+                                this.pendingAssistantTmpKeyByLocalKey.delete(pendingLocalKey);
+                                this.rawUserTextByLocalKey.delete(pendingLocalKey);
+                            }
+                            this.assistantTextBufferBySession.delete(sessionId);
+                            this.pendingAssistantTmpKeyBySession.delete(sessionId);
+                        }
+                        if (sessionId) {
+                            this.client.finishTurn(sessionId);
                         }
                         // Mark all active subagents as failed before clearing (error path)
                         this.markAllSubagentsTerminal('failed', 'main-error-finalize');
                         this.emitSubagentStatus();
                         this.clearSubagentSessions();
-                        this.emitTurnFinalizePhase(activeWebview, this.currentSessionId, 'finalize_done');
-                        if (this.pendingClientMessageId) {
-                            this.clearDraft(this.pendingClientMessageId);
-                            await this.handleAbortedMessage(this.pendingClientMessageId, activeWebview);
-                            this.pendingClientMessageId = undefined;
-                        }
-                        if (this.currentSessionId) {
-                            this.assistantTextBufferBySession.delete(this.currentSessionId);
-                            this.pendingAssistantTmpKeyBySession.delete(this.currentSessionId);
-                            const pendingLocalKey = this.pendingLocalKeyBySession.get(this.currentSessionId);
-                            if (pendingLocalKey) {
-                                this.pendingAssistantTmpKeyByLocalKey.delete(pendingLocalKey);
-                                this.rawUserTextByLocalKey.delete(pendingLocalKey);
-                            }
-                        }
+                        this.emitTurnFinalizePhase(activeWebview, sessionId, 'finalize_done');
                         await this.postModelQuota(activeWebview, 'chat-error');
                     } finally {
                         if (activeSendSessionId) {
@@ -5091,33 +5091,49 @@ ${attachmentLines.join('\n')}`
 
         if (event.type === 'error' && event.text) {
             const liveWebview = this._view?.webview || webview;
-            liveWebview.postMessage({ type: 'addResponse', value: `Error: ${event.text}`, sessionId: this.currentSessionId });
+            const sessionId = event.sessionId || this.currentSessionId;
+            liveWebview.postMessage({ type: 'addResponse', value: `Error: ${event.text}`, sessionId, skipSnapshot: true });
             // Cleanup before chatDone
-            if (this.currentSessionId) {
-                await this.client.commitPendingTurnChanges(this.currentSessionId);
+            if (sessionId) {
+                await this.client.commitPendingTurnChanges(sessionId);
             }
-            if (this.currentSessionId) {
-                this.client.finishTurn(this.currentSessionId);
-            }
+            await this.resolvePendingUserUpgrade(sessionId, liveWebview);
             // Mark all active subagents as done before clearing (error event path)
             this.markAllSubagentsTerminal('failed', 'event-error-finalize');
             this.emitSubagentStatus();
             this.clearSubagentSessions();
 
-            const doneAssistantMsgId = this.currentSessionId
-                ? this.client.getTurnAssistantMsgId(this.currentSessionId)
+            const doneAssistantMsgId = sessionId
+                ? this.client.getTurnAssistantMsgId(sessionId)
                 : undefined;
             liveWebview.postMessage({
                 type: 'chatDone',
-                sessionId: this.currentSessionId,
+                sessionId,
                 assistantMsgId: doneAssistantMsgId,
-                lastAssistantMsgId: doneAssistantMsgId,
-                skipSnapshot: true
+                lastAssistantMsgId: doneAssistantMsgId
             });
-            this.emitTurnFinalizePhase(liveWebview, this.currentSessionId, 'stream_done');
-            this.emitTurnFinalizePhase(liveWebview, this.currentSessionId, 'commit_done');
-            this.emitTurnFinalizePhase(liveWebview, this.currentSessionId, 'upgrade_done');
-            this.emitTurnFinalizePhase(liveWebview, this.currentSessionId, 'finalize_done');
+            this.emitTurnFinalizePhase(liveWebview, sessionId, 'stream_done');
+            this.emitTurnFinalizePhase(liveWebview, sessionId, 'commit_done');
+            this.emitTurnFinalizePhase(liveWebview, sessionId, 'upgrade_done');
+            const pendingLocalKey = sessionId ? this.pendingLocalKeyBySession.get(sessionId) : undefined;
+            if (sessionId && sessionId === this.currentSessionId && pendingLocalKey && this.pendingClientMessageId === pendingLocalKey) {
+                this.clearDraft(this.pendingClientMessageId);
+                await this.handleAbortedMessage(this.pendingClientMessageId, liveWebview);
+                this.pendingClientMessageId = undefined;
+            }
+            if (sessionId) {
+                if (pendingLocalKey) {
+                    this.pendingAssistantTmpKeyByLocalKey.delete(pendingLocalKey);
+                    this.rawUserTextByLocalKey.delete(pendingLocalKey);
+                }
+                this.assistantTextBufferBySession.delete(sessionId);
+                this.pendingAssistantTmpKeyBySession.delete(sessionId);
+                this.pendingLocalKeyBySession.delete(sessionId);
+                this.sendInFlightBySession.delete(sessionId);
+                liveWebview.postMessage({ type: 'turnInFlight', sessionId, inFlight: false });
+                this.client.finishTurn(sessionId);
+            }
+            this.emitTurnFinalizePhase(liveWebview, sessionId, 'finalize_done');
             return;
         }
 
