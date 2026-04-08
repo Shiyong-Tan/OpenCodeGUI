@@ -81,6 +81,11 @@ type SavedAttachment = {
     relPath: string;
 };
 
+type LocalQuestionRequest = {
+    sessionId: string;
+    resolve: (result: { selectedId?: string; selectedLabel?: string }) => void;
+};
+
 /**
  * Simplified SegmentState interface (V2)
  * Only tracks essential data, no state/anchor/resolved complexity
@@ -168,6 +173,51 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     private isTerminalSubagentState(state: SubagentLifecycleState | undefined): boolean {
         return state === 'done' || state === 'failed' || state === 'cancelled' || state === 'dismissed';
+    }
+
+    private async promptCancelRollbackDecision(webview: vscode.Webview, sessionId: string): Promise<boolean> {
+        if (!sessionId) return true;
+        if (!this.client.hasPendingTurnChanges(sessionId)) return true;
+
+        const callId = `local-cancel-rollback-${crypto.randomUUID()}`;
+        const prompt =
+            'Local file changes were detected in the current turn. Do you want to roll them back? ' +
+            'If you choose to roll back, changes made by both the agent and the user during this turn may be reverted. ' +
+            'If you choose to keep them, no rollback will be performed and all changes will remain in place.';
+
+        return await new Promise<boolean>((resolve) => {
+            this.pendingLocalQuestionRequests.set(callId, {
+                sessionId,
+                resolve: (result) => {
+                    const choice = (result.selectedId || result.selectedLabel || '').trim().toLowerCase();
+                    resolve(choice === 'rollback');
+                }
+            });
+
+            webview.postMessage({
+                type: 'questionOverlay',
+                sessionId,
+                callId,
+                title: 'Local Changes Detected',
+                prompt,
+                options: [
+                    { id: 'rollback', label: 'Roll Back Changes' },
+                    { id: 'keep', label: 'Keep Changes' }
+                ],
+                questions: [
+                    {
+                        title: 'Local Changes Detected',
+                        prompt,
+                        options: [
+                            { id: 'rollback', label: 'Roll Back Changes' },
+                            { id: 'keep', label: 'Keep Changes' }
+                        ],
+                        multiple: false
+                    }
+                ],
+                localOnly: true
+            });
+        });
     }
 
     private syncClientRevertedSegmentFromUndoSegments(sessionId: string): void {
@@ -368,6 +418,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private rawUserTextByLocalKey = new Map<string, string>();
     private rawUserTextByMsgId = new Map<string, string>();
     private pendingAssistantMessageIdBySession = new Map<string, string>();
+    private pendingLocalQuestionRequests = new Map<string, LocalQuestionRequest>();
     private sendInFlightBySession = new Set<string>();
     private gitUndoEnabled = false;
     private gitUndoReason?: string;
@@ -3056,16 +3107,20 @@ ${attachmentLines.join('\n')}`
                     break;
                 }
                 case "cancel": {
+                    const cancelSessionId = typeof data.sessionId === 'string' ? data.sessionId : this.currentSessionId;
+                    const shouldRollback = cancelSessionId
+                        ? await this.promptCancelRollbackDecision(activeWebview, cancelSessionId)
+                        : true;
                     const restoreLocalKey =
                         this.pendingClientMessageId
-                        || ((typeof data.sessionId === 'string' ? data.sessionId : this.currentSessionId)
-                            ? this.pendingLocalKeyBySession.get((typeof data.sessionId === 'string' ? data.sessionId : this.currentSessionId)!)
+                        || (cancelSessionId
+                            ? this.pendingLocalKeyBySession.get(cancelSessionId)
                             : undefined);
-                    if (this.currentSessionId) {
-                        await this.client.revertPendingTurnChangesToCurrentBase(this.currentSessionId);
+                    if (cancelSessionId && shouldRollback) {
+                        await this.client.revertPendingTurnChangesToCurrentBase(cancelSessionId);
                         const canceledAt = Date.now();
-                        const { userMsgId, assistantMsgId } = this.client.getPendingTurnMessageIds(this.currentSessionId);
-                        await this.upsertCanceledTurn(this.currentSessionId, {
+                        const { userMsgId, assistantMsgId } = this.client.getPendingTurnMessageIds(cancelSessionId);
+                        await this.upsertCanceledTurn(cancelSessionId, {
                             opId: typeof data.opId === 'string' ? data.opId : undefined,
                             localKey: this.pendingClientMessageId,
                             userMsgId,
@@ -3074,7 +3129,6 @@ ${attachmentLines.join('\n')}`
                         });
                     }
                     this.client.cancel();
-                    const cancelSessionId = typeof data.sessionId === 'string' ? data.sessionId : this.currentSessionId;
                     const cancelOpId = typeof data.opId === 'string' ? data.opId : undefined;
                     if (cancelSessionId) {
                         const pendingLocalKey = this.pendingLocalKeyBySession.get(cancelSessionId);
@@ -3305,6 +3359,21 @@ ${attachmentLines.join('\n')}`
                             `EXT: toolResult.fail | sessionId=${sessionId} | callId=${callId} | err=${String(error)}`
                         );
                     }
+                    break;
+                }
+                case "localQuestionResult": {
+                    const callId = typeof data.callId === 'string' ? data.callId : '';
+                    const pending = callId ? this.pendingLocalQuestionRequests.get(callId) : undefined;
+                    if (!pending) {
+                        this.uiDebugChannel.appendLine(`EXT: localQuestionResult.skip | callId=${callId || 'null'} | reason=missing-pending`);
+                        break;
+                    }
+                    this.pendingLocalQuestionRequests.delete(callId);
+                    pending.resolve({
+                        selectedId: typeof data?.result?.selectedId === 'string' ? data.result.selectedId : undefined,
+                        selectedLabel: typeof data?.result?.selectedLabel === 'string' ? data.result.selectedLabel : undefined
+                    });
+                    this.uiDebugChannel.appendLine(`EXT: localQuestionResult.ok | sessionId=${pending.sessionId} | callId=${callId}`);
                     break;
                 }
                 case "permissionResult": {

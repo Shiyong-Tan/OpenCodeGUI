@@ -8138,18 +8138,28 @@ function commitCurrentQuestionAnswers(answersForCurrent) {
     if (!callId || sentQuestionCallIds.has(callId)) return;
     sentQuestionCallIds.add(callId);
     const allAnswers = nextAnswers.map((entry) => Array.isArray(entry) ? entry : []);
-    vscode.postMessage({
-        type: 'toolResult',
-        sessionId,
-        callId,
-        requestId: requestId || undefined,
-        toolName: 'question',
-        result: {
-            selectedId: allAnswers[0]?.[0] || undefined,
-            selectedLabel: allAnswers[0]?.[0] || undefined,
-            answers: allAnswers
-        }
-    });
+    const result = {
+        selectedId: allAnswers[0]?.[0] || undefined,
+        selectedLabel: allAnswers[0]?.[0] || undefined,
+        answers: allAnswers
+    };
+    if (questionOverlayState.localOnly) {
+        vscode.postMessage({
+            type: 'localQuestionResult',
+            sessionId,
+            callId,
+            result
+        });
+    } else {
+        vscode.postMessage({
+            type: 'toolResult',
+            sessionId,
+            callId,
+            requestId: requestId || undefined,
+            toolName: 'question',
+            result
+        });
+    }
     clearQuestionOverlay('selected', true);
 }
 
@@ -8406,6 +8416,7 @@ function clearQuestionOverlay(reason, advanceQueue = false) {
                 sessionId: nextPayload.sessionId,
                 callId: nextPayload.callId,
                 requestId: nextPayload.requestId || undefined,
+                localOnly: nextPayload.localOnly === true,
                 questions: nextPayload.questions,
                 stepIndex: 0,
                 answers: [],
@@ -8505,6 +8516,7 @@ function showQuestionOverlay(payload) {
         sessionId,
         callId,
         requestId: requestId || undefined,
+        localOnly: payload.localOnly === true,
         questions: questionItems,
         stepIndex: 0,
         answers: [],
