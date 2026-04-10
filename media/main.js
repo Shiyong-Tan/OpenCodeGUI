@@ -578,6 +578,72 @@ function logTimelineSnapshot(action, timeline, details) {
     // });
 }
 
+function stabilizeTimelineAfterFinal(session, finalMessageId, source) {
+    if (!session || !Array.isArray(session.timeline) || !finalMessageId) return;
+    const finalPos = session.timeline.lastIndexOf(finalMessageId);
+    if (finalPos < 0) return;
+
+    const finalIndex = session.messageIndexMap?.get?.(finalMessageId);
+    const trailing = session.timeline.slice(finalPos + 1);
+    if (!trailing.length) return;
+
+    const moveBeforeFinal = [];
+    const keepAfterFinal = [];
+    const pruned = [];
+
+    for (const id of trailing) {
+        if (typeof id !== 'string' || !id) {
+            keepAfterFinal.push(id);
+            continue;
+        }
+
+        if (id.startsWith('tmp:') || id.startsWith('local-')) {
+            const isPinned =
+                session.pendingAssistantUpgrade?.tmpKey === id ||
+                session.currentTurnAssistantKey === id ||
+                session.currentTurnAssistantMsgId === id ||
+                session.thinkingId === id;
+            if (isPinned) {
+                keepAfterFinal.push(id);
+            } else {
+                pruned.push(id);
+            }
+            continue;
+        }
+
+        const idx = session.messageIndexMap?.get?.(id);
+        if (typeof finalIndex === 'number' && typeof idx === 'number' && idx < finalIndex) {
+            moveBeforeFinal.push(id);
+            continue;
+        }
+
+        keepAfterFinal.push(id);
+    }
+
+    if (!moveBeforeFinal.length && !pruned.length) return;
+
+    const head = session.timeline.slice(0, finalPos);
+    const seen = new Set();
+    session.timeline = [...head, ...moveBeforeFinal, finalMessageId, ...keepAfterFinal].filter((id) => {
+        if (seen.has(id)) return false;
+        seen.add(id);
+        return true;
+    });
+
+    vscode.postMessage({
+        type: 'ui-debug',
+        payload: [
+            '[WV][FINAL_TAIL_NORMALIZE]',
+            `source=${source || 'unknown'}`,
+            `final=${finalMessageId}`,
+            `moved=[${moveBeforeFinal.join(', ')}]`,
+            `pruned=[${pruned.join(', ')}]`,
+            `tail=${formatTail(session.timeline, 6)}`
+        ]
+    });
+    logTimelineSnapshot('final-tail-normalize', session.timeline, `final=${finalMessageId}`);
+}
+
 function ensureNoticeAtAnchor(timeline, noticeKey, anchorMsgId) {
     const prevIdx = timeline.indexOf(noticeKey);
     const anchorIdx = timeline.indexOf(anchorMsgId);
@@ -3182,6 +3248,26 @@ function renderMessageElement(message, renderedSet) {
     }
     renderedSet.add(message.id);
     const session = getSessionState(activeSessionId);
+    const finalAssistantId = typeof session?.finalAssistantLock?.assistantMsgId === 'string'
+        ? session.finalAssistantLock.assistantMsgId
+        : null;
+    if (message?.role === 'assistant' && finalAssistantId && message.id === finalAssistantId) {
+        const currentSegmentLen = typeof message?.meta?.currentSegment === 'string' ? message.meta.currentSegment.length : 0;
+        const textSegmentsLen = Array.isArray(message?.meta?.textSegments) ? message.meta.textSegments.length : 0;
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: [
+                '[WV][FINAL_RENDER]',
+                `messageId=${message.id}`,
+                `textLen=${typeof message.text === 'string' ? message.text.length : 0}`,
+                `isThinking=${message?.meta?.isThinking === true}`,
+                `statusTextLen=${typeof message?.meta?.statusText === 'string' ? message.meta.statusText.length : 0}`,
+                `currentSegmentLen=${currentSegmentLen}`,
+                `textSegmentsLen=${textSegmentsLen}`,
+                `timelineHas=${Array.isArray(session?.timeline) ? session.timeline.includes(message.id) : false}`
+            ]
+        });
+    }
 
         if (message.meta?.kind === 'changeList') {
             const files = Array.isArray(message.meta?.files) ? message.meta.files : [];
@@ -5316,6 +5402,7 @@ function handleChatDone(sessionId, message) {
             assistantMsgId: resolvedFinal,
             ts: Date.now()
         };
+        stabilizeTimelineAfterFinal(session, resolvedFinal, 'chatDone');
         vscode.postMessage({
             type: 'ui-debug',
             payload: ['[WV][FINAL_LOCK_SET]', `sessionId=${sessionId}`, `assistantMsgId=${resolvedFinal}`]
@@ -6796,7 +6883,19 @@ window.addEventListener('message', (event) => {
                 if (typeof localKey === 'string' && localKey.length) {
                     const localMsg = session.messagesById.get(localKey);
                     if (!localMsg || !session.timeline.includes(localKey)) {
-                        vscode.postMessage({ type: 'ui-debug', payload: ['user.upgrade', `user.upgrade: localKey=${localKey || 'null'} msgId=${userMsgId || 'null'} replaced=false reason=missing-local`] });
+                        const serverUserMsg = userMsgId ? session.messagesById.get(userMsgId) : null;
+                        if (
+                            localKey.startsWith('cont:')
+                            && serverUserMsg?.role === 'user'
+                            && session.timeline.includes(userMsgId)
+                        ) {
+                            vscode.postMessage({
+                                type: 'ui-debug',
+                                payload: ['user.upgrade', `user.upgrade: localKey=${localKey || 'null'} msgId=${userMsgId || 'null'} replaced=true reason=continuation-already-bound`]
+                            });
+                        } else {
+                            vscode.postMessage({ type: 'ui-debug', payload: ['user.upgrade', `user.upgrade: localKey=${localKey || 'null'} msgId=${userMsgId || 'null'} replaced=false reason=missing-local`] });
+                        }
                     } else if (localMsg.role !== 'user') {
                         vscode.postMessage({ type: 'ui-debug', payload: ['user.upgrade', `user.upgrade: localKey=${localKey || 'null'} msgId=${userMsgId || 'null'} replaced=false reason=local-not-user`] });
                     } else {

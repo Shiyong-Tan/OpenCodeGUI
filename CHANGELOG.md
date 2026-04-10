@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.3.2
+
+- Added a cancel-time rollback confirmation for turns with pending local changes, giving users the choice to roll back or keep work before the revert step runs.
+- Kept local question handling isolated from the server question flow so the new confirmation can reuse the existing overlay without changing backend behavior.
+
 ## 1.3.1
 
 - Added continuation takeover handoff flow so revived sessions can transfer ownership cleanly across the main client, sidebar, diff provider, and undo engine.
