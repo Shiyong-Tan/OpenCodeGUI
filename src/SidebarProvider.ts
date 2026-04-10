@@ -112,12 +112,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private currentSessionId?: string;
     private userOwnedSessionIds = new Set<string>();
     private activeSubagentSessionIds = new Set<string>();
-    private subagentProgressBySession = new Map<string, { taskId: string; parentSessionId: string; description: string; startedAt: number; title?: string; mode?: string; model?: string; latestText?: string; latestTool?: string; latestToolInput?: string; isDone?: boolean; state?: SubagentLifecycleState; finishedAt?: number; dismissAt?: number; lastEventAt?: number; finalMessageId?: string; finalReason?: string }>();
+    private subagentProgressBySession = new Map<string, { taskId: string; parentSessionId: string; description: string; startedAt: number; title?: string; mode?: string; model?: string; providerId?: string; latestText?: string; latestTool?: string; latestToolInput?: string; isDone?: boolean; state?: SubagentLifecycleState; finishedAt?: number; dismissAt?: number; lastEventAt?: number; finalMessageId?: string; finalReason?: string }>();
     private readonly subagentDoneRetentionMs = 5000;
     private subagentRetentionTimer?: NodeJS.Timeout;
     private task1DoneVisibleTotalMs = 0;
     private task1DoneVisibleCount = 0;
     private task1FalseDoneEvents = 0;
+
+    private cleanSubagentTitle(title?: string): string {
+        const raw = typeof title === 'string' ? title.trim() : '';
+        if (!raw) return '';
+        return raw
+            .replace(/\s*[（(]\s*@[^()]*[)）]\s*$/i, '')
+            .trim();
+    }
 
     private isUserOwnedSession(id: string): boolean {
         return this.userOwnedSessionIds.has(id) || id === this.currentSessionId;
@@ -293,8 +301,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             description: entry.description,
             mode: entry.mode || '',
             startedAt: entry.startedAt,
-            title: entry.title || '',
+            title: this.cleanSubagentTitle(entry.title) || '',
             model: entry.model || '',
+            providerId: entry.providerId || '',
             latestText: entry.latestText || '',
             latestTool: entry.latestTool || '',
             latestToolInput: entry.latestToolInput || '',
@@ -4737,7 +4746,8 @@ ${attachmentLines.join('\n')}`
                 this.client.registerSubagentSession(event.sessionId, this.currentSessionId || '');
                 const existing = this.subagentProgressBySession.get(event.sessionId);
                 const initialMode = event.mode || event.agent || '';
-                const initialModel = event.modelID || event.providerID || '';
+                const initialModel = event.modelID || '';
+                const initialProvider = event.providerID || '';
                 if (existing) {
                     if (initialMode) {
                         existing.mode = initialMode;
@@ -4745,6 +4755,9 @@ ${attachmentLines.join('\n')}`
                     }
                     if (initialModel) {
                         existing.model = initialModel;
+                    }
+                    if (initialProvider) {
+                        existing.providerId = initialProvider;
                     }
                     this.uiDebugChannel.appendLine(`[SidebarProvider] Subagent session event: ${event.sessionId} | mode=${event.mode || 'null'} | agent=${event.agent || 'null'} | modelID=${event.modelID || 'null'} | providerID=${event.providerID || 'null'}`);
                     this.emitSubagentStatus();
@@ -4756,6 +4769,7 @@ ${attachmentLines.join('\n')}`
                     description: initialMode,
                     mode: initialMode,
                     model: initialModel,
+                    providerId: initialProvider,
                     isDone: false,
                     state: 'queued',
                     lastEventAt: Date.now(),
@@ -4767,10 +4781,11 @@ ${attachmentLines.join('\n')}`
                 this.client.getSessionInfo(sessionId).then((info: any) => {
                     const entry = this.subagentProgressBySession.get(sessionId);
                     if (entry) {
-                        entry.title = info?.title || '';
+                        entry.title = this.cleanSubagentTitle(info?.title) || '';
                         entry.mode = entry.mode || info?.mode || info?.agent || '';
                         entry.description = entry.description || entry.mode || '';
                         entry.model = entry.model || info?.modelID || info?.model || info?.config?.model || '';
+                        entry.providerId = entry.providerId || info?.providerID || info?.providerId || info?.config?.providerID || info?.config?.providerId || '';
                         this.emitSubagentStatus();
                     }
                 }).catch(() => {});
@@ -4783,7 +4798,8 @@ ${attachmentLines.join('\n')}`
                 this.activeSubagentSessionIds.add(event.sessionId);
                 const existing = this.subagentProgressBySession.get(event.sessionId);
                 const initialMode = event.mode || event.agent || '';
-                const initialModel = event.modelID || event.providerID || '';
+                const initialModel = event.modelID || '';
+                const initialProvider = event.providerID || '';
                 if (existing) {
                     if (initialMode) {
                         existing.mode = initialMode;
@@ -4791,6 +4807,9 @@ ${attachmentLines.join('\n')}`
                     }
                     if (initialModel) {
                         existing.model = initialModel;
+                    }
+                    if (initialProvider) {
+                        existing.providerId = initialProvider;
                     }
                     this.uiDebugChannel.appendLine(`[SidebarProvider] Subagent session event: ${event.sessionId} | mode=${event.mode || 'null'} | agent=${event.agent || 'null'} | modelID=${event.modelID || 'null'} | providerID=${event.providerID || 'null'}`);
                     this.emitSubagentStatus();
@@ -4802,6 +4821,7 @@ ${attachmentLines.join('\n')}`
                     description: initialMode,
                     mode: initialMode,
                     model: initialModel,
+                    providerId: initialProvider,
                     isDone: false,
                     state: 'queued',
                     lastEventAt: Date.now(),
@@ -4812,10 +4832,11 @@ ${attachmentLines.join('\n')}`
                 this.client.getSessionInfo(sessionId).then((info: any) => {
                     const entry = this.subagentProgressBySession.get(sessionId);
                     if (entry) {
-                        entry.title = info?.title || '';
+                        entry.title = this.cleanSubagentTitle(info?.title) || '';
                         entry.mode = entry.mode || info?.mode || info?.agent || '';
                         entry.description = entry.description || entry.mode || '';
                         entry.model = entry.model || info?.modelID || info?.model || info?.config?.model || '';
+                        entry.providerId = entry.providerId || info?.providerID || info?.providerId || info?.config?.providerID || info?.config?.providerId || '';
                         this.emitSubagentStatus();
                     }
                 }).catch(() => {});

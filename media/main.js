@@ -3605,6 +3605,21 @@ function renderMessageElement(message, renderedSet) {
                 return '';
             }
 
+            function cleanSubagentTitle(title) {
+                const raw = typeof title === 'string' ? title.trim() : '';
+                if (!raw) return 'Subagent';
+                return raw
+                    .replace(/\s*[（(]\s*@[^()]*[)）]\s*$/i, '')
+                    .trim() || 'Subagent';
+            }
+
+            function formatSubagentModel(agent) {
+                const modelId = (typeof agent.model === 'string' && agent.model.trim()) ? agent.model.trim() : '';
+                const providerId = (typeof agent.providerId === 'string' && agent.providerId.trim()) ? agent.providerId.trim() : '';
+                if (modelId && providerId) return `${modelId}/${providerId}`;
+                return modelId || providerId || '';
+            }
+
              subagents.forEach((agent, index) => {
                  const entry = document.createElement('div');
                  entry.className = 'subagent-inline-entry';
@@ -3612,7 +3627,8 @@ function renderMessageElement(message, renderedSet) {
                  // 1) Subagent N: [title],
                  const header = document.createElement('div');
                  header.className = 'subagent-inline-header';
-                 const titleText = (typeof agent.title === 'string' && agent.title.trim()) ? agent.title.trim() : 'Subagent';
+                 const rawTitleText = (typeof agent.title === 'string' && agent.title.trim()) ? agent.title.trim() : '';
+                 const titleText = cleanSubagentTitle(rawTitleText);
                  const headerIcon = document.createElement('span');
                  headerIcon.className = 'subagent-inline-icon';
                  const stateForIcon = typeof agent.state === 'string' ? agent.state : (agent.isDone === true ? 'done' : 'running');
@@ -3625,7 +3641,7 @@ function renderMessageElement(message, renderedSet) {
 
                  // 2) indented [description], [model]
                  const mode = pickMode(agent);
-                 const model = (typeof agent.model === 'string' && agent.model.trim()) ? agent.model.trim() : '';
+                 const model = formatSubagentModel(agent);
                  if (mode || model) {
                      const metaRow = document.createElement('div');
                      metaRow.className = 'subagent-inline-meta';
@@ -3660,7 +3676,9 @@ function renderMessageElement(message, renderedSet) {
                     textRow.className = 'subagent-inline-text';
                     // Dedupe: remove leading title prefix from latestText if present
                     let textToRender = latestText;
-                    if (titleText && latestText.startsWith(titleText)) {
+                    if (rawTitleText && latestText.startsWith(rawTitleText)) {
+                        textToRender = latestText.slice(rawTitleText.length).trim();
+                    } else if (titleText && latestText.startsWith(titleText)) {
                         textToRender = latestText.slice(titleText.length).trim();
                     }
                    renderMarkdownInto(textRow, textToRender);
