@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.3.3
+
+- Added a cancel-time rollback confirmation for turns with pending local changes, so users can choose to roll back or keep work before cancel completes.
+- Kept the rollback confirmation on a local-only question flow, avoiding any change to the server-side question handling path.
+- Fixed the temporary final/tail ordering issue by normalizing the timeline after final acceptance and preserving the bound final assistant message.
+- Refined subagent display by trimming redundant title suffixes and showing model/provider information more clearly.
+
 ## 1.3.2
 
 - Added a cancel-time rollback confirmation for turns with pending local changes, giving users the choice to roll back or keep work before the revert step runs.
