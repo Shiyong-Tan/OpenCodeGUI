@@ -1174,16 +1174,17 @@ export class OpenCodeClient {
      * Only transitions from `sealed` state — invalidated, exhausted, or
      * any other state is left unchanged.
      */
-    public handleReviveGate(sessionId: string): void {
-        if (!sessionId) return;
+    public handleReviveGate(sessionId: string): boolean {
+        if (!sessionId) return false;
         const chain = this.continuationChainsBySession.get(sessionId);
-        if (!chain) return;
+        if (!chain) return false;
         if (chain.state !== 'sealed') {
             this.logUiDebug(`EXT: continuation.revive.gate.skip | sessionId=${sessionId} | chainId=${chain.continuationChainId} | state=${chain.state} | reason=not-sealed`);
-            return;
+            return false;
         }
         chain.state = 'revive_armed';
         this.logUiDebug(`EXT: continuation.revive.gate | sessionId=${sessionId} | chainId=${chain.continuationChainId} | state=revive_armed`);
+        return true;
     }
 
     /**
@@ -1199,12 +1200,12 @@ export class OpenCodeClient {
      * - Does NOT clear post-final watch state
      * - Increments `continuationCount` on the chain
      */
-    public bootstrapContinuationTurn(sessionId: string): void {
-        if (!sessionId) return;
+    public bootstrapContinuationTurn(sessionId: string): boolean {
+        if (!sessionId) return false;
         const chain = this.continuationChainsBySession.get(sessionId);
         if (!chain || chain.state !== 'revive_armed') {
             this.logUiDebug(`EXT: continuation.bootstrap.skip | sessionId=${sessionId} | reason=not-revive-armed`);
-            return;
+            return false;
         }
 
         chain.state = 'bootstrap_buffering';
@@ -1257,6 +1258,7 @@ export class OpenCodeClient {
         this.scheduleSilenceResync(sessionId);
 
         this.logUiDebug(`EXT: continuation.bootstrap | sessionId=${sessionId} | chainId=${chain.continuationChainId} | continuationCount=${chain.continuationCount} | continuationUserKey=${continuationUserKey}`);
+        return true;
     }
 
     /**
@@ -5807,10 +5809,14 @@ export class OpenCodeClient {
                 const signalText = typeof partForSignal?.text === 'string' ? partForSignal.text : '';
                 const signalMsgId = typeof partForSignal?.messageID === 'string' ? partForSignal.messageID : '';
                 if (this.isBackgroundCompletionSignal(signalText)) {
-                    this.handleReviveGate(sessionId);
-                    this.bootstrapContinuationTurn(sessionId);
+                    const reviveArmed = this.handleReviveGate(sessionId);
+                    const bootstrapped = reviveArmed && this.bootstrapContinuationTurn(sessionId);
                     if (signalMsgId) {
                         this.rememberHiddenControlUserMsgId(sessionId, signalMsgId);
+                    }
+                    if (!bootstrapped) {
+                        this.logUiDebug(`EXT: background.complete.signal.skip | sessionId=${sessionId} | msgId=${signalMsgId} | reason=revive-not-bootstrapped`);
+                        return events;
                     }
                     const chain = this.continuationChainsBySession.get(sessionId);
                     const ownerMsgId = this.postFinalWatchStateBySession.get(sessionId)?.ownerMsgId

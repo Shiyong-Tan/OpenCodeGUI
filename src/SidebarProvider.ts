@@ -5124,13 +5124,6 @@ ${attachmentLines.join('\n')}`
                     this.pendingAssistantTmpKeyByLocalKey.set(pendingLocalKey, tmpKey);
                 }
             }
-            if (sessionId && event.assistantMsgId) {
-                this.pendingAssistantTmpKeyBySession.delete(sessionId);
-                const pendingLocalKey = this.pendingLocalKeyBySession.get(sessionId);
-                if (pendingLocalKey && pendingLocalKey.startsWith('local-')) {
-                    this.pendingAssistantTmpKeyByLocalKey.delete(pendingLocalKey);
-                }
-            }
             if (event.assistantMsgId && sessionId) {
                 this.uiDebugChannel.appendLine(`[DBG_ASSIST_ID] session=${sessionId} assistantMsgId=${event.assistantMsgId} tmpKey=${tmpKey || 'null'}`);
             }

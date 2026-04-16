@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.3.5
+
+- Hardened continuation revive handling so background completion signals only bootstrap a revived turn when the revive gate and turn bootstrap both succeed.
+- Prevented `turnInFlight` owner updates from overwriting an active temporary or local assistant key, which keeps turn ownership and send gating aligned.
+- Preserved pending assistant tmp-key mappings until the correct upgrade path resolves them, reducing continuation and assistant binding drift.
+
 ## 1.3.3
 
 - Added a cancel-time rollback confirmation for turns with pending local changes, so users can choose to roll back or keep work before cancel completes.

@@ -6514,6 +6514,13 @@ window.addEventListener('message', (event) => {
                     session.snapshotFinalizeReady = false;
                     const ownerMsgId = typeof message?.ownerMsgId === 'string' ? message.ownerMsgId : null;
                     if (ownerMsgId && session.messagesById.has(ownerMsgId)) {
+                        const activeAssistantKey = session.currentTurnAssistantKey || session.thinkingId;
+                        const hasActiveTempAssistant = typeof activeAssistantKey === 'string' && (activeAssistantKey.startsWith('tmp:') || activeAssistantKey.startsWith('local-'));
+                        if (hasActiveTempAssistant && activeAssistantKey !== ownerMsgId) {
+                            vscode.postMessage({ type: 'ui-debug', payload: ['turnInFlight', 'skip-owner-over-temp', 'ownerMsgId', ownerMsgId, 'activeAssistantKey', activeAssistantKey] });
+                            updateSendGate();
+                            break;
+                        }
                         session.currentTurnAssistantKey = ownerMsgId;
                         session.currentTurnAssistantMsgId = ownerMsgId;
                         session.thinkingId = ownerMsgId;
