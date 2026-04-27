@@ -5710,12 +5710,14 @@ ${attachmentLines.join('\n')}`
             (Array.isArray(changes) && changes.length > 0) ||
             (typeof changes === 'string' && changes.trim().length > 0);
         const hasDiff = typeof file?.diff === 'string' && file.diff.trim().length > 0;
+        const hasPatch = typeof file?.patch === 'string' && file.patch.trim().length > 0;
         const metadataDiff = typeof file?.metadata?.diff === 'string' && file.metadata.diff.trim().length > 0;
+        const metadataPatch = typeof file?.metadata?.patch === 'string' && file.metadata.patch.trim().length > 0;
         const hasBeforeAfter = typeof file?.before === 'string' && typeof file?.after === 'string';
         const hasMetadataBeforeAfter =
             typeof file?.metadata?.filediff?.before === 'string' &&
             typeof file?.metadata?.filediff?.after === 'string';
-        return hasChanges || hasDiff || metadataDiff || hasBeforeAfter || hasMetadataBeforeAfter;
+        return hasChanges || hasDiff || hasPatch || metadataDiff || metadataPatch || hasBeforeAfter || hasMetadataBeforeAfter;
     }
 
     private normalizeFileSnapshot(raw: any): FileSnapshot | undefined {
@@ -5724,6 +5726,7 @@ ${attachmentLines.join('\n')}`
         const filediff = metadata?.filediff;
         const filePath =
             (typeof raw?.filePath === 'string' && raw.filePath) ||
+            (typeof raw?.file === 'string' && raw.file) ||
             (typeof raw?.path === 'string' && raw.path) ||
             (typeof raw?.relativePath === 'string' && raw.relativePath) ||
             (typeof filediff?.file === 'string' && filediff.file) ||
@@ -5733,22 +5736,20 @@ ${attachmentLines.join('\n')}`
         const before =
             typeof raw?.before === 'string'
                 ? raw.before
-                : (typeof filediff?.before === 'string' ? filediff.before : undefined);
+                : (typeof raw?.from === 'string' ? raw.from : (typeof filediff?.before === 'string' ? filediff.before : (typeof filediff?.from === 'string' ? filediff.from : undefined)));
         const after =
             typeof raw?.after === 'string'
                 ? raw.after
-                : (typeof filediff?.after === 'string' ? filediff.after : undefined);
-        const diff =
-            typeof raw?.diff === 'string'
-                ? raw.diff
-                : (typeof metadata?.diff === 'string' ? metadata.diff : (typeof filediff?.diff === 'string' ? filediff.diff : undefined));
+                : (typeof raw?.to === 'string' ? raw.to : (typeof filediff?.after === 'string' ? filediff.after : (typeof filediff?.to === 'string' ? filediff.to : undefined)));
+        const diff = this.getPatchTextFromFile(raw);
         const type = raw?.type as 'update' | 'create' | 'delete' | undefined;
 
         return {
             filePath,
             relativePath: typeof raw?.relativePath === 'string' ? raw.relativePath : undefined,
-            type,
+            type: type || (diff ? 'update' : undefined),
             diff,
+            patch: diff,
             before,
             after,
             existsBefore: typeof raw?.existsBefore === 'boolean' ? raw.existsBefore : undefined,
@@ -5762,12 +5763,31 @@ ${attachmentLines.join('\n')}`
         };
     }
 
+    private getPatchTextFromFile(file: any): string | undefined {
+        const metadata = file?.metadata ?? file?.state?.metadata;
+        const filediff = metadata?.filediff;
+        const candidates = [
+            file?.patch,
+            file?.diff,
+            metadata?.patch,
+            metadata?.diff,
+            filediff?.patch,
+            filediff?.diff,
+        ];
+        for (const value of candidates) {
+            if (typeof value === 'string' && value.trim().length > 0) {
+                return value;
+            }
+        }
+        return undefined;
+    }
+
     private wasDiffAlreadyShown(sessionId: string, file: FileSnapshot): boolean {
         if (!sessionId) return false;
         const set = this.shownDiffKeysBySession.get(sessionId) ?? new Set<string>();
         const before = typeof file.before === 'string' ? file.before : '';
         const after = typeof file.after === 'string' ? file.after : '';
-        const diff = typeof file.diff === 'string' ? file.diff : '';
+        const diff = this.getPatchTextFromFile(file) || '';
         const key = `${file.filePath}|${this.hashText(`${before}\n@@\n${after}\n@@\n${diff}`)}`;
         if (set.has(key)) return true;
         set.add(key);
@@ -5817,7 +5837,16 @@ ${attachmentLines.join('\n')}`
             typeof file.existsAfter === 'boolean';
         if (!isToolUseChange) return;
 
-        if (typeof file.before !== 'string' || typeof file.after !== 'string') return;
+        const patchText = this.getPatchTextFromFile(file);
+        if (typeof file.before !== 'string' || typeof file.after !== 'string') {
+            if (!patchText) return;
+            this.currentDiffFilePath = file.filePath;
+            this.diffProvider.markNextChangeAutoFollow();
+            void this.diffProvider.updateFromPatchSnapshot(file.filePath, patchText);
+            const basename = pathModule.basename(file.filePath);
+            OpenCodeClient.outputChannel.appendLine(`[DIFF_PATCH] file=${basename} idx=${index} diff=${patchText.length}`);
+            return;
+        }
         const beforeText = this.normalizeText(file.before);
         const afterText = this.normalizeText(file.after);
         const beforeHash = this.hashText(beforeText);
@@ -5830,8 +5859,8 @@ ${attachmentLines.join('\n')}`
         this.diffHashes.set(file.filePath, { before: beforeHash, after: afterHash });
         this.currentDiffFilePath = file.filePath;
         this.diffProvider.markNextChangeAutoFollow();
-        this.diffProvider.updateFromSnapshot(file.filePath, beforeText, afterText, file.diff);
-        const diffLen = file.diff ? file.diff.length : 0;
+        this.diffProvider.updateFromSnapshot(file.filePath, beforeText, afterText, patchText);
+        const diffLen = patchText ? patchText.length : 0;
         const basename = pathModule.basename(file.filePath);
         OpenCodeClient.outputChannel.appendLine(`[DIFF] file=${basename} idx=${index} before=${beforeText.length} after=${afterText.length} diff=${diffLen}`);
     }
@@ -5845,7 +5874,16 @@ ${attachmentLines.join('\n')}`
             typeof file.existsBefore === 'boolean' ||
             typeof file.existsAfter === 'boolean';
         if (!isToolUseChange) return;
-        if (typeof file.before !== 'string' || typeof file.after !== 'string') return;
+        const patchText = this.getPatchTextFromFile(file);
+        if (typeof file.before !== 'string' || typeof file.after !== 'string') {
+            if (!patchText) return;
+            this.currentDiffFilePath = file.filePath;
+            this.diffProvider.markNextChangeAutoFollow();
+            void this.diffProvider.updateFromPatchSnapshot(file.filePath, patchText, true);
+            const basename = pathModule.basename(file.filePath);
+            OpenCodeClient.outputChannel.appendLine(`[DIFF_FORCE_PATCH] file=${basename} idx=${index} diff=${patchText.length}`);
+            return;
+        }
         const beforeText = this.normalizeText(file.before);
         const afterText = this.normalizeText(file.after);
         const beforeHash = this.hashText(beforeText);
@@ -5853,8 +5891,8 @@ ${attachmentLines.join('\n')}`
         this.diffHashes.set(file.filePath, { before: beforeHash, after: afterHash });
         this.currentDiffFilePath = file.filePath;
         this.diffProvider.markNextChangeAutoFollow();
-        void this.diffProvider.forceOpenFromSnapshot(file.filePath, beforeText, afterText, file.diff);
-        const diffLen = file.diff ? file.diff.length : 0;
+        void this.diffProvider.forceOpenFromSnapshot(file.filePath, beforeText, afterText, patchText);
+        const diffLen = patchText ? patchText.length : 0;
         const basename = pathModule.basename(file.filePath);
         OpenCodeClient.outputChannel.appendLine(`[DIFF_FORCE] file=${basename} idx=${index} before=${beforeText.length} after=${afterText.length} diff=${diffLen}`);
     }

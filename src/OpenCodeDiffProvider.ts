@@ -144,6 +144,19 @@ export class OpenCodeDiffProvider implements vscode.TextDocumentContentProvider 
         this.logDiffUpdate(key, filePath, beforeText, afterText, diffText, state.lastChangeRange);
     }
 
+    public async updateFromPatchSnapshot(filePath: string, diffText: string, forceOpen = false): Promise<boolean> {
+        if (!this.workspaceRoot) return false;
+        const patchText = this.extractPatchForFile(diffText, filePath) || diffText;
+        const snapshot = this.buildSnapshotFromUnifiedPatch(patchText);
+        if (!snapshot) return false;
+        if (forceOpen) {
+            await this.forceOpenFromSnapshot(filePath, snapshot.before, snapshot.after, patchText);
+        } else {
+            await this.updateFromSnapshot(filePath, snapshot.before, snapshot.after, patchText);
+        }
+        return true;
+    }
+
     public handleVisibleRangeChange(editor: vscode.TextEditor): void {
         const key = this.getKeyFromEditor(editor, 'right');
         if (!key) return;
@@ -468,6 +481,48 @@ export class OpenCodeDiffProvider implements vscode.TextDocumentContentProvider 
             return undefined;
         }
         return undefined;
+    }
+
+    private buildSnapshotFromUnifiedPatch(patchText: string): { before: string; after: string } | undefined {
+        const lf = String.fromCharCode(10);
+        const cr = String.fromCharCode(13);
+        const before: string[] = [];
+        const after: string[] = [];
+        let sawHunk = false;
+        let sawChange = false;
+
+        for (const rawLine of patchText.split(lf)) {
+            const line = rawLine.endsWith(cr) ? rawLine.slice(0, -1) : rawLine;
+            if (line.startsWith('@@')) {
+                if (sawHunk && (before.length || after.length)) {
+                    before.push('');
+                    after.push('');
+                }
+                sawHunk = true;
+                continue;
+            }
+            if (!sawHunk) continue;
+            if (line.startsWith('\\')) continue;
+
+            const marker = line.charAt(0);
+            const content = line.slice(1);
+            if (marker === ' ') {
+                before.push(content);
+                after.push(content);
+            } else if (marker === '-') {
+                before.push(content);
+                sawChange = true;
+            } else if (marker === '+') {
+                after.push(content);
+                sawChange = true;
+            }
+        }
+
+        if (!sawHunk || !sawChange) return undefined;
+        return {
+            before: before.join('\n'),
+            after: after.join('\n')
+        };
     }
 
     private extractPatchForFile(diffText: string, filePath: string): string | undefined {

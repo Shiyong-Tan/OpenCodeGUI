@@ -278,6 +278,7 @@ export type FileSnapshot = {
     relativePath?: string;
     type?: 'update' | 'create' | 'delete';
     diff?: string;
+    patch?: string;
     before?: string;
     after?: string;
     existsBefore?: boolean;
@@ -3326,9 +3327,10 @@ export class OpenCodeClient {
                     filePath: file.filePath,
                     relativePath: file.relativePath,
                     type,
-                    diff: file.diff,
-                    before: file.before,
-                    after: file.after,
+                    diff: this.extractPatchText(file),
+                    patch: this.extractPatchText(file),
+                    before: typeof file.before === 'string' ? file.before : (typeof file.from === 'string' ? file.from : undefined),
+                    after: typeof file.after === 'string' ? file.after : (typeof file.to === 'string' ? file.to : undefined),
                     existsBefore,
                     existsAfter,
                     additions: typeof file.additions === 'number' ? file.additions : undefined,
@@ -3345,9 +3347,10 @@ export class OpenCodeClient {
                 {
                     filePath: filediff.file,
                     type: 'update',
-                    diff: typeof metadata?.diff === 'string' ? metadata.diff : undefined,
-                    before: typeof filediff.before === 'string' ? filediff.before : undefined,
-                    after: typeof filediff.after === 'string' ? filediff.after : undefined,
+                    diff: this.extractPatchText({ metadata }),
+                    patch: this.extractPatchText({ metadata }),
+                    before: typeof filediff.before === 'string' ? filediff.before : (typeof filediff.from === 'string' ? filediff.from : undefined),
+                    after: typeof filediff.after === 'string' ? filediff.after : (typeof filediff.to === 'string' ? filediff.to : undefined),
                     existsBefore: true,
                     existsAfter: true,
                     additions: typeof filediff.additions === 'number' ? filediff.additions : undefined,
@@ -3366,10 +3369,10 @@ export class OpenCodeClient {
             const filediff = metadata?.filediff;
             const beforeText = typeof metadata?.before === 'string'
                 ? metadata.before
-                : (typeof filediff?.before === 'string' ? filediff.before : undefined);
+                : (typeof filediff?.before === 'string' ? filediff.before : (typeof filediff?.from === 'string' ? filediff.from : undefined));
             const diffText = typeof metadata?.diff === 'string'
                 ? metadata.diff
-                : (typeof filediff?.diff === 'string' ? filediff.diff : undefined);
+                : (typeof filediff?.diff === 'string' ? filediff.diff : (typeof metadata?.patch === 'string' ? metadata.patch : undefined));
             const additions = typeof filediff?.additions === 'number' ? filediff.additions : undefined;
             const deletions = typeof filediff?.deletions === 'number' ? filediff.deletions : undefined;
             return [
@@ -3381,6 +3384,7 @@ export class OpenCodeClient {
                     existsBefore,
                     existsAfter: true,
                     diff: diffText,
+                    patch: diffText,
                     additions,
                     deletions
                 }
@@ -3410,9 +3414,10 @@ export class OpenCodeClient {
                     filePath: file.filePath,
                     relativePath: file.relativePath,
                     type,
-                    diff: file.diff,
-                    before: file.before,
-                    after: file.after,
+                    diff: this.extractPatchText(file),
+                    patch: this.extractPatchText(file),
+                    before: typeof file.before === 'string' ? file.before : (typeof file.from === 'string' ? file.from : undefined),
+                    after: typeof file.after === 'string' ? file.after : (typeof file.to === 'string' ? file.to : undefined),
                     existsBefore,
                     existsAfter,
                     additions: typeof file.additions === 'number' ? file.additions : undefined,
@@ -3429,9 +3434,10 @@ export class OpenCodeClient {
                 {
                     filePath: filediff.file,
                     type: 'update',
-                    diff: typeof metadata?.diff === 'string' ? metadata.diff : undefined,
-                    before: typeof filediff.before === 'string' ? filediff.before : undefined,
-                    after: typeof filediff.after === 'string' ? filediff.after : undefined,
+                    diff: this.extractPatchText({ metadata }),
+                    patch: this.extractPatchText({ metadata }),
+                    before: typeof filediff.before === 'string' ? filediff.before : (typeof filediff.from === 'string' ? filediff.from : undefined),
+                    after: typeof filediff.after === 'string' ? filediff.after : (typeof filediff.to === 'string' ? filediff.to : undefined),
                     existsBefore: true,
                     existsAfter: true,
                     additions: typeof filediff.additions === 'number' ? filediff.additions : undefined,
@@ -3450,10 +3456,10 @@ export class OpenCodeClient {
             const filediff = metadata?.filediff;
             const beforeText = typeof metadata?.before === 'string'
                 ? metadata.before
-                : (typeof filediff?.before === 'string' ? filediff.before : undefined);
+                : (typeof filediff?.before === 'string' ? filediff.before : (typeof filediff?.from === 'string' ? filediff.from : undefined));
             const diffText = typeof metadata?.diff === 'string'
                 ? metadata.diff
-                : (typeof filediff?.diff === 'string' ? filediff.diff : undefined);
+                : (typeof filediff?.diff === 'string' ? filediff.diff : (typeof metadata?.patch === 'string' ? metadata.patch : undefined));
             const additions = typeof filediff?.additions === 'number' ? filediff.additions : undefined;
             const deletions = typeof filediff?.deletions === 'number' ? filediff.deletions : undefined;
             return [
@@ -3465,6 +3471,7 @@ export class OpenCodeClient {
                     existsBefore,
                     existsAfter: true,
                     diff: diffText,
+                    patch: diffText,
                     additions,
                     deletions
                 }
@@ -3543,17 +3550,20 @@ export class OpenCodeClient {
             }
             const filePath =
                 (typeof raw.filePath === 'string' && raw.filePath) ||
+                (typeof raw.file === 'string' && raw.file) ||
                 (typeof raw.path === 'string' && raw.path) ||
                 (typeof raw.relativePath === 'string' && raw.relativePath) ||
                 '';
             if (!filePath) continue;
+            const diffText = this.extractPatchText(raw);
             normalized.push({
                 filePath,
                 relativePath: typeof raw.relativePath === 'string' ? raw.relativePath : undefined,
                 type: raw.type as 'update' | 'create' | 'delete' | undefined,
-                diff: typeof raw.diff === 'string' ? raw.diff : undefined,
-                before: typeof raw.before === 'string' ? raw.before : undefined,
-                after: typeof raw.after === 'string' ? raw.after : undefined,
+                diff: diffText,
+                patch: diffText,
+                before: typeof raw.before === 'string' ? raw.before : (typeof raw.from === 'string' ? raw.from : undefined),
+                after: typeof raw.after === 'string' ? raw.after : (typeof raw.to === 'string' ? raw.to : undefined),
                 existsBefore: typeof raw.existsBefore === 'boolean' ? raw.existsBefore : undefined,
                 existsAfter: typeof raw.existsAfter === 'boolean' ? raw.existsAfter : undefined,
                 additions: typeof raw.additions === 'number' ? raw.additions : undefined,
@@ -3561,6 +3571,26 @@ export class OpenCodeClient {
             });
         }
         return normalized;
+    }
+
+    private extractPatchText(raw: any): string | undefined {
+        const metadata = raw?.metadata ?? raw?.state?.metadata;
+        const filediff = metadata?.filediff;
+        const candidates = [
+            raw?.patch,
+            raw?.diff,
+            raw?.changes,
+            metadata?.patch,
+            metadata?.diff,
+            filediff?.patch,
+            filediff?.diff,
+        ];
+        for (const value of candidates) {
+            if (typeof value === 'string' && value.trim().length > 0) {
+                return value;
+            }
+        }
+        return undefined;
     }
 
     private buildChangeSpecs(files: FileSnapshot[]): FileChangeSpec[] {
@@ -6392,13 +6422,22 @@ export class OpenCodeClient {
         if (inGrace) {
             this.logUiDebug(`[LATE_DIFF] event in grace window | sessionId=${sessionId} eventType=session.diff`);
         }
-        const files = props.diff.map((entry: any) => ({
-            filePath: entry.file,
-            before: entry.before,
-                after: entry.after,
+        const files = props.diff.map((entry: any) => {
+            const patchText = this.extractPatchText(entry);
+            return {
+                filePath: entry.file || entry.filePath || entry.path || entry.relativePath,
+                relativePath: typeof entry.relativePath === 'string' ? entry.relativePath : undefined,
+                type: (entry.type as 'update' | 'create' | 'delete' | undefined) || (patchText ? 'update' : undefined),
+                diff: patchText,
+                patch: patchText,
+                before: typeof entry.before === 'string' ? entry.before : (typeof entry.from === 'string' ? entry.from : undefined),
+                after: typeof entry.after === 'string' ? entry.after : (typeof entry.to === 'string' ? entry.to : undefined),
+                existsBefore: typeof entry.existsBefore === 'boolean' ? entry.existsBefore : undefined,
+                existsAfter: typeof entry.existsAfter === 'boolean' ? entry.existsAfter : undefined,
                 additions: entry.additions,
                 deletions: entry.deletions
-            })) as FileSnapshot[];
+            };
+        }).filter((entry: FileSnapshot) => typeof entry.filePath === 'string' && entry.filePath.length > 0) as FileSnapshot[];
             if (files.length) {
                 const changeSpecs = this.buildChangeSpecs(files);
                 if (this.gitUndoAvailable && this.isSessionUndoEnabled(props?.sessionID) && props?.sessionID) {
