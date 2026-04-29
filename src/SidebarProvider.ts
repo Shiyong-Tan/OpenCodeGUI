@@ -473,15 +473,22 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private getSessionCwd(info: any): string | undefined {
-        const cwd = info?.path?.cwd;
+        const cwd = info?.path?.cwd ?? info?.cwd;
         if (typeof cwd !== 'string' || !cwd) return undefined;
         return cwd;
     }
 
-    private async getSessionWorkspaceMatch(sessionId: string, workspaceRoot: string): Promise<'match' | 'mismatch' | 'unknown'> {
+    private async getSessionWorkspaceMatch(
+        sessionId: string,
+        workspaceRoot: string,
+        cwdHint?: string
+    ): Promise<'match' | 'mismatch' | 'unknown'> {
         try {
-            const info = await this.client.getSessionInfo(sessionId);
-            const sessionCwd = this.getSessionCwd(info);
+            let sessionCwd = typeof cwdHint === 'string' && cwdHint ? cwdHint : undefined;
+            if (!sessionCwd) {
+                const info = await this.client.getSessionInfo(sessionId);
+                sessionCwd = this.getSessionCwd(info);
+            }
             if (!sessionCwd) {
                 this.uiDebugChannel.appendLine(`[EXT][SESSION_FILTER_SKIP] sessionId=${sessionId} reason=missing-cwd`);
                 return 'unknown';
@@ -518,6 +525,52 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
         }
         return undefined;
+    }
+
+    private async filterSessionsForWorkspace(
+        sessions: SessionInfo[],
+        workspaceRoot: string | undefined,
+        reason: string
+    ): Promise<SessionInfo[]> {
+        if (!workspaceRoot) {
+            const userOwnedSessions = sessions.filter(s => this.isUserOwnedSession(s.id));
+            this.uiDebugChannel.appendLine(
+                `[EXT][SESSION_LIST_FILTER] reason=${reason} workspace=null total=${sessions.length} userOwned=${userOwnedSessions.length} matched=${userOwnedSessions.length}`
+            );
+            return userOwnedSessions;
+        }
+
+        const filtered: SessionInfo[] = [];
+        let matched = 0;
+        let mismatch = 0;
+        let unknownIncluded = 0;
+        let unknownExcluded = 0;
+        let userOwned = 0;
+        for (const session of sessions) {
+            const isUserOwned = this.isUserOwnedSession(session.id);
+            if (isUserOwned) {
+                userOwned++;
+            }
+            const match = await this.getSessionWorkspaceMatch(session.id, workspaceRoot, session.cwd);
+            if (match === 'match') {
+                filtered.push(session);
+                matched++;
+            } else if (match === 'mismatch') {
+                mismatch++;
+            } else {
+                const hasWorkspaceSnapshot = fs.existsSync(this.getSnapshotFile(session.id));
+                if (hasWorkspaceSnapshot) {
+                    filtered.push(session);
+                    unknownIncluded++;
+                } else {
+                    unknownExcluded++;
+                }
+            }
+        }
+        this.uiDebugChannel.appendLine(
+            `[EXT][SESSION_LIST_FILTER] reason=${reason} workspace=${workspaceRoot} total=${sessions.length} userOwned=${userOwned} included=${filtered.length} matched=${matched} mismatch=${mismatch} unknownIncluded=${unknownIncluded} unknownExcluded=${unknownExcluded}`
+        );
+        return filtered;
     }
 
     private getSnapshotDir(): string {
@@ -3699,8 +3752,8 @@ ${attachmentLines.join('\n')}`
         } catch (error) {
             this.postAddResponse(webview, `Failed to load sessions: ${error}`);
         }
-        // Filter: exclude subagent sessions from UI display
-        sessions = sessions.filter(s => this.isUserOwnedSession(s.id));
+        const initWorkspaceRoot = this.client.getWorkspaceRoot() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        sessions = await this.filterSessionsForWorkspace(sessions, initWorkspaceRoot, 'init');
         const storedModel = this._context.globalState.get<string>('opencode.model');
         const storedVariant = this._context.globalState.get<string>('opencode.variant');
         const storedMode = this._context.globalState.get<string>('opencode.mode');
@@ -3760,7 +3813,7 @@ ${attachmentLines.join('\n')}`
             `EXT: mode.init | stored=${storedMode || 'null'} | selected=${resolvedMode || 'null'} | available=${this.availableModes.join(',') || 'none'}`
         );
 
-        const workspaceRoot = this.client.getWorkspaceRoot() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const workspaceRoot = initWorkspaceRoot;
         const workspaceCount = vscode.workspace.workspaceFolders?.length || 0;
         if (workspaceRoot) {
             this.currentWorkspaceKey = this.getWorkspaceKeyForRoot(workspaceRoot);
@@ -5439,8 +5492,9 @@ ${attachmentLines.join('\n')}`
     private async refreshSessions(webview: vscode.Webview, requestId: string): Promise<void> {
         try {
             const sessions = await this.client.listSessions();
-            const filteredSessions = sessions.filter(s => this.isUserOwnedSession(s.id));
-            const topSession = sessions?.[0];
+            const workspaceRoot = this.client.getWorkspaceRoot() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            const filteredSessions = await this.filterSessionsForWorkspace(sessions, workspaceRoot, 'refresh');
+            const topSession = filteredSessions?.[0];
             webview.postMessage({ type: 'sessionsList', requestId, sessions: filteredSessions });
         } catch (error) {
             this.postAddResponse(webview, `Failed to refresh sessions: ${error}`);

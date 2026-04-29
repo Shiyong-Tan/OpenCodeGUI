@@ -45,6 +45,7 @@ export type SessionInfo = {
     id: string;
     title: string;
     updated: string;
+    cwd?: string;
 };
 
 export type QuestionOverlayOption = {
@@ -1306,6 +1307,21 @@ export class OpenCodeClient {
         const provider = (providerId || '').toLowerCase();
         const full = (fullId || '').toLowerCase();
         return provider.includes('copilot') || full.includes('copilot');
+    }
+
+    private inferCopilotSpeedMultiplier(model: ModelInfo): string | undefined {
+        const fullId = String(model.fullId || '').toLowerCase();
+        const id = String(model.id || '').toLowerCase();
+        const name = String(model.name || '').toLowerCase();
+        const haystack = `${name} ${fullId} ${id}`;
+
+        if (haystack.includes('opus')) {
+            return '3x';
+        }
+        if (haystack.includes('gpt')) {
+            return '1x';
+        }
+        return undefined;
     }
 
     private isOpenCodeFreeModel(model: ModelInfo | undefined): boolean {
@@ -7704,6 +7720,9 @@ export class OpenCodeClient {
             id: session.id,
             title: session.title || 'Untitled Session',
             updated: session?.time?.updated ? new Date(session.time.updated).toLocaleString() : '',
+            cwd: typeof session?.path?.cwd === 'string'
+                ? session.path.cwd
+                : (typeof session?.cwd === 'string' ? session.cwd : undefined),
             updatedMs: typeof session?.time?.updated === 'number' ? session.time.updated : 0
         }));
         mapped.sort((a, b) => b.updatedMs - a.updatedMs);
@@ -7912,9 +7931,7 @@ export class OpenCodeClient {
                 speedMap.get(model.name) ||
                 speedMap.get(model.fullId) ||
                 speedMap.get(model.id);
-            if (speed) {
-                model.speedMultiplier = speed;
-            }
+            model.speedMultiplier = speed || this.inferCopilotSpeedMultiplier(model) || model.speedMultiplier;
         }
     }
 
