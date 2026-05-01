@@ -41,6 +41,11 @@ export type ModelQuota = {
     fetchedAt: number;
 };
 
+type CopilotSpeedMultiplierCache = {
+    fetchedAt: number;
+    multipliers: Record<string, string>;
+};
+
 export type SessionInfo = {
     id: string;
     title: string;
@@ -403,6 +408,10 @@ type PendingMainFinalGate = {
     createdAt: number;
 };
 
+const COPILOT_MODEL_MULTIPLIERS_DOC_URL = 'https://docs.github.com/en/copilot/reference/ai-models/supported-models';
+const COPILOT_SPEED_MULTIPLIER_CACHE_KEY = 'opencode.copilotSpeedMultiplierCache.v1';
+const COPILOT_SPEED_MULTIPLIER_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
 export class OpenCodeClient {
     public static outputChannel = vscode.window.createOutputChannel("OpenCode CLI");
     private currentChild?: cp.ChildProcess;
@@ -507,6 +516,8 @@ export class OpenCodeClient {
     private toolStatusBySession = new Map<string, Map<string, string>>();
     private modelQuotaInFlight = new Map<string, Promise<ModelQuota | null>>();
     private modelQuotaCache = new Map<string, { ts: number; quota: ModelQuota | null }>();
+    private copilotSpeedMultiplierCache?: CopilotSpeedMultiplierCache;
+    private copilotSpeedMultiplierRefreshInFlight?: Promise<CopilotSpeedMultiplierCache>;
     private antigravityOAuthConstantsPromise?: Promise<AntigravityOAuthConstants | null>;
     private resyncInFlightBySession = new Map<string, Promise<void>>();
     private resyncCooldownUntilBySession = new Map<string, number>();
@@ -1309,6 +1320,33 @@ export class OpenCodeClient {
         return provider.includes('copilot') || full.includes('copilot');
     }
 
+    private normalizeCopilotModelKey(value: string): string {
+        return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+    }
+
+    private getCopilotSpeedMultiplierKeys(model: ModelInfo): string[] {
+        const rawKeys = [
+            model.name,
+            model.fullId,
+            model.id
+        ]
+            .map((value) => this.normalizeCopilotModelKey(value))
+            .filter((value) => value.length > 0);
+        const keys = new Set<string>(rawKeys);
+
+        for (const key of rawKeys) {
+            const withoutPreview = key
+                .replace(/\s*\(preview\)\s*$/i, '')
+                .replace(/\s+preview\s*$/i, '')
+                .trim();
+            if (withoutPreview && withoutPreview !== key) {
+                keys.add(withoutPreview);
+            }
+        }
+
+        return [...keys];
+    }
+
     private inferCopilotSpeedMultiplier(model: ModelInfo): string | undefined {
         const fullId = String(model.fullId || '').toLowerCase();
         const id = String(model.id || '').toLowerCase();
@@ -1322,6 +1360,224 @@ export class OpenCodeClient {
             return '1x';
         }
         return undefined;
+    }
+
+    private getLocalCopilotSpeedMultiplierMap(): Map<string, string> {
+        return new Map<string, string>([
+            ['GPT-4.1', '0x'],
+            ['GPT-4o', '0x'],
+            ['Grok Code Fast 1', '0.25x'],
+            ['Raptor mini', '0x'],
+            ['Raptor mini (Preview)', '0x'],
+            ['Claude Haiku 4.5', '0.33x'],
+            ['Claude Opus 4.1', '3x'],
+            ['Claude Opus 4.5', '3x'],
+            ['Claude Opus 4.6', '3x'],
+            ['Claude Opus 4.6 (fast mode) (preview)', '30x'],
+            ['Claude Opus 4.7', '15x'],
+            ['Claude Sonnet 4', '1x'],
+            ['Claude Sonnet 4.5', '1x'],
+            ['Claude Sonnet 4.6', '1x'],
+            ['Gemini 2.5 Pro', '1x'],
+            ['Gemini 3 Flash', '0.33x'],
+            ['Gemini 3.1 Pro', '1x'],
+            ['GPT-5 mini', '0x'],
+            ['GPT-5.2', '1x'],
+            ['GPT-5.2-Codex', '1x'],
+            ['GPT-5.3-Codex', '1x'],
+            ['GPT-5.4', '1x'],
+            ['GPT-5.4 mini', '0.33x'],
+            ['GPT-5.4 nano', '0.25x'],
+            ['GPT-5.5', '7.5x'],
+            ['Goldeneye', '1x'],
+        ].map(([name, multiplier]) => [this.normalizeCopilotModelKey(name), multiplier]));
+    }
+
+    private decodeHtmlEntities(value: string): string {
+        return String(value || '')
+            .replace(/&nbsp;/gi, ' ')
+            .replace(/&amp;/gi, '&')
+            .replace(/&lt;/gi, '<')
+            .replace(/&gt;/gi, '>')
+            .replace(/&quot;/gi, '"')
+            .replace(/&#39;/gi, "'");
+    }
+
+    private stripHtmlTags(value: string): string {
+        return this.decodeHtmlEntities(
+            String(value || '')
+                .replace(/<a\b[^>]*href="#[^"]*"[^>]*>[\s\S]*?<\/a>/gi, ' ')
+                .replace(/<[^>]*>/g, ' ')
+        )
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    private parseCopilotMultiplierHtml(html: string): Map<string, string> {
+        const multipliers = new Map<string, string>();
+        const sectionMatch = String(html || '').match(/<h2[^>]*>\s*Model multipliers\s*<\/h2>([\s\S]*?)(?:<h2[^>]*>|<\/main>|<\/article>|<\/body>|<\/html>)/i);
+        const section = sectionMatch ? sectionMatch[1] : html;
+        const rowMatches = section.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi);
+
+        for (const rowMatch of rowMatches) {
+            const rowHtml = rowMatch[1] || '';
+            const cellMatches = [...rowHtml.matchAll(/<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi)];
+            if (cellMatches.length < 2) continue;
+
+            const rawNameHtml = cellMatches[0]?.[1] || '';
+            const rawMultiplierHtml = cellMatches[1]?.[1] || '';
+            const rawName = this.stripHtmlTags(rawNameHtml)
+                .replace(/\s*\[\d+\]$/g, '')
+                .trim();
+            const rawMultiplier = this.stripHtmlTags(rawMultiplierHtml).toLowerCase();
+
+            if (!rawName || !rawMultiplier || rawName.toLowerCase() === 'model') continue;
+            if (rawMultiplier === 'not applicable') continue;
+
+            const numeric = rawMultiplier.replace(/x$/i, '').trim();
+            const parsed = Number(numeric);
+            if (!Number.isFinite(parsed)) continue;
+
+            multipliers.set(this.normalizeCopilotModelKey(rawName), `${numeric}x`);
+        }
+
+        return multipliers;
+    }
+
+    private async fetchTextFromUrl(url: string, redirectCount = 0): Promise<string> {
+        return new Promise((resolve, reject) => {
+            const request = https.get(url, {
+                headers: {
+                    'User-Agent': 'OpenCodeGUI/1.0',
+                    Accept: 'text/html,application/xhtml+xml',
+                    'Accept-Encoding': 'identity'
+                }
+            }, (response) => {
+                const statusCode = response.statusCode || 0;
+                const location = response.headers.location;
+
+                if (statusCode >= 300 && statusCode < 400 && location) {
+                    response.resume();
+                    if (redirectCount >= 5) {
+                        reject(new Error(`Too many redirects while fetching ${url}`));
+                        return;
+                    }
+                    const redirectUrl = new URL(location, url).toString();
+                    void this.fetchTextFromUrl(redirectUrl, redirectCount + 1).then(resolve, reject);
+                    return;
+                }
+
+                if (statusCode < 200 || statusCode >= 300) {
+                    const chunks: Buffer[] = [];
+                    response.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+                    response.on('end', () => {
+                        const body = Buffer.concat(chunks).toString('utf8');
+                        reject(new Error(`Failed to fetch ${url}: ${statusCode} ${body.slice(0, 200)}`));
+                    });
+                    response.resume();
+                    return;
+                }
+
+                const chunks: Buffer[] = [];
+                response.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+                response.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+            });
+
+            request.setTimeout(8000, () => {
+                request.destroy(new Error(`Timeout fetching ${url}`));
+            });
+            request.on('error', reject);
+        });
+    }
+
+    private readStoredCopilotSpeedMultiplierCache(): CopilotSpeedMultiplierCache | undefined {
+        const storageValue = this.storage?.get<CopilotSpeedMultiplierCache>(COPILOT_SPEED_MULTIPLIER_CACHE_KEY);
+        if (!storageValue || typeof storageValue !== 'object') return undefined;
+        const fetchedAt = Number(storageValue.fetchedAt);
+        const multipliers = storageValue.multipliers;
+        if (!Number.isFinite(fetchedAt) || !multipliers || typeof multipliers !== 'object') {
+            return undefined;
+        }
+        return {
+            fetchedAt,
+            multipliers: Object.fromEntries(
+                Object.entries(multipliers).filter(([, value]) => typeof value === 'string' && value.length > 0)
+            )
+        };
+    }
+
+    private async storeCopilotSpeedMultiplierCache(cache: CopilotSpeedMultiplierCache): Promise<void> {
+        this.copilotSpeedMultiplierCache = cache;
+        if (!this.storage) return;
+        try {
+            await this.storage.update(COPILOT_SPEED_MULTIPLIER_CACHE_KEY, cache);
+        } catch (error) {
+            this.logUiDebug(`EXT: copilot.speed.cache.store.fail | err=${String(error)}`);
+        }
+    }
+
+    private async fetchCopilotSpeedMultipliers(): Promise<CopilotSpeedMultiplierCache> {
+        const html = await this.fetchTextFromUrl(COPILOT_MODEL_MULTIPLIERS_DOC_URL);
+        const parsed = this.parseCopilotMultiplierHtml(html);
+        if (!parsed.size) {
+            throw new Error('No copilot speed multipliers parsed from docs page.');
+        }
+        return {
+            fetchedAt: Date.now(),
+            multipliers: Object.fromEntries(parsed.entries())
+        };
+    }
+
+    private async getCopilotSpeedMultiplierCache(): Promise<CopilotSpeedMultiplierCache> {
+        const now = Date.now();
+        const memoryCache = this.copilotSpeedMultiplierCache;
+        const storedCache = this.readStoredCopilotSpeedMultiplierCache();
+        const cache = [memoryCache, storedCache]
+            .filter((entry): entry is CopilotSpeedMultiplierCache => Boolean(entry))
+            .sort((a, b) => b.fetchedAt - a.fetchedAt)[0];
+
+        if (cache) {
+            this.copilotSpeedMultiplierCache = cache;
+            if (now - cache.fetchedAt < COPILOT_SPEED_MULTIPLIER_CACHE_TTL_MS) {
+                return cache;
+            }
+
+            void this.refreshCopilotSpeedMultiplierCache();
+            return cache;
+        }
+
+        if (!this.copilotSpeedMultiplierRefreshInFlight) {
+            void this.refreshCopilotSpeedMultiplierCache();
+        }
+
+        return this.copilotSpeedMultiplierRefreshInFlight || {
+            fetchedAt: now,
+            multipliers: Object.fromEntries(this.getLocalCopilotSpeedMultiplierMap().entries())
+        };
+    }
+
+    private async refreshCopilotSpeedMultiplierCache(): Promise<CopilotSpeedMultiplierCache> {
+        if (this.copilotSpeedMultiplierRefreshInFlight) {
+            return this.copilotSpeedMultiplierRefreshInFlight;
+        }
+
+        this.copilotSpeedMultiplierRefreshInFlight = this.fetchCopilotSpeedMultipliers()
+            .then(async (fresh) => {
+                await this.storeCopilotSpeedMultiplierCache(fresh);
+                return fresh;
+            })
+            .catch((error) => {
+                this.logUiDebug(`EXT: copilot.speed.fetch.fail | err=${String(error)}`);
+                return this.copilotSpeedMultiplierCache || {
+                    fetchedAt: Date.now(),
+                    multipliers: Object.fromEntries(this.getLocalCopilotSpeedMultiplierMap().entries())
+                };
+            })
+            .finally(() => {
+                this.copilotSpeedMultiplierRefreshInFlight = undefined;
+            });
+
+        return this.copilotSpeedMultiplierRefreshInFlight;
     }
 
     private isOpenCodeFreeModel(model: ModelInfo | undefined): boolean {
@@ -7690,7 +7946,7 @@ export class OpenCodeClient {
             attempts += 1;
             await new Promise((resolve) => setTimeout(resolve, 300));
         }
-        this.applyCopilotSpeedMultipliers(models);
+        await this.applyCopilotSpeedMultipliers(models);
         return models;
     }
 
@@ -7889,7 +8145,7 @@ export class OpenCodeClient {
         return models;
     }
 
-    private applyCopilotSpeedMultipliers(models: ModelInfo[]): void {
+    private async applyCopilotSpeedMultipliers(models: ModelInfo[]): Promise<void> {
         const hasCopilot = models.some((model) => {
             const provider = (model.providerId || '').toLowerCase();
             const fullId = (model.fullId || '').toLowerCase();
@@ -7897,40 +8153,20 @@ export class OpenCodeClient {
         });
         if (!hasCopilot) return;
 
-        const speedMap = new Map<string, string>([
-            ['GPT-4.1', '0x'],
-            ['GPT-4o', '0x'],
-            ['Grok Code Fast 1', '0.25x'],
-            ['Raptor mini (Preview)', '0x'],
-            ['Claude Haiku 4.5', '0.33x'],
-            ['Claude Opus 4.1', '1x'],
-            ['Claude Opus 4.5', '3x'],
-            ['Claude Opus 4.6', '3x'],
-            ['Claude Sonnet 4', '1x'],
-            ['Claude Sonnet 4.6', '1x'],
-            ['Claude Sonnet 4.5', '1x'],
-            ['Gemini 2.5 Pro', '1x'],
-            ['Gemini 3 Flash', '0.33x'],
-            ['Gemini 3 Pro Preview', '1x'],
-            ['Gemini 3.1 Pro Preview', '1x'],
-            ['GPT-5', '1x'],
-            ['GPT-5.3-Codex', '1x'],
-            ['GPT-5.4', '1x'],
-            ['GPT-2.3-Codex', '1x'],
-            ['GPT-5-Codex (Preview)', '1x'],
-            ['GPT-5.1', '1x'],
-            ['GPT-5.1-Codex', '1x'],
-            ['GPT-5.1-Codex-max', '1x'],
-            ['GPT-5.1-Codex-mini', '0.33x'],
-            ['GPT-5.2', '1x'],
-            ['GPT-5.2-Codex', '1x']
-        ]);
+        const remoteSpeedMap = await this.getCopilotSpeedMultiplierCache().then((cache) => {
+            const map = new Map<string, string>();
+            for (const [key, value] of Object.entries(cache.multipliers || {})) {
+                map.set(this.normalizeCopilotModelKey(key), value);
+            }
+            return map;
+        });
+        const fallbackSpeedMap = this.getLocalCopilotSpeedMultiplierMap();
 
         for (const model of models) {
+            const keys = this.getCopilotSpeedMultiplierKeys(model);
             const speed =
-                speedMap.get(model.name) ||
-                speedMap.get(model.fullId) ||
-                speedMap.get(model.id);
+                keys.map((key) => remoteSpeedMap.get(key)).find((value) => typeof value === 'string' && value.length > 0) ||
+                keys.map((key) => fallbackSpeedMap.get(key)).find((value) => typeof value === 'string' && value.length > 0);
             model.speedMultiplier = speed || this.inferCopilotSpeedMultiplier(model) || model.speedMultiplier;
         }
     }
