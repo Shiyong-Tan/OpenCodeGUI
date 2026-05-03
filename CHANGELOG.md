@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.3.6
+
+- Added patch-only OpenCode diff support so diff rendering can handle patch payloads without requiring a full diff object.
+- Filtered session visibility by workspace path to keep history scoped to the active workspace and reduce cross-workspace noise.
+- Refreshed Copilot speed multipliers from the docs and added regression coverage for the mapping logic.
+
 ## 1.3.5
 
 - Hardened continuation revive handling so background completion signals only bootstrap a revived turn when the revive gate and turn bootstrap both succeed.
