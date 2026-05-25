@@ -293,6 +293,11 @@ export type FileSnapshot = {
     deletions?: number;
 };
 
+export type ChatFilePart = string | {
+    path?: string;
+    url: string;
+    mime: string;
+};
 
 export type ConflictDetail = {
     path: string;
@@ -7573,7 +7578,7 @@ export class OpenCodeClient {
 
     public async chat(
         message: string,
-        options: { model?: string; variant?: string; sessionId?: string; continueSession?: boolean; files?: string[]; mode?: string },
+        options: { model?: string; variant?: string; sessionId?: string; continueSession?: boolean; files?: ChatFilePart[]; mode?: string },
         onEvent?: (event: ChatEvent) => void
     ): Promise<void> {
         await this.ensureServer();
@@ -7596,7 +7601,16 @@ export class OpenCodeClient {
         payload.agent = options.mode || 'plan';
         this.expectedMainAgentBySession.set(sessionId, options.mode || 'plan');
         if (options.files && options.files.length) {
-            payload.parts.push(...options.files.map((file) => ({ type: 'file', path: file })));
+            payload.parts.push(...options.files.map((file) => {
+                if (typeof file === 'string') {
+                    return { type: 'file', path: file };
+                }
+                return {
+                    type: 'file',
+                    mime: file.mime,
+                    url: file.url
+                };
+            }));
         }
 
         await this.requestJson('POST', `/session/${sessionId}/prompt_async`, payload);

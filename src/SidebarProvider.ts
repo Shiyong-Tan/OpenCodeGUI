@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as pathModule from "path";
-import { OpenCodeClient, ChatEvent, ModelInfo, SessionInfo, FileSnapshot, ConflictDetail, AgentInfo } from "./OpenCodeClient";
+import { OpenCodeClient, ChatEvent, ModelInfo, SessionInfo, FileSnapshot, ConflictDetail, AgentInfo, ChatFilePart } from "./OpenCodeClient";
 import { OpenCodeDiffProvider } from "./OpenCodeDiffProvider";
 import { GitRepoManager } from './undo/GitRepoManager';
 import { runGit } from './undo/GitRunner';
@@ -35,6 +35,12 @@ type CanceledTurnRecord = {
     assistantMsgId?: string;
     textHash?: string;
     canceledAt: number;
+};
+
+type WorkspaceFileResult = {
+    path: string;
+    name: string;
+    directory: string;
 };
 
 type PersistedRevertedSegment = {
@@ -1534,6 +1540,99 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
     }
 
+    private async listWorkspaceFiles(query: string, limit = 50): Promise<WorkspaceFileResult[]> {
+        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!workspaceRoot) return [];
+        const normalizedQuery = String(query || '').trim().replace(/\\/g, '/').toLowerCase();
+        const exclude = '{**/.git/**,**/node_modules/**,**/.opencode/**,**/.sisyphus/**}';
+        const maxScan = normalizedQuery.length >= 2 ? 2500 : 500;
+        const uris = await vscode.workspace.findFiles(new vscode.RelativePattern(workspaceRoot, '**/*'), exclude, maxScan);
+        const scored = uris
+            .map((uri) => {
+                const relPath = pathModule.relative(workspaceRoot, uri.fsPath).replace(/\\/g, '/');
+                const lower = relPath.toLowerCase();
+                if (!relPath || relPath.startsWith('..') || pathModule.isAbsolute(relPath)) return null;
+                if (normalizedQuery && !lower.includes(normalizedQuery)) return null;
+                const name = pathModule.basename(relPath);
+                const directory = pathModule.dirname(relPath).replace(/\\/g, '/');
+                const score = !normalizedQuery
+                    ? relPath.length
+                    : (lower === normalizedQuery ? 0
+                        : (lower.endsWith(`/${normalizedQuery}`) || pathModule.basename(lower) === normalizedQuery ? 1
+                            : (pathModule.basename(lower).includes(normalizedQuery) ? 2 : 3)));
+                return { path: relPath, name, directory: directory === '.' ? '' : directory, score };
+            })
+            .filter((item): item is WorkspaceFileResult & { score: number } => Boolean(item))
+            .sort((a, b) => a.score - b.score || a.path.length - b.path.length || a.path.localeCompare(b.path))
+            .slice(0, limit)
+            .map(({ score, ...item }) => item);
+        return scored;
+    }
+
+    private async normalizeReferencedWorkspaceFiles(rawFiles: unknown): Promise<ChatFilePart[]> {
+        if (!Array.isArray(rawFiles) || !rawFiles.length) return [];
+        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!workspaceRoot) return [];
+        const normalizedRoot = pathModule.resolve(workspaceRoot);
+        const out: ChatFilePart[] = [];
+        const seen = new Set<string>();
+        for (const raw of rawFiles.slice(0, 20)) {
+            const value = typeof raw === 'string'
+                ? raw
+                : (raw && typeof raw === 'object' && typeof (raw as { path?: unknown }).path === 'string'
+                    ? String((raw as { path: string }).path)
+                    : '');
+            if (!value || value.includes('\0')) continue;
+            const slashNormalized = value.replace(/\\/g, '/').replace(/^\/+/, '');
+            const absPath = pathModule.isAbsolute(value)
+                ? pathModule.resolve(value)
+                : pathModule.resolve(workspaceRoot, slashNormalized);
+            const rel = pathModule.relative(normalizedRoot, absPath).replace(/\\/g, '/');
+            if (!rel || rel.startsWith('..') || pathModule.isAbsolute(rel)) continue;
+            if (seen.has(rel)) continue;
+            try {
+                const stat = await fs.promises.stat(absPath);
+                if (!stat.isFile()) continue;
+            } catch {
+                continue;
+            }
+            seen.add(rel);
+            const mime = await this.getWorkspaceReferenceMime(absPath, rel);
+            if (!mime) continue;
+            out.push({
+                path: rel,
+                mime,
+                url: vscode.Uri.file(absPath).toString()
+            });
+        }
+        return out;
+    }
+
+    private async getWorkspaceReferenceMime(absPath: string, name: string): Promise<string | undefined> {
+        const mime = this.getMimeFromName(name);
+        if (mime !== 'application/octet-stream') {
+            return mime;
+        }
+        try {
+            const handle = await fs.promises.open(absPath, 'r');
+            try {
+                const buffer = Buffer.alloc(8192);
+                const result = await handle.read(buffer, 0, buffer.length, 0);
+                const slice = buffer.subarray(0, result.bytesRead);
+                if (slice.includes(0)) {
+                    this.uiDebugChannel.appendLine(`EXT: fileRef.skip | reason=binary-unknown-mime | path=${name}`);
+                    return undefined;
+                }
+                return 'text/plain';
+            } finally {
+                await handle.close();
+            }
+        } catch (error) {
+            this.uiDebugChannel.appendLine(`EXT: fileRef.mime.fail | path=${name} | err=${String(error)}`);
+            return undefined;
+        }
+    }
+
     private async resolveInternalRepo(sessionId: string): Promise<GitRepoRef | null> {
         if (!sessionId) return null;
         try {
@@ -2092,6 +2191,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         const attachKeys = attachments.length ? Object.keys(attachments[0] || {}).join(',') : '';
                         this.uiDebugChannel.appendLine(`EXT: send.enter | reqId=${reqId} | sessionId=${this.currentSessionId || 'null'} | hasAttachments=${String(Boolean(attachments.length))} | attachmentsCount=${attachments.length} | attachKeys=${attachKeys}`);
                         const userText = (data.value as string) || '';
+                        const referencedFiles = await this.normalizeReferencedWorkspaceFiles(data.files);
                         let modelText = userText;
                         const initialDraft = {
                             text: userText,
@@ -2194,7 +2294,8 @@ ${attachmentLines.join('\n')}`
                                 model: this.selectedModel,
                                 variant: this.selectedVariant,
                                 sessionId: this.currentSessionId,
-                                mode: this.selectedMode
+                                mode: this.selectedMode,
+                                files: referencedFiles
                             }
                         );
 
@@ -2393,6 +2494,19 @@ ${attachmentLines.join('\n')}`
                 case "refreshSessions": {
                     // 使用 webviewView.webview（最新实例），而不是 activeWebview
                     await this.refreshSessions(webviewView.webview, data.requestId || '');
+                    break;
+                }
+                case "listWorkspaceFiles": {
+                    const requestId = typeof data.requestId === 'string' ? data.requestId : '';
+                    const query = typeof data.query === 'string' ? data.query : '';
+                    const files = await this.listWorkspaceFiles(query);
+                    const liveWebview = this._view?.webview || activeWebview;
+                    liveWebview.postMessage({
+                        type: 'workspaceFileResults',
+                        requestId,
+                        query,
+                        files
+                    });
                     break;
                 }
                 case "ping": {
@@ -4264,15 +4378,60 @@ ${attachmentLines.join('\n')}`
             case '.txt':
                 return 'text/plain';
             case '.md':
+            case '.markdown':
                 return 'text/markdown';
+            case '.ts':
+            case '.tsx':
+            case '.js':
+            case '.jsx':
+            case '.mjs':
+            case '.cjs':
+            case '.py':
+            case '.java':
+            case '.c':
+            case '.h':
+            case '.cpp':
+            case '.cxx':
+            case '.cc':
+            case '.hpp':
+            case '.cs':
+            case '.go':
+            case '.rs':
+            case '.rb':
+            case '.php':
+            case '.swift':
+            case '.kt':
+            case '.kts':
+            case '.scala':
+            case '.sh':
+            case '.bash':
+            case '.zsh':
+            case '.ps1':
+            case '.bat':
+            case '.cmd':
+            case '.sql':
+            case '.yaml':
+            case '.yml':
+            case '.toml':
+            case '.ini':
+            case '.env':
+            case '.gitignore':
+            case '.dockerignore':
+            case '.css':
+            case '.scss':
+            case '.less':
+            case '.html':
+            case '.htm':
+            case '.vue':
+            case '.svelte':
+            case '.xml':
+                return 'text/plain';
             case '.json':
                 return 'application/json';
             case '.pdf':
                 return 'application/pdf';
             case '.csv':
                 return 'text/csv';
-            case '.xml':
-                return 'application/xml';
             default:
                 return 'application/octet-stream';
         }
@@ -6489,6 +6648,7 @@ ${attachmentLines.join('\n')}`
                     <div class="attachment-list" id="attachment-list"></div>
                     <div class="input-token-list" id="input-token-list"></div>
                     <textarea id="chat-input" placeholder="Ask anything..."></textarea>
+                    <div class="file-mention-list hidden" id="file-mention-list"></div>
 
                     <div class="toolbar">
                         <div class="left-tools">

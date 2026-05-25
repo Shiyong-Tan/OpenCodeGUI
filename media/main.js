@@ -144,6 +144,7 @@ let inputEl = null;
 let freeModelIds = new Set();
 const pendingUiPrompts = [];
 let pendingContextItems = [];
+let pendingFileRefs = [];
 let sendBlockedNotice = '';
 let systemNoticeText = '';
 let baseSessionTitle = 'OpenCode: Chat';
@@ -2940,6 +2941,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const sessionList = document.getElementById('session-list');
     const attachmentList = document.getElementById('attachment-list');
     const inputTokenList = document.getElementById('input-token-list');
+    const fileMentionList = document.getElementById('file-mention-list');
     const serverStatusDot = document.getElementById('server-status-dot');
     const panelBackdrop = document.getElementById('panel-backdrop');
     const refreshSessionsBtn = document.getElementById('refresh-sessions');
@@ -5012,8 +5014,53 @@ function shouldHideDcpUiMessage(message) {
         for (const item of pendingContextItems) {
             if (!item || !item.displayText) continue;
             const chip = document.createElement('span');
-            chip.className = 'input-token';
-            chip.textContent = item.displayText;
+            chip.className = 'input-token context-token';
+
+            const label = document.createElement('span');
+            label.className = 'input-token-label';
+            label.textContent = item.displayText;
+            chip.appendChild(label);
+
+            const removeBtn = document.createElement('button');
+            removeBtn.type = 'button';
+            removeBtn.className = 'input-token-remove';
+            removeBtn.title = 'Remove context';
+            removeBtn.setAttribute('aria-label', `Remove ${item.displayText}`);
+            removeBtn.textContent = '\u00D7';
+            removeBtn.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                pendingContextItems = pendingContextItems.filter((entry) => entry !== item);
+                renderContextTokens();
+            });
+            chip.appendChild(removeBtn);
+
+            inputTokenList.appendChild(chip);
+        }
+        for (const item of pendingFileRefs) {
+            if (!item || !item.path) continue;
+            const chip = document.createElement('span');
+            chip.className = 'input-token file-token';
+
+            const label = document.createElement('span');
+            label.className = 'input-token-label';
+            label.textContent = `@${item.path}`;
+            chip.appendChild(label);
+
+            const removeBtn = document.createElement('button');
+            removeBtn.type = 'button';
+            removeBtn.className = 'input-token-remove';
+            removeBtn.title = 'Remove file reference';
+            removeBtn.setAttribute('aria-label', `Remove ${item.path}`);
+            removeBtn.textContent = '\u00D7';
+            removeBtn.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                pendingFileRefs = pendingFileRefs.filter((entry) => entry.path !== item.path);
+                renderContextTokens();
+            });
+            chip.appendChild(removeBtn);
+
             inputTokenList.appendChild(chip);
         }
     }
@@ -5022,6 +5069,150 @@ function shouldHideDcpUiMessage(message) {
         if (!displayText || !payload || typeof payload.text !== 'string') return;
         pendingContextItems.push({ displayText, ...payload });
         renderContextTokens();
+    }
+
+    const fileMentionState = {
+        open: false,
+        requestId: '',
+        query: '',
+        range: null,
+        items: [],
+        selectedIndex: 0,
+        timer: null
+    };
+
+    function normalizeFileRef(file) {
+        if (!file || typeof file.path !== 'string' || !file.path) return null;
+        return {
+            path: file.path,
+            name: typeof file.name === 'string' ? file.name : file.path.split('/').pop(),
+            directory: typeof file.directory === 'string' ? file.directory : ''
+        };
+    }
+
+    function addFileRef(file) {
+        const normalized = normalizeFileRef(file);
+        if (!normalized) return;
+        if (pendingFileRefs.some((item) => item.path === normalized.path)) {
+            renderContextTokens();
+            return;
+        }
+        pendingFileRefs.push(normalized);
+        renderContextTokens();
+    }
+
+    function closeFileMentionList() {
+        fileMentionState.open = false;
+        fileMentionState.items = [];
+        fileMentionState.selectedIndex = 0;
+        fileMentionState.range = null;
+        if (fileMentionList) {
+            fileMentionList.classList.add('hidden');
+            fileMentionList.innerHTML = '';
+        }
+    }
+
+    function renderFileMentionList() {
+        if (!fileMentionList) return;
+        fileMentionList.innerHTML = '';
+        if (!fileMentionState.open) {
+            fileMentionList.classList.add('hidden');
+            return;
+        }
+        const items = fileMentionState.items || [];
+        if (!items.length) {
+            const empty = document.createElement('div');
+            empty.className = 'file-mention-empty';
+            empty.textContent = 'No files found';
+            fileMentionList.appendChild(empty);
+            fileMentionList.classList.remove('hidden');
+            return;
+        }
+        items.forEach((item, index) => {
+            const option = document.createElement('button');
+            option.type = 'button';
+            option.className = `file-mention-item${index === fileMentionState.selectedIndex ? ' selected' : ''}`;
+            option.dataset.index = String(index);
+
+            const name = document.createElement('span');
+            name.className = 'file-mention-name';
+            name.textContent = item.name || item.path;
+            option.appendChild(name);
+
+            const dir = document.createElement('span');
+            dir.className = 'file-mention-dir';
+            dir.textContent = item.directory || '.';
+            option.appendChild(dir);
+
+            option.addEventListener('mousedown', (event) => {
+                event.preventDefault();
+                selectFileMention(index);
+            });
+            fileMentionList.appendChild(option);
+        });
+        fileMentionList.classList.remove('hidden');
+    }
+
+    function findActiveFileMention() {
+        if (!input) return null;
+        const cursor = input.selectionStart;
+        if (cursor !== input.selectionEnd) return null;
+        const beforeCursor = input.value.slice(0, cursor);
+        const match = beforeCursor.match(/(^|\s)@([^\s@]*)$/);
+        if (!match) return null;
+        const query = match[2] || '';
+        return {
+            query,
+            start: cursor - query.length - 1,
+            end: cursor
+        };
+    }
+
+    function requestFileMentionResults() {
+        const activeMention = findActiveFileMention();
+        if (!activeMention) {
+            closeFileMentionList();
+            return;
+        }
+        fileMentionState.open = true;
+        fileMentionState.query = activeMention.query;
+        fileMentionState.range = { start: activeMention.start, end: activeMention.end };
+        fileMentionState.selectedIndex = 0;
+        const requestId = `files-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        fileMentionState.requestId = requestId;
+        vscode.postMessage({
+            type: 'listWorkspaceFiles',
+            requestId,
+            query: activeMention.query
+        });
+    }
+
+    function scheduleFileMentionUpdate() {
+        if (fileMentionState.timer) {
+            clearTimeout(fileMentionState.timer);
+        }
+        const activeMention = findActiveFileMention();
+        if (!activeMention) {
+            closeFileMentionList();
+            return;
+        }
+        fileMentionState.open = true;
+        fileMentionState.query = activeMention.query;
+        fileMentionState.range = { start: activeMention.start, end: activeMention.end };
+        renderFileMentionList();
+        fileMentionState.timer = setTimeout(requestFileMentionResults, 120);
+    }
+
+    function selectFileMention(index) {
+        const item = fileMentionState.items[index];
+        if (!item || !fileMentionState.range || !input) return;
+        const { start, end } = fileMentionState.range;
+        input.value = `${input.value.slice(0, start)}${input.value.slice(end)}`;
+        input.selectionStart = start;
+        input.selectionEnd = start;
+        addFileRef(item);
+        closeFileMentionList();
+        input.focus();
     }
 
     function openSessionPanel() {
@@ -5537,11 +5728,15 @@ function appendMessageImages(parentEl, message) {
         // applyTurnStartFreeze removed - segments no longer have freeze state
         const text = input.value.trim();
         const hasContext = pendingContextItems.length > 0;
-        if ((!text && !attachments.length && !hasContext) || isBusy) return;
+        const hasFileRefs = pendingFileRefs.length > 0;
+        if ((!text && !attachments.length && !hasContext && !hasFileRefs) || isBusy) return;
 
         const hasNonImage = attachments.some((item) => !isImageAttachment(item));
         const fallbackText = hasNonImage ? 'Attachment added.' : 'Image attached.';
-        const contextDisplay = pendingContextItems.map((item) => item.displayText).filter(Boolean).join(' ');
+        const contextDisplay = [
+            ...pendingContextItems.map((item) => item.displayText).filter(Boolean),
+            ...pendingFileRefs.map((item) => item?.path ? `@${item.path}` : '').filter(Boolean)
+        ].join(' ');
         const baseText = contextDisplay
             ? (text ? `${contextDisplay}\n${text}` : contextDisplay)
             : text;
@@ -5571,6 +5766,9 @@ function appendMessageImages(parentEl, message) {
             filePath: item.filePath,
             range: item.range
         }));
+        const filesPayload = pendingFileRefs
+            .map((item) => item?.path)
+            .filter((value) => typeof value === 'string' && value.length > 0);
 
         setBusy(true);
         if (!activeSessionId) {
@@ -5618,6 +5816,7 @@ function appendMessageImages(parentEl, message) {
             value: messageText,
             attachments: attachmentsPayload,
             contextItems: contextPayload,
+            files: filesPayload,
             clientMessageId,
             sessionId: activeSessionId || undefined,
             tmpKey,
@@ -5626,13 +5825,45 @@ function appendMessageImages(parentEl, message) {
         attachments = [];
         renderAttachments();
         pendingContextItems = [];
+        pendingFileRefs = [];
         renderContextTokens();
         input.value = '';
+        closeFileMentionList();
     });
 
     input.addEventListener('paste', handlePaste);
+    input.addEventListener('input', scheduleFileMentionUpdate);
+    input.addEventListener('click', scheduleFileMentionUpdate);
+    document.addEventListener('mousedown', (event) => {
+        const target = event.target;
+        if (!(target instanceof Node)) return;
+        if (target === input || fileMentionList?.contains(target)) return;
+        closeFileMentionList();
+    });
 
     input.addEventListener('keydown', (e) => {
+        if (fileMentionState.open && !fileMentionList?.classList.contains('hidden')) {
+            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                e.preventDefault();
+                const count = fileMentionState.items.length;
+                if (count > 0) {
+                    const delta = e.key === 'ArrowDown' ? 1 : -1;
+                    fileMentionState.selectedIndex = (fileMentionState.selectedIndex + delta + count) % count;
+                    renderFileMentionList();
+                }
+                return;
+            }
+            if (e.key === 'Enter' && fileMentionState.items.length > 0) {
+                e.preventDefault();
+                selectFileMention(fileMentionState.selectedIndex);
+                return;
+            }
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                closeFileMentionList();
+                return;
+            }
+        }
         if (e.key === 'Tab' && document.activeElement === input) {
             e.preventDefault();
             const modeItems = ['plan', 'build'].filter((mode) => Array.isArray(modes) ? modes.includes(mode) : true);
@@ -5688,7 +5919,9 @@ function appendMessageImages(parentEl, message) {
         attachments = [];
         renderAttachments();
         pendingContextItems = [];
+        pendingFileRefs = [];
         renderContextTokens();
+        closeFileMentionList();
         isSwitchingSession = true;
         vscode.postMessage({ type: 'newSession' });
         window.__oc?.renderFromState?.();
@@ -5953,7 +6186,9 @@ window.addEventListener('message', (event) => {
                 }
                 activeSessionId = incomingSessionId || activeSessionId || '';
                 pendingContextItems = [];
+                pendingFileRefs = [];
                 renderContextTokens();
+                closeFileMentionList();
                 window.__oc?.renderFromState?.();
                 logSegmentState(activeSessionId, 'after-reset');
                 break;
@@ -6489,6 +6724,15 @@ window.addEventListener('message', (event) => {
                 const displayText = typeof message.displayText === 'string' ? message.displayText : '';
                 const payload = message.payload && typeof message.payload === 'object' ? message.payload : null;
                 addContextItem(displayText, payload);
+                break;
+            }
+            case 'workspaceFileResults': {
+                if (message.requestId !== fileMentionState.requestId) break;
+                const files = Array.isArray(message.files) ? message.files : [];
+                fileMentionState.items = files.map(normalizeFileRef).filter(Boolean);
+                fileMentionState.selectedIndex = 0;
+                fileMentionState.open = Boolean(fileMentionState.range);
+                renderFileMentionList();
                 break;
             }
             case 'messageIdMap': {
