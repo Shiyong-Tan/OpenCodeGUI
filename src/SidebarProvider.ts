@@ -2424,6 +2424,64 @@ ${attachmentLines.join('\n')}`
                     }
                     break;
                 }
+                case "appendMessage": {
+                    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : this.currentSessionId;
+                    const value = typeof data.value === 'string' ? data.value.trim() : '';
+                    const clientMessageId = typeof data.clientMessageId === 'string' ? data.clientMessageId : `append-${Date.now()}`;
+                    const liveWebview = this._view?.webview || activeWebview;
+                    if (!sessionId || !value) {
+                        liveWebview.postMessage({
+                            type: 'appendStatus',
+                            sessionId,
+                            clientMessageId,
+                            status: 'failed',
+                            reason: 'empty'
+                        });
+                        break;
+                    }
+                    if (!this.currentSessionId || sessionId !== this.currentSessionId || !this.sendInFlightBySession.has(sessionId) || !this.client.canAppendToCurrentTurn(sessionId)) {
+                        liveWebview.postMessage({
+                            type: 'appendStatus',
+                            sessionId,
+                            clientMessageId,
+                            status: 'rejected',
+                            reason: 'finalized'
+                        });
+                        break;
+                    }
+                    if (!this.client.beginAppendPrompt(sessionId, clientMessageId, value)) {
+                        liveWebview.postMessage({
+                            type: 'appendStatus',
+                            sessionId,
+                            clientMessageId,
+                            status: 'rejected',
+                            reason: 'finalized'
+                        });
+                        break;
+                    }
+                    try {
+                        await this.client.appendPrompt(sessionId, value, {
+                            model: this.selectedModel,
+                            mode: this.selectedMode
+                        });
+                        liveWebview.postMessage({
+                            type: 'appendStatus',
+                            sessionId,
+                            clientMessageId,
+                            status: 'queued'
+                        });
+                    } catch (error) {
+                        this.client.failAppendPrompt(sessionId, clientMessageId);
+                        liveWebview.postMessage({
+                            type: 'appendStatus',
+                            sessionId,
+                            clientMessageId,
+                            status: 'failed',
+                            reason: String(error)
+                        });
+                    }
+                    break;
+                }
                 case "setModel": {
                     this.selectedModel = data.value || undefined;
                     await this._context.globalState.update('opencode.model', this.selectedModel);
@@ -4924,6 +4982,18 @@ ${attachmentLines.join('\n')}`
                 phase: event.phase || '',
                 lane: event.lane || 'unknown',
                 ts: Date.now()
+            });
+            return;
+        }
+        if (event.type === 'appendUserMessage' && event.sessionId) {
+            const liveWebview = this._view?.webview || webview;
+            liveWebview.postMessage({
+                type: 'appendUserMessage',
+                sessionId: event.sessionId,
+                rootUserMsgId: event.rootUserMsgId,
+                appendUserMsgId: event.appendUserMsgId || event.messageId,
+                clientMessageId: event.clientMessageId,
+                text: event.text || ''
             });
             return;
         }

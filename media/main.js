@@ -732,6 +732,8 @@ function createSessionState() {
         lastUndoNoticeKey: null,
         undoAvailable: true,
         turnFullyFinalized: true,
+        appendRootUserKey: null,
+        appendComposerFor: null,
         hiddenControlUserIds: new Set(),
         earlyFinalAssistantId: null,
         finalAssistantLock: null,
@@ -1825,6 +1827,16 @@ function replaceKeyEverywhere(oldId, newId) {
 
     if (session.thinkingId === oldId) {
         session.thinkingId = newId;
+    }
+
+    if (session.lastTurnUserId === oldId) {
+        session.lastTurnUserId = newId;
+    }
+    if (session.appendRootUserKey === oldId) {
+        session.appendRootUserKey = newId;
+    }
+    if (session.appendComposerFor === oldId) {
+        session.appendComposerFor = newId;
     }
 
     if (session.currentTurnAssistantKey === oldId) {
@@ -3243,6 +3255,49 @@ document.addEventListener('DOMContentLoaded', () => {
         return card;
     }
 
+function renderAppendComposer(sessionId, rootUserKey) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'append-composer';
+    const input = document.createElement('textarea');
+    input.className = 'append-composer-input';
+    input.rows = 2;
+    input.placeholder = 'Append...';
+    const actions = document.createElement('div');
+    actions.className = 'append-composer-actions';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'append-composer-btn secondary';
+    cancel.textContent = 'Cancel';
+    cancel.addEventListener('click', () => {
+        const session = getSessionState(sessionId);
+        if (session) session.appendComposerFor = null;
+        window.__oc?.renderFromState?.();
+    });
+    const send = document.createElement('button');
+    send.type = 'button';
+    send.className = 'append-composer-btn primary';
+    send.textContent = 'Append';
+    const submit = () => submitAppendMessage(sessionId, rootUserKey, input.value);
+    send.addEventListener('click', submit);
+    input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' && !event.shiftKey) {
+            event.preventDefault();
+            submit();
+        }
+        if (event.key === 'Escape') {
+            const session = getSessionState(sessionId);
+            if (session) session.appendComposerFor = null;
+            window.__oc?.renderFromState?.();
+        }
+    });
+    actions.appendChild(cancel);
+    actions.appendChild(send);
+    wrapper.appendChild(input);
+    wrapper.appendChild(actions);
+    setTimeout(() => input.focus(), 0);
+    return wrapper;
+}
+
 function renderMessageElement(message, renderedSet) {
     if (renderedSet.has(message.id)) {
         console.warn('[Render] duplicate message skipped', message.id);
@@ -3573,7 +3628,39 @@ function renderMessageElement(message, renderedSet) {
             if (message.role === 'user' && !sanitized.trim()) {
                 return;
             }
-            content.textContent = sanitized;
+            if (message.role === 'user') {
+                const mainText = document.createElement('div');
+                mainText.className = 'message-user-text';
+                mainText.textContent = sanitized;
+                content.appendChild(mainText);
+                for (const item of getAppendItems(message)) {
+                    if (!item || typeof item.text !== 'string' || !item.text.trim()) continue;
+                    const block = document.createElement('div');
+                    block.className = 'append-message-block';
+                    const divider = document.createElement('div');
+                    divider.className = 'append-message-divider';
+                    block.appendChild(divider);
+                    const textEl = document.createElement('div');
+                    textEl.className = 'append-message-text';
+                    textEl.textContent = item.text;
+                    block.appendChild(textEl);
+                    if (item.status && item.status !== 'applied') {
+                        const status = document.createElement('div');
+                        status.className = `append-message-status append-${item.status}`;
+                        status.textContent = item.status === 'failed'
+                            ? 'Append failed'
+                            : item.status === 'rejected'
+                                ? 'Append unavailable'
+                                : item.status === 'seen' || item.status === 'queued'
+                                    ? 'Queued'
+                                    : 'Sending...';
+                        block.appendChild(status);
+                    }
+                    content.appendChild(block);
+                }
+            } else {
+                content.textContent = sanitized;
+            }
         }
         div.appendChild(content);
 
@@ -3725,8 +3812,23 @@ function renderMessageElement(message, renderedSet) {
         if (message.role === 'user') {
             const actions = document.createElement('div');
             actions.className = 'message-actions';
+            if (canAppendToMessage(session, message)) {
+                const appendBtn = document.createElement('button');
+                appendBtn.className = 'append-btn';
+                appendBtn.type = 'button';
+                appendBtn.title = 'Append to this message';
+                appendBtn.textContent = '+';
+                appendBtn.addEventListener('click', () => {
+                    session.appendComposerFor = message.id;
+                    window.__oc?.renderFromState?.();
+                });
+                actions.appendChild(appendBtn);
+            }
             if (!gitUndoEnabled) {
                 div.appendChild(actions);
+                if (session?.appendComposerFor === message.id && canAppendToMessage(session, message)) {
+                    div.appendChild(renderAppendComposer(activeSessionId, message.id));
+                }
                 chatContainer.appendChild(div);
                 return;
             }
@@ -3766,6 +3868,9 @@ function renderMessageElement(message, renderedSet) {
             });
             actions.appendChild(undoBtn);
             div.appendChild(actions);
+            if (session?.appendComposerFor === message.id && canAppendToMessage(session, message)) {
+                div.appendChild(renderAppendComposer(activeSessionId, message.id));
+            }
         }
 
 
@@ -5264,6 +5369,7 @@ function applyPromptToSession(sessionId, payload) {
             meta: { clientId: payload.clientMessageId, images: payload.images || [] }
         });
         session.lastTurnUserId = payload.clientMessageId;
+        session.appendRootUserKey = payload.clientMessageId;
         if (payload.clientMessageId && payload.clientMessageId.startsWith('local-')) {
             vscode.postMessage({ type: 'registerPendingUserLocal', sessionId, localKey: payload.clientMessageId });
         }
@@ -5308,6 +5414,77 @@ function applyPromptToSession(sessionId, payload) {
         updateSendGate();
         // agent timeout notice removed
     }
+
+function canAppendToMessage(session, message) {
+    if (!session || !message || message.role !== 'user') return false;
+    if (!activeSessionId) return false;
+    if (!isBusy || session.backendTurnInFlight !== true) return false;
+    if (session.turnFullyFinalized === true) return false;
+    if (session.canceledActiveTurn === true) return false;
+    if (session.finalAssistantLock?.assistantMsgId) return false;
+    return Boolean(session.appendRootUserKey && message.id === session.appendRootUserKey);
+}
+
+function getAppendItems(message) {
+    if (!message.meta || !Array.isArray(message.meta.appendedPrompts)) return [];
+    return message.meta.appendedPrompts;
+}
+
+function upsertAppendItem(message, item) {
+    if (!message) return null;
+    if (!message.meta) message.meta = {};
+    const items = Array.isArray(message.meta.appendedPrompts)
+        ? [...message.meta.appendedPrompts]
+        : [];
+    const index = items.findIndex((entry) =>
+        (item.clientMessageId && entry.clientMessageId === item.clientMessageId)
+        || (item.appendUserMsgId && entry.appendUserMsgId === item.appendUserMsgId)
+    );
+    const existing = index >= 0 ? items[index] : {};
+    const statusRank = { sending: 1, queued: 2, seen: 3, applied: 4, failed: 10, rejected: 10 };
+    let status = item.status || existing.status;
+    if (existing.status && item.status) {
+        const oldRank = statusRank[existing.status] || 0;
+        const newRank = statusRank[item.status] || 0;
+        status = newRank >= oldRank ? item.status : existing.status;
+    }
+    const next = {
+        ...existing,
+        ...item,
+        status
+    };
+    if (index >= 0) {
+        items[index] = next;
+    } else {
+        items.push(next);
+    }
+    message.meta.appendedPrompts = items;
+    return next;
+}
+
+function submitAppendMessage(sessionId, rootUserKey, text) {
+    const session = getSessionState(sessionId);
+    const root = session?.messagesById?.get(rootUserKey);
+    const value = typeof text === 'string' ? text.trim() : '';
+    if (!session || !root || !value || !canAppendToMessage(session, root)) return;
+    const clientMessageId = `append-${Date.now()}-${messageCounter++}`;
+    upsertAppendItem(root, {
+        clientMessageId,
+        text: value,
+        status: 'sending',
+        createdAt: Date.now()
+    });
+    session.appendComposerFor = null;
+    vscode.postMessage({
+        type: 'appendMessage',
+        sessionId,
+        rootUserKey,
+        clientMessageId,
+        value
+    });
+    window.__oc?.renderFromState?.();
+    scrollToBottom();
+}
 
 function handleAssistantMeta(sessionId, message) {
         const session = getSessionState(sessionId, true);
@@ -5616,6 +5793,14 @@ function handleChatDone(sessionId, message) {
             type: 'ui-debug',
             payload: ['[WV][FINAL_LOCK_SET]', `sessionId=${sessionId}`, `assistantMsgId=${resolvedFinal}`]
         });
+    }
+    const rootKey = session.appendRootUserKey || session.lastTurnUserId;
+    const rootMsg = rootKey ? session.messagesById.get(rootKey) : null;
+    if (rootMsg?.meta && Array.isArray(rootMsg.meta.appendedPrompts)) {
+        rootMsg.meta.appendedPrompts = rootMsg.meta.appendedPrompts.map((item) => ({
+            ...item,
+            status: item.status === 'failed' || item.status === 'rejected' ? item.status : 'applied'
+        }));
     }
     updateSendGate();
     // Mark snapshot pending for this turn; actual emit is single-point gated at finalize_done.
@@ -6746,6 +6931,38 @@ window.addEventListener('message', (event) => {
                         'payloadInternalKey', payloadInternalKey || 'null',
                         'payloadServerId', payloadServerId || 'null']
                 });
+                break;
+            }
+            case 'appendStatus': {
+                const sessionId = getEventSessionId(message, 'appendStatus');
+                if (!sessionId) break;
+                const session = getSessionState(sessionId, true);
+                const rootKey = session.appendRootUserKey || session.lastTurnUserId;
+                const root = rootKey ? session.messagesById.get(rootKey) : null;
+                if (!root) break;
+                upsertAppendItem(root, {
+                    clientMessageId: message.clientMessageId,
+                    status: message.status || 'queued',
+                    reason: message.reason || ''
+                });
+                window.__oc?.renderFromState?.();
+                break;
+            }
+            case 'appendUserMessage': {
+                const sessionId = getEventSessionId(message, 'appendUserMessage');
+                if (!sessionId) break;
+                const session = getSessionState(sessionId, true);
+                const rootKey = session.appendRootUserKey || message.rootUserMsgId || session.lastTurnUserId;
+                const root = rootKey ? session.messagesById.get(rootKey) : null;
+                if (!root) break;
+                upsertAppendItem(root, {
+                    clientMessageId: message.clientMessageId,
+                    appendUserMsgId: message.appendUserMsgId,
+                    text: typeof message.text === 'string' ? message.text : '',
+                    status: 'seen'
+                });
+                window.__oc?.renderFromState?.();
+                scrollToBottom();
                 break;
             }
             case 'turnInFlight': {

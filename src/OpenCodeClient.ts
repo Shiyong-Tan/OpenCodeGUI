@@ -192,7 +192,7 @@ export type PermissionOverlayPayload = {
 };
 
 export type ChatEvent = {
-    type: 'text' | 'session' | 'raw' | 'permission' | 'diff' | 'message' | 'error' | 'tool' | 'toolPatch' | 'files' | 'assistantMessageMeta' | 'assistantPhase' | 'questionOverlay' | 'permissionRequest' | 'permissionReplied' | 'autoResumeStallWarn' | 'autoResumeStallClear' | 'autoResumeHardStop' | 'todoUpdate' | 'sessionUsage' | 'turnInFlight' | 'turnResolved' | 'backgroundActivityPulse';
+    type: 'text' | 'session' | 'raw' | 'permission' | 'diff' | 'message' | 'appendUserMessage' | 'error' | 'tool' | 'toolPatch' | 'files' | 'assistantMessageMeta' | 'assistantPhase' | 'questionOverlay' | 'permissionRequest' | 'permissionReplied' | 'autoResumeStallWarn' | 'autoResumeStallClear' | 'autoResumeHardStop' | 'todoUpdate' | 'sessionUsage' | 'turnInFlight' | 'turnResolved' | 'backgroundActivityPulse';
     text?: string;
     sessionId?: string;
     files?: FileSnapshot[];
@@ -200,6 +200,9 @@ export type ChatEvent = {
     messageIndex?: number;
     lastText?: string;
     assistantMsgId?: string;
+    rootUserMsgId?: string;
+    appendUserMsgId?: string;
+    clientMessageId?: string;
     tmpKey?: string;
     callId?: string;
     requestId?: string;
@@ -413,6 +416,19 @@ type PendingMainFinalGate = {
     createdAt: number;
 };
 
+type AppendPendingPrompt = {
+    clientMessageId: string;
+    text: string;
+    serverMsgId?: string;
+};
+
+type AppendTurnState = {
+    rootUserMsgId: string;
+    pending: AppendPendingPrompt[];
+    appendUserMsgIds: Set<string>;
+    emittedAppendUserMsgIds: Set<string>;
+};
+
 const COPILOT_MODEL_MULTIPLIERS_DOC_URL = 'https://docs.github.com/en/copilot/reference/ai-models/supported-models';
 const COPILOT_SPEED_MULTIPLIER_CACHE_KEY = 'opencode.copilotSpeedMultiplierCache.v1';
 const COPILOT_SPEED_MULTIPLIER_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -500,6 +516,7 @@ export class OpenCodeClient {
     private turnFinalWaitersBySession = new Map<string, Array<() => void>>();
     private turnFinalResolvedBySession = new Set<string>();
     private turnFinalSourceBySession = new Map<string, EventSource>();
+    private appendTurnStateBySession = new Map<string, AppendTurnState>();
     private turnFinishedBySession = new Set<string>();
     private turnRescueTimerBySession = new Map<string, NodeJS.Timeout>();
     private turnRescueRunIdBySession = new Map<string, number>();
@@ -628,6 +645,7 @@ export class OpenCodeClient {
         this.clearTurnFinals();
         this.turnFinalResolvedBySession.clear();
         this.turnFinalSourceBySession.clear();
+        this.appendTurnStateBySession.clear();
         this.clearRescueTimers();
         this.clearResyncLoopTimers();
         this.clearSseDrainTimers();
@@ -1238,6 +1256,7 @@ export class OpenCodeClient {
         this.finishedTurnAtBySession.delete(sessionId);
         this.currentTurnUserMsgIdBySession.delete(sessionId);
         this.displayTurnUserMsgIdBySession.delete(sessionId);
+        this.appendTurnStateBySession.delete(sessionId);
         this.hiddenControlUserMsgIdsBySession.delete(sessionId);
         this.hiddenControlAssistantMsgIdsBySession.delete(sessionId);
         this.currentTurnAssistantMsgIdBySession.delete(sessionId);
@@ -1306,6 +1325,7 @@ export class OpenCodeClient {
         this.pendingAssistantMsgIdBySession.delete(sessionId);
         this.currentTurnUserMsgIdBySession.delete(sessionId);
         this.displayTurnUserMsgIdBySession.delete(sessionId);
+        this.appendTurnStateBySession.delete(sessionId);
         this.hiddenControlUserMsgIdsBySession.delete(sessionId);
         this.hiddenControlAssistantMsgIdsBySession.delete(sessionId);
         this.pendingStopContinuationUserBySession.delete(sessionId);
@@ -1754,6 +1774,7 @@ export class OpenCodeClient {
         this.finishedTurnAtBySession.delete(sessionId);
         this.currentTurnUserMsgIdBySession.delete(sessionId);
         this.displayTurnUserMsgIdBySession.delete(sessionId);
+        this.appendTurnStateBySession.delete(sessionId);
         this.hiddenControlUserMsgIdsBySession.delete(sessionId);
         this.hiddenControlAssistantMsgIdsBySession.delete(sessionId);
         this.currentTurnAssistantMsgIdBySession.delete(sessionId);
@@ -1910,6 +1931,7 @@ export class OpenCodeClient {
         this.pendingAssistantMsgIdBySession.delete(sessionId);
         this.currentTurnUserMsgIdBySession.delete(sessionId);
         this.displayTurnUserMsgIdBySession.delete(sessionId);
+        this.appendTurnStateBySession.delete(sessionId);
         this.hiddenControlUserMsgIdsBySession.delete(sessionId);
         this.hiddenControlAssistantMsgIdsBySession.delete(sessionId);
         this.pendingStopContinuationUserBySession.delete(sessionId);
@@ -2275,6 +2297,72 @@ export class OpenCodeClient {
         return this.displayTurnUserMsgIdBySession.has(sessionId);
     }
 
+    public canAppendToCurrentTurn(sessionId: string | undefined): boolean {
+        if (!sessionId) return false;
+        if (!this.turnStateBySession.has(sessionId)) return false;
+        if (!this.displayTurnUserMsgIdBySession.has(sessionId)) return false;
+        if (this.turnFinalAtBySession.has(sessionId)) return false;
+        if (this.turnFinalResolvedBySession.has(sessionId)) return false;
+        if (this.canceledActiveTurnBySession.get(sessionId) === true) return false;
+        return true;
+    }
+
+    public beginAppendPrompt(sessionId: string, clientMessageId: string, text: string): boolean {
+        if (!this.canAppendToCurrentTurn(sessionId)) return false;
+        const rootUserMsgId = this.displayTurnUserMsgIdBySession.get(sessionId);
+        if (!rootUserMsgId) return false;
+        const state = this.appendTurnStateBySession.get(sessionId) || {
+            rootUserMsgId,
+            pending: [],
+            appendUserMsgIds: new Set<string>(),
+            emittedAppendUserMsgIds: new Set<string>()
+        };
+        state.rootUserMsgId = rootUserMsgId;
+        state.pending.push({ clientMessageId, text });
+        this.appendTurnStateBySession.set(sessionId, state);
+        this.logUiDebug(`EXT: append.begin | sessionId=${sessionId} | rootUserMsgId=${rootUserMsgId} | clientMessageId=${clientMessageId}`);
+        return true;
+    }
+
+    public failAppendPrompt(sessionId: string, clientMessageId: string): void {
+        const state = this.appendTurnStateBySession.get(sessionId);
+        if (!state) return;
+        state.pending = state.pending.filter((item) => item.clientMessageId !== clientMessageId);
+        if (!state.pending.length && !state.appendUserMsgIds.size) {
+            this.appendTurnStateBySession.delete(sessionId);
+        }
+    }
+
+    private bindAppendUserMessage(sessionId: string | undefined, userMsgId: string | undefined): AppendPendingPrompt | undefined {
+        if (!sessionId || !userMsgId || !userMsgId.startsWith('msg_')) return undefined;
+        const state = this.appendTurnStateBySession.get(sessionId);
+        if (!state || state.rootUserMsgId === userMsgId) return undefined;
+        const existing = state.pending.find((item) => item.serverMsgId === userMsgId);
+        if (existing) return existing;
+        const next = state.pending.find((item) => !item.serverMsgId);
+        if (!next) return undefined;
+        next.serverMsgId = userMsgId;
+        state.appendUserMsgIds.add(userMsgId);
+        this.logUiDebug(`EXT: append.ack | sessionId=${sessionId} | rootUserMsgId=${state.rootUserMsgId} | appendUserMsgId=${userMsgId} | clientMessageId=${next.clientMessageId}`);
+        return next;
+    }
+
+    private getAppendPromptForUserMessage(sessionId: string | undefined, userMsgId: string | undefined): AppendPendingPrompt | undefined {
+        if (!sessionId || !userMsgId) return undefined;
+        const state = this.appendTurnStateBySession.get(sessionId);
+        if (!state?.appendUserMsgIds.has(userMsgId)) return undefined;
+        return state.pending.find((item) => item.serverMsgId === userMsgId);
+    }
+
+    private shouldEmitAppendUserMessage(sessionId: string | undefined, userMsgId: string | undefined): boolean {
+        if (!sessionId || !userMsgId) return false;
+        const state = this.appendTurnStateBySession.get(sessionId);
+        if (!state || !state.appendUserMsgIds.has(userMsgId)) return false;
+        if (state.emittedAppendUserMsgIds.has(userMsgId)) return false;
+        state.emittedAppendUserMsgIds.add(userMsgId);
+        return true;
+    }
+
     private rememberHiddenControlUserMsgId(sessionId: string, userMsgId: string): void {
         if (!sessionId || !userMsgId || !userMsgId.startsWith('msg_')) return;
         const set = this.hiddenControlUserMsgIdsBySession.get(sessionId) || new Set<string>();
@@ -2376,7 +2464,9 @@ export class OpenCodeClient {
     }
 
     private isTurnMissingFinal(sessionId: string): boolean {
-        const userMsgId = this.currentTurnUserMsgIdBySession.get(sessionId);
+        const userMsgId = this.appendTurnStateBySession.get(sessionId)?.rootUserMsgId
+            || this.displayTurnUserMsgIdBySession.get(sessionId)
+            || this.currentTurnUserMsgIdBySession.get(sessionId);
         if (!userMsgId) return false;
         const assistantMsgId = this.currentTurnAssistantMsgIdBySession.get(sessionId);
         if (!assistantMsgId) return true;
@@ -3028,7 +3118,10 @@ export class OpenCodeClient {
             }
 
             const { userMsgId, resolved, rawMessages } = parsed;
-            state.resolvedUserMsgId = userMsgId;
+            const rootUserMsgId = this.appendTurnStateBySession.get(sessionId)?.rootUserMsgId
+                || this.displayTurnUserMsgIdBySession.get(sessionId)
+                || userMsgId;
+            state.resolvedUserMsgId = rootUserMsgId;
             // this.logUiDebug(`[DBG_EXPORT_FINAL] userMsgId=${resolved.userMsgId} assistantMsgIdsAll=[${resolved.assistantMsgIdsAll.join(', ')}] chosen=${resolved.assistantMsgId || 'null'} finish=${resolved.chosenFinish || 'null'} completed=${resolved.chosenTimeCompleted ?? 'null'} created=${resolved.chosenTimeCreated ?? 'null'}`);
 
             if (!resolved.assistantMsgIdsAll.length) {
@@ -3057,7 +3150,7 @@ export class OpenCodeClient {
                         sessionId,
                         state.pendingAssistantTmpKey,
                         resolved.assistantMsgId,
-                        userMsgId || undefined
+                        rootUserMsgId || undefined
                     );
                 }
             }
@@ -3065,7 +3158,7 @@ export class OpenCodeClient {
             return {
                 status: 'ok',
                 localKey,
-                userMsgId,
+                userMsgId: rootUserMsgId,
                 assistantMsgId: resolved.assistantMsgId,
                 assistantMsgIdsAll: resolved.assistantMsgIdsAll,
                 chosenFinish: resolved.chosenFinish,
@@ -6243,6 +6336,11 @@ export class OpenCodeClient {
                 }
             }
             if (sessionId && role === 'user' && typeof messageId === 'string' && source === 'sse') {
+                const appendPrompt = this.bindAppendUserMessage(sessionId, messageId);
+                if (appendPrompt) {
+                    this.setCurrentTurnUserMsgId(sessionId, messageId, 'append-user-message');
+                    shouldEmitUserMessageEvent = false;
+                }
                 if (this.shouldSuppressPendingStopControlUser(sessionId)) {
                     this.pendingStopContinuationUserBySession.delete(sessionId);
                     this.rememberHiddenControlUserMsgId(sessionId, messageId);
@@ -6457,6 +6555,25 @@ export class OpenCodeClient {
                 }
                 if (source === 'sse' && sessionId && msgId && roleForMsg === 'user') {
                     const partText = typeof part?.text === 'string' ? part.text : '';
+                    const appendPrompt = this.bindAppendUserMessage(sessionId, msgId) || this.getAppendPromptForUserMessage(sessionId, msgId);
+                    if (appendPrompt) {
+                        this.setCurrentTurnUserMsgId(sessionId, msgId, 'append-user-part');
+                        this.markSessionProgress(sessionId, 'append-user-part', msgId);
+                        if (this.shouldEmitAppendUserMessage(sessionId, msgId)) {
+                            const rootUserMsgId = this.appendTurnStateBySession.get(sessionId)?.rootUserMsgId;
+                            events.push({
+                                type: 'appendUserMessage',
+                                text: partText || appendPrompt.text,
+                                sessionId,
+                                messageId: msgId,
+                                appendUserMsgId: msgId,
+                                rootUserMsgId,
+                                clientMessageId: appendPrompt.clientMessageId,
+                                source
+                            });
+                        }
+                        return events;
+                    }
                     const isAutoResumeControl = this.isAutoResumePromptText(partText);
                     const isHiddenStopControl = this.isStopContinuationPromptText(partText) || this.isOmoContinuationText(partText);
                     if (isAutoResumeControl || isHiddenStopControl) {
@@ -7622,6 +7739,30 @@ export class OpenCodeClient {
             }
             this.eventListeners.delete(listener);
         }
+    }
+
+    public async appendPrompt(
+        sessionId: string,
+        message: string,
+        options: { model?: string; mode?: string } = {}
+    ): Promise<void> {
+        await this.ensureServer();
+        if (!sessionId) {
+            throw new Error('Missing session ID for append request.');
+        }
+        if (!this.canAppendToCurrentTurn(sessionId)) {
+            throw new Error('This turn can no longer be appended to.');
+        }
+        const payload: any = {
+            parts: [{ type: 'text', text: message }]
+        };
+        const modelRef = this.parseModelRef(options.model);
+        if (modelRef) {
+            payload.model = modelRef;
+        }
+        payload.agent = options.mode || 'plan';
+        this.expectedMainAgentBySession.set(sessionId, options.mode || 'plan');
+        await this.requestJson('POST', `/session/${sessionId}/prompt_async`, payload);
     }
 
     private toBodyPreview(value: unknown, maxLen = 500): string {
