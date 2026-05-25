@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.5.0
+
+- Added `@` workspace file mentions in the chat input with searchable file suggestions, keyboard navigation, and removable file chips.
+- Sent referenced workspace files through OpenCode file parts with workspace path validation, file URLs, and supported MIME detection for common source/text files.
+- Unified removable input chips for file mentions and editor-selection context so users can remove selected context before sending.
+- Improved Antigravity local development reload by using `npm.cmd run compile` for the debug prelaunch task on Windows.
+
 ## 1.3.6
 
 - Added patch-only OpenCode diff support so diff rendering can handle patch payloads without requiring a full diff object.

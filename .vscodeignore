@@ -42,6 +42,7 @@ config.json
 # tests
 test/**
 tests/**
+image/**
 
 # node modules - exclude devDependencies, keep only runtime deps
 node_modules/.bin/**
