@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2.0.0
+
+- Added live append/steering for active turns: while OpenCode is still processing, hover the active user message and click the `+` button to append a plain-text instruction to that same turn.
+- Merged appended instructions into the original user message with dividers, while keeping a single final assistant response in the timeline.
+- Kept append-compatible turn ownership, change-list, undo, restore, and snapshot behavior aligned with the existing final assistant message flow.
+
 ## 1.5.0
 
 - Added `@` workspace file mentions in the chat input with searchable file suggestions, keyboard navigation, and removable file chips.
