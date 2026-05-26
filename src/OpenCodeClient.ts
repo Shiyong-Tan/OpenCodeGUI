@@ -5971,7 +5971,7 @@ export class OpenCodeClient {
         }
         if (!lockedMsgId) {
             this.task1Metrics.parentMismatchChecks += 1;
-            if (!(typeof parentId === 'string' && ((typeof currentUser === 'string' && parentId === currentUser) || isContinuationHiddenControlParent))) {
+            if (!this.isAcceptedTurnParent(sessionId, parentId, currentUser, isContinuationHiddenControlParent)) {
                 this.task1Metrics.parentMismatchCount += 1;
                 this.logUiDebug(`EXT: finalizing.ignore | sessionId=${sessionId} | msgId=${msgId || 'null'} | reason=parent-mismatch`);
                 return false;
@@ -5979,6 +5979,21 @@ export class OpenCodeClient {
         }
         if (this.hasRunningToolsForMessage(msgId)) return false;
         return true;
+    }
+
+    private isAcceptedTurnParent(
+        sessionId: string,
+        parentId: unknown,
+        currentUser: string | undefined,
+        isContinuationHiddenControlParent: boolean
+    ): boolean {
+        if (typeof parentId !== 'string') return false;
+        if (typeof currentUser === 'string' && parentId === currentUser) return true;
+        if (isContinuationHiddenControlParent) return true;
+        const appendState = this.appendTurnStateBySession.get(sessionId);
+        if (!appendState) return false;
+        if (parentId === appendState.rootUserMsgId) return true;
+        return appendState.appendUserMsgIds.has(parentId);
     }
 
     private shouldAcceptSubagentCompletionFinal(sessionId: string | undefined, info: any): boolean {
@@ -6351,7 +6366,10 @@ export class OpenCodeClient {
             if (sessionId && role === 'user' && typeof messageId === 'string' && source === 'sse') {
                 const appendPrompt = this.bindAppendUserMessage(sessionId, messageId);
                 if (appendPrompt) {
-                    this.setCurrentTurnUserMsgId(sessionId, messageId, 'append-user-message');
+                    const rootUserMsgId = this.getAppendRootUserMsgId(sessionId);
+                    if (rootUserMsgId) {
+                        this.setCurrentTurnUserMsgId(sessionId, rootUserMsgId, 'append-root-user-message');
+                    }
                     shouldEmitUserMessageEvent = false;
                 }
                 if (this.shouldSuppressPendingStopControlUser(sessionId)) {
@@ -6570,7 +6588,10 @@ export class OpenCodeClient {
                     const partText = typeof part?.text === 'string' ? part.text : '';
                     const appendPrompt = this.bindAppendUserMessage(sessionId, msgId) || this.getAppendPromptForUserMessage(sessionId, msgId);
                     if (appendPrompt) {
-                        this.setCurrentTurnUserMsgId(sessionId, msgId, 'append-user-part');
+                        const rootUserMsgId = this.getAppendRootUserMsgId(sessionId);
+                        if (rootUserMsgId) {
+                            this.setCurrentTurnUserMsgId(sessionId, rootUserMsgId, 'append-root-user-part');
+                        }
                         this.markSessionProgress(sessionId, 'append-user-part', msgId);
                         if (this.shouldEmitAppendUserMessage(sessionId, msgId)) {
                             const rootUserMsgId = this.getAppendRootUserMsgId(sessionId);

@@ -734,6 +734,7 @@ function createSessionState() {
         turnFullyFinalized: true,
         appendRootUserKey: null,
         appendComposerFor: null,
+        appendComposerDrafts: new Map(),
         hiddenControlUserIds: new Set(),
         earlyFinalAssistantId: null,
         finalAssistantLock: null,
@@ -1837,6 +1838,11 @@ function replaceKeyEverywhere(oldId, newId) {
     }
     if (session.appendComposerFor === oldId) {
         session.appendComposerFor = newId;
+    }
+    if (session.appendComposerDrafts?.has?.(oldId)) {
+        const draft = session.appendComposerDrafts.get(oldId);
+        session.appendComposerDrafts.delete(oldId);
+        session.appendComposerDrafts.set(newId, draft);
     }
 
     if (session.currentTurnAssistantKey === oldId) {
@@ -3256,12 +3262,25 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
 function renderAppendComposer(sessionId, rootUserKey) {
+    const session = getSessionState(sessionId);
+    if (session && !(session.appendComposerDrafts instanceof Map)) {
+        session.appendComposerDrafts = new Map();
+    }
     const wrapper = document.createElement('div');
     wrapper.className = 'append-composer';
     const input = document.createElement('textarea');
     input.className = 'append-composer-input';
     input.rows = 2;
     input.placeholder = 'Append...';
+    input.value = session?.appendComposerDrafts?.get?.(rootUserKey) || '';
+    input.addEventListener('input', () => {
+        const liveSession = getSessionState(sessionId);
+        if (!liveSession) return;
+        if (!(liveSession.appendComposerDrafts instanceof Map)) {
+            liveSession.appendComposerDrafts = new Map();
+        }
+        liveSession.appendComposerDrafts.set(rootUserKey, input.value);
+    });
     const actions = document.createElement('div');
     actions.className = 'append-composer-actions';
     const cancel = document.createElement('button');
@@ -3270,7 +3289,10 @@ function renderAppendComposer(sessionId, rootUserKey) {
     cancel.textContent = 'Cancel';
     cancel.addEventListener('click', () => {
         const session = getSessionState(sessionId);
-        if (session) session.appendComposerFor = null;
+        if (session) {
+            session.appendComposerFor = null;
+            session.appendComposerDrafts?.delete?.(rootUserKey);
+        }
         window.__oc?.renderFromState?.();
     });
     const send = document.createElement('button');
@@ -3298,7 +3320,10 @@ function renderAppendComposer(sessionId, rootUserKey) {
         }
         if (event.key === 'Escape') {
             const session = getSessionState(sessionId);
-            if (session) session.appendComposerFor = null;
+            if (session) {
+                session.appendComposerFor = null;
+                session.appendComposerDrafts?.delete?.(rootUserKey);
+            }
             window.__oc?.renderFromState?.();
         }
     });
@@ -5551,6 +5576,7 @@ function submitAppendMessage(sessionId, rootUserKey, text) {
         createdAt: Date.now()
     });
     session.appendComposerFor = null;
+    session.appendComposerDrafts?.delete?.(rootUserKey);
     vscode.postMessage({
         type: 'appendMessage',
         sessionId,
