@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2.0.1
+
+- Improved user-message action visibility by sliding the user bubble left on hover/focus and showing append/undo controls in the newly exposed space to the right.
+
 ## 2.0.0
 
 - Added live append/steering for active turns: while OpenCode is still processing, hover the active user message and click the `+` button to append a plain-text instruction to that same turn.

@@ -438,6 +438,8 @@ body {
     background-color: var(--vscode-button-background);
     color: var(--vscode-button-foreground);
     border-color: rgba(0,0,0,0.08);
+    overflow: visible;
+    transition: transform 0.16s ease;
 }
 
 .message.bot {
@@ -538,22 +540,37 @@ body {
 /* --- Message Actions --- */
 .message-actions {
     position: absolute;
-    right: 6px;
+    right: -36px;
     top: 50%;
     bottom: auto;
     transform: translateY(-50%);
     opacity: 0;
+    pointer-events: none;
     transition: opacity 0.15s ease;
     display: flex;
     align-items: center;
+    z-index: 2;
 }
 
-.message.user:hover .message-actions {
+.message.user::after {
+    content: "";
+    position: absolute;
+    top: -4px;
+    right: -40px;
+    bottom: -4px;
+    width: 44px;
+    pointer-events: auto;
+}
+
+.message.user:hover,
+.message.user:focus-within {
+    transform: translateX(-36px);
+}
+
+.message.user:hover .message-actions,
+.message.user:focus-within .message-actions {
     opacity: 1;
-}
-
-.message.user:hover .message-content {
-    opacity: 0.7;
+    pointer-events: auto;
 }
 
 .message.user .undo-btn {
