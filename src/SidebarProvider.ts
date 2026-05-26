@@ -2442,20 +2442,21 @@ ${attachmentLines.join('\n')}`
                     const value = typeof data.value === 'string' ? data.value.trim() : '';
                     const clientMessageId = typeof data.clientMessageId === 'string' ? data.clientMessageId : `append-${Date.now()}`;
                     const liveWebview = this._view?.webview || activeWebview;
+                    const requestedRootUserMsgId = typeof data.rootUserKey === 'string' ? data.rootUserKey : undefined;
+                    const currentRootUserMsgId = this.client.getAppendRootUserMsgId(sessionId) || requestedRootUserMsgId;
                     if (!sessionId || !value) {
                         liveWebview.postMessage({
                             type: 'appendStatus',
                             sessionId,
                             clientMessageId,
                             status: 'failed',
+                            rootUserMsgId: currentRootUserMsgId,
                             reason: 'empty'
                         });
                         break;
                     }
                     if (!this.currentSessionId || sessionId !== this.currentSessionId || !this.sendInFlightBySession.has(sessionId) || !this.client.canAppendToCurrentTurn(sessionId)) {
-                    const requestedRootUserMsgId = typeof data.rootUserKey === 'string' ? data.rootUserKey : undefined;
                         liveWebview.postMessage({
-                    const currentRootUserMsgId = this.client.getAppendRootUserMsgId(sessionId) || requestedRootUserMsgId;
                             type: 'appendStatus',
                             sessionId,
                             clientMessageId,
@@ -2472,20 +2473,6 @@ ${attachmentLines.join('\n')}`
                             clientMessageId,
                             status: 'rejected',
                             rootUserMsgId: currentRootUserMsgId,
-                            reason: 'finalized'
-                        });
-                        break;
-                    }
-                    try {
-                        await this.client.appendPrompt(sessionId, value, {
-                            model: this.selectedModel,
-                            mode: this.selectedMode,
-                            clientMessageId
-                        });
-                        liveWebview.postMessage({
-                            rootUserMsgId: currentRootUserMsgId,
-                            clientMessageId,
-                            status: 'rejected',
                             reason: 'append-in-flight'
                         });
                         break;
@@ -2495,23 +2482,39 @@ ${attachmentLines.join('\n')}`
                         liveWebview.postMessage({
                             type: 'appendStatus',
                             sessionId,
+                            clientMessageId,
+                            status: 'rejected',
                             rootUserMsgId: currentRootUserMsgId,
+                            reason: 'begin-rejected'
+                        });
+                        break;
+                    }
+                    this.appendSubmitInFlightBySession.add(sessionId);
+                    try {
+                        await this.client.appendPrompt(sessionId, value, {
+                            model: this.selectedModel,
+                            mode: this.selectedMode,
+                            clientMessageId
+                        });
+                        liveWebview.postMessage({
                             type: 'appendStatus',
                             sessionId,
                             clientMessageId,
+                            rootUserMsgId: currentRootUserMsgId,
                             status: 'queued'
                         });
                     } catch (error) {
-                    this.appendSubmitInFlightBySession.add(sessionId);
                         this.client.failAppendPrompt(sessionId, clientMessageId);
                         liveWebview.postMessage({
                             type: 'appendStatus',
                             sessionId,
                             clientMessageId,
                             status: 'failed',
+                            rootUserMsgId: beginAppend.rootUserMsgId,
                             reason: String(error)
                         });
-                            rootUserMsgId: beginAppend.rootUserMsgId,
+                    } finally {
+                        this.appendSubmitInFlightBySession.delete(sessionId);
                     }
                     break;
                 }
@@ -2520,13 +2523,10 @@ ${attachmentLines.join('\n')}`
                     await this._context.globalState.update('opencode.model', this.selectedModel);
                     await this.postModelQuota(activeWebview, 'model-change');
                     break;
-                            rootUserMsgId: beginAppend.rootUserMsgId,
                 }
                 case "compactSession": {
                     const requestedSessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
                     const sessionId = requestedSessionId || this.currentSessionId || '';
-                    } finally {
-                        this.appendSubmitInFlightBySession.delete(sessionId);
                     if (!sessionId) {
                         this.postAddResponse(activeWebview, 'Compaction skipped: no active session.');
                         break;
