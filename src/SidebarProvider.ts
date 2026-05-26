@@ -270,6 +270,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         });
     }
 
+    private clearClientRevertedSegmentIfNonRestorable(sessionId: string): void {
+        const startMessageId = this.client.getRevertedSegment()?.startMessageId;
+        if (!startMessageId) return;
+
+        const noticeKey = `system:undo:${startMessageId}`;
+        const stored = this.undoSegmentsBySession.get(sessionId)?.get(noticeKey);
+        if (stored?.restoreAllowed === false) {
+            this.client.setRevertedSegment(undefined);
+            this.uiDebugChannel.appendLine(`[EXT][UNDO_SEGMENT] cleared non-restorable revertedSegment sessionId=${sessionId} noticeKey=${noticeKey}`);
+        }
+    }
+
     private transitionSubagentState(sessionId: string, entry: { state?: SubagentLifecycleState; isDone?: boolean; finalReason?: string; lastEventAt?: number }, to: SubagentLifecycleState, reason: string): void {
         const from = entry.state || (entry.isDone ? 'done' : 'queued');
         if (from === to) return;
@@ -3207,6 +3219,9 @@ ${attachmentLines.join('\n')}`
                         const noticeKey = `system:undo:${resolvedMessageId}`;
                         this.uiDebugChannel.appendLine(`[EXT][UNDO_CALL] anchorMsgId=${resolvedMessageId} sessionId=${sessionId || 'null'} opId=${operationId || 'null'}`);
                         this.uiDebugChannel.appendLine(`[EXT][UNDO_RX] anchorMsgId=${data.messageId} resolvedMsgId=${resolvedMessageId} sessionId=${sessionId || 'null'} opId=${operationId || 'null'}`);
+                        if (sessionId) {
+                            this.clearClientRevertedSegmentIfNonRestorable(sessionId);
+                        }
                         const previousSegment = this.client.getRevertedSegment();
                         const currentActiveNoticeKey = previousSegment?.startMessageId
                             ? `system:undo:${previousSegment.startMessageId}`
@@ -3735,6 +3750,9 @@ ${attachmentLines.join('\n')}`
                     }
                     try {
                         if (conflictContext.kind === 'undo' && conflictContext.startMessageId) {
+                            if (this.currentSessionId) {
+                                this.clearClientRevertedSegmentIfNonRestorable(this.currentSessionId);
+                            }
                             const previousSegment = this.client.getRevertedSegment();
                             const currentActiveNoticeKey = previousSegment?.startMessageId
                                 ? `system:undo:${previousSegment.startMessageId}`
