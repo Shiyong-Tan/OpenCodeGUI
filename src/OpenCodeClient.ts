@@ -429,6 +429,12 @@ type AppendTurnState = {
     emittedAppendUserMsgIds: Set<string>;
 };
 
+export type BeginAppendPromptResult = {
+    sessionId: string;
+    rootUserMsgId: string;
+    clientMessageId: string;
+};
+
 const COPILOT_MODEL_MULTIPLIERS_DOC_URL = 'https://docs.github.com/en/copilot/reference/ai-models/supported-models';
 const COPILOT_SPEED_MULTIPLIER_CACHE_KEY = 'opencode.copilotSpeedMultiplierCache.v1';
 const COPILOT_SPEED_MULTIPLIER_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -2297,6 +2303,12 @@ export class OpenCodeClient {
         return this.displayTurnUserMsgIdBySession.has(sessionId);
     }
 
+    public getAppendRootUserMsgId(sessionId: string | undefined): string | undefined {
+        if (!sessionId) return undefined;
+        return this.appendTurnStateBySession.get(sessionId)?.rootUserMsgId
+            || this.displayTurnUserMsgIdBySession.get(sessionId);
+    }
+
     public canAppendToCurrentTurn(sessionId: string | undefined): boolean {
         if (!sessionId) return false;
         if (!this.turnStateBySession.has(sessionId)) return false;
@@ -2307,10 +2319,10 @@ export class OpenCodeClient {
         return true;
     }
 
-    public beginAppendPrompt(sessionId: string, clientMessageId: string, text: string): boolean {
-        if (!this.canAppendToCurrentTurn(sessionId)) return false;
-        const rootUserMsgId = this.displayTurnUserMsgIdBySession.get(sessionId);
-        if (!rootUserMsgId) return false;
+    public beginAppendPrompt(sessionId: string, clientMessageId: string, text: string): BeginAppendPromptResult | null {
+        if (!this.canAppendToCurrentTurn(sessionId)) return null;
+        const rootUserMsgId = this.getAppendRootUserMsgId(sessionId);
+        if (!rootUserMsgId) return null;
         const state = this.appendTurnStateBySession.get(sessionId) || {
             rootUserMsgId,
             pending: [],
@@ -2321,16 +2333,19 @@ export class OpenCodeClient {
         state.pending.push({ clientMessageId, text });
         this.appendTurnStateBySession.set(sessionId, state);
         this.logUiDebug(`EXT: append.begin | sessionId=${sessionId} | rootUserMsgId=${rootUserMsgId} | clientMessageId=${clientMessageId}`);
-        return true;
+        return { sessionId, rootUserMsgId, clientMessageId };
     }
 
-    public failAppendPrompt(sessionId: string, clientMessageId: string): void {
+    public failAppendPrompt(sessionId: string, clientMessageId: string): boolean {
         const state = this.appendTurnStateBySession.get(sessionId);
-        if (!state) return;
+        if (!state) return false;
+        const before = state.pending.length;
         state.pending = state.pending.filter((item) => item.clientMessageId !== clientMessageId);
+        const changed = state.pending.length !== before;
         if (!state.pending.length && !state.appendUserMsgIds.size) {
             this.appendTurnStateBySession.delete(sessionId);
         }
+        return changed;
     }
 
     private bindAppendUserMessage(sessionId: string | undefined, userMsgId: string | undefined): AppendPendingPrompt | undefined {
@@ -2464,8 +2479,7 @@ export class OpenCodeClient {
     }
 
     private isTurnMissingFinal(sessionId: string): boolean {
-        const userMsgId = this.appendTurnStateBySession.get(sessionId)?.rootUserMsgId
-            || this.displayTurnUserMsgIdBySession.get(sessionId)
+        const userMsgId = this.getAppendRootUserMsgId(sessionId)
             || this.currentTurnUserMsgIdBySession.get(sessionId);
         if (!userMsgId) return false;
         const assistantMsgId = this.currentTurnAssistantMsgIdBySession.get(sessionId);
@@ -3118,8 +3132,7 @@ export class OpenCodeClient {
             }
 
             const { userMsgId, resolved, rawMessages } = parsed;
-            const rootUserMsgId = this.appendTurnStateBySession.get(sessionId)?.rootUserMsgId
-                || this.displayTurnUserMsgIdBySession.get(sessionId)
+            const rootUserMsgId = this.getAppendRootUserMsgId(sessionId)
                 || userMsgId;
             state.resolvedUserMsgId = rootUserMsgId;
             // this.logUiDebug(`[DBG_EXPORT_FINAL] userMsgId=${resolved.userMsgId} assistantMsgIdsAll=[${resolved.assistantMsgIdsAll.join(', ')}] chosen=${resolved.assistantMsgId || 'null'} finish=${resolved.chosenFinish || 'null'} completed=${resolved.chosenTimeCompleted ?? 'null'} created=${resolved.chosenTimeCreated ?? 'null'}`);
@@ -3199,7 +3212,7 @@ export class OpenCodeClient {
             this.logUiDebug(`EXT: finalizeBinding.direct.skip | sessionId=${sessionId} assistantMsgId=${assistantMsgId} reason=missing-tmpKey`);
             return;
         }
-        const userMsgId = this.currentTurnUserMsgIdBySession.get(sessionId);
+        const userMsgId = this.getAppendRootUserMsgId(sessionId) || this.currentTurnUserMsgIdBySession.get(sessionId);
         state.lastResolvedAssistantMsgId = assistantMsgId;
         try {
             await this.gitUndo?.finalizeBinding(sessionId, tmpKey, assistantMsgId, userMsgId || undefined);
@@ -6560,7 +6573,7 @@ export class OpenCodeClient {
                         this.setCurrentTurnUserMsgId(sessionId, msgId, 'append-user-part');
                         this.markSessionProgress(sessionId, 'append-user-part', msgId);
                         if (this.shouldEmitAppendUserMessage(sessionId, msgId)) {
-                            const rootUserMsgId = this.appendTurnStateBySession.get(sessionId)?.rootUserMsgId;
+                            const rootUserMsgId = this.getAppendRootUserMsgId(sessionId);
                             events.push({
                                 type: 'appendUserMessage',
                                 text: partText || appendPrompt.text,
@@ -7744,7 +7757,7 @@ export class OpenCodeClient {
     public async appendPrompt(
         sessionId: string,
         message: string,
-        options: { model?: string; mode?: string } = {}
+        options: { model?: string; mode?: string; clientMessageId?: string } = {}
     ): Promise<void> {
         await this.ensureServer();
         if (!sessionId) {
@@ -7753,6 +7766,14 @@ export class OpenCodeClient {
         if (!this.canAppendToCurrentTurn(sessionId)) {
             throw new Error('This turn can no longer be appended to.');
         }
+        const clientMessageId = typeof options.clientMessageId === 'string' ? options.clientMessageId : '';
+        if (clientMessageId) {
+            const appendState = this.appendTurnStateBySession.get(sessionId);
+            const pending = appendState?.pending.some((item) => item.clientMessageId === clientMessageId && !item.serverMsgId);
+            if (!pending) {
+                throw new Error('This append request is no longer pending.');
+            }
+        }
         const payload: any = {
             parts: [{ type: 'text', text: message }]
         };
@@ -7760,8 +7781,10 @@ export class OpenCodeClient {
         if (modelRef) {
             payload.model = modelRef;
         }
-        payload.agent = options.mode || 'plan';
-        this.expectedMainAgentBySession.set(sessionId, options.mode || 'plan');
+        if (typeof options.mode === 'string' && options.mode) {
+            payload.agent = options.mode;
+            this.expectedMainAgentBySession.set(sessionId, options.mode);
+        }
         await this.requestJson('POST', `/session/${sessionId}/prompt_async`, payload);
     }
 

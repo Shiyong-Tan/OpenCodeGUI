@@ -124,6 +124,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private task1DoneVisibleTotalMs = 0;
     private task1DoneVisibleCount = 0;
     private task1FalseDoneEvents = 0;
+    private appendSubmitInFlightBySession = new Set<string>();
 
     private cleanSubagentTitle(title?: string): string {
         const raw = typeof title === 'string' ? title.trim() : '';
@@ -2440,21 +2441,25 @@ ${attachmentLines.join('\n')}`
                         break;
                     }
                     if (!this.currentSessionId || sessionId !== this.currentSessionId || !this.sendInFlightBySession.has(sessionId) || !this.client.canAppendToCurrentTurn(sessionId)) {
+                    const requestedRootUserMsgId = typeof data.rootUserKey === 'string' ? data.rootUserKey : undefined;
                         liveWebview.postMessage({
+                    const currentRootUserMsgId = this.client.getAppendRootUserMsgId(sessionId) || requestedRootUserMsgId;
                             type: 'appendStatus',
                             sessionId,
                             clientMessageId,
                             status: 'rejected',
+                            rootUserMsgId: currentRootUserMsgId,
                             reason: 'finalized'
                         });
                         break;
                     }
-                    if (!this.client.beginAppendPrompt(sessionId, clientMessageId, value)) {
+                    if (this.appendSubmitInFlightBySession.has(sessionId)) {
                         liveWebview.postMessage({
                             type: 'appendStatus',
                             sessionId,
                             clientMessageId,
                             status: 'rejected',
+                            rootUserMsgId: currentRootUserMsgId,
                             reason: 'finalized'
                         });
                         break;
@@ -2462,15 +2467,30 @@ ${attachmentLines.join('\n')}`
                     try {
                         await this.client.appendPrompt(sessionId, value, {
                             model: this.selectedModel,
-                            mode: this.selectedMode
+                            mode: this.selectedMode,
+                            clientMessageId
                         });
                         liveWebview.postMessage({
+                            rootUserMsgId: currentRootUserMsgId,
+                            clientMessageId,
+                            status: 'rejected',
+                            reason: 'append-in-flight'
+                        });
+                        break;
+                    }
+                    const beginAppend = this.client.beginAppendPrompt(sessionId, clientMessageId, value);
+                    if (!beginAppend) {
+                        liveWebview.postMessage({
+                            type: 'appendStatus',
+                            sessionId,
+                            rootUserMsgId: currentRootUserMsgId,
                             type: 'appendStatus',
                             sessionId,
                             clientMessageId,
                             status: 'queued'
                         });
                     } catch (error) {
+                    this.appendSubmitInFlightBySession.add(sessionId);
                         this.client.failAppendPrompt(sessionId, clientMessageId);
                         liveWebview.postMessage({
                             type: 'appendStatus',
@@ -2479,6 +2499,7 @@ ${attachmentLines.join('\n')}`
                             status: 'failed',
                             reason: String(error)
                         });
+                            rootUserMsgId: beginAppend.rootUserMsgId,
                     }
                     break;
                 }
@@ -2487,10 +2508,13 @@ ${attachmentLines.join('\n')}`
                     await this._context.globalState.update('opencode.model', this.selectedModel);
                     await this.postModelQuota(activeWebview, 'model-change');
                     break;
+                            rootUserMsgId: beginAppend.rootUserMsgId,
                 }
                 case "compactSession": {
                     const requestedSessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
                     const sessionId = requestedSessionId || this.currentSessionId || '';
+                    } finally {
+                        this.appendSubmitInFlightBySession.delete(sessionId);
                     if (!sessionId) {
                         this.postAddResponse(activeWebview, 'Compaction skipped: no active session.');
                         break;

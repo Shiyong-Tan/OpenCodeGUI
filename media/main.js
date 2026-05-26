@@ -3277,7 +3277,19 @@ function renderAppendComposer(sessionId, rootUserKey) {
     send.type = 'button';
     send.className = 'append-composer-btn primary';
     send.textContent = 'Append';
-    const submit = () => submitAppendMessage(sessionId, rootUserKey, input.value);
+    let isSubmitting = false;
+    const submit = () => {
+        if (isSubmitting) return;
+        isSubmitting = true;
+        send.disabled = true;
+        input.disabled = true;
+        const accepted = submitAppendMessage(sessionId, rootUserKey, input.value);
+        if (!accepted) {
+            isSubmitting = false;
+            send.disabled = false;
+            input.disabled = false;
+        }
+    };
     send.addEventListener('click', submit);
     input.addEventListener('keydown', (event) => {
         if (event.key === 'Enter' && !event.shiftKey) {
@@ -3651,9 +3663,11 @@ function renderMessageElement(message, renderedSet) {
                             ? 'Append failed'
                             : item.status === 'rejected'
                                 ? 'Append unavailable'
-                                : item.status === 'seen' || item.status === 'queued'
-                                    ? 'Queued'
-                                    : 'Sending...';
+                                : item.status === 'seen'
+                                    ? 'Received'
+                                    : item.status === 'queued'
+                                        ? 'Queued'
+                                        : 'Sending...';
                         block.appendChild(status);
                     }
                     content.appendChild(block);
@@ -3812,7 +3826,8 @@ function renderMessageElement(message, renderedSet) {
         if (message.role === 'user') {
             const actions = document.createElement('div');
             actions.className = 'message-actions';
-            if (canAppendToMessage(session, message)) {
+            const isAppendableActiveUserMessage = canAppendToMessage(session, message);
+            if (isAppendableActiveUserMessage) {
                 const appendBtn = document.createElement('button');
                 appendBtn.className = 'append-btn';
                 appendBtn.type = 'button';
@@ -3826,7 +3841,15 @@ function renderMessageElement(message, renderedSet) {
             }
             if (!gitUndoEnabled) {
                 div.appendChild(actions);
-                if (session?.appendComposerFor === message.id && canAppendToMessage(session, message)) {
+                if (session?.appendComposerFor === message.id && isAppendableActiveUserMessage) {
+                    div.appendChild(renderAppendComposer(activeSessionId, message.id));
+                }
+                chatContainer.appendChild(div);
+                return;
+            }
+            if (isAppendableActiveUserMessage) {
+                div.appendChild(actions);
+                if (session?.appendComposerFor === message.id) {
                     div.appendChild(renderAppendComposer(activeSessionId, message.id));
                 }
                 chatContainer.appendChild(div);
@@ -3868,7 +3891,7 @@ function renderMessageElement(message, renderedSet) {
             });
             actions.appendChild(undoBtn);
             div.appendChild(actions);
-            if (session?.appendComposerFor === message.id && canAppendToMessage(session, message)) {
+            if (session?.appendComposerFor === message.id && isAppendableActiveUserMessage) {
                 div.appendChild(renderAppendComposer(activeSessionId, message.id));
             }
         }
@@ -5418,16 +5441,58 @@ function applyPromptToSession(sessionId, payload) {
 function canAppendToMessage(session, message) {
     if (!session || !message || message.role !== 'user') return false;
     if (!activeSessionId) return false;
-    if (!isBusy || session.backendTurnInFlight !== true) return false;
+    if (session.backendTurnInFlight !== true) return false;
     if (session.turnFullyFinalized === true) return false;
     if (session.canceledActiveTurn === true) return false;
     if (session.finalAssistantLock?.assistantMsgId) return false;
     return Boolean(session.appendRootUserKey && message.id === session.appendRootUserKey);
 }
 
+function hasBlockingAppendSubmission(message) {
+    const items = getAppendItems(message);
+    return items.some((item) => item && (item.status === 'sending' || item.status === 'queued'));
+}
+
 function getAppendItems(message) {
     if (!message.meta || !Array.isArray(message.meta.appendedPrompts)) return [];
     return message.meta.appendedPrompts;
+}
+
+function resolveAppendRootMessage(session, message) {
+    if (!session?.messagesById) return null;
+    const clientMessageId = typeof message?.clientMessageId === 'string' ? message.clientMessageId : '';
+
+    if (clientMessageId) {
+        for (const candidate of session.messagesById.values()) {
+            if (!candidate || candidate.role !== 'user') continue;
+            const items = getAppendItems(candidate);
+            if (items.some((item) => item?.clientMessageId === clientMessageId)) {
+                return candidate;
+            }
+        }
+    }
+
+    const keys = [];
+    const addKey = (key) => {
+        if (typeof key !== 'string' || !key || keys.includes(key)) return;
+        keys.push(key);
+        const localKey = session.serverIdToClientKey?.get?.(key);
+        if (typeof localKey === 'string' && localKey && !keys.includes(localKey)) keys.push(localKey);
+        const stableKey = session.clientKeyToServerId?.get?.(key);
+        if (typeof stableKey === 'string' && stableKey && !keys.includes(stableKey)) keys.push(stableKey);
+        const mappedKey = session.serverIdToKey?.get?.(key);
+        if (typeof mappedKey === 'string' && mappedKey && !keys.includes(mappedKey)) keys.push(mappedKey);
+    };
+
+    addKey(message?.rootUserMsgId);
+    addKey(session.appendRootUserKey);
+    addKey(session.lastTurnUserId);
+
+    for (const key of keys) {
+        const candidate = session.messagesById.get(key);
+        if (candidate?.role === 'user') return candidate;
+    }
+    return null;
 }
 
 function upsertAppendItem(message, item) {
@@ -5458,7 +5523,17 @@ function upsertAppendItem(message, item) {
     } else {
         items.push(next);
     }
-    message.meta.appendedPrompts = items;
+    const seenClientMessageIds = new Set();
+    message.meta.appendedPrompts = items.filter((entry, entryIndex) => {
+        if (!entry?.clientMessageId) return true;
+        if (entryIndex === index) {
+            seenClientMessageIds.add(entry.clientMessageId);
+            return true;
+        }
+        if (seenClientMessageIds.has(entry.clientMessageId)) return false;
+        seenClientMessageIds.add(entry.clientMessageId);
+        return true;
+    });
     return next;
 }
 
@@ -5466,7 +5541,8 @@ function submitAppendMessage(sessionId, rootUserKey, text) {
     const session = getSessionState(sessionId);
     const root = session?.messagesById?.get(rootUserKey);
     const value = typeof text === 'string' ? text.trim() : '';
-    if (!session || !root || !value || !canAppendToMessage(session, root)) return;
+    if (!session || !root || !value || !canAppendToMessage(session, root)) return false;
+    if (hasBlockingAppendSubmission(root)) return false;
     const clientMessageId = `append-${Date.now()}-${messageCounter++}`;
     upsertAppendItem(root, {
         clientMessageId,
@@ -5484,6 +5560,7 @@ function submitAppendMessage(sessionId, rootUserKey, text) {
     });
     window.__oc?.renderFromState?.();
     scrollToBottom();
+    return true;
 }
 
 function handleAssistantMeta(sessionId, message) {
@@ -5797,10 +5874,18 @@ function handleChatDone(sessionId, message) {
     const rootKey = session.appendRootUserKey || session.lastTurnUserId;
     const rootMsg = rootKey ? session.messagesById.get(rootKey) : null;
     if (rootMsg?.meta && Array.isArray(rootMsg.meta.appendedPrompts)) {
-        rootMsg.meta.appendedPrompts = rootMsg.meta.appendedPrompts.map((item) => ({
-            ...item,
-            status: item.status === 'failed' || item.status === 'rejected' ? item.status : 'applied'
-        }));
+        rootMsg.meta.appendedPrompts = rootMsg.meta.appendedPrompts.map((item) => {
+            if (item.status === 'failed' || item.status === 'rejected' || item.status === 'applied') {
+                return item;
+            }
+            if (item.status === 'seen' || (item.status === 'queued' && item.appendUserMsgId)) {
+                return { ...item, status: 'applied' };
+            }
+            if (item.status === 'sending' || item.status === 'queued') {
+                return { ...item, status: 'failed', reason: item.reason || 'append-not-acknowledged' };
+            }
+            return item;
+        });
     }
     updateSendGate();
     // Mark snapshot pending for this turn; actual emit is single-point gated at finalize_done.
@@ -6937,8 +7022,7 @@ window.addEventListener('message', (event) => {
                 const sessionId = getEventSessionId(message, 'appendStatus');
                 if (!sessionId) break;
                 const session = getSessionState(sessionId, true);
-                const rootKey = session.appendRootUserKey || session.lastTurnUserId;
-                const root = rootKey ? session.messagesById.get(rootKey) : null;
+                const root = resolveAppendRootMessage(session, message);
                 if (!root) break;
                 upsertAppendItem(root, {
                     clientMessageId: message.clientMessageId,
@@ -6952,8 +7036,7 @@ window.addEventListener('message', (event) => {
                 const sessionId = getEventSessionId(message, 'appendUserMessage');
                 if (!sessionId) break;
                 const session = getSessionState(sessionId, true);
-                const rootKey = session.appendRootUserKey || message.rootUserMsgId || session.lastTurnUserId;
-                const root = rootKey ? session.messagesById.get(rootKey) : null;
+                const root = resolveAppendRootMessage(session, message);
                 if (!root) break;
                 upsertAppendItem(root, {
                     clientMessageId: message.clientMessageId,
