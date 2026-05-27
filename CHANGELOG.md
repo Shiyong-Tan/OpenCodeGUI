@@ -2,11 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2.0.5
+
+- Added current-session search controls with match highlighting, first-match auto-jump, and previous/next navigation.
+- Added Smart semantic session search using a temporary model-backed ranking session, preferring free or `0x` models before falling back to the selected/default model.
+- Added semantic-result message highlighting and a spinner while Smart search is running.
+
 ## 2.0.3
 
 - Fixed active-turn append handling so appended user messages do not replace the root turn anchor during final matching.
 - Moved active-turn append entry into the stable bottom input composer with append mode, draft preservation, and input-border pulse feedback.
 - Improved append queue status so queued prompts remain sendable, use queued/received colors, and transition to received when the assistant starts processing appended prompts.
+- Added a quote function to quote text in chat window.
 
 ## 2.0.1
 
