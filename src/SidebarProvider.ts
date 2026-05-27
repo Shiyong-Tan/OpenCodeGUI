@@ -79,6 +79,12 @@ type AttachmentPayload = {
     tempPath?: string;
 };
 
+type SmartSearchMessage = {
+    id: string;
+    role: string;
+    text: string;
+};
+
 type SavedAttachment = {
     token: string;
     filename: string;
@@ -2583,6 +2589,42 @@ ${attachmentLines.join('\n')}`
                 }
                 case "refreshModels": {
                     await this.refreshModels(activeWebview);
+                    break;
+                }
+                case "smartSessionSearch": {
+                    const requestId = typeof data.requestId === 'string' ? data.requestId : '';
+                    const query = typeof data.query === 'string' ? data.query : '';
+                    const messages: SmartSearchMessage[] = Array.isArray(data.messages)
+                        ? data.messages
+                            .filter((item: any) => item && typeof item.id === 'string' && typeof item.text === 'string')
+                            .map((item: any) => ({
+                                id: item.id,
+                                role: typeof item.role === 'string' ? item.role : 'unknown',
+                                text: item.text
+                            }))
+                        : [];
+                    const liveWebview = this._view?.webview || activeWebview;
+                    try {
+                        const result = await this.runSmartSessionSearch(query, messages);
+                        this.uiDebugChannel.appendLine(
+                            `EXT: smartSearch.done | requestId=${requestId || 'null'} | model=${result.modelId || 'default'} | results=${result.messageIds.length}`
+                        );
+                        liveWebview.postMessage({
+                            type: 'smartSessionSearchResult',
+                            requestId,
+                            sessionId: typeof data.sessionId === 'string' ? data.sessionId : this.currentSessionId,
+                            messageIds: result.messageIds,
+                            modelId: result.modelId
+                        });
+                    } catch (error) {
+                        this.uiDebugChannel.appendLine(`EXT: smartSearch.fail | requestId=${requestId || 'null'} | err=${String(error)}`);
+                        liveWebview.postMessage({
+                            type: 'smartSessionSearchError',
+                            requestId,
+                            sessionId: typeof data.sessionId === 'string' ? data.sessionId : this.currentSessionId,
+                            error: String(error)
+                        });
+                    }
                     break;
                 }
                 case "refreshSessions": {
@@ -5719,6 +5761,146 @@ ${attachmentLines.join('\n')}`
         return [];
     }
 
+    private async pickSmartSearchModel(): Promise<ModelInfo | undefined> {
+        let models = this.lastKnownModels;
+        if (!Array.isArray(models) || !models.length) {
+            try {
+                models = await this.client.listModels();
+                if (models.length) {
+                    this.lastKnownModels = models;
+                }
+            } catch (error) {
+                this.uiDebugChannel.appendLine(`EXT: smartSearch.models.fail | err=${String(error)}`);
+                models = [];
+            }
+        }
+        return this.client.pickFreeModel(models, this.selectedModel)
+            || models.find((model) => model.fullId === this.selectedModel)
+            || undefined;
+    }
+
+    private buildSmartSearchPrompt(query: string, messages: SmartSearchMessage[]): string {
+        const trimmedMessages = messages
+            .filter((item) => item && typeof item.id === 'string' && typeof item.text === 'string' && item.text.trim())
+            .slice(0, 140)
+            .map((item, index) => ({
+                index,
+                id: item.id,
+                role: item.role || 'unknown',
+                text: item.text.slice(0, 1600)
+            }));
+        return [
+            'You are ranking chat messages for semantic search.',
+            'Find messages that are conceptually relevant to the query, even when wording differs.',
+            'Return only strict JSON with this shape: {"messageIds":["id1","id2"]}.',
+            'Return at most 8 messageIds, ordered most relevant first. Use only ids from the provided messages.',
+            '',
+            `Query: ${query}`,
+            '',
+            `Messages JSON: ${JSON.stringify(trimmedMessages)}`
+        ].join('\n');
+    }
+
+    private parseSmartSearchMessageIds(text: string, validIds: Set<string>): string[] {
+        const raw = String(text || '').trim();
+        const candidates = [
+            raw,
+            raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim()
+        ];
+        const objectMatch = raw.match(/\{[\s\S]*\}/);
+        if (objectMatch) {
+            candidates.push(objectMatch[0]);
+        }
+        const arrayMatch = raw.match(/\[[\s\S]*\]/);
+        if (arrayMatch) {
+            candidates.push(arrayMatch[0]);
+        }
+        for (const candidate of candidates) {
+            try {
+                const parsed = JSON.parse(candidate);
+                const ids = Array.isArray(parsed)
+                    ? parsed
+                    : Array.isArray(parsed?.messageIds)
+                        ? parsed.messageIds
+                        : [];
+                const unique: string[] = [];
+                for (const id of ids) {
+                    if (typeof id !== 'string' || !validIds.has(id) || unique.includes(id)) continue;
+                    unique.push(id);
+                }
+                if (unique.length) return unique;
+            } catch {
+                // Try the next parse candidate.
+            }
+        }
+        const fallback: string[] = [];
+        for (const id of validIds) {
+            if (raw.includes(id)) fallback.push(id);
+            if (fallback.length >= 8) break;
+        }
+        return fallback;
+    }
+
+    private async runSmartSessionSearch(query: string, messages: SmartSearchMessage[]): Promise<{ messageIds: string[]; modelId: string }> {
+        const validIds = new Set(messages.map((item) => item.id).filter((id) => typeof id === 'string' && id.length > 0));
+        if (!query.trim() || !validIds.size) {
+            return { messageIds: [], modelId: '' };
+        }
+        const model = await this.pickSmartSearchModel();
+        const tempSession = await this.client.createSession();
+        let assistantText = '';
+        try {
+            const prompt = this.buildSmartSearchPrompt(query.trim(), messages);
+            const tempLocalKey = `smart-search-${Date.now()}`;
+            this.client.startTurnWithOp(tempSession.id, tempLocalKey, tempLocalKey);
+            const task = this.client.chat(
+                prompt,
+                {
+                    model: model?.fullId,
+                    sessionId: tempSession.id,
+                    mode: 'plan'
+                },
+                (event) => {
+                    if (event.sessionId !== tempSession.id) return;
+                    if (event.type === 'text' && typeof event.text === 'string') {
+                        assistantText += event.text;
+                    }
+                }
+            );
+            await Promise.race([
+                task,
+                new Promise((_, reject) => setTimeout(() => reject(new Error('Smart search timed out.')), 90000))
+            ]);
+            if (!assistantText.trim()) {
+                const exported = await this.client.listSessionMessages(tempSession.id);
+                const assistant = [...exported].reverse().find((item: any) => item?.role === 'assistant');
+                assistantText = typeof assistant?.text === 'string'
+                    ? assistant.text
+                    : Array.isArray(assistant?.parts)
+                        ? assistant.parts.map((part: any) => typeof part?.text === 'string' ? part.text : '').join('\n')
+                        : '';
+            }
+            return {
+                messageIds: this.parseSmartSearchMessageIds(assistantText, validIds),
+                modelId: model?.fullId || 'default'
+            };
+        } catch (error) {
+            try {
+                await this.client.abortSession(tempSession.id);
+            } catch {
+                // Best effort cleanup before deleting the temporary session.
+            }
+            throw error;
+        } finally {
+            this.client.finishTurn(tempSession.id);
+            try {
+                await this.client.deleteSession(tempSession.id);
+            } catch (error) {
+                this.uiDebugChannel.appendLine(`EXT: smartSearch.cleanup.fail | sessionId=${tempSession.id} | err=${String(error)}`);
+            }
+        }
+    }
+
     private parseModelRef(model?: string): { providerID: string; modelID: string } | undefined {
         if (!model) return undefined;
         const parts = model.split('/');
@@ -6743,6 +6925,7 @@ ${attachmentLines.join('\n')}`
                 <div class="session-search-bar hidden" id="session-search-bar">
                     <input class="session-search-input" id="session-search-input" type="search" placeholder="Search session..." autocomplete="off" spellcheck="false" />
                     <span class="session-search-count" id="session-search-count">0/0</span>
+                    <button class="session-search-smart" id="session-search-smart" type="button" title="Semantic search with a free model">Smart</button>
                     <button class="icon-btn session-search-nav" id="session-search-prev" title="Previous match" aria-label="Previous match">
                         <svg width="14" height="14" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M8 2.5 3.5 7l.7.7L7.5 4.4V14h1V4.4l3.3 3.3.7-.7L8 2.5z"/></svg>
                     </button>

@@ -183,6 +183,51 @@ body {
     color: var(--vscode-errorForeground);
 }
 
+.session-search-count.is-loading {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.session-search-count.is-loading::before {
+    content: "";
+    width: 12px;
+    height: 12px;
+    border: 2px solid color-mix(in srgb, var(--vscode-descriptionForeground) 35%, transparent);
+    border-top-color: var(--vscode-focusBorder);
+    border-radius: 50%;
+    animation: session-search-spin 700ms linear infinite;
+}
+
+@keyframes session-search-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+.session-search-smart {
+    flex: 0 0 auto;
+    height: 24px;
+    padding: 0 8px;
+    border: 1px solid var(--vscode-button-border, transparent);
+    border-radius: 4px;
+    background: var(--vscode-button-secondaryBackground, var(--vscode-button-background));
+    color: var(--vscode-button-secondaryForeground, var(--vscode-button-foreground));
+    font: inherit;
+    font-size: 0.82em;
+    cursor: pointer;
+}
+
+.session-search-smart:hover:not(:disabled),
+.session-search-smart.is-active {
+    background: var(--vscode-button-hoverBackground);
+}
+
+.session-search-smart:disabled {
+    opacity: 0.55;
+    cursor: default;
+}
+
 .session-search-bar .icon-btn {
     width: 24px;
     height: 24px;
@@ -1494,6 +1539,16 @@ body {
 .session-search-hit.active {
     background: var(--vscode-editor-findMatchBackground, rgba(246, 185, 77, 0.7));
     outline: 1px solid var(--vscode-focusBorder);
+}
+
+.session-search-semantic-hit {
+    outline: 1px solid var(--vscode-editor-findMatchHighlightBackground, rgba(234, 196, 0, 0.45));
+    outline-offset: 2px;
+}
+
+.session-search-semantic-hit.active {
+    outline: 2px solid var(--vscode-focusBorder);
+    background-color: color-mix(in srgb, var(--vscode-editor-findMatchHighlightBackground, rgba(234, 196, 0, 0.35)) 22%, transparent);
 }
 
 textarea {

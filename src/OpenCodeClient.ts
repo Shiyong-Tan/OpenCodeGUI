@@ -8281,6 +8281,12 @@ export class OpenCodeClient {
         void this.requestJson('POST', `/session/${sessionId}/abort`, {});
     }
 
+    public async abortSession(sessionId: string): Promise<void> {
+        if (!sessionId) return;
+        await this.ensureServer();
+        await this.requestJson('POST', `/session/${encodeURIComponent(sessionId)}/abort`, {});
+    }
+
     public async dispose(): Promise<void> {
         this.resetSessionState();
         this.eventListeners.clear();

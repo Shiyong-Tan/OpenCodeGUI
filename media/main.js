@@ -122,8 +122,12 @@ let sessionSearchDebounceTimer = null;
 let sessionSearch = {
     open: false,
     query: '',
+    mode: 'text',
     matches: [],
-    activeIndex: -1
+    activeIndex: -1,
+    smartMessageIds: [],
+    smartRequestId: '',
+    smartInFlight: false
 };
 const shownQuestionCallIds = new Set();
 const sentQuestionCallIds = new Set();
@@ -2977,6 +2981,7 @@ function getSessionSearchElements() {
         bar: document.getElementById('session-search-bar'),
         input: document.getElementById('session-search-input'),
         count: document.getElementById('session-search-count'),
+        smart: document.getElementById('session-search-smart'),
         prev: document.getElementById('session-search-prev'),
         next: document.getElementById('session-search-next')
     };
@@ -2994,17 +2999,27 @@ function clearSessionSearchHighlights() {
     for (const parent of parents) {
         if (typeof parent.normalize === 'function') parent.normalize();
     }
+    const semanticHits = Array.from(document.querySelectorAll('.session-search-semantic-hit'));
+    for (const hit of semanticHits) {
+        hit.classList.remove('session-search-semantic-hit', 'active');
+    }
     sessionSearch.matches = [];
 }
 
 function updateSessionSearchControls() {
-    const { count, prev, next } = getSessionSearchElements();
+    const { count, prev, next, smart } = getSessionSearchElements();
     const total = sessionSearch.matches.length;
     const current = total > 0 && sessionSearch.activeIndex >= 0 ? sessionSearch.activeIndex + 1 : 0;
     const hasQuery = Boolean(String(sessionSearch.query || '').trim());
     if (count) {
-        count.textContent = hasQuery ? `${current}/${total}` : '0/0';
-        count.classList.toggle('no-results', hasQuery && total === 0);
+        count.textContent = sessionSearch.smartInFlight ? '' : (hasQuery ? `${current}/${total}` : '0/0');
+        count.classList.toggle('is-loading', sessionSearch.smartInFlight);
+        count.classList.toggle('no-results', !sessionSearch.smartInFlight && hasQuery && total === 0);
+    }
+    if (smart) {
+        smart.disabled = sessionSearch.smartInFlight || !hasQuery;
+        smart.classList.toggle('is-active', sessionSearch.mode === 'smart');
+        smart.textContent = sessionSearch.smartInFlight ? 'Smart...' : 'Smart';
     }
     if (prev) prev.disabled = total <= 1;
     if (next) next.disabled = total <= 1;
@@ -3057,6 +3072,10 @@ function highlightSessionSearchTextNode(node, query, queryLower) {
 }
 
 function refreshSessionSearchHighlights({ jumpToFirst = false } = {}) {
+    if (sessionSearch.mode === 'smart') {
+        updateSessionSearchControls();
+        return;
+    }
     const previousIndex = sessionSearch.activeIndex;
     clearSessionSearchHighlights();
 
@@ -3110,6 +3129,7 @@ function refreshSessionSearchHighlights({ jumpToFirst = false } = {}) {
 }
 
 function scheduleSessionSearchRefresh({ jumpToFirst = false } = {}) {
+    sessionSearch.mode = 'text';
     if (sessionSearchDebounceTimer) {
         clearTimeout(sessionSearchDebounceTimer);
     }
@@ -3142,7 +3162,11 @@ function closeSessionSearch() {
     const { bar, input } = getSessionSearchElements();
     sessionSearch.open = false;
     sessionSearch.query = '';
+    sessionSearch.mode = 'text';
     sessionSearch.activeIndex = -1;
+    sessionSearch.smartMessageIds = [];
+    sessionSearch.smartRequestId = '';
+    sessionSearch.smartInFlight = false;
     if (sessionSearchDebounceTimer) {
         clearTimeout(sessionSearchDebounceTimer);
         sessionSearchDebounceTimer = null;
@@ -3151,6 +3175,80 @@ function closeSessionSearch() {
     clearSessionSearchHighlights();
     updateSessionSearchControls();
     bar?.classList.add('hidden');
+}
+
+function collectSmartSearchMessages() {
+    const chat = document.getElementById('chat');
+    if (!chat) return [];
+    const seen = new Set();
+    const rows = [];
+    const nodes = Array.from(chat.querySelectorAll('[data-message-id], [data-segment-key]'));
+    for (const node of nodes) {
+        if (!(node instanceof HTMLElement)) continue;
+        const id = node.dataset.messageId || node.dataset.segmentKey || '';
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        const content = node.querySelector('.message-content, .conflict-card-list') || node;
+        const text = String(content.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!text) continue;
+        rows.push({
+            id,
+            role: node.classList.contains('user') ? 'user' : node.classList.contains('bot') ? 'assistant' : 'system',
+            text: text.slice(0, 2200)
+        });
+    }
+    return rows;
+}
+
+function applySmartSessionSearchResults(messageIds, { scroll = true } = {}) {
+    const previousIndex = sessionSearch.activeIndex;
+    clearSessionSearchHighlights();
+    sessionSearch.mode = 'smart';
+    sessionSearch.smartMessageIds = Array.isArray(messageIds) ? messageIds.filter((id) => typeof id === 'string' && id) : [];
+    sessionSearch.matches = [];
+    const seen = new Set();
+    for (const id of sessionSearch.smartMessageIds) {
+        if (typeof id !== 'string' || !id || seen.has(id)) continue;
+        seen.add(id);
+        const escaped = typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
+            ? CSS.escape(id)
+            : id.replace(/["\\]/g, '\\$&');
+        const el = document.querySelector(`[data-message-id="${escaped}"], [data-segment-key="${escaped}"]`);
+        if (!(el instanceof HTMLElement)) continue;
+        el.classList.add('session-search-semantic-hit');
+        sessionSearch.matches.push(el);
+    }
+    sessionSearch.activeIndex = sessionSearch.matches.length
+        ? Math.min(Math.max(previousIndex, 0), sessionSearch.matches.length - 1)
+        : -1;
+    updateActiveSessionSearchHit({ scroll });
+}
+
+function runSmartSessionSearch() {
+    const query = String(sessionSearch.query || '').trim();
+    if (!query || sessionSearch.smartInFlight) return;
+    const messages = collectSmartSearchMessages();
+    if (!messages.length) {
+        clearSessionSearchHighlights();
+        sessionSearch.mode = 'smart';
+        sessionSearch.activeIndex = -1;
+        updateSessionSearchControls();
+        return;
+    }
+    const requestId = `smart-search-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    sessionSearch.mode = 'smart';
+    sessionSearch.smartRequestId = requestId;
+    sessionSearch.smartMessageIds = [];
+    sessionSearch.smartInFlight = true;
+    clearSessionSearchHighlights();
+    updateSessionSearchControls();
+    vscode.postMessage({
+        type: 'smartSessionSearch',
+        requestId,
+        sessionId: activeSessionId || '',
+        query,
+        messages
+    });
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -3177,6 +3275,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const historyBtn = document.getElementById('history-btn');
     const searchBtn = document.getElementById('search-btn');
     const searchInput = document.getElementById('session-search-input');
+    const searchSmartBtn = document.getElementById('session-search-smart');
     const searchPrevBtn = document.getElementById('session-search-prev');
     const searchNextBtn = document.getElementById('session-search-next');
     const searchCloseBtn = document.getElementById('session-search-close');
@@ -4732,7 +4831,9 @@ function shouldHideDcpUiMessage(message) {
         if (!session || !session.timeline.length) {
             setDefaultGreeting();
             renderQuestionCardInTimeline();
-            if (sessionSearch.open || sessionSearch.query) {
+            if (sessionSearch.mode === 'smart' && sessionSearch.smartMessageIds.length) {
+                applySmartSessionSearchResults(sessionSearch.smartMessageIds, { scroll: false });
+            } else if (sessionSearch.open || sessionSearch.query) {
                 refreshSessionSearchHighlights({ jumpToFirst: false });
             }
             return;
@@ -4877,7 +4978,9 @@ function shouldHideDcpUiMessage(message) {
             payload: ['WV', 'tableWrap', 'applied', 'roots', roots.length, 'wrapped', totalWrapped]
         });
 
-        if (sessionSearch.open || sessionSearch.query) {
+        if (sessionSearch.mode === 'smart' && sessionSearch.smartMessageIds.length) {
+            applySmartSessionSearchResults(sessionSearch.smartMessageIds, { scroll: false });
+        } else if (sessionSearch.open || sessionSearch.query) {
             refreshSessionSearchHighlights({ jumpToFirst: false });
         }
 
@@ -6786,6 +6889,9 @@ function appendMessageImages(parentEl, message) {
 
     searchInput?.addEventListener('input', () => {
         sessionSearch.query = searchInput.value || '';
+        sessionSearch.mode = 'text';
+        sessionSearch.smartRequestId = '';
+        sessionSearch.smartInFlight = false;
         sessionSearch.activeIndex = -1;
         scheduleSessionSearchRefresh({ jumpToFirst: true });
     });
@@ -6796,10 +6902,20 @@ function appendMessageImages(parentEl, message) {
             closeSessionSearch();
             return;
         }
+        if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+            event.preventDefault();
+            runSmartSessionSearch();
+            return;
+        }
         if (event.key === 'Enter') {
             event.preventDefault();
             goToSessionSearchMatch(event.shiftKey ? -1 : 1);
         }
+    });
+
+    searchSmartBtn?.addEventListener('click', () => {
+        runSmartSessionSearch();
+        searchInput?.focus();
     });
 
     searchPrevBtn?.addEventListener('click', () => {
@@ -6884,6 +7000,22 @@ window.addEventListener('message', (event) => {
         });
 
         switch (message.type) {
+            case 'smartSessionSearchResult': {
+                if (message.requestId !== sessionSearch.smartRequestId) break;
+                sessionSearch.smartInFlight = false;
+                applySmartSessionSearchResults(message.messageIds || []);
+                updateSessionSearchControls();
+                break;
+            }
+            case 'smartSessionSearchError': {
+                if (message.requestId !== sessionSearch.smartRequestId) break;
+                sessionSearch.smartInFlight = false;
+                sessionSearch.mode = 'smart';
+                sessionSearch.matches = [];
+                sessionSearch.activeIndex = -1;
+                updateSessionSearchControls();
+                break;
+            }
             case 'gitUndoAvailability': {
                 gitUndoEnabled = Boolean(message.enabled);
                 gitUndoReason = typeof message.reason === 'string' ? message.reason : null;
