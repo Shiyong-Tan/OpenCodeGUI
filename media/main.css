@@ -139,6 +139,62 @@ body {
     justify-content: center;
 }
 
+.session-search-bar {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--vscode-widget-border);
+    background: var(--vscode-editor-background);
+    flex: 0 0 auto;
+}
+
+.session-search-bar.hidden {
+    display: none;
+}
+
+.session-search-input {
+    min-width: 0;
+    flex: 1 1 auto;
+    height: 24px;
+    padding: 3px 7px;
+    border: 1px solid var(--vscode-input-border, var(--vscode-widget-border));
+    border-radius: 4px;
+    background: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+    font: inherit;
+    font-size: 0.9em;
+    outline: none;
+}
+
+.session-search-input:focus {
+    border-color: var(--vscode-focusBorder);
+}
+
+.session-search-count {
+    flex: 0 0 auto;
+    min-width: 44px;
+    text-align: center;
+    font-size: 0.8em;
+    color: var(--vscode-descriptionForeground);
+}
+
+.session-search-count.no-results {
+    color: var(--vscode-errorForeground);
+}
+
+.session-search-bar .icon-btn {
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    flex: 0 0 auto;
+}
+
+.session-search-bar .icon-btn:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+
 .header-usage.hidden {
     display: none;
 }
@@ -1413,7 +1469,7 @@ body {
     background: var(--vscode-button-background);
     color: var(--vscode-button-foreground);
     font: inherit;
-    font-size: 0.82rem;
+    font-size: 0.95em;
     line-height: 1;
     padding: 6px 8px;
     cursor: pointer;
@@ -1426,6 +1482,18 @@ body {
 
 .quote-selection-btn.hidden {
     display: none;
+}
+
+.session-search-hit {
+    background: var(--vscode-editor-findMatchHighlightBackground, rgba(234, 196, 0, 0.35));
+    color: inherit;
+    border-radius: 2px;
+    padding: 0 1px;
+}
+
+.session-search-hit.active {
+    background: var(--vscode-editor-findMatchBackground, rgba(246, 185, 77, 0.7));
+    outline: 1px solid var(--vscode-focusBorder);
 }
 
 textarea {

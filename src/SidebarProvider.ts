@@ -6734,7 +6734,24 @@ ${attachmentLines.join('\n')}`
                         <button class="icon-btn" id="history-btn" title="History">
                             <svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path fill-rule="evenodd" clip-rule="evenodd" d="M8 13.5a5.5 5.5 0 1 0 0-11 5.5 5.5 0 0 0 0 11zm0 1a6.5 6.5 0 1 0 0-13 6.5 6.5 0 0 0 0 13z"/><path fill-rule="evenodd" clip-rule="evenodd" d="M8.5 4.5V8l2.5 1.5-.5.866L7.5 8.5V4.5h1z"/></svg>
                         </button>
+                        <button class="icon-btn" id="search-btn" title="Search current session" aria-label="Search current session">
+                            <svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path fill-rule="evenodd" clip-rule="evenodd" d="M7 2.5a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9zM1.5 7a5.5 5.5 0 1 1 9.77 3.47l3.13 3.13-.8.8-3.13-3.13A5.5 5.5 0 0 1 1.5 7z"/></svg>
+                        </button>
                     </div>
+                </div>
+
+                <div class="session-search-bar hidden" id="session-search-bar">
+                    <input class="session-search-input" id="session-search-input" type="search" placeholder="Search session..." autocomplete="off" spellcheck="false" />
+                    <span class="session-search-count" id="session-search-count">0/0</span>
+                    <button class="icon-btn session-search-nav" id="session-search-prev" title="Previous match" aria-label="Previous match">
+                        <svg width="14" height="14" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M8 2.5 3.5 7l.7.7L7.5 4.4V14h1V4.4l3.3 3.3.7-.7L8 2.5z"/></svg>
+                    </button>
+                    <button class="icon-btn session-search-nav" id="session-search-next" title="Next match" aria-label="Next match">
+                        <svg width="14" height="14" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M8 13.5 12.5 9l-.7-.7-3.3 3.3V2h-1v9.6L4.2 8.3l-.7.7L8 13.5z"/></svg>
+                    </button>
+                    <button class="icon-btn session-search-close" id="session-search-close" title="Close search" aria-label="Close search">
+                        <svg width="14" height="14" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.75.75 0 1 1 1.06 1.06L9.06 8l3.22 3.22a.75.75 0 1 1-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 0 1-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06z"/></svg>
+                    </button>
                 </div>
 
                 <div class="panel-backdrop hidden" id="panel-backdrop"></div>

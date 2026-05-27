@@ -118,6 +118,13 @@ let questionOverlayTimer = null;
 let questionOverlayState = null;
 let quoteSelectionButton = null;
 let quoteSelectionText = '';
+let sessionSearchDebounceTimer = null;
+let sessionSearch = {
+    open: false,
+    query: '',
+    matches: [],
+    activeIndex: -1
+};
 const shownQuestionCallIds = new Set();
 const sentQuestionCallIds = new Set();
 const questionOverlayQueue = [];
@@ -2965,6 +2972,187 @@ function wrapTables(root) {
     return wrapped;
 }
 
+function getSessionSearchElements() {
+    return {
+        bar: document.getElementById('session-search-bar'),
+        input: document.getElementById('session-search-input'),
+        count: document.getElementById('session-search-count'),
+        prev: document.getElementById('session-search-prev'),
+        next: document.getElementById('session-search-next')
+    };
+}
+
+function clearSessionSearchHighlights() {
+    const marks = Array.from(document.querySelectorAll('mark.session-search-hit'));
+    const parents = new Set();
+    for (const mark of marks) {
+        const parent = mark.parentNode;
+        if (!parent) continue;
+        parents.add(parent);
+        parent.replaceChild(document.createTextNode(mark.textContent || ''), mark);
+    }
+    for (const parent of parents) {
+        if (typeof parent.normalize === 'function') parent.normalize();
+    }
+    sessionSearch.matches = [];
+}
+
+function updateSessionSearchControls() {
+    const { count, prev, next } = getSessionSearchElements();
+    const total = sessionSearch.matches.length;
+    const current = total > 0 && sessionSearch.activeIndex >= 0 ? sessionSearch.activeIndex + 1 : 0;
+    const hasQuery = Boolean(String(sessionSearch.query || '').trim());
+    if (count) {
+        count.textContent = hasQuery ? `${current}/${total}` : '0/0';
+        count.classList.toggle('no-results', hasQuery && total === 0);
+    }
+    if (prev) prev.disabled = total <= 1;
+    if (next) next.disabled = total <= 1;
+}
+
+function updateActiveSessionSearchHit({ scroll = false } = {}) {
+    const total = sessionSearch.matches.length;
+    for (let i = 0; i < total; i++) {
+        sessionSearch.matches[i].classList.toggle('active', i === sessionSearch.activeIndex);
+    }
+    updateSessionSearchControls();
+    if (!scroll || total === 0 || sessionSearch.activeIndex < 0) return;
+    const active = sessionSearch.matches[sessionSearch.activeIndex];
+    active?.scrollIntoView?.({ block: 'center', inline: 'nearest', behavior: 'smooth' });
+}
+
+function isSessionSearchTextNode(node, queryLower) {
+    const text = node?.nodeValue || '';
+    if (!text || !text.toLowerCase().includes(queryLower)) return false;
+    const parent = node.parentElement;
+    if (!parent) return false;
+    if (parent.closest('button, input, textarea, select, mark.session-search-hit')) return false;
+    if (parent.closest('.message-actions, .copy-btn, .session-search-bar')) return false;
+    return true;
+}
+
+function highlightSessionSearchTextNode(node, query, queryLower) {
+    const text = node.nodeValue || '';
+    const lower = text.toLowerCase();
+    const fragment = document.createDocumentFragment();
+    let cursor = 0;
+    let index = lower.indexOf(queryLower, cursor);
+    while (index !== -1) {
+        if (index > cursor) {
+            fragment.appendChild(document.createTextNode(text.slice(cursor, index)));
+        }
+        const mark = document.createElement('mark');
+        mark.className = 'session-search-hit';
+        mark.textContent = text.slice(index, index + query.length);
+        mark.dataset.searchIndex = String(sessionSearch.matches.length);
+        sessionSearch.matches.push(mark);
+        fragment.appendChild(mark);
+        cursor = index + query.length;
+        index = lower.indexOf(queryLower, cursor);
+    }
+    if (cursor < text.length) {
+        fragment.appendChild(document.createTextNode(text.slice(cursor)));
+    }
+    node.parentNode?.replaceChild(fragment, node);
+}
+
+function refreshSessionSearchHighlights({ jumpToFirst = false } = {}) {
+    const previousIndex = sessionSearch.activeIndex;
+    clearSessionSearchHighlights();
+
+    const query = String(sessionSearch.query || '').trim();
+    if (!query) {
+        sessionSearch.activeIndex = -1;
+        updateSessionSearchControls();
+        return;
+    }
+
+    const chat = document.getElementById('chat');
+    if (!chat) {
+        sessionSearch.activeIndex = -1;
+        updateSessionSearchControls();
+        return;
+    }
+
+    const queryLower = query.toLowerCase();
+    const roots = Array.from(chat.querySelectorAll('.message-content, .change-list-card'));
+    for (const root of roots) {
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+            acceptNode(node) {
+                return isSessionSearchTextNode(node, queryLower)
+                    ? NodeFilter.FILTER_ACCEPT
+                    : NodeFilter.FILTER_REJECT;
+            }
+        });
+        const nodes = [];
+        let node = walker.nextNode();
+        while (node) {
+            nodes.push(node);
+            node = walker.nextNode();
+        }
+        for (const textNode of nodes) {
+            highlightSessionSearchTextNode(textNode, query, queryLower);
+        }
+    }
+
+    if (sessionSearch.matches.length === 0) {
+        sessionSearch.activeIndex = -1;
+        updateSessionSearchControls();
+        return;
+    }
+
+    if (jumpToFirst || previousIndex < 0) {
+        sessionSearch.activeIndex = 0;
+    } else {
+        sessionSearch.activeIndex = Math.min(previousIndex, sessionSearch.matches.length - 1);
+    }
+    updateActiveSessionSearchHit({ scroll: jumpToFirst });
+}
+
+function scheduleSessionSearchRefresh({ jumpToFirst = false } = {}) {
+    if (sessionSearchDebounceTimer) {
+        clearTimeout(sessionSearchDebounceTimer);
+    }
+    sessionSearchDebounceTimer = setTimeout(() => {
+        sessionSearchDebounceTimer = null;
+        refreshSessionSearchHighlights({ jumpToFirst });
+    }, 120);
+}
+
+function goToSessionSearchMatch(delta) {
+    const total = sessionSearch.matches.length;
+    if (!total) return;
+    sessionSearch.activeIndex = (sessionSearch.activeIndex + delta + total) % total;
+    updateActiveSessionSearchHit({ scroll: true });
+}
+
+function openSessionSearch() {
+    const { bar, input } = getSessionSearchElements();
+    if (!bar || !input) return;
+    sessionSearch.open = true;
+    bar.classList.remove('hidden');
+    requestAnimationFrame(() => {
+        input.focus();
+        input.select();
+    });
+    refreshSessionSearchHighlights({ jumpToFirst: false });
+}
+
+function closeSessionSearch() {
+    const { bar, input } = getSessionSearchElements();
+    sessionSearch.open = false;
+    sessionSearch.query = '';
+    sessionSearch.activeIndex = -1;
+    if (sessionSearchDebounceTimer) {
+        clearTimeout(sessionSearchDebounceTimer);
+        sessionSearchDebounceTimer = null;
+    }
+    if (input) input.value = '';
+    clearSessionSearchHighlights();
+    updateSessionSearchControls();
+    bar?.classList.add('hidden');
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     sendBtn = document.getElementById('send-btn');
     const sendIcon = `
@@ -2987,6 +3175,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const sessionTitle = document.getElementById('session-title');
     const undoStatusEl = document.getElementById('undo-status');
     const historyBtn = document.getElementById('history-btn');
+    const searchBtn = document.getElementById('search-btn');
+    const searchInput = document.getElementById('session-search-input');
+    const searchPrevBtn = document.getElementById('session-search-prev');
+    const searchNextBtn = document.getElementById('session-search-next');
+    const searchCloseBtn = document.getElementById('session-search-close');
     const newSessionBtn = document.getElementById('new-session-btn');
     const sessionPanel = document.getElementById('session-panel');
     const sessionList = document.getElementById('session-list');
@@ -4539,6 +4732,9 @@ function shouldHideDcpUiMessage(message) {
         if (!session || !session.timeline.length) {
             setDefaultGreeting();
             renderQuestionCardInTimeline();
+            if (sessionSearch.open || sessionSearch.query) {
+                refreshSessionSearchHighlights({ jumpToFirst: false });
+            }
             return;
         }
 
@@ -4680,6 +4876,10 @@ function shouldHideDcpUiMessage(message) {
             type: 'ui-debug',
             payload: ['WV', 'tableWrap', 'applied', 'roots', roots.length, 'wrapped', totalWrapped]
         });
+
+        if (sessionSearch.open || sessionSearch.query) {
+            refreshSessionSearchHighlights({ jumpToFirst: false });
+        }
 
         const timelineKeys = timeline.slice();
         const domKeys = Array.from(chatContainer.children).map((el) => {
@@ -6574,6 +6774,46 @@ function appendMessageImages(parentEl, message) {
 
     historyBtn.addEventListener('click', () => {
         openSessionPanel();
+    });
+
+    searchBtn?.addEventListener('click', () => {
+        if (sessionSearch.open) {
+            closeSessionSearch();
+        } else {
+            openSessionSearch();
+        }
+    });
+
+    searchInput?.addEventListener('input', () => {
+        sessionSearch.query = searchInput.value || '';
+        sessionSearch.activeIndex = -1;
+        scheduleSessionSearchRefresh({ jumpToFirst: true });
+    });
+
+    searchInput?.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            closeSessionSearch();
+            return;
+        }
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            goToSessionSearchMatch(event.shiftKey ? -1 : 1);
+        }
+    });
+
+    searchPrevBtn?.addEventListener('click', () => {
+        goToSessionSearchMatch(-1);
+        searchInput?.focus();
+    });
+
+    searchNextBtn?.addEventListener('click', () => {
+        goToSessionSearchMatch(1);
+        searchInput?.focus();
+    });
+
+    searchCloseBtn?.addEventListener('click', () => {
+        closeSessionSearch();
     });
 
     newSessionBtn.addEventListener('click', () => {
