@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2.0.3
+
+- Fixed active-turn append handling so appended user messages do not replace the root turn anchor during final matching.
+- Moved active-turn append entry into the stable bottom input composer with append mode, draft preservation, and input-border pulse feedback.
+- Improved append queue status so queued prompts remain sendable, use queued/received colors, and transition to received when the assistant starts processing appended prompts.
+
 ## 2.0.1
 
 - Improved user-message action visibility by sliding the user bubble left on hover/focus and showing append/undo controls in the newly exposed space to the right.

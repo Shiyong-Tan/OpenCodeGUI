@@ -203,6 +203,7 @@ export type ChatEvent = {
     rootUserMsgId?: string;
     appendUserMsgId?: string;
     clientMessageId?: string;
+    parentId?: string;
     tmpKey?: string;
     callId?: string;
     requestId?: string;
@@ -5518,6 +5519,7 @@ export class OpenCodeClient {
             sessionId,
             messageId,
             assistantMsgId: messageId,
+            parentId,
             phase,
             lane
         };

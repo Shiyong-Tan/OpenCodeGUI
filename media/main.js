@@ -116,6 +116,8 @@ let lastConflictPayload = null;
 let questionOverlayEl = null;
 let questionOverlayTimer = null;
 let questionOverlayState = null;
+let quoteSelectionButton = null;
+let quoteSelectionText = '';
 const shownQuestionCallIds = new Set();
 const sentQuestionCallIds = new Set();
 const questionOverlayQueue = [];
@@ -141,6 +143,8 @@ let sendButtonEl = null;
 let currentModelQuota = null;
 let quotaTooltipEl = null;
 let inputEl = null;
+let appendInputMode = null;
+let inputDefaultPlaceholder = 'Ask anything...';
 let freeModelIds = new Set();
 const pendingUiPrompts = [];
 let pendingContextItems = [];
@@ -735,6 +739,7 @@ function createSessionState() {
         appendRootUserKey: null,
         appendComposerFor: null,
         appendComposerDrafts: new Map(),
+        inputDraft: '',
         hiddenControlUserIds: new Set(),
         earlyFinalAssistantId: null,
         finalAssistantLock: null,
@@ -1031,8 +1036,32 @@ function isSendBlockedByPendingState(session) {
     return !session.turnFullyFinalized || session.backendTurnInFlight;
 }
 
+function canSendAppendFromInput() {
+    if (!appendInputMode || !activeSessionId) return false;
+    if (appendInputMode.sessionId !== activeSessionId) return false;
+    const session = getSessionState(activeSessionId);
+    if (!session) return false;
+    const root = session.messagesById?.get?.(appendInputMode.rootUserKey);
+    if (!root || root.role !== 'user') return false;
+    if (session.backendTurnInFlight !== true) return false;
+    if (session.turnFullyFinalized === true) return false;
+    if (session.canceledActiveTurn === true) return false;
+    if (session.finalAssistantLock?.assistantMsgId) return false;
+    if (!session.appendRootUserKey || root.id !== session.appendRootUserKey) return false;
+    const appendItems = Array.isArray(root.meta?.appendedPrompts) ? root.meta.appendedPrompts : [];
+    if (appendItems.some((item) => item && item.status === 'sending')) return false;
+    return true;
+}
+
 function updateSendGate() {
     if (!sendBtn) return;
+    if (appendInputMode) {
+        const allowed = canSendAppendFromInput();
+        sendBtn.disabled = !allowed;
+        sendBtn.title = allowed ? '' : SEND_BLOCK_NOTICE;
+        setSendBlockedNotice(allowed ? '' : SEND_BLOCK_NOTICE);
+        return;
+    }
     if (isBusy) {
         sendBtn.disabled = false;
         setSendBlockedNotice('');
@@ -2677,6 +2706,10 @@ function renderAssistantMarkdown(content, message) {
     }
 }
 
+function renderUserMarkdown(content, text) {
+    renderMarkdownInto(content, text || '', { linkifyRefs: false });
+}
+
 function renderMarkdownInto(element, text, options = {}) {
     delete element.dataset.linkified;
     const unwrapped = escapeSystemReminderTags(text || '');
@@ -2990,7 +3023,14 @@ document.addEventListener('DOMContentLoaded', () => {
         autoScrollPinnedToBottom = isNearBottom(chatContainer);
         chatContainer.addEventListener('scroll', () => {
             autoScrollPinnedToBottom = isNearBottom(chatContainer);
+            hideQuoteSelectionButton();
         }, { passive: true });
+        chatContainer.addEventListener('mouseup', () => {
+            setTimeout(showQuoteSelectionButton, 0);
+        });
+        chatContainer.addEventListener('keyup', () => {
+            setTimeout(showQuoteSelectionButton, 0);
+        });
         chatContainer.addEventListener('click', (event) => {
             const target = event.target;
             if (!(target instanceof Element)) return;
@@ -3020,11 +3060,311 @@ document.addEventListener('DOMContentLoaded', () => {
     vscode.postMessage({ type: 'ui-debug', payload: ['WV', 'webviewReady', 'id', webviewInstanceId] });
     vscode.postMessage({ type: 'webviewReady', webviewInstanceId });
     sendBtn.innerHTML = sendIcon;
+    inputDefaultPlaceholder = input?.placeholder || inputDefaultPlaceholder;
+
+    function getInputContainer() {
+        return input?.closest?.('.input-container') || null;
+    }
+
+    function pulseAppendInput() {
+        const container = getInputContainer();
+        if (!container) return;
+        container.classList.remove('append-pulse');
+        void container.offsetWidth;
+        container.classList.add('append-pulse');
+        setTimeout(() => container.classList.remove('append-pulse'), 1400);
+    }
+
+    function updateAppendInputUi() {
+        const container = getInputContainer();
+        if (container) {
+            container.classList.toggle('append-mode', Boolean(appendInputMode));
+        }
+        if (input) {
+            input.placeholder = appendInputMode ? 'Append...' : inputDefaultPlaceholder;
+        }
+        if (sendBtn) {
+            sendBtn.innerHTML = isBusy && !appendInputMode ? stopIcon : sendIcon;
+            sendBtn.classList.toggle('is-busy', isBusy && !appendInputMode);
+        }
+        renderContextTokens();
+        updateSendGate();
+    }
+
+    function enterAppendInputMode(rootUserKey, initialText) {
+        const session = getSessionState(activeSessionId);
+        if (!session || !rootUserKey || !input) return;
+        if (!(session.appendComposerDrafts instanceof Map)) {
+            session.appendComposerDrafts = new Map();
+        }
+        if (!appendInputMode || appendInputMode.sessionId !== activeSessionId) {
+            session.inputDraft = input.value;
+        } else if (appendInputMode.rootUserKey !== rootUserKey) {
+            session.appendComposerDrafts.set(appendInputMode.rootUserKey, input.value);
+        }
+        session.appendComposerFor = null;
+        appendInputMode = { sessionId: activeSessionId, rootUserKey };
+        input.value = typeof initialText === 'string'
+            ? initialText
+            : (session.appendComposerDrafts.get(rootUserKey) || '');
+        updateAppendInputUi();
+        pulseAppendInput();
+        setTimeout(() => {
+            input.focus();
+            const end = input.value.length;
+            input.selectionStart = end;
+            input.selectionEnd = end;
+        }, 0);
+    }
+
+    function exitAppendInputMode(options = {}) {
+        if (!appendInputMode || !input) return;
+        const { restoreDraft = true, discardAppendDraft = false, keepCurrentInput = false } = options;
+        const { sessionId, rootUserKey } = appendInputMode;
+        const session = getSessionState(sessionId);
+        const currentValue = input.value;
+        if (session) {
+            if (discardAppendDraft) {
+                session.appendComposerDrafts?.delete?.(rootUserKey);
+            } else {
+                if (!(session.appendComposerDrafts instanceof Map)) {
+                    session.appendComposerDrafts = new Map();
+                }
+                session.appendComposerDrafts.set(rootUserKey, currentValue);
+            }
+        }
+        appendInputMode = null;
+        if (keepCurrentInput && sessionId === activeSessionId) {
+            if (session) session.inputDraft = currentValue;
+            input.value = currentValue;
+        } else if (restoreDraft && sessionId === activeSessionId) {
+            input.value = session?.inputDraft || '';
+        }
+        updateAppendInputUi();
+    }
+
+    function maybeExitAppendInputModeAfterTurnEnd(sessionId, reason = 'unknown') {
+        if (!appendInputMode || appendInputMode.sessionId !== sessionId || sessionId !== activeSessionId) return;
+        const session = getSessionState(sessionId);
+        if (!session) return;
+        const turnEnded =
+            session.backendTurnInFlight !== true ||
+            session.turnFullyFinalized === true ||
+            session.canceledActiveTurn === true ||
+            Boolean(session.finalAssistantLock?.assistantMsgId);
+        if (!turnEnded) return;
+        const rootUserKey = appendInputMode.rootUserKey;
+        exitAppendInputMode({ restoreDraft: false, discardAppendDraft: false, keepCurrentInput: true });
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: ['append.input.auto-exit', 'reason', reason, 'sessionId', sessionId, 'rootUserKey', rootUserKey || 'null']
+        });
+    }
+
+    function clearAppendInputForSessionChange(nextSessionId) {
+        if (!appendInputMode || appendInputMode.sessionId === nextSessionId) return;
+        appendInputMode = null;
+        if (input) {
+            const nextSession = getSessionState(nextSessionId);
+            input.value = nextSession?.inputDraft || '';
+        }
+        updateAppendInputUi();
+    }
+
+    function ensureQuoteSelectionButton() {
+        if (quoteSelectionButton) return quoteSelectionButton;
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'quote-selection-btn hidden';
+        button.textContent = 'Quote';
+        button.addEventListener('mousedown', (event) => {
+            event.preventDefault();
+        });
+        button.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            insertQuoteIntoInput(quoteSelectionText);
+            hideQuoteSelectionButton();
+            window.getSelection()?.removeAllRanges?.();
+        });
+        document.body.appendChild(button);
+        quoteSelectionButton = button;
+        return button;
+    }
+
+    function hideQuoteSelectionButton() {
+        quoteSelectionText = '';
+        if (quoteSelectionButton) {
+            quoteSelectionButton.classList.add('hidden');
+        }
+    }
+
+    function getSelectionElement(node) {
+        if (!node) return null;
+        return node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+    }
+
+    function getSelectedFormulaMarkdown(selection) {
+        if (!selection || selection.rangeCount !== 1) return '';
+        const range = selection.getRangeAt(0);
+        const startFormula = getSelectionElement(range.startContainer)?.closest?.('.katex');
+        const endFormula = getSelectionElement(range.endContainer)?.closest?.('.katex');
+        if (!startFormula || startFormula !== endFormula) return '';
+        const annotation = startFormula.querySelector('annotation[encoding="application/x-tex"]');
+        const tex = annotation?.textContent?.trim?.() || '';
+        if (!tex) return '';
+        const isDisplay = Boolean(startFormula.closest('.katex-display'));
+        return isDisplay ? `$$${tex}$$` : `$${tex}$`;
+    }
+
+    function getKatexMarkdown(formulaEl) {
+        if (!formulaEl || typeof formulaEl.querySelector !== 'function') return '';
+        const annotation = formulaEl.querySelector('annotation[encoding="application/x-tex"]');
+        const tex = annotation?.textContent?.trim?.() || '';
+        if (!tex) return '';
+        const isDisplay = Boolean(formulaEl.closest?.('.katex-display') || formulaEl.parentElement?.classList?.contains('katex-display'));
+        return isDisplay ? `$$${tex}$$` : `$${tex}$`;
+    }
+
+    function isBlockElement(element) {
+        if (!element || !element.tagName) return false;
+        return /^(P|DIV|SECTION|ARTICLE|LI|UL|OL|BLOCKQUOTE|PRE|TABLE|TR|H[1-6])$/.test(element.tagName);
+    }
+
+    function serializeSelectionNode(node) {
+        if (!node) return '';
+        if (node.nodeType === Node.TEXT_NODE) {
+            return (node.nodeValue || '').replace(/\u00a0/g, ' ');
+        }
+        if (node.nodeType !== Node.ELEMENT_NODE) return '';
+        const element = node;
+        if (element.classList?.contains('katex')) {
+            return getKatexMarkdown(element);
+        }
+        if (element.classList?.contains('katex-html') || element.getAttribute?.('aria-hidden') === 'true') {
+            return '';
+        }
+        if (element.tagName === 'ANNOTATION' || element.tagName === 'SEMANTICS') {
+            return '';
+        }
+        if (element.tagName === 'BR') {
+            return '\n';
+        }
+
+        let text = '';
+        for (const child of Array.from(element.childNodes || [])) {
+            text += serializeSelectionNode(child);
+        }
+        if (isBlockElement(element)) {
+            text = text.replace(/[ \t]+\n/g, '\n').trim();
+            return text ? `${text}\n` : '';
+        }
+        return text;
+    }
+
+    function getSelectionMarkdownText(selection) {
+        if (!selection || selection.rangeCount !== 1) return '';
+        const formulaOnly = getSelectedFormulaMarkdown(selection);
+        if (formulaOnly) return formulaOnly;
+        const range = selection.getRangeAt(0);
+        const fragment = range.cloneContents();
+        let text = '';
+        for (const child of Array.from(fragment.childNodes || [])) {
+            text += serializeSelectionNode(child);
+        }
+        return text
+            .replace(/\u200b/g, '')
+            .replace(/[ \t]+\n/g, '\n')
+            .replace(/\n{3,}/g, '\n\n')
+            .trim();
+    }
+
+    function getQuoteMarkdownFromSelection(selection) {
+        const text = getSelectionMarkdownText(selection);
+        if (!text) return '';
+        const looksLikeMarkdownMath = /\$[^$]+\$|\\\(|\\\[/.test(text);
+        return text
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .filter(Boolean)
+            .map((line) => looksLikeMarkdownMath ? `> ${line}` : `> *${line.replace(/\*/g, '\\*')}*`)
+            .join('\n');
+    }
+
+    function showQuoteSelectionButton() {
+        const selection = window.getSelection();
+        if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+            hideQuoteSelectionButton();
+            return;
+        }
+        const range = selection.getRangeAt(0);
+        const startEl = getSelectionElement(range.startContainer);
+        const endEl = getSelectionElement(range.endContainer);
+        if (!chatContainer?.contains(startEl) || !chatContainer.contains(endEl)) {
+            hideQuoteSelectionButton();
+            return;
+        }
+        if (startEl?.closest?.('textarea, input, button, select') || endEl?.closest?.('textarea, input, button, select')) {
+            hideQuoteSelectionButton();
+            return;
+        }
+        const quoteText = getQuoteMarkdownFromSelection(selection);
+        if (!quoteText) {
+            hideQuoteSelectionButton();
+            return;
+        }
+        quoteSelectionText = quoteText;
+        const rect = range.getBoundingClientRect();
+        if (!rect || (!rect.width && !rect.height)) {
+            hideQuoteSelectionButton();
+            return;
+        }
+        const button = ensureQuoteSelectionButton();
+        button.classList.remove('hidden');
+        const buttonWidth = button.offsetWidth || 62;
+        const buttonHeight = button.offsetHeight || 28;
+        const left = Math.max(8, Math.min(window.innerWidth - buttonWidth - 8, rect.right + 8));
+        const top = Math.max(8, Math.min(window.innerHeight - buttonHeight - 8, rect.top + (rect.height / 2) - (buttonHeight / 2)));
+        button.style.left = `${left}px`;
+        button.style.top = `${top}px`;
+    }
+
+    function insertQuoteIntoInput(quoteText) {
+        if (!quoteText || !input) return;
+        const start = input.selectionStart ?? input.value.length;
+        const end = input.selectionEnd ?? input.value.length;
+        const before = input.value.slice(0, start);
+        const after = input.value.slice(end);
+        const prefix = before && !before.endsWith('\n\n')
+            ? (before.endsWith('\n') ? '\n' : '\n\n')
+            : '';
+        const suffix = after
+            ? (after.startsWith('\n\n') ? '' : after.startsWith('\n') ? '\n' : '\n\n')
+            : '\n\n';
+        const inserted = `${prefix}${quoteText}${suffix}`;
+        input.value = `${before}${inserted}${after}`;
+        const cursor = before.length + inserted.length;
+        input.selectionStart = cursor;
+        input.selectionEnd = cursor;
+        input.focus();
+        const session = getSessionState(activeSessionId);
+        if (appendInputMode && appendInputMode.sessionId === activeSessionId) {
+            if (session) {
+                if (!(session.appendComposerDrafts instanceof Map)) {
+                    session.appendComposerDrafts = new Map();
+                }
+                session.appendComposerDrafts.set(appendInputMode.rootUserKey, input.value);
+            }
+        } else if (session) {
+            session.inputDraft = input.value;
+        }
+        updateSendGate();
+    }
 
     function setBusy(nextBusy) {
         isBusy = nextBusy;
-        sendBtn.innerHTML = isBusy ? stopIcon : sendIcon;
-        sendBtn.classList.toggle('is-busy', isBusy);
+        sendBtn.innerHTML = isBusy && !appendInputMode ? stopIcon : sendIcon;
+        sendBtn.classList.toggle('is-busy', isBusy && !appendInputMode);
         updateSendQuotaVisual();
         updateSendGate();
     }
@@ -3220,7 +3560,11 @@ document.addEventListener('DOMContentLoaded', () => {
         } else {
             const rawText = message.text || '';
             const trimmedText = isUser ? stripSystemInjections(rawText.replace(/^(\r?\n)+/, '')) : rawText;
-            content.textContent = trimmedText;
+            if (isUser) {
+                renderUserMarkdown(content, trimmedText);
+            } else {
+                content.textContent = trimmedText;
+            }
         }
         div.appendChild(content);
 
@@ -3260,80 +3604,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
         return card;
     }
-
-function renderAppendComposer(sessionId, rootUserKey) {
-    const session = getSessionState(sessionId);
-    if (session && !(session.appendComposerDrafts instanceof Map)) {
-        session.appendComposerDrafts = new Map();
-    }
-    const wrapper = document.createElement('div');
-    wrapper.className = 'append-composer';
-    const input = document.createElement('textarea');
-    input.className = 'append-composer-input';
-    input.rows = 2;
-    input.placeholder = 'Append...';
-    input.value = session?.appendComposerDrafts?.get?.(rootUserKey) || '';
-    input.addEventListener('input', () => {
-        const liveSession = getSessionState(sessionId);
-        if (!liveSession) return;
-        if (!(liveSession.appendComposerDrafts instanceof Map)) {
-            liveSession.appendComposerDrafts = new Map();
-        }
-        liveSession.appendComposerDrafts.set(rootUserKey, input.value);
-    });
-    const actions = document.createElement('div');
-    actions.className = 'append-composer-actions';
-    const cancel = document.createElement('button');
-    cancel.type = 'button';
-    cancel.className = 'append-composer-btn secondary';
-    cancel.textContent = 'Cancel';
-    cancel.addEventListener('click', () => {
-        const session = getSessionState(sessionId);
-        if (session) {
-            session.appendComposerFor = null;
-            session.appendComposerDrafts?.delete?.(rootUserKey);
-        }
-        window.__oc?.renderFromState?.();
-    });
-    const send = document.createElement('button');
-    send.type = 'button';
-    send.className = 'append-composer-btn primary';
-    send.textContent = 'Append';
-    let isSubmitting = false;
-    const submit = () => {
-        if (isSubmitting) return;
-        isSubmitting = true;
-        send.disabled = true;
-        input.disabled = true;
-        const accepted = submitAppendMessage(sessionId, rootUserKey, input.value);
-        if (!accepted) {
-            isSubmitting = false;
-            send.disabled = false;
-            input.disabled = false;
-        }
-    };
-    send.addEventListener('click', submit);
-    input.addEventListener('keydown', (event) => {
-        if (event.key === 'Enter' && !event.shiftKey) {
-            event.preventDefault();
-            submit();
-        }
-        if (event.key === 'Escape') {
-            const session = getSessionState(sessionId);
-            if (session) {
-                session.appendComposerFor = null;
-                session.appendComposerDrafts?.delete?.(rootUserKey);
-            }
-            window.__oc?.renderFromState?.();
-        }
-    });
-    actions.appendChild(cancel);
-    actions.appendChild(send);
-    wrapper.appendChild(input);
-    wrapper.appendChild(actions);
-    setTimeout(() => input.focus(), 0);
-    return wrapper;
-}
 
 function renderMessageElement(message, renderedSet) {
     if (renderedSet.has(message.id)) {
@@ -3668,7 +3938,7 @@ function renderMessageElement(message, renderedSet) {
             if (message.role === 'user') {
                 const mainText = document.createElement('div');
                 mainText.className = 'message-user-text';
-                mainText.textContent = sanitized;
+                renderUserMarkdown(mainText, sanitized);
                 content.appendChild(mainText);
                 for (const item of getAppendItems(message)) {
                     if (!item || typeof item.text !== 'string' || !item.text.trim()) continue;
@@ -3679,7 +3949,7 @@ function renderMessageElement(message, renderedSet) {
                     block.appendChild(divider);
                     const textEl = document.createElement('div');
                     textEl.className = 'append-message-text';
-                    textEl.textContent = item.text;
+                    renderUserMarkdown(textEl, item.text);
                     block.appendChild(textEl);
                     if (item.status && item.status !== 'applied') {
                         const status = document.createElement('div');
@@ -3859,24 +4129,17 @@ function renderMessageElement(message, renderedSet) {
                 appendBtn.title = 'Append to this message';
                 appendBtn.textContent = '+';
                 appendBtn.addEventListener('click', () => {
-                    session.appendComposerFor = message.id;
-                    window.__oc?.renderFromState?.();
+                    enterAppendInputMode(message.id);
                 });
                 actions.appendChild(appendBtn);
             }
             if (!gitUndoEnabled) {
                 div.appendChild(actions);
-                if (session?.appendComposerFor === message.id && isAppendableActiveUserMessage) {
-                    div.appendChild(renderAppendComposer(activeSessionId, message.id));
-                }
                 chatContainer.appendChild(div);
                 return;
             }
             if (isAppendableActiveUserMessage) {
                 div.appendChild(actions);
-                if (session?.appendComposerFor === message.id) {
-                    div.appendChild(renderAppendComposer(activeSessionId, message.id));
-                }
                 chatContainer.appendChild(div);
                 return;
             }
@@ -3916,9 +4179,6 @@ function renderMessageElement(message, renderedSet) {
             });
             actions.appendChild(undoBtn);
             div.appendChild(actions);
-            if (session?.appendComposerFor === message.id && isAppendableActiveUserMessage) {
-                div.appendChild(renderAppendComposer(activeSessionId, message.id));
-            }
         }
 
 
@@ -4208,7 +4468,11 @@ function shouldHideDcpUiMessage(message) {
                 } else {
                     const rawText = msg.text || '';
                     const trimmedText = isUser ? stripSystemInjections(rawText.replace(/^(\r?\n)+/, '')) : rawText;
-                    content.textContent = trimmedText;
+                    if (isUser) {
+                        renderUserMarkdown(content, trimmedText);
+                    } else {
+                        content.textContent = trimmedText;
+                    }
                 }
                 entry.appendChild(content);
                 body.appendChild(entry);
@@ -5164,6 +5428,30 @@ function shouldHideDcpUiMessage(message) {
     function renderContextTokens() {
         if (!inputTokenList) return;
         inputTokenList.innerHTML = '';
+        if (appendInputMode && appendInputMode.sessionId === activeSessionId) {
+            const chip = document.createElement('span');
+            chip.className = 'input-token append-token';
+
+            const label = document.createElement('span');
+            label.className = 'input-token-label';
+            label.textContent = 'Append';
+            chip.appendChild(label);
+
+            const removeBtn = document.createElement('button');
+            removeBtn.type = 'button';
+            removeBtn.className = 'input-token-remove';
+            removeBtn.title = 'Exit append mode';
+            removeBtn.setAttribute('aria-label', 'Exit append mode');
+            removeBtn.textContent = '\u00D7';
+            removeBtn.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                exitAppendInputMode({ restoreDraft: true });
+            });
+            chip.appendChild(removeBtn);
+            inputTokenList.appendChild(chip);
+            return;
+        }
         for (const item of pendingContextItems) {
             if (!item || !item.displayText) continue;
             const chip = document.createElement('span');
@@ -5475,7 +5763,7 @@ function canAppendToMessage(session, message) {
 
 function hasBlockingAppendSubmission(message) {
     const items = getAppendItems(message);
-    return items.some((item) => item && (item.status === 'sending' || item.status === 'queued'));
+    return items.some((item) => item && item.status === 'sending');
 }
 
 function getAppendItems(message) {
@@ -5560,6 +5848,38 @@ function upsertAppendItem(message, item) {
         return true;
     });
     return next;
+}
+
+function markAppendItemSeenByAssistantParent(session, parentId) {
+    if (!session || !parentId || !(session.messagesById instanceof Map)) return false;
+    for (const message of session.messagesById.values()) {
+        const items = Array.isArray(message?.meta?.appendedPrompts)
+            ? message.meta.appendedPrompts
+            : [];
+        const parentIndex = items.findIndex((entry) => entry?.appendUserMsgId === parentId);
+        if (parentIndex < 0) continue;
+        let changed = false;
+        for (let i = 0; i <= parentIndex; i += 1) {
+            const item = items[i];
+            if (
+                !item?.appendUserMsgId ||
+                item.status === 'seen' ||
+                item.status === 'applied' ||
+                item.status === 'failed' ||
+                item.status === 'rejected'
+            ) {
+                continue;
+            }
+            upsertAppendItem(message, {
+                clientMessageId: item.clientMessageId,
+                appendUserMsgId: item.appendUserMsgId,
+                status: 'seen'
+            });
+            changed = true;
+        }
+        return changed;
+    }
+    return false;
 }
 
 function submitAppendMessage(sessionId, rootUserKey, text) {
@@ -5991,6 +6311,18 @@ function appendMessageImages(parentEl, message) {
     }
 
     sendBtn.addEventListener('click', () => {
+        if (appendInputMode) {
+            if (!canSendAppendFromInput()) {
+                updateSendGate();
+                return;
+            }
+            const { sessionId, rootUserKey } = appendInputMode;
+            const accepted = submitAppendMessage(sessionId, rootUserKey, input.value);
+            if (accepted) {
+                exitAppendInputMode({ restoreDraft: true, discardAppendDraft: true });
+            }
+            return;
+        }
         if (isBusy) {
             if (activeSessionId) {
                 // agent timeout notice removed
@@ -6124,15 +6456,44 @@ function appendMessageImages(parentEl, message) {
         pendingFileRefs = [];
         renderContextTokens();
         input.value = '';
+        const sentSession = getSessionState(activeSessionId);
+        if (sentSession) sentSession.inputDraft = '';
         closeFileMentionList();
     });
 
     input.addEventListener('paste', handlePaste);
-    input.addEventListener('input', scheduleFileMentionUpdate);
-    input.addEventListener('click', scheduleFileMentionUpdate);
+    input.addEventListener('input', () => {
+        const session = getSessionState(activeSessionId);
+        if (appendInputMode && appendInputMode.sessionId === activeSessionId) {
+            if (session) {
+                if (!(session.appendComposerDrafts instanceof Map)) {
+                    session.appendComposerDrafts = new Map();
+                }
+                session.appendComposerDrafts.set(appendInputMode.rootUserKey, input.value);
+            }
+            closeFileMentionList();
+            updateSendGate();
+            return;
+        }
+        if (session) {
+            session.inputDraft = input.value;
+        }
+        scheduleFileMentionUpdate();
+    });
+    input.addEventListener('click', () => {
+        if (appendInputMode) {
+            closeFileMentionList();
+            return;
+        }
+        scheduleFileMentionUpdate();
+    });
     document.addEventListener('mousedown', (event) => {
         const target = event.target;
         if (!(target instanceof Node)) return;
+        if (quoteSelectionButton?.contains?.(target)) return;
+        if (target instanceof Element && !target.closest('#chat')) {
+            hideQuoteSelectionButton();
+        }
         if (target === input || fileMentionList?.contains(target)) return;
         closeFileMentionList();
     });
@@ -6159,6 +6520,14 @@ function appendMessageImages(parentEl, message) {
                 closeFileMentionList();
                 return;
             }
+        }
+        if (appendInputMode && e.key === 'Escape') {
+            e.preventDefault();
+            exitAppendInputMode({ restoreDraft: true });
+            return;
+        }
+        if (appendInputMode && e.key === 'Tab') {
+            return;
         }
         if (e.key === 'Tab' && document.activeElement === input) {
             e.preventDefault();
@@ -6208,6 +6577,7 @@ function appendMessageImages(parentEl, message) {
     });
 
     newSessionBtn.addEventListener('click', () => {
+        exitAppendInputMode({ restoreDraft: false });
         activeSessionId = '';
         baseSessionTitle = 'OpenCode: Chat';
         renderHeaderTitle();
@@ -6623,6 +6993,7 @@ window.addEventListener('message', (event) => {
 
                 try {
                     activeSessionId = sessionId;
+                    clearAppendInputForSessionChange(sessionId);
                     baseSessionTitle = message.title || 'OpenCode: Chat';
                     renderHeaderTitle();
                     renderHeaderUsage();
@@ -6950,6 +7321,7 @@ window.addEventListener('message', (event) => {
                 if (!sessionId) break;
                 const prevSessionId = activeSessionId;
                 activeSessionId = sessionId;
+                clearAppendInputForSessionChange(sessionId);
                 renderHeaderUsage();
                 if (prevSessionId && prevSessionId !== sessionId) {
                     clearQuestionOverlay('session-change');
@@ -7050,11 +7422,19 @@ window.addEventListener('message', (event) => {
                 const session = getSessionState(sessionId, true);
                 const root = resolveAppendRootMessage(session, message);
                 if (!root) break;
-                upsertAppendItem(root, {
+                const item = upsertAppendItem(root, {
                     clientMessageId: message.clientMessageId,
                     status: message.status || 'queued',
                     reason: message.reason || ''
                 });
+                if (
+                    sessionId === activeSessionId
+                    && (message.status === 'failed' || message.status === 'rejected')
+                    && root?.id
+                    && item?.text
+                ) {
+                    enterAppendInputMode(root.id, item.text);
+                }
                 window.__oc?.renderFromState?.();
                 break;
             }
@@ -7068,7 +7448,9 @@ window.addEventListener('message', (event) => {
                     clientMessageId: message.clientMessageId,
                     appendUserMsgId: message.appendUserMsgId,
                     text: typeof message.text === 'string' ? message.text : '',
-                    status: 'seen'
+                    // The user-message SSE only means opencode persisted the append.
+                    // It can still be queued behind the active turn's current work.
+                    status: 'queued'
                 });
                 window.__oc?.renderFromState?.();
                 scrollToBottom();
@@ -7103,6 +7485,8 @@ window.addEventListener('message', (event) => {
                             };
                         }
                     }
+                } else {
+                    maybeExitAppendInputModeAfterTurnEnd(sessionId, 'turnInFlight:false');
                 }
                 updateSendGate();
                 break;
@@ -7305,6 +7689,13 @@ window.addEventListener('message', (event) => {
                         lane: message.lane || 'unknown',
                         ts: typeof message.ts === 'number' ? message.ts : Date.now()
                     };
+                    const parentId =
+                        (typeof message.parentId === 'string' && message.parentId)
+                        || (typeof message.parentID === 'string' && message.parentID)
+                        || '';
+                    if (markAppendItemSeenByAssistantParent(session, parentId)) {
+                        window.__oc?.renderFromState?.();
+                    }
                     if (message.phase === 'assistant_final_accepted') {
                         session.earlyFinalAssistantId = msgId;
                         if (sessionHasActiveBackgroundSubagents(session)) {
@@ -7353,6 +7744,7 @@ window.addEventListener('message', (event) => {
                     if (pendingEpoch > emittedEpoch) {
                         shouldEmitSnapshotOnNextRender = true;
                     }
+                    maybeExitAppendInputModeAfterTurnEnd(sessionId, 'finalize_done');
                     setBusy(false);
                     updateSendGate();
                     window.__oc?.renderFromState?.();
@@ -7370,10 +7762,12 @@ window.addEventListener('message', (event) => {
                 }
                 if (session?.canceledActiveTurn) {
                     setBusy(false);
+                    maybeExitAppendInputModeAfterTurnEnd(sessionId, 'chatDone:canceledActiveTurn');
                     logSessionState(sessionId, 'chatDone.canceledActiveTurn');
                     break;
                 }
                 handleChatDone(sessionId, message);
+                maybeExitAppendInputModeAfterTurnEnd(sessionId, 'chatDone');
                 if (session) {
                     session.cancelledTurn = false;
                 }
@@ -8627,6 +9021,7 @@ window.addEventListener('message', (event) => {
             }
             case 'newSession': {
                 activeSessionId = message.sessionId || '';
+                clearAppendInputForSessionChange(activeSessionId);
                 clearQuestionOverlay('new-session');
                 clearPermissionOverlay('new-session');
                 baseSessionTitle = 'OpenCode: Chat';

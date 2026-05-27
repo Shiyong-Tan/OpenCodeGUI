@@ -5021,6 +5021,7 @@ ${attachmentLines.join('\n')}`
                 type: 'assistantPhase',
                 sessionId: event.sessionId,
                 messageId: event.messageId || event.assistantMsgId || '',
+                parentId: event.parentId,
                 phase: event.phase || '',
                 lane: event.lane || 'unknown',
                 ts: Date.now()

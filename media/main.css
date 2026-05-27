@@ -613,13 +613,21 @@ body {
 
 .append-message-text,
 .message-user-text {
-    white-space: pre-wrap;
+    white-space: normal;
 }
 
 .append-message-status {
     margin-top: 4px;
     color: var(--vscode-descriptionForeground);
     font-size: 0.78em;
+}
+
+.append-message-status.append-queued {
+    color: #f59e0b;
+}
+
+.append-message-status.append-seen {
+    color: #22c55e;
 }
 
 .append-message-status.append-failed,
@@ -1340,6 +1348,86 @@ body {
     border-color: var(--vscode-focusBorder);
 }
 
+.input-container.append-mode {
+    border-color: var(--vscode-textLink-foreground);
+    box-shadow: none;
+}
+
+.input-container.append-pulse {
+    animation: appendInputPulse 1.15s ease-in-out 2;
+}
+
+@keyframes appendInputPulse {
+    0%, 100% {
+        border-color: var(--vscode-input-border);
+        box-shadow: none;
+    }
+    18%, 58% {
+        border-color: var(--vscode-textLink-foreground);
+        box-shadow: none;
+    }
+    38%, 78% {
+        border-color: color-mix(in srgb, var(--vscode-textLink-foreground) 25%, var(--vscode-input-border));
+        box-shadow: none;
+    }
+}
+
+.input-token.append-token {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    min-height: 24px;
+    padding: 0 32px;
+    background: transparent;
+    border: 0;
+    color: var(--vscode-textLink-foreground);
+}
+
+.input-token.append-token .input-token-label {
+    text-align: center;
+    font-size: 1.2em;
+}
+
+.input-token.append-token .input-token-remove {
+    position: absolute;
+    right: 4px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.1rem;
+    line-height: 1;
+}
+
+.quote-selection-btn {
+    position: fixed;
+    z-index: 1000;
+    border: 1px solid var(--vscode-button-border, transparent);
+    border-radius: 4px;
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    font: inherit;
+    font-size: 0.82rem;
+    line-height: 1;
+    padding: 6px 8px;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
+}
+
+.quote-selection-btn:hover {
+    background: var(--vscode-button-hoverBackground);
+}
+
+.quote-selection-btn.hidden {
+    display: none;
+}
+
 textarea {
     width: 100%;
     background: transparent;
@@ -1795,6 +1883,12 @@ button.send-btn.has-quota svg {
     border-color: #f85149;
 }
 
+.input-container.append-mode,
+.input-container.append-mode.mode-plan,
+.input-container.append-mode.mode-build {
+    border-color: var(--vscode-textLink-foreground);
+}
+
 .input-container.mode-plan select#mode-select {
     color: #2ea043;
 }
@@ -2004,7 +2098,7 @@ select#mode-select {
 }
 
 .message.user .message-content {
-  white-space: pre-wrap;
+  white-space: normal;
 }
 
 /* ---- Global block spacing (the main knob) ---- */
@@ -2071,6 +2165,18 @@ select#mode-select {
   padding: 6px 10px;
   border-left: 3px solid var(--vscode-widget-border);
   color: var(--vscode-descriptionForeground);
+}
+
+.message.user .message-content blockquote {
+  background: transparent;
+  border-left-color: color-mix(in srgb, var(--vscode-button-foreground) 42%, transparent);
+  color: inherit;
+  font-style: italic;
+  padding: 3px 0 3px 8px;
+}
+
+.message.user .message-content blockquote :where(p, em) {
+  font-style: italic;
 }
 
 /* ---- HR ---- */
