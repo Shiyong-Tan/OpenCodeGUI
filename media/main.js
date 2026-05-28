@@ -3636,9 +3636,12 @@ document.addEventListener('DOMContentLoaded', () => {
         const inserted = `${prefix}${quoteText}${suffix}`;
         input.value = `${before}${inserted}${after}`;
         const cursor = before.length + inserted.length;
-        input.selectionStart = cursor;
-        input.selectionEnd = cursor;
         input.focus();
+        input.setSelectionRange(cursor, cursor);
+        requestAnimationFrame(() => {
+            input.focus();
+            input.setSelectionRange(cursor, cursor);
+        });
         const session = getSessionState(activeSessionId);
         if (appendInputMode && appendInputMode.sessionId === activeSessionId) {
             if (session) {
