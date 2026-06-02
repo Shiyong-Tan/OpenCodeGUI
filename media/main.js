@@ -151,6 +151,8 @@ let baselinePreparing = false;
 let baselinePreparingTimer = null;
 let sendBtn = null;
 let sendButtonEl = null;
+let sendButtonSendIconHtml = '';
+let sendButtonStopIconHtml = '';
 let currentModelQuota = null;
 let quotaTooltipEl = null;
 let inputEl = null;
@@ -1017,18 +1019,80 @@ function clearBackgroundSubagentIndicator(session) {
     updateSendGate();
 }
 
-function getEventSessionId(message, eventName) {
+const SINGLE_IN_FLIGHT_FALLBACK_EVENTS = new Set([
+    // Intentionally empty for Slice 3: no legacy streaming event was proven to need fallback.
+]);
+
+function findSingleInFlightSessionId() {
+    let found = '';
+    for (const [sessionId, session] of sessionsById.entries()) {
+        if (!session) continue;
+        if (session.backendTurnInFlight === true || session.turnFullyFinalized === false) {
+            if (found) return '';
+            found = sessionId;
+        }
+    }
+    return found;
+}
+
+function resolveEventSessionId(message, eventName, options = {}) {
     const sessionId =
         message?.sessionID ||
         message?.sessionId ||
         message?.part?.sessionID ||
         message?.part?.sessionId ||
         '';
-    if (!sessionId) {
+    let resolvedSessionId = sessionId;
+    let source = sessionId ? 'payload' : '';
+    if (!resolvedSessionId && options?.allowSingleInFlightFallback === true && SINGLE_IN_FLIGHT_FALLBACK_EVENTS.has(eventName)) {
+        resolvedSessionId = findSingleInFlightSessionId();
+        source = resolvedSessionId ? 'single-in-flight' : '';
+    }
+    if (!resolvedSessionId) {
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: ['[WV][SESSION_ROUTE_DROP]', `event=${eventName || 'unknown'}`, 'reason=missing-session', `activeSessionId=${activeSessionId || 'null'}`]
+        });
         console.warn(`[SessionGate] drop event=${eventName} missing sessionID`, message);
         return null;
     }
-    return sessionId;
+    const isActive = resolvedSessionId === activeSessionId;
+    const shouldRender = options?.render === false ? false : isActive;
+    vscode.postMessage({
+        type: 'ui-debug',
+        payload: ['[WV][SESSION_ROUTE]', `event=${eventName || 'unknown'}`, `sessionId=${resolvedSessionId}`, `source=${source || 'unknown'}`, `active=${isActive ? 'true' : 'false'}`, `shouldRender=${shouldRender ? 'true' : 'false'}`]
+    });
+    return { sessionId: resolvedSessionId, source: source || 'unknown', isActive, shouldRender };
+}
+
+function getEventSessionId(message, eventName) {
+    const route = resolveEventSessionId(message, eventName);
+    return route?.sessionId || null;
+}
+
+function logBackgroundStateUpdate(sessionId, reason, options = {}) {
+    if (!sessionId || sessionId === activeSessionId) return;
+    vscode.postMessage({
+        type: 'ui-debug',
+        payload: ['[WV][BACKGROUND_STATE_UPDATE]', `event=${reason || 'unknown'}`, `sessionId=${sessionId}`, `activeSessionId=${activeSessionId || 'null'}`, ...(Array.isArray(options.extra) ? options.extra : [])]
+    });
+}
+
+function renderIfActive(sessionId, reason, options = {}) {
+    const isActive = Boolean(sessionId && sessionId === activeSessionId);
+    if (!isActive) {
+        logBackgroundStateUpdate(sessionId, reason, options);
+        return false;
+    }
+    window.__oc?.renderFromState?.(reason);
+    if (options.scroll === true) {
+        if (typeof window.__oc?.scrollToBottom === 'function') {
+            window.__oc.scrollToBottom(options.forceScroll === true);
+        } else if (typeof options.scrollFallback === 'function') {
+            options.scrollFallback(options.forceScroll === true);
+        }
+    }
+    return true;
 }
 
 function getEventMessageId(message) {
@@ -1045,6 +1109,22 @@ function getEventMessageId(message) {
 function isSendBlockedByPendingState(session) {
     if (!session) return false;
     return !session.turnFullyFinalized || session.backendTurnInFlight;
+}
+
+function isSessionBusy(sessionId) {
+    if (!sessionId) return false;
+    return isSendBlockedByPendingState(getSessionState(sessionId));
+}
+
+function isActiveSessionBusy() {
+    return isSessionBusy(activeSessionId);
+}
+
+function syncSendButtonBusyVisual() {
+    if (!sendBtn || !sendButtonSendIconHtml || !sendButtonStopIconHtml) return;
+    const activeBusy = isActiveSessionBusy();
+    sendBtn.innerHTML = activeBusy && !appendInputMode ? sendButtonStopIconHtml : sendButtonSendIconHtml;
+    sendBtn.classList.toggle('is-busy', activeBusy && !appendInputMode);
 }
 
 function canSendAppendFromInput() {
@@ -1066,6 +1146,7 @@ function canSendAppendFromInput() {
 
 function updateSendGate() {
     if (!sendBtn) return;
+    syncSendButtonBusyVisual();
     if (appendInputMode) {
         const allowed = canSendAppendFromInput();
         sendBtn.disabled = !allowed;
@@ -1073,7 +1154,7 @@ function updateSendGate() {
         setSendBlockedNotice(allowed ? '' : SEND_BLOCK_NOTICE);
         return;
     }
-    if (isBusy) {
+    if (isActiveSessionBusy()) {
         sendBtn.disabled = false;
         setSendBlockedNotice('');
         return;
@@ -1778,14 +1859,14 @@ function upsertUndoNotice(session, operationId, startServerId, text, anchorKey, 
     return k;
 }
 
-function replaceKeyEverywhere(oldId, newId) {
-    const session = getSessionState(activeSessionId);
+function replaceKeyEverywhere(oldId, newId, sessionId = activeSessionId) {
+    const session = getSessionState(sessionId);
     if (!session) return;
 
     if (typeof oldId === 'string' && typeof newId === 'string' && oldId.startsWith('local-') && newId === session.currentTurnAssistantMsgId) {
         vscode.postMessage({
             type: 'ui-debug',
-            payload: ['reject.user->assistant-id', 'oldKey', oldId, 'newKey', newId, 'sessionId', activeSessionId]
+            payload: ['reject.user->assistant-id', 'oldKey', oldId, 'newKey', newId, 'sessionId', sessionId]
         });
         return;
     }
@@ -1906,6 +1987,7 @@ function replaceKeyEverywhere(oldId, newId) {
             'timelineIndex', timelineIndex,
             'timelineReplaced', timelineReplaced,
             'deduped', deduped,
+            'sessionId', sessionId,
             'hadOldMsg', Boolean(message),
             'hadNewMsg', Boolean(existing),
             'timelineSample', timelineSample]
@@ -2247,8 +2329,8 @@ function attemptAssistantUpgrade(sessionId, payload, source) {
         payload: ['[DBG_WV_ID]', `type=${source} sessionPayload=${payloadSession || 'null'} currentSession=${currentSession || 'null'} tmpKey=${tmpKey || 'null'} assistantMsgId=${assistantMsgId || 'null'}`]
     });
 
-    if (!payloadSession || payloadSession !== currentSession) {
-        vscode.postMessage({ type: 'ui-debug', payload: ['assistant.upgrade', `tmpKey=${tmpKey || 'null'} msgId=${assistantMsgId || 'null'} replaced=false reason=session-mismatch`] });
+    if (!payloadSession) {
+        vscode.postMessage({ type: 'ui-debug', payload: ['assistant.upgrade', `tmpKey=${tmpKey || 'null'} msgId=${assistantMsgId || 'null'} replaced=false reason=missing-session`] });
         return;
     }
     if (typeof assistantMsgId !== 'string' || !assistantMsgId.startsWith('msg_')) {
@@ -2332,23 +2414,23 @@ function attemptAssistantUpgrade(sessionId, payload, source) {
     } else if (currentKey === newKey) {
         reason = 'already-current';
     } else if (typeof newIndex === 'number' && typeof curIndex !== 'number') {
-        replaceKeyEverywhere(currentKey, newKey);
+        replaceKeyEverywhere(currentKey, newKey, payloadSession);
         replaced = true;
         reason = 'new-index-known';
     } else if (typeof newIndex === 'number' && typeof curIndex === 'number' && newIndex > curIndex) {
-        replaceKeyEverywhere(currentKey, newKey);
+        replaceKeyEverywhere(currentKey, newKey, payloadSession);
         replaced = true;
         reason = 'higher-index';
     } else if ((currentKey.startsWith('tmp:') || currentKey.startsWith('local-')) && typeof newIndex === 'number') {
-        replaceKeyEverywhere(currentKey, newKey);
+        replaceKeyEverywhere(currentKey, newKey, payloadSession);
         replaced = true;
         reason = 'tmp-local-upgrade';
     } else if (typeof newIndex === 'number' && curIndex === -1) {
-        replaceKeyEverywhere(currentKey, newKey);
+        replaceKeyEverywhere(currentKey, newKey, payloadSession);
         replaced = true;
         reason = 'tmp-local-index';
     } else if ((currentKey.startsWith('tmp:') || currentKey.startsWith('local-')) && !session.messageIndexMap && newKey.startsWith('msg_')) {
-        replaceKeyEverywhere(currentKey, newKey);
+        replaceKeyEverywhere(currentKey, newKey, payloadSession);
         replaced = true;
         reason = 'index-map-missing-fallback';
         console.log('[ASSIST_UPGRADE] fallback path triggered, reason=index-map-missing');
@@ -3264,6 +3346,8 @@ document.addEventListener('DOMContentLoaded', () => {
             <path d="M4 4h8v8H4z"/>
         </svg>
     `;
+    sendButtonSendIconHtml = sendIcon;
+    sendButtonStopIconHtml = stopIcon;
     const input = document.getElementById('chat-input');
     const chatContainer = document.getElementById('chat');
     const modelSelect = document.getElementById('model-select');
@@ -3367,6 +3451,12 @@ document.addEventListener('DOMContentLoaded', () => {
         setTimeout(() => container.classList.remove('append-pulse'), 1400);
     }
 
+    function refreshSendButtonState() {
+        syncSendButtonBusyVisual();
+        updateSendQuotaVisual();
+        updateSendGate();
+    }
+
     function updateAppendInputUi() {
         const container = getInputContainer();
         if (container) {
@@ -3375,12 +3465,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (input) {
             input.placeholder = appendInputMode ? 'Append...' : inputDefaultPlaceholder;
         }
-        if (sendBtn) {
-            sendBtn.innerHTML = isBusy && !appendInputMode ? stopIcon : sendIcon;
-            sendBtn.classList.toggle('is-busy', isBusy && !appendInputMode);
-        }
         renderContextTokens();
-        updateSendGate();
+        refreshSendButtonState();
     }
 
     function enterAppendInputMode(rootUserKey, initialText) {
@@ -3658,10 +3744,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function setBusy(nextBusy) {
         isBusy = nextBusy;
-        sendBtn.innerHTML = isBusy && !appendInputMode ? stopIcon : sendIcon;
-        sendBtn.classList.toggle('is-busy', isBusy && !appendInputMode);
-        updateSendQuotaVisual();
-        updateSendGate();
+        refreshSendButtonState();
     }
 
     function ensureQuotaTooltip() {
@@ -3683,7 +3766,8 @@ document.addEventListener('DOMContentLoaded', () => {
     function updateSendQuotaVisual() {
         if (!sendBtn) return;
         const isFree = freeModelIds.has(selectedModel);
-        if (isBusy || (!isFree && (!currentModelQuota || typeof currentModelQuota.summaryRemainingPercent !== 'number'))) {
+        const activeBusy = isActiveSessionBusy();
+        if (activeBusy || (!isFree && (!currentModelQuota || typeof currentModelQuota.summaryRemainingPercent !== 'number'))) {
             sendBtn.classList.remove('has-quota');
             sendBtn.style.removeProperty('--quota-remaining-deg');
             sendBtn.style.removeProperty('--quota-remaining-color');
@@ -3692,7 +3776,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 type: 'ui-debug',
                 payload: [
                     'quota.render.skip',
-                    `busy=${String(isBusy)}`,
+                    `busy=${String(activeBusy)}`,
                     `summary=${currentModelQuota?.summaryRemainingPercent ?? 'null'}`
                 ]
             });
@@ -3733,7 +3817,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function showQuotaTooltip() {
-        if (!sendBtn || !quotaTooltipEl || isBusy) return;
+        if (!sendBtn || !quotaTooltipEl || isActiveSessionBusy()) return;
         const rows = currentModelQuota && Array.isArray(currentModelQuota.rows) ? currentModelQuota.rows : [];
         const body = rows.length
             ? rows.map((row) => {
@@ -3761,7 +3845,7 @@ document.addEventListener('DOMContentLoaded', () => {
             payload: [
                 'quota.tooltip.show',
                 `rows=${rows.length}`,
-                `busy=${String(isBusy)}`
+                `busy=${String(isActiveSessionBusy())}`
             ]
         });
     }
@@ -5546,6 +5630,8 @@ function shouldHideDcpUiMessage(message) {
             autoScrollPinnedToBottom = true;
         });
     }
+    window.__oc = window.__oc || {};
+    window.__oc.scrollToBottom = scrollToBottom;
 
     function renderSessionList() {
         sessionList.innerHTML = '';
@@ -6215,7 +6301,7 @@ function submitAppendMessage(sessionId, rootUserKey, text) {
     return true;
 }
 
-function handleAssistantMeta(sessionId, message) {
+function handleAssistantMeta(sessionId, message, options = {}) {
         const session = getSessionState(sessionId, true);
         const backendId = getEventMessageId(message);
         const msgId = typeof message?.assistantMsgId === 'string' ? message.assistantMsgId : null;
@@ -6303,11 +6389,11 @@ function handleAssistantMeta(sessionId, message) {
                 const statusText = typeof message.lastText === 'string' ? message.lastText : '';
                 // isStatusUpdate: statusText only to avoid flicker. (isStatusUpdate statusText)
                 target.meta = { ...target.meta, internalId: backendId, isThinking: true, statusText };
-                const statusEl = document.querySelector(`[data-message-id="${targetId}"] .message-status`);
+                const statusEl = options.render === false ? null : document.querySelector(`[data-message-id="${targetId}"] .message-status`);
                 if (statusEl) {
                     statusEl.textContent = statusText;
                 } else {
-                    window.__oc?.renderFromState?.();
+                    renderIfActive(sessionId, 'assistantMessageMeta:status');
                 }
                 vscode.postMessage({ type: 'ui-debug', payload: ['handleAssistantMeta', 'status-update', targetId] });
             } else {
@@ -6340,7 +6426,7 @@ function handleAssistantMeta(sessionId, message) {
                     emitTempFinalTrace('meta.replace.reset', [`targetId=${targetId}`, `textLen=${typeof nextText === 'string' ? nextText.length : 0}`, `segments=${segmentsLen}`]);
                 }
                 vscode.postMessage({ type: 'ui-debug', payload: ['handleAssistantMeta', 'merged', targetId] });
-                window.__oc?.renderFromState?.();
+                renderIfActive(sessionId, 'assistantMessageMeta:merge');
             }
         }
 
@@ -6629,7 +6715,7 @@ function appendMessageImages(parentEl, message) {
             }
             return;
         }
-        if (isBusy) {
+        if (isActiveSessionBusy()) {
             if (activeSessionId) {
                 // agent timeout notice removed
                 cancelLocalTurn(activeSessionId);
@@ -6657,13 +6743,13 @@ function appendMessageImages(parentEl, message) {
         const willFreezeSegments = selectedMode === 'build';
         vscode.postMessage({
             type: 'ui-debug',
-            payload: ['[WV][TURN_START]', `isBusy=${isBusy}`, `willFreezeSegments=${willFreezeSegments}`]
+            payload: ['[WV][TURN_START]', `isBusy=${isActiveSessionBusy()}`, `willFreezeSegments=${willFreezeSegments}`]
         });
         // applyTurnStartFreeze removed - segments no longer have freeze state
         const text = input.value.trim();
         const hasContext = pendingContextItems.length > 0;
         const hasFileRefs = pendingFileRefs.length > 0;
-        if ((!text && !attachments.length && !hasContext && !hasFileRefs) || isBusy) return;
+        if ((!text && !attachments.length && !hasContext && !hasFileRefs) || isActiveSessionBusy()) return;
 
         const hasNonImage = attachments.some((item) => !isImageAttachment(item));
         const fallbackText = hasNonImage ? 'Attachment added.' : 'Image attached.';
@@ -6941,6 +7027,7 @@ function appendMessageImages(parentEl, message) {
         baseSessionTitle = 'OpenCode: Chat';
         renderHeaderTitle();
         renderHeaderUsage();
+        refreshSendButtonState();
         attachments = [];
         renderAttachments();
         pendingContextItems = [];
@@ -7716,7 +7803,7 @@ window.addEventListener('message', (event) => {
                     window.__oc?.renderFromState?.();
                     logSessionState(sessionId, 'flushPendingPrompts');
                 }
-                updateSendGate();
+                refreshSendButtonState();
                 break;
             }
             case 'sessionUsage': {
@@ -7906,8 +7993,9 @@ window.addEventListener('message', (event) => {
                 break;
             }
             case 'messageIndexMap': {
-                const sessionId = getEventSessionId(message, 'messageIndexMap');
-                if (!sessionId) break;
+                const route = resolveEventSessionId(message, 'messageIndexMap');
+                if (!route) break;
+                const sessionId = route.sessionId;
                 const session = getSessionState(sessionId);
                 const map = Array.isArray(message.map) ? message.map : [];
                 if (session) {
@@ -7925,7 +8013,6 @@ window.addEventListener('message', (event) => {
                 const pending = session?.pendingAssistantUpgrade || null;
                 const willTry = Boolean(
                     session &&
-                    activeSessionId === sessionId &&
                     pending &&
                     session.messageIndexMap instanceof Map &&
                     session.messageIndexMap.size > 0
@@ -7969,6 +8056,9 @@ window.addEventListener('message', (event) => {
                         payload: ['[DBG_RECONCILE]', `storedMap size=${session.messageIndexMap.size} first=[${storedSample.join(', ')}]`]
                     });
                 }
+                if (session && !route.shouldRender) {
+                    logBackgroundStateUpdate(sessionId, 'messageIndexMap');
+                }
                 updateSendGate();
                 break;
             }
@@ -7983,8 +8073,9 @@ window.addEventListener('message', (event) => {
                 break;
             }
             case 'assistantMessageMeta': {
-                const sessionId = getEventSessionId(message, 'assistantMessageMeta');
-                if (!sessionId) break;
+                const route = resolveEventSessionId(message, 'assistantMessageMeta');
+                if (!route) break;
+                const sessionId = route.sessionId;
                 const session = getSessionState(sessionId, false);
                 if (session?.canceledActiveTurn) {
                     vscode.postMessage({
@@ -8044,10 +8135,9 @@ window.addEventListener('message', (event) => {
                     });
                     break;
                 }
-                handleAssistantMeta(sessionId, message);
+                handleAssistantMeta(sessionId, message, { render: route.shouldRender });
                 // Removed: reconcilePendingSegments - new system uses applyHydratedSegments
-                window.__oc?.renderFromState?.();
-                scrollToBottom();
+                renderIfActive(sessionId, 'assistantMessageMeta', { scroll: true });
                 logSessionState(sessionId, 'assistantMessageMeta');
                 break;
             }
@@ -8081,8 +8171,9 @@ window.addEventListener('message', (event) => {
                 break;
             }
             case 'chatChunk': {
-                const sessionId = getEventSessionId(message, 'chatChunk');
-                if (!sessionId) break;
+                const route = resolveEventSessionId(message, 'chatChunk');
+                if (!route) break;
+                const sessionId = route.sessionId;
                 const session = getSessionState(sessionId);
                 if (session?.canceledActiveTurn) {
                     vscode.postMessage({
@@ -8099,14 +8190,14 @@ window.addEventListener('message', (event) => {
                     break;
                 }
                 handleChatChunk(sessionId, message);
-                window.__oc?.renderFromState?.();
-                scrollToBottom();
+                renderIfActive(sessionId, 'chatChunk', { scroll: true });
                 logSessionState(sessionId, 'chatChunk');
                 break;
             }
             case 'turnFinalizePhase': {
-                const sessionId = getEventSessionId(message, 'turnFinalizePhase');
-                if (!sessionId) break;
+                const route = resolveEventSessionId(message, 'turnFinalizePhase');
+                if (!route) break;
+                const sessionId = route.sessionId;
                 const session = getSessionState(sessionId, true);
                 if (!session.meta) session.meta = {};
                 session.meta.turnFinalizePhase = message.phase || '';
@@ -8116,19 +8207,20 @@ window.addEventListener('message', (event) => {
                     session.snapshotFinalizeReady = true;
                     const pendingEpoch = typeof session.snapshotPendingEpoch === 'number' ? session.snapshotPendingEpoch : 0;
                     const emittedEpoch = typeof session.snapshotEmittedEpoch === 'number' ? session.snapshotEmittedEpoch : 0;
-                    if (pendingEpoch > emittedEpoch) {
+                    if (route.isActive && pendingEpoch > emittedEpoch) {
                         shouldEmitSnapshotOnNextRender = true;
                     }
                     maybeExitAppendInputModeAfterTurnEnd(sessionId, 'finalize_done');
-                    setBusy(false);
+                    if (route.isActive) setBusy(false);
                     updateSendGate();
-                    window.__oc?.renderFromState?.();
+                    renderIfActive(sessionId, 'turnFinalizePhase:finalize_done');
                 }
                 break;
             }
             case 'chatDone': {
-                const sessionId = getEventSessionId(message, 'chatDone');
-                if (!sessionId) break;
+                const route = resolveEventSessionId(message, 'chatDone');
+                if (!route) break;
+                const sessionId = route.sessionId;
                 logIdCandidates('[DBG_CHATDONE]', message, sessionId, activeSessionId);
                 const session = getSessionState(sessionId);
                 if (session) {
@@ -8136,7 +8228,7 @@ window.addEventListener('message', (event) => {
                     vscode.postMessage({ type: 'ui-debug', payload: ['[DBG_CHATDONE]', `timelineTail=${tail}`] });
                 }
                 if (session?.canceledActiveTurn) {
-                    setBusy(false);
+                    if (route.isActive) setBusy(false);
                     maybeExitAppendInputModeAfterTurnEnd(sessionId, 'chatDone:canceledActiveTurn');
                     logSessionState(sessionId, 'chatDone.canceledActiveTurn');
                     break;
@@ -8146,9 +8238,8 @@ window.addEventListener('message', (event) => {
                 if (session) {
                     session.cancelledTurn = false;
                 }
-                window.__oc?.renderFromState?.();
-                scrollToBottom();
-                setBusy(false);
+                renderIfActive(sessionId, 'chatDone', { scroll: true });
+                if (route.isActive) setBusy(false);
                 logSessionState(sessionId, 'chatDone');
                 break;
             }
@@ -8185,11 +8276,12 @@ window.addEventListener('message', (event) => {
                 break;
             }
             case 'userMessageUpgrade': {
-                const sessionId = message?.sessionId || message?.sessionID || '';
-                if (!sessionId || sessionId !== activeSessionId) {
+                const route = resolveEventSessionId(message, 'userMessageUpgrade');
+                if (!route) {
                     vscode.postMessage({ type: 'ui-debug', payload: ['user.upgrade', `user.upgrade: localKey=${message?.localKey || 'null'} msgId=${message?.userMsgId || 'null'} replaced=false reason=session-mismatch`] });
                     break;
                 }
+                const sessionId = route.sessionId;
                 const session = getSessionState(sessionId);
                 if (!session) {
                     vscode.postMessage({ type: 'ui-debug', payload: ['user.upgrade', `user.upgrade: localKey=${message?.localKey || 'null'} msgId=${message?.userMsgId || 'null'} replaced=false reason=session-mismatch`] });
@@ -8223,10 +8315,10 @@ window.addEventListener('message', (event) => {
                     });
                 }
 
-                if (!targetKey) {
+                    if (!targetKey) {
                     vscode.postMessage({ type: 'ui-debug', payload: ['user.upgrade', 'drop-no-target', `localKey=${localKey || 'null'}`, `userMsgId=${userMsgId || 'null'}`] });
                     if (awaitingAssistantIdFromExport) {
-                        window.__oc?.renderFromState?.();
+                        renderIfActive(sessionId, 'userMessageUpgrade:awaitingAssistantIdFromExport');
                     }
                     break;
                 }
@@ -8267,7 +8359,7 @@ window.addEventListener('message', (event) => {
                         if (existing && existing.role !== 'user') {
                             vscode.postMessage({ type: 'ui-debug', payload: ['user.upgrade', `user.upgrade: localKey=${localKey || 'null'} msgId=${userMsgId || 'null'} replaced=false reason=collision-nonuser`] });
                         } else {
-                            replaceKeyEverywhere(localKey, userMsgId);
+                            replaceKeyEverywhere(localKey, userMsgId, sessionId);
                             vscode.postMessage({ type: 'ui-debug', payload: ['user.upgrade', `user.upgrade: localKey=${localKey || 'null'} msgId=${userMsgId || 'null'} replaced=true reason=ok`] });
                             logTimelineSnapshot('user.upgrade', session.timeline, 'expectSize=2');
                             const counts = timelineCounts(session.timeline);
@@ -8282,6 +8374,9 @@ window.addEventListener('message', (event) => {
                 
                 // Also upgrade the assistant message if provided
                 attemptAssistantUpgrade(sessionId, message, 'userMessageUpgrade');
+                if (!route.shouldRender) {
+                    logBackgroundStateUpdate(sessionId, 'userMessageUpgrade');
+                }
                 
                 break;
             }
@@ -8353,8 +8448,9 @@ window.addEventListener('message', (event) => {
                 break;
             }
             case 'permissionPrompt': {
-                const sessionId = getEventSessionId(message, 'permissionPrompt');
-                if (!sessionId) break;
+                const route = resolveEventSessionId(message, 'permissionPrompt');
+                if (!route) break;
+                const sessionId = route.sessionId;
                 const session = getSessionState(sessionId, true);
                 upsertMessage(session, {
                     id: `system:${Date.now()}`,
@@ -8362,12 +8458,13 @@ window.addEventListener('message', (event) => {
                     text: `Permission required. Check OpenCode output: ${message.value}`,
                     meta: {}
                 });
-                window.__oc?.renderFromState?.();
+                renderIfActive(sessionId, 'permissionPrompt');
                 break;
             }
             case 'diffChunk': {
-                const sessionId = getEventSessionId(message, 'diffChunk');
-                if (!sessionId) break;
+                const route = resolveEventSessionId(message, 'diffChunk');
+                if (!route) break;
+                const sessionId = route.sessionId;
                 const session = getSessionState(sessionId, true);
                 if (!shouldRenderDiffChunk(session, message)) {
                     break;
@@ -8378,13 +8475,13 @@ window.addEventListener('message', (event) => {
                     text: message.value || '',
                     meta: { isDiff: true, diffText: message.value || '' }
                 });
-                window.__oc?.renderFromState?.();
-                scrollToBottom();
+                renderIfActive(sessionId, 'diffChunk', { scroll: true });
                 break;
             }
             case 'diffFileList': {
-                const sessionId = getEventSessionId(message, 'diffFileList');
-                if (!sessionId) break;
+                const route = resolveEventSessionId(message, 'diffFileList');
+                if (!route) break;
+                const sessionId = route.sessionId;
                 discardAllSegments(sessionId, 'file-change-detected', selectedMode || 'unknown');
                 const files = Array.isArray(message.files)
                     ? message.files.filter((item) => typeof item === 'string' && item.length)
@@ -8425,13 +8522,13 @@ window.addEventListener('message', (event) => {
                         statsByPath: mergedStats
                     }
                 });
-                window.__oc?.renderFromState?.();
-                scrollToBottom();
+                renderIfActive(sessionId, 'diffFileList', { scroll: true });
                 break;
             }
             case 'changeListUpdate': {
-                const sessionId = getEventSessionId(message, 'changeListUpdate');
-                if (!sessionId) break;
+                const route = resolveEventSessionId(message, 'changeListUpdate');
+                if (!route) break;
+                const sessionId = route.sessionId;
                 const commitHead = typeof message.commitHead === 'string' ? message.commitHead : '';
                 if (!commitHead) break;
                 const session = getSessionState(sessionId, true);
@@ -8443,14 +8540,17 @@ window.addEventListener('message', (event) => {
                     }
                 }
                 if (updated) {
-                    window.__oc?.renderFromState?.();
+                    renderIfActive(sessionId, 'changeListUpdate');
                 }
                 break;
             }
             case 'todoUpdate': {
-                const { todos, anchorMessageId, sessionId: sid } = message;
+                const route = resolveEventSessionId(message, 'todoUpdate');
+                if (!route) break;
+                const sessionId = route.sessionId;
+                const { todos, anchorMessageId } = message;
                 if (!Array.isArray(todos)) break;
-                const session = getSessionState(sid || activeSessionId);
+                const session = getSessionState(sessionId);
                 if (!session) break;
                 const activeTargetId = session.currentTurnAssistantKey || session.thinkingId || null;
                 let msg = activeTargetId ? session.messagesById.get(activeTargetId) : null;
@@ -8463,12 +8563,13 @@ window.addEventListener('message', (event) => {
                 if (!msg) break;
                 if (!msg.meta) msg.meta = {};
                 msg.meta.todos = todos;
-                window.__oc?.renderFromState?.();
+                renderIfActive(sessionId, 'todoUpdate');
                 break;
             }
             case 'messageAppend': {
-                const sessionId = getEventSessionId(message, 'messageAppend');
-                if (!sessionId) break;
+                const route = resolveEventSessionId(message, 'messageAppend');
+                if (!route) break;
+                const sessionId = route.sessionId;
                 const session = getSessionState(sessionId, true);
                 if (session?.canceledActiveTurn && message?.message?.id === session.lastTurnUserId) {
                     vscode.postMessage({
@@ -8504,8 +8605,7 @@ window.addEventListener('message', (event) => {
                         text: message.message.text || '',
                         meta: {}
                     });
-                    window.__oc?.renderFromState?.();
-                    scrollToBottom();
+                    renderIfActive(sessionId, 'messageAppend', { scroll: true });
                 }
                 break;
             }
@@ -8534,8 +8634,9 @@ window.addEventListener('message', (event) => {
                 break;
             }
             case 'permissionPrompt': {
-                const sessionId = getEventSessionId(message, 'permissionPrompt');
-                if (!sessionId) break;
+                const route = resolveEventSessionId(message, 'permissionPrompt');
+                if (!route) break;
+                const sessionId = route.sessionId;
                 const session = getSessionState(sessionId, true);
                 upsertMessage(session, {
                     id: `system:${Date.now()}`,
@@ -8543,12 +8644,13 @@ window.addEventListener('message', (event) => {
                     text: `Permission required. Check OpenCode output: ${message.value}`,
                     meta: {}
                 });
-                window.__oc?.renderFromState?.();
+                renderIfActive(sessionId, 'permissionPrompt');
                 break;
             }
             case 'diffChunk': {
-                const sessionId = getEventSessionId(message, 'diffChunk');
-                if (!sessionId) break;
+                const route = resolveEventSessionId(message, 'diffChunk');
+                if (!route) break;
+                const sessionId = route.sessionId;
                 const session = getSessionState(sessionId, true);
                 if (!shouldRenderDiffChunk(session, message)) {
                     break;
@@ -8559,13 +8661,13 @@ window.addEventListener('message', (event) => {
                     text: message.value || '',
                     meta: { isDiff: true, diffText: message.value || '' }
                 });
-                window.__oc?.renderFromState?.();
-                scrollToBottom();
+                renderIfActive(sessionId, 'diffChunk', { scroll: true });
                 break;
             }
             case 'messageAppend': {
-                const sessionId = getEventSessionId(message, 'messageAppend');
-                if (!sessionId) break;
+                const route = resolveEventSessionId(message, 'messageAppend');
+                if (!route) break;
+                const sessionId = route.sessionId;
                 const session = getSessionState(sessionId, true);
                 if (message.message && message.message.role === 'user' && isHiddenControlUserText(message.message.text || '')) {
                     if (typeof message.message.id === 'string' && message.message.id.length) {
@@ -8587,8 +8689,7 @@ window.addEventListener('message', (event) => {
                         text: message.message.text || '',
                         meta: {}
                     });
-                    window.__oc?.renderFromState?.();
-                    scrollToBottom();
+                    renderIfActive(sessionId, 'messageAppend', { scroll: true });
                 }
                 break;
             }

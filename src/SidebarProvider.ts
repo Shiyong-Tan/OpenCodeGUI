@@ -2194,50 +2194,67 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         return;
                     }
 
-                    if (this.currentSessionId && this.sendInFlightBySession.has(this.currentSessionId)) {
-                        this.uiDebugChannel.appendLine(`EXT: send.blocked | sessionId=${this.currentSessionId} | reason=turn-in-flight`);
+                    const targetSessionId = this.currentSessionId;
+                    if (!targetSessionId) {
+                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE_DROP] event=sendMessage reason=missing-target-session reqId=pending`);
+                        vscode.window.showErrorMessage('OpenCode Error: No active session available for send.');
+                        return;
+                    }
+
+                    if (this.sendInFlightBySession.has(targetSessionId)) {
+                        this.uiDebugChannel.appendLine(`EXT: send.blocked | sessionId=${targetSessionId} | reason=turn-in-flight`);
                         const liveWebview = this._view?.webview || activeWebview;
-                        liveWebview.postMessage({ type: 'turnInFlight', sessionId: this.currentSessionId, inFlight: true });
+                        liveWebview.postMessage({ type: 'turnInFlight', sessionId: targetSessionId, inFlight: true });
                         return;
                     }
 
                     // this.uiDebugChannel.appendLine(`[EXT][SEND_START] sessionId=${this.currentSessionId} attachments=${data.attachments?.length || 0}`);
 
                     const reqId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-                    let activeSendSessionId: string | undefined;
+                    const targetModel = this.selectedModel;
+                    const targetVariant = this.selectedVariant;
+                    const targetMode = this.selectedMode;
+                    let activeSendSessionId: string | undefined = targetSessionId;
+                    let turnClientMessageId: string | undefined;
+                    let turnTmpAssistantKey: string | undefined;
                     try {
                         const attachments = Array.isArray(data.attachments) ? data.attachments as AttachmentPayload[] : [];
                         const attachKeys = attachments.length ? Object.keys(attachments[0] || {}).join(',') : '';
-                        this.uiDebugChannel.appendLine(`EXT: send.enter | reqId=${reqId} | sessionId=${this.currentSessionId || 'null'} | hasAttachments=${String(Boolean(attachments.length))} | attachmentsCount=${attachments.length} | attachKeys=${attachKeys}`);
+                        this.uiDebugChannel.appendLine(`EXT: send.enter | reqId=${reqId} | sessionId=${targetSessionId} | hasAttachments=${String(Boolean(attachments.length))} | attachmentsCount=${attachments.length} | attachKeys=${attachKeys}`);
+                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=start reqId=${reqId} targetSessionId=${targetSessionId}`);
                         const userText = (data.value as string) || '';
                         const referencedFiles = await this.normalizeReferencedWorkspaceFiles(data.files);
                         let modelText = userText;
                         const initialDraft = {
                             text: userText,
                             attachments: [],
-                            model: this.selectedModel,
-                            variant: this.selectedVariant,
-                            mode: this.selectedMode
+                            model: targetModel,
+                            variant: targetVariant,
+                            mode: targetMode
                         };
                         const clientMessageId = data.clientMessageId || `local-${Date.now()}`;
+                        const tmpAssistantKey = typeof data.tmpKey === 'string' && data.tmpKey.startsWith('tmp:') ? data.tmpKey : undefined;
+                        turnClientMessageId = clientMessageId;
+                        turnTmpAssistantKey = tmpAssistantKey;
+                        this.uiDebugChannel.appendLine(`[EXT][TURN_BIND] phase=capture reqId=${reqId} targetSessionId=${targetSessionId} clientMessageId=${clientMessageId} tmpAssistantKey=${tmpAssistantKey || 'none'}`);
                         this.pendingClientMessageId = clientMessageId;
                         this.rememberDraft(clientMessageId, initialDraft);
                         this.rawUserTextByLocalKey.set(clientMessageId, userText);
                         const opId = typeof data.opId === 'string' ? data.opId : undefined;
-                        if (this.currentSessionId) {
-                            activeSendSessionId = this.currentSessionId;
-                            this.sendInFlightBySession.add(this.currentSessionId);
-                            this.pendingLocalKeyBySession.set(this.currentSessionId, clientMessageId);
-                            this.pendingAssistantTmpKeyBySession.delete(this.currentSessionId);
+                        if (targetSessionId) {
+                            activeSendSessionId = targetSessionId;
+                            this.sendInFlightBySession.add(targetSessionId);
+                            this.pendingLocalKeyBySession.set(targetSessionId, clientMessageId);
+                            this.pendingAssistantTmpKeyBySession.delete(targetSessionId);
                             const liveWebview = this._view?.webview || activeWebview;
-                            liveWebview.postMessage({ type: 'turnInFlight', sessionId: this.currentSessionId, inFlight: true });
-                            this.client.startTurnWithOp(this.currentSessionId, clientMessageId, opId);
-                            this.assistantTextBufferBySession.set(this.currentSessionId, '');
+                            liveWebview.postMessage({ type: 'turnInFlight', sessionId: targetSessionId, inFlight: true });
+                            this.client.startTurnWithOp(targetSessionId, clientMessageId, opId);
+                            this.assistantTextBufferBySession.set(targetSessionId, '');
                         }
-                        if (typeof data.tmpKey === 'string' && data.tmpKey.startsWith('tmp:') && this.currentSessionId) {
-                            this.pendingAssistantTmpKeyBySession.set(this.currentSessionId, data.tmpKey);
-                            this.pendingAssistantTmpKeyByLocalKey.set(clientMessageId, data.tmpKey);
-                            this.client.setPendingAssistantTmpKey(this.currentSessionId, data.tmpKey);
+                        if (tmpAssistantKey) {
+                            this.pendingAssistantTmpKeyBySession.set(targetSessionId, tmpAssistantKey);
+                            this.pendingAssistantTmpKeyByLocalKey.set(clientMessageId, tmpAssistantKey);
+                            this.client.setPendingAssistantTmpKey(targetSessionId, tmpAssistantKey);
                         }
 
                         const messageIndex = this.client.registerMessage(clientMessageId);
@@ -2265,30 +2282,28 @@ ${attachmentLines.join('\n')}`
                             messageIndex
                         };
 
-                        const assistantMessageId = this.client.createInternalMessageId('assistant', this.currentSessionId);
+                        const assistantMessageId = this.client.createInternalMessageId('assistant', targetSessionId);
                         const assistantMessageIndex = this.client.registerMessage(assistantMessageId);
-                        if (this.currentSessionId) {
-                            this.pendingAssistantMessageIdBySession.set(this.currentSessionId, assistantMessageId);
-                        }
+                        this.pendingAssistantMessageIdBySession.set(targetSessionId, assistantMessageId);
                         liveWebview.postMessage({
                             type: 'messageAppend',
                             message: pendingUserMessage,
-                            sessionId: this.currentSessionId
+                            sessionId: targetSessionId
                         });
                         liveWebview.postMessage({
                             type: 'assistantMessageMeta',
                             messageId: assistantMessageId,
                             messageIndex: assistantMessageIndex,
-                            sessionId: this.currentSessionId
+                            sessionId: targetSessionId
                         });
 
                         const savedAttachments: SavedAttachment[] = [];
                         if (!attachments.length) {
                             this.uiDebugChannel.appendLine(`EXT: attach.precheck.skip | reqId=${reqId} | reason=no_attachments`);
-                        } else if (this.currentSessionId) {
+                        } else if (targetSessionId) {
                             for (const attachment of attachments) {
                                 try {
-                                    const saved = await this.saveAttachment(this.currentSessionId, attachment, reqId);
+                                    const saved = await this.saveAttachment(targetSessionId, attachment, reqId);
                                     if (saved) {
                                         savedAttachments.push(saved);
                                     }
@@ -2310,81 +2325,83 @@ ${attachmentLines.join('\n')}`
                         await this.client.chat(
                             modelText,
                             {
-                                model: this.selectedModel,
-                                variant: this.selectedVariant,
-                                sessionId: this.currentSessionId,
-                                mode: this.selectedMode,
+                                model: targetModel,
+                                variant: targetVariant,
+                                sessionId: targetSessionId,
+                                mode: targetMode,
                                 files: referencedFiles
                             }
                         );
 
-                        if (this.currentSessionId) {
-                            await this.client.waitForSessionIdleGate(this.currentSessionId, {
-                                sseWaitMs: 2000,
-                                pollEveryMs: 2000,
-                                maxPolls: 3
-                            });
-                        }
+                        await this.client.waitForSessionIdleGate(targetSessionId, {
+                            sseWaitMs: 2000,
+                            pollEveryMs: 2000,
+                            maxPolls: 3
+                        });
 
                         OpenCodeClient.outputChannel.appendLine(`[BRIDGE] Chat done`);
-                        let doneAssistantMsgId = this.currentSessionId
-                            ? this.client.getTurnAssistantMsgId(this.currentSessionId)
-                            : undefined;
-                        if (this.currentSessionId && !doneAssistantMsgId) {
-                            this.uiDebugChannel.appendLine(`EXT: chatdone.guard.wait-final | sessionId=${this.currentSessionId} | reason=missing-assistant-msg-id`);
-                            doneAssistantMsgId = await this.client.waitForTurnAssistantMsgId(this.currentSessionId, 500);
-                            this.uiDebugChannel.appendLine(`EXT: chatdone.guard.resolved | sessionId=${this.currentSessionId} | assistantMsgId=${doneAssistantMsgId}`);
+                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=stream_done reqId=${reqId} targetSessionId=${targetSessionId}`);
+                        let doneAssistantMsgId = this.client.getTurnAssistantMsgId(targetSessionId) || undefined;
+                        if (!doneAssistantMsgId) {
+                            this.uiDebugChannel.appendLine(`EXT: chatdone.guard.wait-final | sessionId=${targetSessionId} | reason=missing-assistant-msg-id`);
+                            doneAssistantMsgId = await this.client.waitForTurnAssistantMsgId(targetSessionId, 500);
+                            this.uiDebugChannel.appendLine(`EXT: chatdone.guard.resolved | sessionId=${targetSessionId} | assistantMsgId=${doneAssistantMsgId}`);
                         }
+                        this.uiDebugChannel.appendLine(`[EXT][TURN_BIND] phase=stream_done reqId=${reqId} targetSessionId=${targetSessionId} clientMessageId=${clientMessageId} assistantMsgId=${doneAssistantMsgId || 'none'} tmpAssistantKey=${tmpAssistantKey || 'none'}`);
                         liveWebview.postMessage({
                             type: 'chatDone',
-                            sessionId: this.currentSessionId,
+                            sessionId: targetSessionId,
                             assistantMsgId: doneAssistantMsgId,
                             lastAssistantMsgId: doneAssistantMsgId
                         });
-                        this.emitTurnFinalizePhase(liveWebview, this.currentSessionId, 'stream_done');
+                        this.emitTurnFinalizePhase(liveWebview, targetSessionId, 'stream_done');
                         this.postMessageIndexMap(liveWebview);
-                        if (this.currentSessionId) {
-                            this.uiDebugChannel.appendLine(`EXT: finalize.order | sessionId=${this.currentSessionId} | phase=commit-start`);
-                            await this.client.commitPendingTurnChanges(this.currentSessionId);
-                            this.uiDebugChannel.appendLine(`EXT: finalize.order | sessionId=${this.currentSessionId} | phase=commit-done`);
-                            this.emitTurnFinalizePhase(liveWebview, this.currentSessionId, 'commit_done');
-                        }
-                        this.uiDebugChannel.appendLine(`EXT: finalize.order | sessionId=${this.currentSessionId || 'null'} | phase=upgrade-start`);
-                        await this.resolvePendingUserUpgrade(this.currentSessionId, liveWebview);
-                        this.uiDebugChannel.appendLine(`EXT: finalize.order | sessionId=${this.currentSessionId || 'null'} | phase=upgrade-done`);
-                        this.emitTurnFinalizePhase(liveWebview, this.currentSessionId, 'upgrade_done');
+                        this.uiDebugChannel.appendLine(`EXT: finalize.order | sessionId=${targetSessionId} | phase=commit-start`);
+                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=commit_start reqId=${reqId} targetSessionId=${targetSessionId}`);
+                        await this.client.commitPendingTurnChanges(targetSessionId);
+                        this.uiDebugChannel.appendLine(`EXT: finalize.order | sessionId=${targetSessionId} | phase=commit-done`);
+                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=commit_done reqId=${reqId} targetSessionId=${targetSessionId}`);
+                        this.emitTurnFinalizePhase(liveWebview, targetSessionId, 'commit_done');
+                        this.uiDebugChannel.appendLine(`EXT: finalize.order | sessionId=${targetSessionId} | phase=upgrade-start`);
+                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=upgrade_start reqId=${reqId} targetSessionId=${targetSessionId}`);
+                        await this.resolvePendingUserUpgrade(targetSessionId, liveWebview);
+                        this.uiDebugChannel.appendLine(`EXT: finalize.order | sessionId=${targetSessionId} | phase=upgrade-done`);
+                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=upgrade_done reqId=${reqId} targetSessionId=${targetSessionId}`);
+                        this.emitTurnFinalizePhase(liveWebview, targetSessionId, 'upgrade_done');
                         this.postMessageIndexMap(liveWebview);
-                        if (this.currentSessionId) {
-                            await this.emitDiffFileListWithRetry(this.currentSessionId, liveWebview);
-                        }
-                        if (this.currentSessionId) {
-                            this.client.finishTurn(this.currentSessionId);
-                            this.postFinalWatchDiffFocusedBySession.delete(this.currentSessionId);
-                        }
+                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=diff_list_start reqId=${reqId} targetSessionId=${targetSessionId}`);
+                        await this.emitDiffFileListWithRetry(targetSessionId, liveWebview);
+                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=diff_list_done reqId=${reqId} targetSessionId=${targetSessionId}`);
+                        this.client.finishTurn(targetSessionId);
+                        this.postFinalWatchDiffFocusedBySession.delete(targetSessionId);
                         // Do not force "done" from main finalize; only subagent final-accepted can set done.
                         // Any still-active subagents at this point are treated as cancelled.
                         this.markAllSubagentsTerminal('cancelled', 'main-finalize-cancel-active');
                         this.emitSubagentStatus();
                         this.clearSubagentSessions();
-                        this.emitTurnFinalizePhase(liveWebview, this.currentSessionId, 'finalize_done');
+                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=finalize_done reqId=${reqId} targetSessionId=${targetSessionId}`);
+                        this.uiDebugChannel.appendLine(`[EXT][TURN_BIND] phase=finalize_done reqId=${reqId} targetSessionId=${targetSessionId} clientMessageId=${clientMessageId} assistantMsgId=${doneAssistantMsgId || 'none'} tmpAssistantKey=${tmpAssistantKey || 'none'}`);
+                        this.emitTurnFinalizePhase(liveWebview, targetSessionId, 'finalize_done');
                         await this.postModelQuota(liveWebview, 'chat-done');
-                        if (this.pendingClientMessageId) {
-                            this.clearDraft(this.pendingClientMessageId);
-                            await this.handleAbortedMessage(this.pendingClientMessageId, liveWebview);
+                        if (this.pendingClientMessageId === clientMessageId) {
+                            this.clearDraft(clientMessageId);
+                            await this.handleAbortedMessage(clientMessageId, liveWebview);
                             this.pendingClientMessageId = undefined;
                         }
-                        if (this.selectedMode === 'build' && this.currentSessionId) {
+                        if (targetMode === 'build') {
                             const segment = this.client.getRevertedSegment();
                             if (segment) {
                                 segment.discarded = true;
                                 segment.isActive = true;
                                 segment.collapsed = true;
                                 this.client.setRevertedSegment(segment);
-                                await this.persistRevertedSegment(this.currentSessionId, segment, segment.conflicts || [], true);
+                                await this.persistRevertedSegment(targetSessionId, segment, segment.conflicts || [], true);
                             }
                         }
                     } catch (error) {
-                        const sessionId = activeSendSessionId ?? this.currentSessionId;
+                        const sessionId = activeSendSessionId;
+                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=error reqId=${reqId} targetSessionId=${sessionId || 'none'}`);
+                        this.uiDebugChannel.appendLine(`[EXT][TURN_BIND] phase=error reqId=${reqId} targetSessionId=${sessionId || 'none'} clientMessageId=${turnClientMessageId || 'none'} tmpAssistantKey=${turnTmpAssistantKey || 'none'}`);
                         this.uiDebugChannel.appendLine(`EXT: send.abort | reqId=${reqId} | reason=${String(error)}`);
                         OpenCodeClient.outputChannel.appendLine(`[BRIDGE] Error: ${error}`);
                         vscode.window.showErrorMessage(`OpenCode Error: ${error}`);
@@ -2406,9 +2423,9 @@ ${attachmentLines.join('\n')}`
                         await this.resolvePendingUserUpgrade(sessionId, activeWebview);
                         this.emitTurnFinalizePhase(activeWebview, sessionId, 'upgrade_done');
                         const pendingLocalKey = sessionId ? this.pendingLocalKeyBySession.get(sessionId) : undefined;
-                        if (sessionId && sessionId === this.currentSessionId && pendingLocalKey && this.pendingClientMessageId === pendingLocalKey) {
-                            this.clearDraft(this.pendingClientMessageId);
-                            await this.handleAbortedMessage(this.pendingClientMessageId, activeWebview);
+                        if (sessionId && pendingLocalKey && this.pendingClientMessageId === pendingLocalKey) {
+                            this.clearDraft(pendingLocalKey);
+                            await this.handleAbortedMessage(pendingLocalKey, activeWebview);
                             this.pendingClientMessageId = undefined;
                         }
                         if (sessionId) {
@@ -5589,7 +5606,12 @@ ${attachmentLines.join('\n')}`
 
         if (event.type === 'permission' && event.text) {
             const liveWebview = this._view?.webview || webview;
-            liveWebview.postMessage({ type: 'permissionPrompt', value: event.text, sessionId: this.currentSessionId });
+            if (!event.sessionId) {
+                this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE_DROP] event=permissionPrompt reason=missing-event-session`);
+                return;
+            }
+            this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=permissionPrompt targetSessionId=${event.sessionId}`);
+            liveWebview.postMessage({ type: 'permissionPrompt', value: event.text, sessionId: event.sessionId });
             return;
         }
 
@@ -5627,7 +5649,12 @@ ${attachmentLines.join('\n')}`
 
         if (event.type === 'diff' && event.text) {
             const liveWebview = this._view?.webview || webview;
-            liveWebview.postMessage({ type: 'diffChunk', value: event.text, sessionId: this.currentSessionId });
+            if (!event.sessionId) {
+                this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE_DROP] event=diffChunk reason=missing-event-session`);
+                return;
+            }
+            this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=diffChunk targetSessionId=${event.sessionId}`);
+            liveWebview.postMessage({ type: 'diffChunk', value: event.text, sessionId: event.sessionId });
             return;
         }
 
