@@ -135,6 +135,7 @@ const questionOverlayQueue = [];
 let permissionOverlayEl = null;
 let permissionOverlayState = null;
 let isSwitchingSession = false;
+let pendingExplicitSessionSelectionId = '';
 let pendingRefreshRequestId = null;
 let hydratedSessions = new Set();
 let allowedDiscardKeys = new Set();
@@ -823,6 +824,156 @@ function getSessionState(sessionId, create = false) {
         sessionsById.set(sessionId, createSessionState());
     }
     return sessionsById.get(sessionId) || null;
+}
+
+function cloneSessionMap(value) {
+    return value instanceof Map ? new Map(value) : new Map();
+}
+
+function cloneSessionSet(value) {
+    return value instanceof Set ? new Set(value) : new Set();
+}
+
+function clonePlainSessionValue(value) {
+    if (value && typeof value === 'object') {
+        if (Array.isArray(value)) return value.slice();
+        return { ...value };
+    }
+    return value;
+}
+
+function cloneMessageForHydrationPreserve(message) {
+    if (!message || typeof message !== 'object') return message;
+    return {
+        ...message,
+        meta: message.meta && typeof message.meta === 'object' ? { ...message.meta } : message.meta
+    };
+}
+
+function captureVolatileHydrationState(session) {
+    if (!session) return null;
+    return {
+        messagesById: cloneSessionMap(session.messagesById),
+        timeline: Array.isArray(session.timeline) ? session.timeline.slice() : [],
+        messageIndexMap: cloneSessionMap(session.messageIndexMap),
+        serverIdToKey: cloneSessionMap(session.serverIdToKey),
+        clientKeyToServerId: cloneSessionMap(session.clientKeyToServerId),
+        serverIdToClientKey: cloneSessionMap(session.serverIdToClientKey),
+        hiddenControlUserIds: cloneSessionSet(session.hiddenControlUserIds),
+        assistantUpgradeSeen: cloneSessionSet(session.assistantUpgradeSeen),
+        pendingAssistantUpgrade: clonePlainSessionValue(session.pendingAssistantUpgrade),
+        finalAssistantLock: clonePlainSessionValue(session.finalAssistantLock),
+        thinkingId: session.thinkingId,
+        currentTurnAssistantKey: session.currentTurnAssistantKey,
+        currentTurnAssistantMsgId: session.currentTurnAssistantMsgId,
+        lastTurnUserId: session.lastTurnUserId,
+        lastTurnAssistantId: session.lastTurnAssistantId,
+        cancelledTurn: session.cancelledTurn,
+        canceledActiveTurn: session.canceledActiveTurn,
+        activeTurnOpId: session.activeTurnOpId,
+        backendTurnInFlight: session.backendTurnInFlight,
+        awaitingFinalMapBind: session.awaitingFinalMapBind,
+        streamMode: session.streamMode,
+        earlyFinalAssistantId: session.earlyFinalAssistantId,
+        turnFullyFinalized: session.turnFullyFinalized,
+        appendRootUserKey: session.appendRootUserKey,
+        appendComposerFor: session.appendComposerFor,
+        appendComposerDrafts: cloneSessionMap(session.appendComposerDrafts),
+        inputDraft: session.inputDraft,
+        backgroundSubagentIndicatorVisible: session.backgroundSubagentIndicatorVisible,
+        backgroundSubagentIndicatorUntil: session.backgroundSubagentIndicatorUntil,
+        backgroundSubagentIndicatorAnchorId: session.backgroundSubagentIndicatorAnchorId,
+        snapshotPendingEpoch: session.snapshotPendingEpoch,
+        snapshotEmittedEpoch: session.snapshotEmittedEpoch,
+        snapshotFinalizeReady: session.snapshotFinalizeReady
+    };
+}
+
+function restoreVolatileHydrationState(session, preserved) {
+    if (!session || !preserved) return { missingIds: [], fieldNames: [] };
+
+    const hydratedIds = new Set(Array.isArray(session.timeline) ? session.timeline : []);
+    const missingIds = [];
+    for (const id of preserved.timeline) {
+        if (typeof id !== 'string' || !id.length || hydratedIds.has(id)) continue;
+        const preservedMessage = preserved.messagesById.get(id);
+        if (!preservedMessage) continue;
+        session.messagesById.set(id, cloneMessageForHydrationPreserve(preservedMessage));
+        session.timeline.push(id);
+        hydratedIds.add(id);
+        missingIds.push(id);
+    }
+
+    for (const [id, preservedMessage] of preserved.messagesById.entries()) {
+        if (!id || session.messagesById.has(id)) continue;
+        session.messagesById.set(id, cloneMessageForHydrationPreserve(preservedMessage));
+    }
+
+    const fieldNames = [];
+    const preserveField = (name, shouldPreserve) => {
+        if (!shouldPreserve) return;
+        session[name] = clonePlainSessionValue(preserved[name]);
+        fieldNames.push(name);
+    };
+
+    preserveField('pendingAssistantUpgrade', Boolean(preserved.pendingAssistantUpgrade));
+    preserveField('finalAssistantLock', Boolean(preserved.finalAssistantLock));
+    preserveField('thinkingId', Boolean(preserved.thinkingId));
+    preserveField('currentTurnAssistantKey', Boolean(preserved.currentTurnAssistantKey));
+    preserveField('currentTurnAssistantMsgId', Boolean(preserved.currentTurnAssistantMsgId));
+    preserveField('lastTurnUserId', Boolean(preserved.lastTurnUserId));
+    preserveField('lastTurnAssistantId', Boolean(preserved.lastTurnAssistantId));
+    preserveField('cancelledTurn', preserved.cancelledTurn === true);
+    preserveField('canceledActiveTurn', preserved.canceledActiveTurn === true);
+    preserveField('activeTurnOpId', Boolean(preserved.activeTurnOpId));
+    preserveField('backendTurnInFlight', preserved.backendTurnInFlight === true);
+    preserveField('awaitingFinalMapBind', preserved.awaitingFinalMapBind === true);
+    preserveField('streamMode', Boolean(preserved.streamMode));
+    preserveField('earlyFinalAssistantId', Boolean(preserved.earlyFinalAssistantId));
+    preserveField('turnFullyFinalized', preserved.turnFullyFinalized === false);
+    preserveField('appendRootUserKey', Boolean(preserved.appendRootUserKey));
+    preserveField('appendComposerFor', Boolean(preserved.appendComposerFor));
+    preserveField('inputDraft', typeof preserved.inputDraft === 'string' && preserved.inputDraft.length > 0);
+    preserveField('backgroundSubagentIndicatorVisible', preserved.backgroundSubagentIndicatorVisible === true);
+    preserveField('backgroundSubagentIndicatorUntil', typeof preserved.backgroundSubagentIndicatorUntil === 'number' && preserved.backgroundSubagentIndicatorUntil > Date.now());
+    preserveField('backgroundSubagentIndicatorAnchorId', Boolean(preserved.backgroundSubagentIndicatorAnchorId));
+    preserveField('snapshotPendingEpoch', typeof preserved.snapshotPendingEpoch === 'number' && preserved.snapshotPendingEpoch > (session.snapshotPendingEpoch || 0));
+    preserveField('snapshotEmittedEpoch', typeof preserved.snapshotEmittedEpoch === 'number' && preserved.snapshotEmittedEpoch > (session.snapshotEmittedEpoch || 0));
+    preserveField('snapshotFinalizeReady', preserved.snapshotFinalizeReady === true);
+
+    if (preserved.messageIndexMap.size) {
+        if (!(session.messageIndexMap instanceof Map)) session.messageIndexMap = new Map();
+        for (const [key, value] of preserved.messageIndexMap.entries()) {
+            if (!session.messageIndexMap.has(key)) session.messageIndexMap.set(key, value);
+        }
+        fieldNames.push('messageIndexMap');
+    }
+    for (const [name, preservedMap] of [
+        ['serverIdToKey', preserved.serverIdToKey],
+        ['clientKeyToServerId', preserved.clientKeyToServerId],
+        ['serverIdToClientKey', preserved.serverIdToClientKey],
+        ['appendComposerDrafts', preserved.appendComposerDrafts]
+    ]) {
+        if (!preservedMap.size) continue;
+        if (!(session[name] instanceof Map)) session[name] = new Map();
+        for (const [key, value] of preservedMap.entries()) {
+            if (!session[name].has(key)) session[name].set(key, value);
+        }
+        fieldNames.push(name);
+    }
+    for (const [name, preservedSet] of [
+        ['hiddenControlUserIds', preserved.hiddenControlUserIds],
+        ['assistantUpgradeSeen', preserved.assistantUpgradeSeen]
+    ]) {
+        if (!preservedSet.size) continue;
+        if (!(session[name] instanceof Set)) session[name] = new Set();
+        for (const value of preservedSet.values()) {
+            session[name].add(value);
+        }
+        fieldNames.push(name);
+    }
+
+    return { missingIds, fieldNames: Array.from(new Set(fieldNames)) };
 }
 
 function sessionHasActiveBackgroundSubagents(session) {
@@ -5669,6 +5820,11 @@ function shouldHideDcpUiMessage(message) {
             button.appendChild(meta);
             button.addEventListener('click', () => {
                 armedDeleteSessionId = '';
+                pendingExplicitSessionSelectionId = item.id;
+                vscode.postMessage({
+                    type: 'ui-debug',
+                    payload: ['[WV][SESSION_SELECTION_TARGET]', `sessionId=${item.id || 'null'}`]
+                });
                 vscode.postMessage({ type: 'selectSession', sessionId: item.id });
             });
 
@@ -7436,7 +7592,8 @@ window.addEventListener('message', (event) => {
                 break;
             }
             case 'sessionData': {
-                const sessionId = getEventSessionId(message, 'sessionData');
+                const route = resolveEventSessionId(message, 'sessionData');
+                const sessionId = route?.sessionId || null;
                 if (!sessionId) {
                     vscode.postMessage({
                         type: 'ui-debug',
@@ -7444,24 +7601,42 @@ window.addEventListener('message', (event) => {
                     });
                     break;
                 }
+                const wasActiveSession = Boolean(activeSessionId && activeSessionId === sessionId);
+                const isExplicitSelectionTarget = Boolean(pendingExplicitSessionSelectionId && pendingExplicitSessionSelectionId === sessionId);
+                const isFirstBootstrap = !activeSessionId;
+                const shouldActivateSession = wasActiveSession || isExplicitSelectionTarget || isFirstBootstrap;
 
                 vscode.postMessage({
                     type: 'ui-debug',
                     payload: ['[WV][SESSIONDATA_ENTER]', 
                         `sessionId=${sessionId}`, 
                         `messagesLen=${message.messages?.length ?? 0}`, 
-                        `segmentsLen=${message.segments?.length ?? 0}`]
+                        `segmentsLen=${message.segments?.length ?? 0}`,
+                        `activate=${shouldActivateSession ? 'true' : 'false'}`,
+                        `explicit=${isExplicitSelectionTarget ? 'true' : 'false'}`,
+                        `bootstrap=${isFirstBootstrap ? 'true' : 'false'}`]
                 });
 
                 try {
-                    activeSessionId = sessionId;
-                    clearAppendInputForSessionChange(sessionId);
-                    baseSessionTitle = message.title || 'OpenCode: Chat';
-                    renderHeaderTitle();
-                    renderHeaderUsage();
-                    updateUndoStatusDisplay(sessionId);
+                    if (shouldActivateSession) {
+                        activeSessionId = sessionId;
+                        if (isExplicitSelectionTarget) {
+                            pendingExplicitSessionSelectionId = '';
+                        }
+                        clearAppendInputForSessionChange(sessionId);
+                        baseSessionTitle = message.title || 'OpenCode: Chat';
+                        renderHeaderTitle();
+                        renderHeaderUsage();
+                        updateUndoStatusDisplay(sessionId);
+                    } else {
+                        vscode.postMessage({
+                            type: 'ui-debug',
+                            payload: ['[WV][SESSION_SELECTION_PRESERVE]', 'event=sessionData', `sessionId=${sessionId}`, `activeSessionId=${activeSessionId || 'null'}`, `pendingExplicit=${pendingExplicitSessionSelectionId || 'null'}`]
+                        });
+                    }
                     
                     const session = getSessionState(sessionId, true);
+                    const preservedHydrationState = captureVolatileHydrationState(session);
                     
                     const hasSegments = Array.isArray(message.segments);
                     // Clear everything
@@ -7728,7 +7903,20 @@ window.addEventListener('message', (event) => {
                         payload: ['[WV][HYDRATE_PLACEHOLDER_REBUILD]', `total=${session.segmentsByNoticeKey.size}`, `inserted=${inserted}`, `skipped=${skipped}`]
                     });
 
-                    window.__oc?.renderFromState?.();
+                    const preservedLive = restoreVolatileHydrationState(session, preservedHydrationState);
+                    if (preservedLive.missingIds.length || preservedLive.fieldNames.length) {
+                        vscode.postMessage({
+                            type: 'ui-debug',
+                            payload: ['[WV][HYDRATE_PRESERVE_VOLATILE]',
+                                `sessionId=${sessionId}`,
+                                `preservedIds=${preservedLive.missingIds.length}`,
+                                `tail=[${formatTail(preservedLive.missingIds, 6)}]`,
+                                `fields=[${preservedLive.fieldNames.slice(0, 12).join(',')}]`,
+                                `timelineSize=${session.timeline.length}`]
+                        });
+                    }
+
+                    renderIfActive(sessionId, 'sessionData', { extra: ['phase=hydrated'] });
                     
                     vscode.postMessage({
                         type: 'ui-debug',
@@ -7740,7 +7928,9 @@ window.addEventListener('message', (event) => {
                     });
                     
                     hydratedSessions.add(sessionId);
-                    closeSessionPanel();
+                    if (shouldActivateSession) {
+                        closeSessionPanel();
+                    }
                     updateSendGate();
                     
                 } catch (err) {
@@ -7749,10 +7939,12 @@ window.addEventListener('message', (event) => {
                         payload: ['[WV][SESSIONDATA_ERROR]', `sessionId=${sessionId}`, `err=${String(err)}`]
                     });
                 } finally {
-                    window.__oc?.renderFromState?.();
-                    requestAnimationFrame(() => {
-                        scrollToBottom();
-                    });
+                    const didRender = renderIfActive(sessionId, 'sessionData-finally', { extra: ['phase=finally'] });
+                    if (didRender) {
+                        requestAnimationFrame(() => {
+                            scrollToBottom();
+                        });
+                    }
                 }
                 break;
             }
@@ -7779,10 +7971,27 @@ window.addEventListener('message', (event) => {
                 break;
             }
             case 'sessionId': {
-                const sessionId = getEventSessionId(message, 'sessionId');
+                const route = resolveEventSessionId(message, 'sessionId');
+                const sessionId = route?.sessionId || null;
                 if (!sessionId) break;
+                const wasActiveSession = Boolean(activeSessionId && activeSessionId === sessionId);
+                const isExplicitSelectionTarget = Boolean(pendingExplicitSessionSelectionId && pendingExplicitSessionSelectionId === sessionId);
+                const isFirstBootstrap = !activeSessionId;
+                const shouldActivateSession = wasActiveSession || isExplicitSelectionTarget || isFirstBootstrap;
+                if (!shouldActivateSession) {
+                    vscode.postMessage({
+                        type: 'ui-debug',
+                        payload: ['[WV][SESSION_SELECTION_PRESERVE]', 'event=sessionId', `sessionId=${sessionId}`, `activeSessionId=${activeSessionId || 'null'}`, `pendingExplicit=${pendingExplicitSessionSelectionId || 'null'}`]
+                    });
+                    logBackgroundStateUpdate(sessionId, 'sessionId', { extra: ['phase=selection-preserve'] });
+                    refreshSendButtonState();
+                    break;
+                }
                 const prevSessionId = activeSessionId;
                 activeSessionId = sessionId;
+                if (isExplicitSelectionTarget) {
+                    pendingExplicitSessionSelectionId = '';
+                }
                 clearAppendInputForSessionChange(sessionId);
                 renderHeaderUsage();
                 if (prevSessionId && prevSessionId !== sessionId) {
