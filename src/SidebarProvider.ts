@@ -26,6 +26,10 @@ type ChangeListRecord = {
     createdAt: number;
     reverted?: boolean;
     statsByPath?: Record<string, { additions: number | null; deletions: number | null }>;
+    userMessageId?: string;
+    rootUserMessageId?: string;
+    latestAppendUserMessageId?: string;
+    assistantMessageId?: string;
 };
 
 type CanceledTurnRecord = {
@@ -104,6 +108,14 @@ type FinalizeTurnIdentity = {
     commitResult?: CommitPendingTurnChangesResult;
 };
 
+type AppendSnapshotMetaRoot = {
+    rootMessageId: string;
+    appendRootUserKey?: string;
+    meta: {
+        appendedPrompts: Array<Record<string, unknown>>;
+    };
+};
+
 type LocalQuestionRequest = {
     sessionId: string;
     resolve: (result: { selectedId?: string; selectedLabel?: string }) => void;
@@ -143,6 +155,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private task1DoneVisibleCount = 0;
     private task1FalseDoneEvents = 0;
     private appendSubmitInFlightBySession = new Set<string>();
+    private appendSnapshotMetaBySession = new Map<string, Map<string, AppendSnapshotMetaRoot>>();
 
     private cleanSubagentTitle(title?: string): string {
         const raw = typeof title === 'string' ? title.trim() : '';
@@ -519,6 +532,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         conflictId: string;
         startMessageId?: string;
         endMessageId?: string;
+        visibleMessageIds?: string[];
+        forwardMessageIdsFromAnchor?: string[];
+        anchorIndex?: number;
         noticeKey?: string;
     };
     private uiDebugChannel!: vscode.OutputChannel;
@@ -1458,6 +1474,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private normalizeSnapshotMessageMeta(meta: any): any {
         if (!meta || typeof meta !== 'object') return undefined;
         const out: any = { ...meta };
+        if (Array.isArray(meta.appendedPrompts)) {
+            const appendedPrompts = this.sanitizeAppendSnapshotItems(meta.appendedPrompts);
+            if (appendedPrompts.length > 0) {
+                out.appendedPrompts = appendedPrompts;
+            } else {
+                delete out.appendedPrompts;
+            }
+        }
         if (Array.isArray(meta.images)) {
             const sanitizedImages: string[] = [];
             let redactedCount = 0;
@@ -1480,6 +1504,91 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
         }
         return out;
+    }
+
+    private sanitizeAppendSnapshotItems(items: unknown): Array<Record<string, unknown>> {
+        if (!Array.isArray(items)) return [];
+        const out: Array<Record<string, unknown>> = [];
+        const seen = new Set<string>();
+        for (const raw of items) {
+            if (!raw || typeof raw !== 'object') continue;
+            const item = raw as Record<string, unknown>;
+            const sanitized: Record<string, unknown> = {};
+            const copyString = (name: string, maxLen = 20000) => {
+                const value = item[name];
+                if (typeof value === 'string' && value.length > 0) sanitized[name] = value.slice(0, maxLen);
+            };
+            copyString('clientMessageId', 512);
+            copyString('appendUserMsgId', 512);
+            copyString('rootUserMsgId', 512);
+            copyString('status', 64);
+            copyString('reason', 1000);
+            copyString('text', 20000);
+            for (const name of ['createdAt', 'updatedAt']) {
+                const value = item[name];
+                if (typeof value === 'number' && Number.isFinite(value)) sanitized[name] = value;
+            }
+            if (!Object.keys(sanitized).length) continue;
+            const key = String(sanitized.clientMessageId || sanitized.appendUserMsgId || out.length);
+            if (seen.has(key)) continue;
+            seen.add(key);
+            out.push(sanitized);
+        }
+        return out;
+    }
+
+    private sanitizeAppendSnapshotMetaPayload(payload: any): Map<string, AppendSnapshotMetaRoot> {
+        const out = new Map<string, AppendSnapshotMetaRoot>();
+        const roots = Array.isArray(payload?.roots) ? payload.roots : [];
+        for (const root of roots) {
+            if (!root || typeof root !== 'object') continue;
+            const rootMessageId = typeof root.rootMessageId === 'string' ? root.rootMessageId : '';
+            if (!rootMessageId || rootMessageId.startsWith('local-') || rootMessageId.startsWith('tmp:')) continue;
+            const appendedPrompts = this.sanitizeAppendSnapshotItems(root.meta?.appendedPrompts);
+            if (!appendedPrompts.length) continue;
+            out.set(rootMessageId, {
+                rootMessageId,
+                appendRootUserKey: typeof root.appendRootUserKey === 'string' ? root.appendRootUserKey : rootMessageId,
+                meta: { appendedPrompts }
+            });
+        }
+        return out;
+    }
+
+    private cacheAppendSnapshotMeta(payload: any): void {
+        const sessionId = typeof payload?.sessionId === 'string' ? payload.sessionId : '';
+        if (!sessionId) return;
+        const incoming = this.sanitizeAppendSnapshotMetaPayload(payload);
+        if (!incoming.size) return;
+        const existing = this.appendSnapshotMetaBySession.get(sessionId) || new Map<string, AppendSnapshotMetaRoot>();
+        for (const [rootMessageId, entry] of incoming.entries()) {
+            existing.set(rootMessageId, entry);
+        }
+        this.appendSnapshotMetaBySession.set(sessionId, existing);
+        const appendCount = Array.from(existing.values()).reduce((sum, root) => sum + root.meta.appendedPrompts.length, 0);
+        this.uiDebugChannel.appendLine(`[EXT][APPEND_SNAPSHOT_META] cache sessionId=${sessionId} rootCount=${existing.size} appendCount=${appendCount} reason=${typeof payload?.reason === 'string' ? payload.reason : 'unknown'}`);
+    }
+
+    private applyAppendSnapshotMeta(sessionId: string, messagesById: Map<string, SessionMessage>): number {
+        const cached = this.appendSnapshotMetaBySession.get(sessionId);
+        if (!cached?.size) return 0;
+        let merged = 0;
+        for (const [rootMessageId, entry] of cached.entries()) {
+            const message = messagesById.get(rootMessageId);
+            if (!message || message.role !== 'user') continue;
+            const existingMeta = message.meta && typeof message.meta === 'object' ? message.meta : {};
+            message.meta = {
+                ...existingMeta,
+                appendedPrompts: entry.meta.appendedPrompts,
+                appendRootUserKey: entry.appendRootUserKey || rootMessageId
+            };
+            messagesById.set(rootMessageId, message);
+            merged++;
+        }
+        if (merged > 0) {
+            this.uiDebugChannel.appendLine(`[EXT][APPEND_SNAPSHOT_META] merge sessionId=${sessionId} rootCount=${merged}`);
+        }
+        return merged;
     }
 
     private async appendSnapshotIncremental(
@@ -1545,6 +1654,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             if (!timelineIdSet.has(message.id)) continue;
             combinedById.set(message.id, message);
         }
+        this.applyAppendSnapshotMeta(sessionId, combinedById);
         const nextTimeline = Array.from(timelineIdSet);
         const nextMessages = nextTimeline
             .map((id) => combinedById.get(id))
@@ -2129,8 +2239,27 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 files: mergedFiles,
                 statsByPath: mergedStatsByPath,
                 anchorMessageId,
+                userMessageId: identity.userMessageId,
+                rootUserMessageId,
+                latestAppendUserMessageId,
+                assistantMessageId,
                 createdAt: Date.now()
             }, { preserveAuthoritativeFiles: true });
+            const topologyMessageIds = Array.from(new Set([
+                rootUserMessageId,
+                latestAppendUserMessageId,
+                identity.userMessageId,
+                assistantMessageId
+            ].filter((id): id is string => this.isResolvableMessageId(id))));
+            const topologyResult = typeof (this.client as any).bindCommitToMessageIds === 'function'
+                ? await (this.client as any).bindCommitToMessageIds(sessionId, {
+                    messageIds: topologyMessageIds,
+                    commitHash: bindHeadCommit,
+                    baseCommit: bindBaseCommit,
+                    reason: latestAppendUserMessageId ? 'append-commit-bind' : 'commit-bind'
+                })
+                : { ok: false, boundIds: [] };
+            this.uiDebugChannel?.appendLine(`[EXT][APPEND_BIND_TOPOLOGY] sessionId=${sessionId} | rootUserMessageId=${rootUserMessageId || 'null'} | latestAppendUserMessageId=${latestAppendUserMessageId || 'null'} | userMessageId=${identity.userMessageId || 'null'} | assistantMessageId=${assistantMessageId || 'null'} | msgToCommit=${bindHeadCommit} | msgToBaseCommit=${bindBaseCommit} | bound=${topologyResult.boundIds?.join(',') || 'none'} | ok=${String(topologyResult.ok)}`);
             this.uiDebugChannel?.appendLine(`[EXT][COMMIT_BIND] bound | sessionId=${sessionId} | changeListId=${changeListId} | anchorMessageId=${anchorMessageId} | userMessageId=${identity.userMessageId || 'null'} | assistantMessageId=${assistantMessageId} | rootUserMessageId=${rootUserMessageId} | latestAppendUserMessageId=${latestAppendUserMessageId || 'null'} | msgToCommit=${bindHeadCommit} | msgToBaseCommit=${bindBaseCommit} | fileCount=${mergedFiles.length}`);
             await this.client.updateSessionBaseCommitAfterBind(sessionId, bindHeadCommit);
         } else {
@@ -2767,58 +2896,67 @@ ${attachmentLines.join('\n')}`
                     break;
                 }
                 case "appendMessage": {
-                    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : this.currentSessionId;
+                    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : undefined;
                     const value = typeof data.value === 'string' ? data.value.trim() : '';
-                    const clientMessageId = typeof data.clientMessageId === 'string' ? data.clientMessageId : `append-${Date.now()}`;
+                    const clientMessageId = typeof data.clientMessageId === 'string' ? data.clientMessageId : undefined;
                     const liveWebview = this._view?.webview || activeWebview;
                     const requestedRootUserMsgId = typeof data.rootUserKey === 'string' ? data.rootUserKey : undefined;
-                    const currentRootUserMsgId = this.client.getAppendRootUserMsgId(sessionId) || requestedRootUserMsgId;
-                    if (!sessionId || !value) {
+                    this.uiDebugChannel.appendLine(`[EXT][APPEND_ROUTE] rx sessionId=${sessionId || 'null'} rootUserMsgId=${requestedRootUserMsgId || 'null'} clientMessageId=${clientMessageId || 'null'} currentSessionId=${this.currentSessionId || 'null'}`);
+                    if (!sessionId || !requestedRootUserMsgId || !clientMessageId || !value) {
+                        const reason = !sessionId || !requestedRootUserMsgId || !clientMessageId ? 'missing-route' : 'empty';
+                        this.uiDebugChannel.appendLine(`[EXT][APPEND_ROUTE] rejected sessionId=${sessionId || 'null'} rootUserMsgId=${requestedRootUserMsgId || 'null'} clientMessageId=${clientMessageId || 'null'} reason=${reason}`);
                         liveWebview.postMessage({
                             type: 'appendStatus',
                             sessionId,
                             clientMessageId,
                             status: 'failed',
-                            rootUserMsgId: currentRootUserMsgId,
-                            reason: 'empty'
+                            rootUserMsgId: requestedRootUserMsgId,
+                            reason
                         });
                         break;
                     }
-                    if (!this.currentSessionId || sessionId !== this.currentSessionId || !this.sendInFlightBySession.has(sessionId) || !this.client.canAppendToCurrentTurn(sessionId)) {
+                    const hasTurnInFlight = this.sendInFlightBySession.has(sessionId);
+                    const canAppend = this.client.canAppendToCurrentTurn(sessionId);
+                    if (!hasTurnInFlight || !canAppend) {
+                        const reason = !hasTurnInFlight ? 'turn-not-in-flight' : 'finalized';
+                        this.uiDebugChannel.appendLine(`[EXT][APPEND_ROUTE] rejected sessionId=${sessionId} rootUserMsgId=${requestedRootUserMsgId} clientMessageId=${clientMessageId} reason=${reason}`);
                         liveWebview.postMessage({
                             type: 'appendStatus',
                             sessionId,
                             clientMessageId,
                             status: 'rejected',
-                            rootUserMsgId: currentRootUserMsgId,
-                            reason: 'finalized'
+                            rootUserMsgId: requestedRootUserMsgId,
+                            reason
                         });
                         break;
                     }
                     if (this.appendSubmitInFlightBySession.has(sessionId)) {
+                        this.uiDebugChannel.appendLine(`[EXT][APPEND_ROUTE] rejected sessionId=${sessionId} rootUserMsgId=${requestedRootUserMsgId} clientMessageId=${clientMessageId} reason=append-in-flight`);
                         liveWebview.postMessage({
                             type: 'appendStatus',
                             sessionId,
                             clientMessageId,
                             status: 'rejected',
-                            rootUserMsgId: currentRootUserMsgId,
+                            rootUserMsgId: requestedRootUserMsgId,
                             reason: 'append-in-flight'
                         });
                         break;
                     }
-                    const beginAppend = this.client.beginAppendPrompt(sessionId, clientMessageId, value);
+                    const beginAppend = this.client.beginAppendPrompt(sessionId, clientMessageId, value, requestedRootUserMsgId);
                     if (!beginAppend) {
+                        this.uiDebugChannel.appendLine(`[EXT][APPEND_ROUTE] rejected sessionId=${sessionId} rootUserMsgId=${requestedRootUserMsgId} clientMessageId=${clientMessageId} reason=begin-rejected`);
                         liveWebview.postMessage({
                             type: 'appendStatus',
                             sessionId,
                             clientMessageId,
                             status: 'rejected',
-                            rootUserMsgId: currentRootUserMsgId,
+                            rootUserMsgId: requestedRootUserMsgId,
                             reason: 'begin-rejected'
                         });
                         break;
                     }
                     this.appendSubmitInFlightBySession.add(sessionId);
+                    this.uiDebugChannel.appendLine(`[EXT][APPEND_ROUTE] accepted sessionId=${sessionId} rootUserMsgId=${beginAppend.rootUserMsgId} clientMessageId=${clientMessageId}`);
                     try {
                         await this.client.appendPrompt(sessionId, value, {
                             model: this.selectedModel,
@@ -2829,7 +2967,7 @@ ${attachmentLines.join('\n')}`
                             type: 'appendStatus',
                             sessionId,
                             clientMessageId,
-                            rootUserMsgId: currentRootUserMsgId,
+                            rootUserMsgId: beginAppend.rootUserMsgId,
                             status: 'queued'
                         });
                     } catch (error) {
@@ -2845,6 +2983,10 @@ ${attachmentLines.join('\n')}`
                     } finally {
                         this.appendSubmitInFlightBySession.delete(sessionId);
                     }
+                    break;
+                }
+                case "appendSnapshotMeta": {
+                    this.cacheAppendSnapshotMeta(data);
                     break;
                 }
                 case "setModel": {
@@ -3602,6 +3744,11 @@ ${attachmentLines.join('\n')}`
                             : undefined;
                         const undoRange = this.client.getUndoRangeForAnchor(resolvedMessageId, ownerSessionId);
                         const extAnchorIndex = typeof undoRange?.startIndex === 'number' ? undoRange.startIndex : -1;
+                        const visibleMessageIds = this.sanitizeUndoRangeMessageIds(data?.visibleMessageIds);
+                        const forwardMessageIdsFromAnchor = this.sanitizeUndoRangeMessageIds(data?.forwardMessageIdsFromAnchor);
+                        const anchorIndex = typeof data?.anchorIndex === 'number' && Number.isFinite(data.anchorIndex)
+                            ? data.anchorIndex
+                            : undefined;
                         const invalidMessageIds = undoRange && undoRange.endIndex >= undoRange.startIndex
                             ? Array.from(this.getInvalidSegmentMessageIds(ownerSessionId, {
                                 currentNoticeKey: currentActiveNoticeKey,
@@ -3612,15 +3759,25 @@ ${attachmentLines.join('\n')}`
                         const result = await this.client.undoFromMessage(resolvedMessageId, {
                             excludedMessageIds: invalidMessageIds,
                             sessionId: ownerSessionId,
-                            visibleMessageIds: this.sanitizeUndoRangeMessageIds(data?.visibleMessageIds),
-                            forwardMessageIdsFromAnchor: this.sanitizeUndoRangeMessageIds(data?.forwardMessageIdsFromAnchor)
+                            visibleMessageIds,
+                            forwardMessageIdsFromAnchor
                         });
                         const currentSegment = this.client.getRevertedSegment();
                         this.uiDebugChannel.appendLine(`[EXT][UNDO_RESULT] applied=${result.applied} conflicts=${result.conflicts.length} touched=${result.touchedFiles.length} reason=${result.reason || 'null'} segmentStart=${currentSegment?.startMessageId || 'null'} segmentEnd=${currentSegment?.endMessageId || 'null'}`);
                         this.uiDebugChannel.appendLine(`[EXT][UNDO_DONE] applied=${result.applied} conflicts=${result.conflicts.length} sessionId=${ownerSessionId}`);
                             if (!result.applied && result.conflicts.length) {
                                 const conflictId = this.createConflictId('undo', operationId);
-                                this.pendingConflict = { kind: 'undo', sessionId: ownerSessionId, operationId, conflictId, startMessageId: resolvedMessageId, noticeKey };
+                                this.pendingConflict = {
+                                    kind: 'undo',
+                                    sessionId: ownerSessionId,
+                                    operationId,
+                                    conflictId,
+                                    startMessageId: resolvedMessageId,
+                                    visibleMessageIds,
+                                    forwardMessageIdsFromAnchor,
+                                    anchorIndex,
+                                    noticeKey
+                                };
                                 const liveWebview = this._view?.webview || activeWebview;
                                 this.uiDebugChannel.appendLine(`[EXT][UNDO_TX] type=conflictCard sessionId=${ownerSessionId} opId=${operationId} conflictId=${conflictId} kind=undo`);
                                 this.uiDebugChannel.appendLine(`EXT: undo.postToWebview | type=conflictCard | sessionId | ${ownerSessionId} | opId | ${operationId} | conflictId | ${conflictId}`);
@@ -4238,7 +4395,20 @@ ${attachmentLines.join('\n')}`
                                     rangeEndIndex: undoRange.endIndex
                                 }))
                                 : [];
-                            const result = await this.client.undoFromMessage(conflictContext.startMessageId, { force: true, excludedMessageIds: invalidMessageIds, sessionId: ownerSessionId });
+                            const visibleMessageIds = Array.isArray(conflictContext.visibleMessageIds)
+                                ? conflictContext.visibleMessageIds
+                                : this.sanitizeUndoRangeMessageIds(data?.visibleMessageIds);
+                            const forwardMessageIdsFromAnchor = Array.isArray(conflictContext.forwardMessageIdsFromAnchor)
+                                ? conflictContext.forwardMessageIdsFromAnchor
+                                : this.sanitizeUndoRangeMessageIds(data?.forwardMessageIdsFromAnchor);
+                            this.uiDebugChannel.appendLine(`[EXT][CONFLICT_RETRY] kind=undo sessionId=${ownerSessionId} opId=${conflictContext.operationId} conflictId=${conflictContext.conflictId} uiRange=${visibleMessageIds.length} forward=${forwardMessageIdsFromAnchor.length}`);
+                            const result = await this.client.undoFromMessage(conflictContext.startMessageId, {
+                                force: true,
+                                excludedMessageIds: invalidMessageIds,
+                                sessionId: ownerSessionId,
+                                visibleMessageIds,
+                                forwardMessageIdsFromAnchor
+                            });
                             if (result.applied && previousSegment) {
                                 const historyEntry = {
                                     isActive: false,
@@ -7241,6 +7411,7 @@ ${attachmentLines.join('\n')}`
     }
 
     private resetSessionState(): void {
+        const retainedSendInFlightBySession = new Set(this.sendInFlightBySession);
         this.client.resetSessionState();
         this.clientMessageIdMap.clear();
         this.revertedSegment = undefined;
@@ -7258,6 +7429,12 @@ ${attachmentLines.join('\n')}`
         this.rawUserTextByLocalKey.clear();
         this.rawUserTextByMsgId.clear();
         this.sendInFlightBySession.clear();
+        for (const sessionId of retainedSendInFlightBySession) {
+            this.sendInFlightBySession.add(sessionId);
+        }
+        if (retainedSendInFlightBySession.size) {
+            this.uiDebugChannel.appendLine(`[EXT][APPEND_RETAIN] preserved sendInFlight sessions=${retainedSendInFlightBySession.size} reason=ui-reset`);
+        }
     }
 
     private resetUiState(): void {

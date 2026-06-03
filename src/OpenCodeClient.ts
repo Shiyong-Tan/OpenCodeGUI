@@ -682,7 +682,9 @@ export class OpenCodeClient {
         this.clearTurnFinals();
         this.turnFinalResolvedBySession.clear();
         this.turnFinalSourceBySession.clear();
-        this.appendTurnStateBySession.clear();
+        if (this.appendTurnStateBySession.size) {
+            this.logUiDebug(`[EXT][APPEND_RETAIN] preserved sessions=${this.appendTurnStateBySession.size} reason=resetSessionState`);
+        }
         this.clearRescueTimers();
         this.clearResyncLoopTimers();
         this.clearSseDrainTimers();
@@ -1968,7 +1970,9 @@ export class OpenCodeClient {
         this.pendingAssistantMsgIdBySession.delete(sessionId);
         this.currentTurnUserMsgIdBySession.delete(sessionId);
         this.displayTurnUserMsgIdBySession.delete(sessionId);
-        this.appendTurnStateBySession.delete(sessionId);
+        if (this.appendTurnStateBySession.has(sessionId)) {
+            this.logUiDebug(`[EXT][APPEND_RETAIN] preserved sessionId=${sessionId} reason=finishTurn`);
+        }
         this.hiddenControlUserMsgIdsBySession.delete(sessionId);
         this.hiddenControlAssistantMsgIdsBySession.delete(sessionId);
         this.pendingStopContinuationUserBySession.delete(sessionId);
@@ -2363,9 +2367,9 @@ export class OpenCodeClient {
         return true;
     }
 
-    public beginAppendPrompt(sessionId: string, clientMessageId: string, text: string): BeginAppendPromptResult | null {
+    public beginAppendPrompt(sessionId: string, clientMessageId: string, text: string, rootUserMsgIdFromIngress?: string): BeginAppendPromptResult | null {
         if (!this.canAppendToCurrentTurn(sessionId)) return null;
-        const rootUserMsgId = this.getAppendRootUserMsgId(sessionId);
+        const rootUserMsgId = rootUserMsgIdFromIngress || this.getAppendRootUserMsgId(sessionId);
         if (!rootUserMsgId) return null;
         const state = this.appendTurnStateBySession.get(sessionId) || {
             rootUserMsgId,
@@ -2373,6 +2377,9 @@ export class OpenCodeClient {
             appendUserMsgIds: new Set<string>(),
             emittedAppendUserMsgIds: new Set<string>()
         };
+        if (state.rootUserMsgId && state.rootUserMsgId !== rootUserMsgId) {
+            this.logUiDebug(`[EXT][APPEND_RETAIN] root-update sessionId=${sessionId} previousRootUserMsgId=${state.rootUserMsgId} rootUserMsgId=${rootUserMsgId}`);
+        }
         state.rootUserMsgId = rootUserMsgId;
         state.pending.push({ clientMessageId, text });
         this.appendTurnStateBySession.set(sessionId, state);
@@ -4353,6 +4360,31 @@ export class OpenCodeClient {
             return false;
         }
         return this.setSessionBaseCommit(sessionId, sessionId, msgToCommit, 'commit-bind-success');
+    }
+
+    public async bindCommitToMessageIds(sessionId: string, input: {
+        messageIds: string[];
+        commitHash: string;
+        baseCommit?: string;
+        reason?: string;
+    }): Promise<{ ok: boolean; boundIds: string[] }> {
+        const boundIds = Array.from(new Set((Array.isArray(input?.messageIds) ? input.messageIds : [])
+            .filter((id): id is string => typeof id === 'string' && id.startsWith('msg_'))));
+        if (!sessionId || !input?.commitHash || !boundIds.length || !this.gitUndo) {
+            this.logUiDebug(`[EXT][COMMIT_BIND_TOPOLOGY] skip | sessionId=${sessionId || 'null'} | reason=${input?.reason || 'missing-input'} | ids=${boundIds.join(',') || 'none'} | commit=${input?.commitHash || 'null'} | base=${input?.baseCommit || 'null'}`);
+            return { ok: false, boundIds };
+        }
+        try {
+            const repo = await this.gitUndo['repoManager'].resolveRepo(sessionId, sessionId);
+            const map = await this.gitUndo['mapStore'].loadSessionMap(sessionId, repo.repoId);
+            const updated = this.gitUndo['mapStore'].bindMessageIdsToCommit(map, boundIds, input.commitHash, input.baseCommit);
+            await this.gitUndo['mapStore'].saveSessionMap(sessionId, updated);
+            this.logUiDebug(`[EXT][COMMIT_BIND_TOPOLOGY] bound | sessionId=${sessionId} | reason=${input.reason || 'commit-bind'} | ids=${boundIds.join(',')} | commit=${input.commitHash} | base=${input.baseCommit || 'null'}`);
+            return { ok: true, boundIds };
+        } catch (error) {
+            this.logUiDebug(`[EXT][COMMIT_BIND_TOPOLOGY] fail | sessionId=${sessionId} | reason=${input.reason || 'commit-bind'} | ids=${boundIds.join(',') || 'none'} | commit=${input.commitHash} | base=${input.baseCommit || 'null'} | err=${String(error)}`);
+            return { ok: false, boundIds };
+        }
     }
 
     private isConcreteAuthoritativePath(value: string): boolean {

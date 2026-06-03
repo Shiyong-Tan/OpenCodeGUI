@@ -205,6 +205,82 @@ describe('SidebarProvider undoToMessage owner routing', () => {
         expect(provider.uiDebugChannel.appendLine).toHaveBeenCalledWith(expect.stringContaining('[EXT][UNDO_RANGE] source=fallback'));
     });
 
+    it('retains WebView-visible order for undo conflict override retry', async () => {
+        const provider = createProvider();
+        provider.client.undoFromMessage
+            .mockResolvedValueOnce({ conflicts: [{ file: 'file.ts', type: 'modified' }], touchedFiles: [], applied: false })
+            .mockResolvedValueOnce({ conflicts: [], touchedFiles: ['file.ts'], applied: true });
+        const { receive } = attachWebview(provider);
+
+        await receive({
+            type: 'undoToMessage',
+            sessionId: 'ses_A_payload',
+            messageId: 'msg_anchor',
+            operationId: 'op_conflict_ui_range',
+            visibleMessageIds: ['msg_pre_1', 'msg_anchor', 'msg_ui_tail'],
+            anchorIndex: 1,
+            forwardMessageIdsFromAnchor: ['msg_anchor', 'msg_ui_tail'],
+        });
+        const pendingConflict = provider.pendingConflict;
+
+        await receive({
+            type: 'conflictDecision',
+            decision: 'override',
+            sessionId: 'ses_A_payload',
+            operationId: 'op_conflict_ui_range',
+            conflictId: pendingConflict.conflictId,
+            kind: 'undo',
+        });
+
+        expect(provider.client.undoFromMessage).toHaveBeenNthCalledWith(2, 'msg_anchor', expect.objectContaining({
+            force: true,
+            sessionId: 'ses_A_payload',
+            visibleMessageIds: ['msg_pre_1', 'msg_anchor', 'msg_ui_tail'],
+            forwardMessageIdsFromAnchor: ['msg_anchor', 'msg_ui_tail'],
+        }));
+        expect(provider.uiDebugChannel.appendLine).toHaveBeenCalledWith(expect.stringContaining('[EXT][CONFLICT_RETRY] kind=undo'));
+        expect(provider.uiDebugChannel.appendLine).toHaveBeenCalledWith(expect.stringContaining('uiRange=3 forward=2'));
+    });
+
+    it('reports undo conflict retry failure clearly when cached UI order is missing', async () => {
+        const provider = createProvider();
+        provider.client.undoFromMessage
+            .mockResolvedValueOnce({ conflicts: [{ file: 'file.ts', type: 'modified' }], touchedFiles: [], applied: false })
+            .mockRejectedValueOnce(new Error('Unknown message for undo.'));
+        const { postMessage, receive } = attachWebview(provider);
+
+        await receive({
+            type: 'undoToMessage',
+            sessionId: 'ses_A_payload',
+            messageId: 'msg_anchor',
+            operationId: 'op_conflict_missing_ui_range',
+        });
+        const pendingConflict = provider.pendingConflict;
+
+        await receive({
+            type: 'conflictDecision',
+            decision: 'override',
+            sessionId: 'ses_A_payload',
+            operationId: 'op_conflict_missing_ui_range',
+            conflictId: pendingConflict.conflictId,
+            kind: 'undo',
+        });
+
+        expect(provider.client.undoFromMessage).toHaveBeenNthCalledWith(2, 'msg_anchor', expect.objectContaining({
+            force: true,
+            sessionId: 'ses_A_payload',
+            visibleMessageIds: [],
+            forwardMessageIdsFromAnchor: [],
+        }));
+        expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+            type: 'addResponse',
+            value: expect.stringContaining('Conflict resolution failed: Error: Unknown message for undo.'),
+            sessionId: 'ses_A_payload',
+            operationId: 'op_conflict_missing_ui_range',
+        }));
+        expect(provider.uiDebugChannel.appendLine).toHaveBeenCalledWith(expect.stringContaining('uiRange=0 forward=0'));
+    });
+
     it('drops missing required undo owner inputs without calling undo', async () => {
         const provider = createProvider();
         const { postMessage, receive } = attachWebview(provider);

@@ -42,6 +42,7 @@ function createSession(timeline: string[]): any {
         hiddenSet: new Set<string>(),
         segmentsByNoticeKey: new Map(),
         undoNoticeKeyByOpId: new Map(),
+        pendingUndoByNoticeKey: new Map(),
         clientKeyToServerId: new Map(),
         serverIdToClientKey: new Map(),
     };
@@ -51,13 +52,14 @@ function loadUndoSenderHarness() {
     const mainPath = path.join(__dirname, '../../../media/main.js');
     const source = fs.readFileSync(mainPath, 'utf8');
     const start = source.indexOf('function isHydrationPersistenceArtifact');
-    const end = source.indexOf('function handleUndoTimeout');
+    const end = source.indexOf('function createOperationId');
     if (start < 0 || end < 0 || end <= start) {
         throw new Error('Could not locate undo sender helper block in media/main.js');
     }
 
     const posts: any[] = [];
     const sessions = new Map<string, any>();
+    const renderFromState = jest.fn();
     const context: any = {
         console,
         Date,
@@ -71,10 +73,17 @@ function loadUndoSenderHarness() {
         },
         getSessionState: (sessionId: string) => sessions.get(sessionId),
         setTimeout: jest.fn(),
+        clearTimeout: jest.fn(),
+        logTimelineSnapshot: jest.fn(),
+        window: {
+            __oc: {
+                renderFromState,
+            },
+        },
     };
     vm.createContext(context);
-    vm.runInContext(source.slice(start, end), context);
-    return { context, posts, sessions };
+    vm.runInContext(`${source.slice(start, end)}\nthis.suspendUndoTimeoutForConflictCard = suspendUndoTimeoutForConflictCard;`, context);
+    return { context, posts, sessions, renderFromState };
 }
 
 describe('WebView revertedSegment explicit member handling', () => {
@@ -172,6 +181,73 @@ describe('WebView undoToMessage visible range payload', () => {
         expect(posts).toContainEqual(expect.objectContaining({
             type: 'ui-debug',
             payload: expect.arrayContaining(['[WV][UNDO_RANGE_TX]', 'sessionId=ses_A', expect.stringContaining('anchorIndex=1')]),
+        }));
+    });
+
+    it('keeps normal unanswered undo requests timing out', () => {
+        const { context, posts, sessions, renderFromState } = loadUndoSenderHarness();
+        const session = createSession(['msg_anchor']);
+        session.pendingUndo = {
+            clientOpId: 'op_undo_1',
+            anchorKey: 'msg_anchor',
+            noticeKey: 'system:undo:msg_anchor',
+            ts: Date.now() - 10001,
+            status: 'waiting-response',
+        };
+        session.pendingUndoByNoticeKey.set('system:undo:msg_anchor', {
+            clientOpId: 'op_undo_1',
+            noticeKey: 'system:undo:msg_anchor',
+        });
+        sessions.set('ses_A', session);
+
+        context.handleUndoTimeout('ses_A', 'op_undo_1');
+
+        expect(session.pendingUndo).toBeNull();
+        expect(session.messagesById.get('system:undo-timeout:op_undo_1')).toEqual(expect.objectContaining({
+            meta: expect.objectContaining({ kind: 'undoTimeout', opId: 'op_undo_1' }),
+        }));
+        expect(renderFromState).toHaveBeenCalled();
+        expect(posts).toContainEqual(expect.objectContaining({
+            type: 'ui-debug',
+            payload: expect.arrayContaining(['undo', 'timeout', 'clientOpId', 'op_undo_1']),
+        }));
+    });
+
+    it('suspends undo timeout while a matching conflict card is waiting for decision', () => {
+        const { context, posts, sessions } = loadUndoSenderHarness();
+        const timeoutId = { id: 'timer' };
+        const session = createSession(['msg_anchor']);
+        session.pendingUndo = {
+            clientOpId: 'op_undo_2',
+            anchorKey: 'msg_anchor',
+            noticeKey: 'system:undo:msg_anchor',
+            ts: Date.now() - 10001,
+            status: 'waiting-response',
+            timeoutId,
+        };
+        sessions.set('ses_A', session);
+
+        const suspended = context.suspendUndoTimeoutForConflictCard({
+            type: 'conflictCard',
+            sessionId: 'ses_A',
+            operationId: 'op_undo_2',
+            conflictId: 'conflict_1',
+            kind: 'undo',
+        });
+        context.handleUndoTimeout('ses_A', 'op_undo_2');
+
+        expect(suspended).toBe(true);
+        expect(context.clearTimeout).toHaveBeenCalledWith(timeoutId);
+        expect(session.pendingUndo).toEqual(expect.objectContaining({
+            clientOpId: 'op_undo_2',
+            status: 'waiting-conflict-decision',
+            conflictId: 'conflict_1',
+            timeoutId: null,
+        }));
+        expect(session.messagesById.has('system:undo-timeout:op_undo_2')).toBe(false);
+        expect(posts).toContainEqual(expect.objectContaining({
+            type: 'ui-debug',
+            payload: expect.arrayContaining(['undo', 'timeout-skip-conflict', 'clientOpId', 'op_undo_2']),
         }));
     });
 });

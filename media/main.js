@@ -105,6 +105,7 @@ let selectedVariant = '';
 let selectedMode = 'plan';
 let activeSessionId = '';
 let isBusy = false;
+let busySessionId = '';
 let attachments = [];
 let messageCounter = 0;
 let collapsedProviders = new Set();
@@ -1557,6 +1558,54 @@ function registerMessageIdMapping(session, localKey, serverId, source) {
     });
 }
 
+function handleUserAckBindMessage(message) {
+    const sessionId = getEventSessionId(message, 'userAckBind');
+    if (!sessionId) return false;
+
+    const session = getSessionState(sessionId, true);
+    const localKey = message?.localKey;
+    const serverId = message?.msgId;
+
+    registerMessageIdMapping(session, localKey, serverId, 'userAckBind');
+
+    if (typeof localKey !== 'string' || typeof serverId !== 'string') return false;
+    if (!localKey.startsWith('local-') || !serverId.startsWith('msg_')) return false;
+    if (localKey === serverId) return false;
+
+    const localMsg = session.messagesById?.get?.(localKey) || null;
+    const existingServerMsg = session.messagesById?.get?.(serverId) || null;
+    if (localMsg && localMsg.role !== 'user') {
+        vscode.postMessage({ type: 'ui-debug', payload: ['userAckBind.upgrade', 'skipped', 'reason', 'local-not-user', 'localKey', localKey, 'serverId', serverId, 'sessionId', sessionId] });
+        return false;
+    }
+    if (existingServerMsg && existingServerMsg.role !== 'user') {
+        vscode.postMessage({ type: 'ui-debug', payload: ['userAckBind.upgrade', 'skipped', 'reason', 'collision-nonuser', 'localKey', localKey, 'serverId', serverId, 'sessionId', sessionId] });
+        return false;
+    }
+
+    const hasLocalReferences = Boolean(
+        localMsg
+        || session.timeline?.includes?.(localKey)
+        || session.appendRootUserKey === localKey
+        || session.appendComposerFor === localKey
+        || session.appendComposerDrafts?.has?.(localKey)
+        || session.lastTurnUserId === localKey
+    );
+    if (!hasLocalReferences) return false;
+
+    const previousAssistantKey = session.currentTurnAssistantKey;
+    const previousAssistantMsgId = session.currentTurnAssistantMsgId;
+    replaceKeyEverywhere(localKey, serverId, sessionId);
+    if (previousAssistantKey && previousAssistantKey !== localKey) {
+        session.currentTurnAssistantKey = previousAssistantKey;
+    }
+    if (previousAssistantMsgId && previousAssistantMsgId !== localKey) {
+        session.currentTurnAssistantMsgId = previousAssistantMsgId;
+    }
+    syncAppendSnapshotMetadata(sessionId, 'userAckBind');
+    return true;
+}
+
 function toStableMessageKey(session, key) {
     if (!key || typeof key !== 'string') return null;
     if (key.startsWith('msg_')) return key;
@@ -1591,6 +1640,222 @@ function resolveSnapshotMessageKey(session, key) {
         }
     }
     return key;
+}
+
+function sanitizeAppendSnapshotItem(item, session) {
+    if (!item || typeof item !== 'object') return null;
+    const out = {};
+    const copyString = (name, maxLen = 20000) => {
+        const value = item[name];
+        if (typeof value === 'string' && value.length > 0) out[name] = value.slice(0, maxLen);
+    };
+    copyString('clientMessageId', 512);
+    copyString('status', 64);
+    copyString('reason', 1000);
+    copyString('text', 20000);
+    const appendUserMsgId = resolveSnapshotMessageKey(session, item.appendUserMsgId) || item.appendUserMsgId;
+    if (typeof appendUserMsgId === 'string' && appendUserMsgId.length && !appendUserMsgId.startsWith('local-') && !appendUserMsgId.startsWith('tmp:')) {
+        out.appendUserMsgId = appendUserMsgId;
+    }
+    const rootUserMsgId = resolveSnapshotMessageKey(session, item.rootUserMsgId) || item.rootUserMsgId;
+    if (typeof rootUserMsgId === 'string' && rootUserMsgId.length && !rootUserMsgId.startsWith('local-') && !rootUserMsgId.startsWith('tmp:')) {
+        out.rootUserMsgId = rootUserMsgId;
+    }
+    if (typeof item.createdAt === 'number' && Number.isFinite(item.createdAt)) out.createdAt = item.createdAt;
+    if (typeof item.updatedAt === 'number' && Number.isFinite(item.updatedAt)) out.updatedAt = item.updatedAt;
+    return Object.keys(out).length ? out : null;
+}
+
+function sanitizeAppendSnapshotItems(items, session) {
+    if (!Array.isArray(items)) return [];
+    const out = [];
+    const seen = new Set();
+    for (const item of items) {
+        const sanitized = sanitizeAppendSnapshotItem(item, session);
+        if (!sanitized) continue;
+        const dedupeKey = sanitized.clientMessageId || sanitized.appendUserMsgId || `${out.length}`;
+        if (seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
+        out.push(sanitized);
+    }
+    return out;
+}
+
+function normalizeAppendItemsForFinalize(items) {
+    if (!Array.isArray(items)) return { items: [], changed: false };
+    let changed = false;
+    const normalized = items.map((item) => {
+        if (!item || typeof item !== 'object') return item;
+        if (item.status === 'applied' || item.status === 'failed' || item.status === 'rejected') {
+            return item;
+        }
+        if (item.status === 'seen' || ((item.status === 'queued' || item.status === 'sending') && item.appendUserMsgId)) {
+            changed = true;
+            return { ...item, status: 'applied' };
+        }
+        if (item.status === 'sending' || item.status === 'queued') {
+            changed = true;
+            return { ...item, status: 'failed', reason: item.reason || 'append-not-acknowledged' };
+        }
+        return item;
+    });
+    return { items: normalized, changed };
+}
+
+function normalizeSessionAppendItemsForFinalize(session) {
+    if (!session || !(session.messagesById instanceof Map)) return false;
+    let changed = false;
+    for (const message of session.messagesById.values()) {
+        if (!message || message.role !== 'user') continue;
+        if (!Array.isArray(message.meta?.appendedPrompts)) continue;
+        const result = normalizeAppendItemsForFinalize(message.meta.appendedPrompts);
+        if (!result.changed) continue;
+        message.meta = { ...(message.meta || {}), appendedPrompts: result.items };
+        changed = true;
+    }
+    return changed;
+}
+
+function collectAppendSnapshotMetadata(session) {
+    if (!session || !(session.messagesById instanceof Map)) return [];
+    const entries = [];
+    const seenRoots = new Set();
+    for (const message of session.messagesById.values()) {
+        if (!message || message.role !== 'user') continue;
+        const items = sanitizeAppendSnapshotItems(message.meta?.appendedPrompts, session);
+        if (!items.length) continue;
+        const rootMessageId = resolveSnapshotMessageKey(session, message.id) || message.id;
+        if (typeof rootMessageId !== 'string' || !rootMessageId.length || rootMessageId.startsWith('local-') || rootMessageId.startsWith('tmp:')) continue;
+        if (seenRoots.has(rootMessageId)) continue;
+        seenRoots.add(rootMessageId);
+        entries.push({ rootMessageId, appendRootUserKey: rootMessageId, meta: { appendedPrompts: items } });
+    }
+    return entries;
+}
+
+function syncAppendSnapshotMetadata(sessionId, reason = 'unknown') {
+    if (typeof sessionId !== 'string' || !sessionId.length) return;
+    const session = getSessionState(sessionId);
+    if (!session) return;
+    const roots = collectAppendSnapshotMetadata(session);
+    if (!roots.length) return;
+    vscode.postMessage({ type: 'appendSnapshotMeta', sessionId, roots, reason });
+    vscode.postMessage({
+        type: 'ui-debug',
+        payload: ['[WV][APPEND_SNAPSHOT_META]', `sessionId=${sessionId}`, `reason=${reason}`, `rootCount=${roots.length}`, `appendCount=${roots.reduce((sum, root) => sum + (Array.isArray(root.meta?.appendedPrompts) ? root.meta.appendedPrompts.length : 0), 0)}`]
+    });
+}
+
+function restoreAppendHydrationMetadata(sessionId, session) {
+    if (!session || !(session.messagesById instanceof Map)) return { rootCount: 0, appendCount: 0, restoredRootUserKey: '' };
+    let rootCount = 0;
+    let appendCount = 0;
+    let restoredRootUserKey = '';
+    const shouldNormalizeFinalizedAppendItems = session.turnFullyFinalized === true;
+    for (const message of session.messagesById.values()) {
+        if (!message || message.role !== 'user') continue;
+        let items = sanitizeAppendSnapshotItems(message.meta?.appendedPrompts, session);
+        if (!items.length) continue;
+        if (shouldNormalizeFinalizedAppendItems) {
+            items = normalizeAppendItemsForFinalize(items).items;
+        }
+        message.meta = { ...(message.meta || {}), appendedPrompts: items };
+        rootCount++;
+        appendCount += items.length;
+        if (!restoredRootUserKey && typeof message.id === 'string' && message.id.length && !message.id.startsWith('local-') && !message.id.startsWith('tmp:')) {
+            restoredRootUserKey = message.id;
+        }
+    }
+    if (restoredRootUserKey) session.appendRootUserKey = restoredRootUserKey;
+    if (rootCount > 0) {
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: ['[WV][APPEND_HYDRATE_META]', `sessionId=${sessionId || 'null'}`, `rootCount=${rootCount}`, `appendCount=${appendCount}`, `appendRootUserKey=${restoredRootUserKey || 'null'}`]
+        });
+    }
+    return { rootCount, appendCount, restoredRootUserKey };
+}
+
+function getPresentationMessageKeyVariants(session, key) {
+    const variants = new Set();
+    if (!session || typeof key !== 'string' || !key.length) return variants;
+
+    variants.add(key);
+    const resolved = resolveSnapshotMessageKey(session, key);
+    if (typeof resolved === 'string' && resolved.length) variants.add(resolved);
+    const stable = toStableMessageKey(session, key);
+    if (typeof stable === 'string' && stable.length) variants.add(stable);
+
+    const mappedServer = session.clientKeyToServerId?.get?.(key);
+    if (typeof mappedServer === 'string' && mappedServer.length) variants.add(mappedServer);
+    const mappedClient = session.serverIdToClientKey?.get?.(key);
+    if (typeof mappedClient === 'string' && mappedClient.length) variants.add(mappedClient);
+
+    for (const candidate of Array.from(variants)) {
+        const serverAlias = session.clientKeyToServerId?.get?.(candidate);
+        if (typeof serverAlias === 'string' && serverAlias.length) variants.add(serverAlias);
+        const clientAlias = session.serverIdToClientKey?.get?.(candidate);
+        if (typeof clientAlias === 'string' && clientAlias.length) variants.add(clientAlias);
+    }
+
+    return variants;
+}
+
+function addAppendChildPresentationEntry(index, childId, rootId) {
+    if (typeof childId !== 'string' || !childId.length) return;
+    if (!index.has(childId)) index.set(childId, new Set());
+    if (typeof rootId === 'string' && rootId.length) {
+        index.get(childId).add(rootId);
+    }
+}
+
+function buildAppendChildPresentationIndex(session) {
+    const index = new Map();
+    if (!session || !(session.messagesById instanceof Map)) return index;
+
+    for (const root of session.messagesById.values()) {
+        if (!root || root.role !== 'user') continue;
+        const items = Array.isArray(root.meta?.appendedPrompts) ? root.meta.appendedPrompts : [];
+        if (!items.length) continue;
+
+        const rootId = typeof root.id === 'string' ? root.id : '';
+        for (const item of items) {
+            const appendUserMsgId = item?.appendUserMsgId;
+            if (typeof appendUserMsgId !== 'string' || !appendUserMsgId.length) continue;
+            const childVariants = getPresentationMessageKeyVariants(session, appendUserMsgId);
+            if (!childVariants.size) childVariants.add(appendUserMsgId);
+            for (const childId of childVariants) {
+                addAppendChildPresentationEntry(index, childId, rootId);
+            }
+        }
+    }
+
+    return index;
+}
+
+function isAppendChildTopLevelUser(session, msg, id, appendChildPresentationIndex) {
+    if (!session || !msg || msg.role !== 'user') return false;
+    const index = appendChildPresentationIndex instanceof Map
+        ? appendChildPresentationIndex
+        : buildAppendChildPresentationIndex(session);
+    const candidates = new Set();
+    if (typeof id === 'string' && id.length) {
+        for (const candidate of getPresentationMessageKeyVariants(session, id)) candidates.add(candidate);
+        candidates.add(id);
+    }
+    if (typeof msg.id === 'string' && msg.id.length) {
+        for (const candidate of getPresentationMessageKeyVariants(session, msg.id)) candidates.add(candidate);
+        candidates.add(msg.id);
+    }
+
+    for (const candidate of candidates) {
+        const roots = index.get(candidate);
+        if (!roots || roots.size === 0) continue;
+        if (!roots.has(candidate)) return true;
+        if (typeof id === 'string' && !roots.has(id)) return true;
+        if (typeof msg.id === 'string' && !roots.has(msg.id)) return true;
+    }
+    return false;
 }
 
 function buildCanonicalSnapshotEntries(session, keys) {
@@ -2959,6 +3224,30 @@ function buildUndoVisibleRangeSnapshot(session, anchorMsgId) {
     return { visibleMessageIds, anchorIndex, forwardMessageIdsFromAnchor };
 }
 
+function suspendUndoTimeoutForConflictCard(payload) {
+    if (!payload || typeof payload.operationId !== 'string' || !payload.operationId) return false;
+    const kind = typeof payload.kind === 'string' ? payload.kind : '';
+    if (kind && kind !== 'undo') return false;
+    const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId : activeSessionId;
+    const session = getSessionState(sessionId);
+    const pending = session?.pendingUndo;
+    if (!pending || pending.clientOpId !== payload.operationId) return false;
+
+    if (pending.timeoutId) {
+        clearTimeout(pending.timeoutId);
+        pending.timeoutId = null;
+    }
+    pending.status = 'waiting-conflict-decision';
+    pending.conflictId = typeof payload.conflictId === 'string' ? payload.conflictId : '';
+    pending.conflictKind = kind || 'undo';
+
+    vscode.postMessage({
+        type: 'ui-debug',
+        payload: ['undo', 'timeout-suspended-conflict', 'clientOpId', pending.clientOpId, 'sessionId', sessionId || 'null', 'conflictId', pending.conflictId || 'null']
+    });
+    return true;
+}
+
 function handleUndoToMessage(sessionId, targetMessageId) {
     try {
         vscode.postMessage({ type: 'ui-debug', payload: ['[WV][UNDO_FUNC_ENTER]', 'sessionId', sessionId || 'NULL', 'typeof', typeof sessionId, 'targetMessageId', targetMessageId || 'NULL', 'activeSessionId', activeSessionId || 'NULL'] });
@@ -2990,7 +3279,9 @@ function handleUndoToMessage(sessionId, targetMessageId) {
             anchorKey: targetMessageId,
             anchorServerId: serverId,
             noticeKey,
-            ts: Date.now()
+            ts: Date.now(),
+            status: 'waiting-response',
+            timeoutId: null
         };
 
         session.pendingUndoByNoticeKey = session.pendingUndoByNoticeKey || new Map();
@@ -3031,7 +3322,7 @@ function handleUndoToMessage(sessionId, targetMessageId) {
         vscode.postMessage(undoMessage);
         vscode.postMessage({ type: 'ui-debug', payload: ['[WV][UNDO_POST_SEND]', 'sent'] });
 
-        setTimeout(() => handleUndoTimeout(sessionId, opId), UNDO_TIMEOUT_MS);
+        session.pendingUndo.timeoutId = setTimeout(() => handleUndoTimeout(sessionId, opId), UNDO_TIMEOUT_MS);
     } catch (error) {
         vscode.postMessage({ type: 'ui-debug', payload: ['[WV][UNDO_ERROR]', 'error', String(error), 'message', error?.message || 'unknown', 'stack', error?.stack || 'no-stack'] });
         throw error;
@@ -3045,6 +3336,14 @@ function handleUndoTimeout(sessionId, clientOpId) {
         vscode.postMessage({
             type: 'ui-debug',
             payload: ['undo', 'timeout-skip', 'clientOpId', clientOpId || 'null', 'stillPending', false]
+        });
+        return;
+    }
+
+    if (session.pendingUndo.status === 'waiting-conflict-decision') {
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: ['undo', 'timeout-skip-conflict', 'clientOpId', clientOpId || 'null', 'sessionId', sessionId || 'null']
         });
         return;
     }
@@ -4265,9 +4564,23 @@ document.addEventListener('DOMContentLoaded', () => {
         updateSendGate();
     }
 
-    function setBusy(nextBusy) {
+    function setBusy(nextBusy, ownerSessionId = '') {
         isBusy = nextBusy;
+        busySessionId = nextBusy ? (ownerSessionId || activeSessionId || '') : '';
         refreshSendButtonState();
+    }
+
+    function clearBusyForSession(sessionId, reason = 'unknown') {
+        if (!isBusy) return false;
+        const eventSessionId = typeof sessionId === 'string' ? sessionId : '';
+        if (busySessionId && eventSessionId && busySessionId !== eventSessionId) return false;
+        if (busySessionId && !eventSessionId) return false;
+        setBusy(false);
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: ['[WV][BUSY_CLEAR]', `reason=${reason}`, `sessionId=${eventSessionId || 'null'}`, `activeSessionId=${activeSessionId || 'null'}`]
+        });
+        return true;
     }
 
     function ensureQuotaTooltip() {
@@ -5051,7 +5364,13 @@ function renderMessageElement(message, renderedSet) {
             undoBtn.title = 'Undo to this message';
             undoBtn.textContent = '\u21BA';
             undoBtn.addEventListener('click', () => {
-                if (isBusy) return;
+                if (isBusy) {
+                    vscode.postMessage({
+                        type: 'ui-debug',
+                        payload: ['[WV][UNDO_BLOCKED]', 'reason=busy', `busySessionId=${busySessionId || 'null'}`, `activeSessionId=${activeSessionId || 'null'}`]
+                    });
+                    return;
+                }
                 const sessionId = activeSessionId;
                 const session = getSessionState(sessionId);
                 if (!session) return;
@@ -5469,11 +5788,13 @@ function shouldHideDcpUiMessage(message) {
         const timeline = Array.isArray(session.timeline) ? session.timeline : [];
         const segments = Array.from(session.segmentsByNoticeKey.values());
         const derivedHiddenSet = session.hiddenSet; // Already computed by rebuildHiddenSetFromTimeline
+        const appendChildPresentationIndex = buildAppendChildPresentationIndex(session);
 
         vscode.postMessage({
             type: 'ui-debug',
             payload: ['renderFromState',
                 'hiddenSetSize', derivedHiddenSet.size,
+                'appendChildPresentationHidden', appendChildPresentationIndex.size,
                 'segmentsCount', segments.length,
                 'timelineSize', timeline.length]
         });
@@ -5484,6 +5805,7 @@ function shouldHideDcpUiMessage(message) {
         const renderStats = {
             missingMessage: 0,
             hidden: 0,
+            appendChildHidden: 0,
             dcpHidden: 0,
             rendered: 0,
             changeListSeen: 0,
@@ -5561,6 +5883,11 @@ function shouldHideDcpUiMessage(message) {
                 renderStats.hidden += 1;
                 continue;
             }
+            if (isAppendChildTopLevelUser(session, msg, id, appendChildPresentationIndex)) {
+                renderStats.appendChildHidden += 1;
+                trackSkipped(id, msg?.role, 'append-child-top-level');
+                continue;
+            }
             if (shouldHideDcpUiMessage(msg)) {
                 renderStats.dcpHidden += 1;
                 continue;
@@ -5579,6 +5906,7 @@ function shouldHideDcpUiMessage(message) {
                 `changeListSeen=${renderStats.changeListSeen}`,
                 `changeListRendered=${renderStats.changeListRendered}`,
                 `hidden=${renderStats.hidden}`,
+                `appendChildHidden=${renderStats.appendChildHidden}`,
                 `dcpHidden=${renderStats.dcpHidden}`,
                 `missingMessage=${renderStats.missingMessage}`,
                 `skippedNoDom=${renderStats.skippedNoDom}`,
@@ -6795,6 +7123,7 @@ function submitAppendMessage(sessionId, rootUserKey, text) {
         status: 'sending',
         createdAt: Date.now()
     });
+    syncAppendSnapshotMetadata(sessionId, 'submitAppendMessage');
     session.appendComposerFor = null;
     session.appendComposerDrafts?.delete?.(rootUserKey);
     vscode.postMessage({
@@ -7117,21 +7446,9 @@ function handleChatDone(sessionId, message) {
             payload: ['[WV][FINAL_LOCK_SET]', `sessionId=${sessionId}`, `assistantMsgId=${resolvedFinal}`]
         });
     }
-    const rootKey = session.appendRootUserKey || session.lastTurnUserId;
-    const rootMsg = rootKey ? session.messagesById.get(rootKey) : null;
-    if (rootMsg?.meta && Array.isArray(rootMsg.meta.appendedPrompts)) {
-        rootMsg.meta.appendedPrompts = rootMsg.meta.appendedPrompts.map((item) => {
-            if (item.status === 'failed' || item.status === 'rejected' || item.status === 'applied') {
-                return item;
-            }
-            if (item.status === 'seen' || (item.status === 'queued' && item.appendUserMsgId)) {
-                return { ...item, status: 'applied' };
-            }
-            if (item.status === 'sending' || item.status === 'queued') {
-                return { ...item, status: 'failed', reason: item.reason || 'append-not-acknowledged' };
-            }
-            return item;
-        });
+    const appendItemsChanged = normalizeSessionAppendItemsForFinalize(session);
+    if (appendItemsChanged) {
+        syncAppendSnapshotMetadata(sessionId, 'chatDone-finalize');
     }
     updateSendGate();
     // Mark snapshot pending for this turn; actual emit is single-point gated at finalize_done.
@@ -7298,7 +7615,8 @@ function appendMessageImages(parentEl, message) {
             .map((item) => item?.path)
             .filter((value) => typeof value === 'string' && value.length > 0);
 
-        setBusy(true);
+        const sendingSessionId = activeSessionId || '';
+        setBusy(true, sendingSessionId);
         if (!activeSessionId) {
             isSwitchingSession = true;
             pendingUiPrompts.push({
@@ -8258,6 +8576,10 @@ window.addEventListener('message', (event) => {
                     });
 
                     const preservedLive = restoreVolatileHydrationState(session, preservedHydrationState);
+                    const restoredAppendMeta = restoreAppendHydrationMetadata(sessionId, session);
+                    if (restoredAppendMeta.rootCount > 0) {
+                        syncAppendSnapshotMetadata(sessionId, 'sessionData-hydrate');
+                    }
                     const skippedTimelineArtifacts = preservedLive.skippedArtifacts?.timeline || 0;
                     const skippedBackingArtifacts = preservedLive.skippedArtifacts?.backing || 0;
                     const skippedCanonicalTimeline = preservedLive.skippedCanonicalizedVolatile?.timeline || 0;
@@ -8454,10 +8776,7 @@ window.addEventListener('message', (event) => {
                 break;
             }
             case 'userAckBind': {
-                const sessionId = getEventSessionId(message, 'userAckBind');
-                if (!sessionId) break;
-                const session = getSessionState(sessionId, true);
-                registerMessageIdMapping(session, message.localKey, message.msgId, 'userAckBind');
+                handleUserAckBindMessage(message);
                 break;
             }
             case 'appendStatus': {
@@ -8471,6 +8790,7 @@ window.addEventListener('message', (event) => {
                     status: message.status || 'queued',
                     reason: message.reason || ''
                 });
+                syncAppendSnapshotMetadata(sessionId, 'appendStatus');
                 if (
                     sessionId === activeSessionId
                     && (message.status === 'failed' || message.status === 'rejected')
@@ -8479,7 +8799,8 @@ window.addEventListener('message', (event) => {
                 ) {
                     enterAppendInputMode(root.id, item.text);
                 }
-                window.__oc?.renderFromState?.();
+                vscode.postMessage({ type: 'ui-debug', payload: ['[WV][APPEND_ROUTE]', 'appendStatus', 'sessionId', sessionId, 'activeSessionId', activeSessionId || 'null', 'status', message.status || 'queued'] });
+                renderIfActive(sessionId, 'appendStatus');
                 break;
             }
             case 'appendUserMessage': {
@@ -8496,8 +8817,9 @@ window.addEventListener('message', (event) => {
                     // It can still be queued behind the active turn's current work.
                     status: 'queued'
                 });
-                window.__oc?.renderFromState?.();
-                scrollToBottom();
+                syncAppendSnapshotMetadata(sessionId, 'appendUserMessage');
+                vscode.postMessage({ type: 'ui-debug', payload: ['[WV][APPEND_ROUTE]', 'appendUserMessage', 'sessionId', sessionId, 'activeSessionId', activeSessionId || 'null', 'rootUserMsgId', message.rootUserMsgId || 'null', 'appendUserMsgId', message.appendUserMsgId || 'null'] });
+                renderIfActive(sessionId, 'appendUserMessage', { scroll: true, scrollFallback: scrollToBottom });
                 break;
             }
             case 'turnInFlight': {
@@ -8796,7 +9118,7 @@ window.addEventListener('message', (event) => {
                         });
                     }
                     maybeExitAppendInputModeAfterTurnEnd(sessionId, 'finalize_done');
-                    if (route.isActive) setBusy(false);
+                    clearBusyForSession(sessionId, 'turnFinalizePhase:finalize_done');
                     updateSendGate();
                     renderIfActive(sessionId, 'turnFinalizePhase:finalize_done');
                 }
@@ -8813,7 +9135,7 @@ window.addEventListener('message', (event) => {
                     vscode.postMessage({ type: 'ui-debug', payload: ['[DBG_CHATDONE]', `timelineTail=${tail}`] });
                 }
                 if (session?.canceledActiveTurn) {
-                    if (route.isActive) setBusy(false);
+                    clearBusyForSession(sessionId, 'chatDone:canceledActiveTurn');
                     maybeExitAppendInputModeAfterTurnEnd(sessionId, 'chatDone:canceledActiveTurn');
                     logSessionState(sessionId, 'chatDone.canceledActiveTurn');
                     break;
@@ -8824,7 +9146,7 @@ window.addEventListener('message', (event) => {
                     session.cancelledTurn = false;
                 }
                 renderIfActive(sessionId, 'chatDone', { scroll: true });
-                if (route.isActive) setBusy(false);
+                clearBusyForSession(sessionId, 'chatDone');
                 logSessionState(sessionId, 'chatDone');
                 break;
             }
@@ -10095,6 +10417,7 @@ window.addEventListener('message', (event) => {
             }
             case 'conflictCard': {
                 lastConflictPayload = message;
+                suspendUndoTimeoutForConflictCard(message);
                 window.__oc?.renderFromState?.();
                 scrollToBottom();
                 break;

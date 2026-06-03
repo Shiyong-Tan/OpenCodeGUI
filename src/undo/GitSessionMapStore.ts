@@ -257,4 +257,23 @@ export class GitSessionMapStore {
             entries: updatedEntries
         };
     }
+
+    public bindMessageIdsToCommit(map: SessionMap, messageIds: string[], commitHash: string, baseCommit?: string): SessionMap {
+        if (!commitHash || !Array.isArray(messageIds) || messageIds.length === 0) return map;
+        const ids = Array.from(new Set(messageIds.filter((id) => typeof id === 'string' && id.startsWith('msg_'))));
+        if (!ids.length) return map;
+        const msgToCommit = { ...(map.msgToCommit || {}) };
+        const msgToBaseCommit = { ...(map.msgToBaseCommit || {}) };
+        for (const id of ids) {
+            msgToCommit[id] = commitHash;
+            if (baseCommit) {
+                msgToBaseCommit[id] = baseCommit;
+            }
+        }
+        return {
+            ...map,
+            msgToCommit,
+            msgToBaseCommit
+        };
+    }
 }
