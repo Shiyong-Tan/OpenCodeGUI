@@ -850,6 +850,60 @@ function cloneMessageForHydrationPreserve(message) {
     };
 }
 
+function isHydrationPersistenceArtifact(id, message) {
+    if (typeof id === 'string' && (id.startsWith('system:snapshot:') || id.startsWith('system:changeList:'))) {
+        return true;
+    }
+    const kind = message?.meta?.kind;
+    return kind === 'snapshotNotice' || kind === 'changeList';
+}
+
+function findMappedHydrationMsgId(map, key, matchValue = false) {
+    if (!(map instanceof Map) || typeof key !== 'string' || !key.length) return null;
+    if (!matchValue) {
+        const mapped = map.get(key);
+        return typeof mapped === 'string' && mapped.startsWith('msg_') ? mapped : null;
+    }
+    for (const [mapped, value] of map.entries()) {
+        if (value === key && typeof mapped === 'string' && mapped.startsWith('msg_')) {
+            return mapped;
+        }
+    }
+    return null;
+}
+
+function resolvePreservedHydrationCanonicalId(session, preserved, id, message) {
+    if (typeof id !== 'string' || !id.length) return null;
+    if (id.startsWith('msg_')) return id;
+    if (id.startsWith('local-')) {
+        return findMappedHydrationMsgId(preserved?.clientKeyToServerId, id)
+            || findMappedHydrationMsgId(session?.clientKeyToServerId, id)
+            || findMappedHydrationMsgId(preserved?.serverIdToClientKey, id, true)
+            || findMappedHydrationMsgId(session?.serverIdToClientKey, id, true)
+            || findMappedHydrationMsgId(preserved?.serverIdToKey, id, true)
+            || findMappedHydrationMsgId(session?.serverIdToKey, id, true)
+            || toStableMessageKey(session, id)
+            || null;
+    }
+    if (id.startsWith('tmp:')) {
+        const preservedPending = preserved?.pendingAssistantUpgrade;
+        const sessionPending = session?.pendingAssistantUpgrade;
+        const pendingAssistantId =
+            (preservedPending?.tmpKey === id && typeof preservedPending.assistantMsgId === 'string' && preservedPending.assistantMsgId.startsWith('msg_') && preservedPending.assistantMsgId) ||
+            (sessionPending?.tmpKey === id && typeof sessionPending.assistantMsgId === 'string' && sessionPending.assistantMsgId.startsWith('msg_') && sessionPending.assistantMsgId) ||
+            null;
+        if (pendingAssistantId) return pendingAssistantId;
+        const finalAssistantId =
+            (typeof preserved?.finalAssistantLock?.assistantMsgId === 'string' && preserved.finalAssistantLock.assistantMsgId.startsWith('msg_') && preserved.finalAssistantLock.assistantMsgId) ||
+            (typeof session?.finalAssistantLock?.assistantMsgId === 'string' && session.finalAssistantLock.assistantMsgId.startsWith('msg_') && session.finalAssistantLock.assistantMsgId) ||
+            (typeof preserved?.earlyFinalAssistantId === 'string' && preserved.earlyFinalAssistantId.startsWith('msg_') && preserved.earlyFinalAssistantId) ||
+            (typeof session?.earlyFinalAssistantId === 'string' && session.earlyFinalAssistantId.startsWith('msg_') && session.earlyFinalAssistantId) ||
+            null;
+        if (message?.role === 'assistant' && finalAssistantId) return finalAssistantId;
+    }
+    return null;
+}
+
 function captureVolatileHydrationState(session) {
     if (!session) return null;
     return {
@@ -882,36 +936,99 @@ function captureVolatileHydrationState(session) {
         inputDraft: session.inputDraft,
         backgroundSubagentIndicatorVisible: session.backgroundSubagentIndicatorVisible,
         backgroundSubagentIndicatorUntil: session.backgroundSubagentIndicatorUntil,
-        backgroundSubagentIndicatorAnchorId: session.backgroundSubagentIndicatorAnchorId,
-        snapshotPendingEpoch: session.snapshotPendingEpoch,
-        snapshotEmittedEpoch: session.snapshotEmittedEpoch,
-        snapshotFinalizeReady: session.snapshotFinalizeReady
+        backgroundSubagentIndicatorAnchorId: session.backgroundSubagentIndicatorAnchorId
     };
 }
 
 function restoreVolatileHydrationState(session, preserved) {
-    if (!session || !preserved) return { missingIds: [], fieldNames: [] };
+    if (!session || !preserved) return { missingIds: [], fieldNames: [], skippedArtifacts: { timeline: 0, backing: 0 }, skippedCanonicalizedVolatile: { timeline: 0, backing: 0, fields: 0 } };
 
     const hydratedIds = new Set(Array.isArray(session.timeline) ? session.timeline : []);
+    const hydratedBackingIds = new Set(session.messagesById instanceof Map ? session.messagesById.keys() : []);
     const missingIds = [];
+    const skippedArtifacts = { timeline: 0, backing: 0 };
+    const skippedCanonicalizedVolatile = { timeline: 0, backing: 0, fields: 0 };
+    let hasCanonicalizedVolatileDuplicate = false;
+    const isHydrated = (id) => typeof id === 'string' && (hydratedIds.has(id) || hydratedBackingIds.has(id));
+    const canonicalizedHydratedId = (id, message) => {
+        if (typeof id !== 'string' || (!id.startsWith('local-') && !id.startsWith('tmp:'))) return null;
+        const canonicalId = resolvePreservedHydrationCanonicalId(session, preserved, id, message);
+        return canonicalId && canonicalId.startsWith('msg_') && isHydrated(canonicalId) ? canonicalId : null;
+    };
     for (const id of preserved.timeline) {
         if (typeof id !== 'string' || !id.length || hydratedIds.has(id)) continue;
         const preservedMessage = preserved.messagesById.get(id);
         if (!preservedMessage) continue;
+        if (isHydrationPersistenceArtifact(id, preservedMessage)) {
+            skippedArtifacts.timeline++;
+            continue;
+        }
+        if (canonicalizedHydratedId(id, preservedMessage)) {
+            skippedCanonicalizedVolatile.timeline++;
+            hasCanonicalizedVolatileDuplicate = true;
+            continue;
+        }
         session.messagesById.set(id, cloneMessageForHydrationPreserve(preservedMessage));
         session.timeline.push(id);
         hydratedIds.add(id);
+        hydratedBackingIds.add(id);
         missingIds.push(id);
     }
 
     for (const [id, preservedMessage] of preserved.messagesById.entries()) {
         if (!id || session.messagesById.has(id)) continue;
+        if (isHydrationPersistenceArtifact(id, preservedMessage)) {
+            skippedArtifacts.backing++;
+            continue;
+        }
+        if (canonicalizedHydratedId(id, preservedMessage)) {
+            skippedCanonicalizedVolatile.backing++;
+            hasCanonicalizedVolatileDuplicate = true;
+            continue;
+        }
         session.messagesById.set(id, cloneMessageForHydrationPreserve(preservedMessage));
+        hydratedBackingIds.add(id);
     }
 
     const fieldNames = [];
+    const fieldReferencesCanonicalHydratedVolatile = (value) => {
+        if (typeof value === 'string') {
+            return Boolean(canonicalizedHydratedId(value, preserved.messagesById.get(value)));
+        }
+        if (value && typeof value === 'object') {
+            for (const candidate of [value.tmpKey, value.localKey, value.messageId, value.msgId, value.assistantMsgId, value.userMsgId, value.rootUserMessageId]) {
+                if (typeof candidate === 'string' && canonicalizedHydratedId(candidate, preserved.messagesById.get(candidate))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+    const shouldSkipStaleInFlightField = (name) => {
+        if (!hasCanonicalizedVolatileDuplicate) return false;
+        const staleInFlightFields = new Set([
+            'pendingAssistantUpgrade',
+            'currentTurnAssistantKey',
+            'currentTurnAssistantMsgId',
+            'lastTurnUserId',
+            'lastTurnAssistantId',
+            'activeTurnOpId',
+            'backendTurnInFlight',
+            'streamMode',
+            'appendRootUserKey'
+        ]);
+        if (!staleInFlightFields.has(name)) return false;
+        if (fieldReferencesCanonicalHydratedVolatile(preserved[name])) return true;
+        return ['activeTurnOpId', 'backendTurnInFlight', 'streamMode'].includes(name)
+            && session.turnFullyFinalized !== false
+            && session.backendTurnInFlight !== true;
+    };
     const preserveField = (name, shouldPreserve) => {
         if (!shouldPreserve) return;
+        if (shouldSkipStaleInFlightField(name)) {
+            skippedCanonicalizedVolatile.fields++;
+            return;
+        }
         session[name] = clonePlainSessionValue(preserved[name]);
         fieldNames.push(name);
     };
@@ -937,9 +1054,6 @@ function restoreVolatileHydrationState(session, preserved) {
     preserveField('backgroundSubagentIndicatorVisible', preserved.backgroundSubagentIndicatorVisible === true);
     preserveField('backgroundSubagentIndicatorUntil', typeof preserved.backgroundSubagentIndicatorUntil === 'number' && preserved.backgroundSubagentIndicatorUntil > Date.now());
     preserveField('backgroundSubagentIndicatorAnchorId', Boolean(preserved.backgroundSubagentIndicatorAnchorId));
-    preserveField('snapshotPendingEpoch', typeof preserved.snapshotPendingEpoch === 'number' && preserved.snapshotPendingEpoch > (session.snapshotPendingEpoch || 0));
-    preserveField('snapshotEmittedEpoch', typeof preserved.snapshotEmittedEpoch === 'number' && preserved.snapshotEmittedEpoch > (session.snapshotEmittedEpoch || 0));
-    preserveField('snapshotFinalizeReady', preserved.snapshotFinalizeReady === true);
 
     if (preserved.messageIndexMap.size) {
         if (!(session.messageIndexMap instanceof Map)) session.messageIndexMap = new Map();
@@ -973,7 +1087,7 @@ function restoreVolatileHydrationState(session, preserved) {
         fieldNames.push(name);
     }
 
-    return { missingIds, fieldNames: Array.from(new Set(fieldNames)) };
+    return { missingIds, fieldNames: Array.from(new Set(fieldNames)), skippedArtifacts, skippedCanonicalizedVolatile };
 }
 
 function sessionHasActiveBackgroundSubagents(session) {
@@ -1457,6 +1571,48 @@ function toStableMessageKey(session, key) {
     return null;
 }
 
+function resolveSnapshotMessageKey(session, key) {
+    if (!session || typeof key !== 'string' || !key.length) return null;
+    if (key.startsWith('local-')) {
+        return toStableMessageKey(session, key);
+    }
+    if (key.startsWith('tmp:')) {
+        const pending = session.pendingAssistantUpgrade;
+        if (pending?.tmpKey === key && typeof pending.assistantMsgId === 'string' && pending.assistantMsgId.startsWith('msg_')) {
+            return pending.assistantMsgId;
+        }
+        const finalAssistantId =
+            (typeof session.finalAssistantLock?.assistantMsgId === 'string' && session.finalAssistantLock.assistantMsgId) ||
+            (typeof session.earlyFinalAssistantId === 'string' && session.earlyFinalAssistantId) ||
+            null;
+        const message = session.messagesById?.get?.(key);
+        if (message?.role === 'assistant' && finalAssistantId && session.messagesById?.has?.(finalAssistantId)) {
+            return finalAssistantId;
+        }
+    }
+    return key;
+}
+
+function buildCanonicalSnapshotEntries(session, keys) {
+    const entries = [];
+    const unresolved = [];
+    const seen = new Set();
+    const sourceByCanonicalId = new Map();
+    for (const key of Array.isArray(keys) ? keys : []) {
+        if (typeof key !== 'string' || !key.length) continue;
+        const canonicalId = resolveSnapshotMessageKey(session, key);
+        if (!canonicalId || canonicalId.startsWith('local-') || canonicalId.startsWith('tmp:')) {
+            unresolved.push(key);
+            continue;
+        }
+        if (seen.has(canonicalId)) continue;
+        seen.add(canonicalId);
+        sourceByCanonicalId.set(canonicalId, key);
+        entries.push(canonicalId);
+    }
+    return { entries, unresolved, sourceByCanonicalId };
+}
+
 function createMessage(session, payload) {
     const order = typeof payload.order === 'number' ? payload.order : session.nextOrder++;
     return {
@@ -1497,6 +1653,110 @@ function upsertMessage(session, payload) {
     session.timeline.push(message.id);
     logTimelineSnapshot('append', session.timeline, `key=${message.id}`);
     return message;
+}
+
+function placeMessageAfterAnchor(session, messageId, anchorMessageId, source) {
+    if (!session || typeof messageId !== 'string' || typeof anchorMessageId !== 'string') return false;
+    if (!session.messagesById?.has?.(messageId)) return false;
+    const stableAnchorId = toStableMessageKey(session, anchorMessageId) || anchorMessageId;
+    if (stableAnchorId === messageId || !session.messagesById.has(stableAnchorId)) return false;
+    const anchorIndex = session.timeline.indexOf(stableAnchorId);
+    if (anchorIndex < 0) return false;
+
+    session.timeline = session.timeline.filter((id) => id !== messageId);
+    const nextAnchorIndex = session.timeline.indexOf(stableAnchorId);
+    if (nextAnchorIndex < 0) return false;
+    session.timeline.splice(nextAnchorIndex + 1, 0, messageId);
+    logTimelineSnapshot('anchor-place', session.timeline, `key=${messageId} anchor=${stableAnchorId} source=${source || 'unknown'}`);
+    return true;
+}
+
+function isChangeListSessionMessage(item) {
+    if (!item || typeof item.id !== 'string' || !item.id.length) return false;
+    return item.meta?.kind === 'changeList' || item.id.startsWith('system:changeList:');
+}
+
+function materializeInjectedChangeLists(session, rawSessionMessages, source = 'sessionData') {
+    if (!session || !Array.isArray(rawSessionMessages) || !rawSessionMessages.length) {
+        return { seen: 0, alreadyTimeline: 0, materialized: 0, insertedAfter: 0, appended: 0, skippedNoFiles: 0 };
+    }
+
+    const stats = { seen: 0, alreadyTimeline: 0, materialized: 0, insertedAfter: 0, appended: 0, skippedNoFiles: 0 };
+    const findNearestPriorTimelineId = (index) => {
+        for (let i = index - 1; i >= 0; i--) {
+            const priorId = rawSessionMessages[i]?.id;
+            if (typeof priorId !== 'string' || !priorId.length) continue;
+            const stablePriorId = toStableMessageKey(session, priorId) || priorId;
+            if (session.timeline.includes(stablePriorId)) return stablePriorId;
+        }
+        return '';
+    };
+
+    rawSessionMessages.forEach((item, index) => {
+        if (!isChangeListSessionMessage(item)) return;
+        stats.seen++;
+        const id = item.id;
+        const files = Array.isArray(item.meta?.files)
+            ? item.meta.files.filter((file) => typeof file === 'string' && file.length)
+            : [];
+        if (!files.length) {
+            stats.skippedNoFiles++;
+            return;
+        }
+
+        const existing = session.messagesById.get(id);
+        const message = {
+            ...(existing || {}),
+            id,
+            role: item.role || existing?.role || 'system',
+            text: typeof item.text === 'string' ? item.text : (existing?.text || ''),
+            meta: {
+                ...(existing?.meta || {}),
+                ...(item.meta || {}),
+                kind: 'changeList',
+                files
+            },
+            order: existing?.order ?? session.nextOrder++
+        };
+        session.messagesById.set(id, message);
+
+        if (session.timeline.includes(id)) {
+            stats.alreadyTimeline++;
+            return;
+        }
+
+        const anchorId = typeof message.meta?.stableAnchorMessageId === 'string' && session.timeline.includes(message.meta.stableAnchorMessageId)
+            ? message.meta.stableAnchorMessageId
+            : (typeof message.meta?.anchorMessageId === 'string'
+                ? (toStableMessageKey(session, message.meta.anchorMessageId) || message.meta.anchorMessageId)
+                : findNearestPriorTimelineId(index));
+        if (anchorId && session.timeline.includes(anchorId)) {
+            const anchorIndex = session.timeline.indexOf(anchorId);
+            session.timeline.splice(anchorIndex + 1, 0, id);
+            stats.insertedAfter++;
+        } else {
+            session.timeline.push(id);
+            stats.appended++;
+        }
+        stats.materialized++;
+    });
+
+    if (stats.seen || stats.materialized) {
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: ['[WV][CHANGELIST_MATERIALIZE]',
+                `source=${source}`,
+                `seen=${stats.seen}`,
+                `alreadyTimeline=${stats.alreadyTimeline}`,
+                `materialized=${stats.materialized}`,
+                `insertedAfter=${stats.insertedAfter}`,
+                `appended=${stats.appended}`,
+                `skippedNoFiles=${stats.skippedNoFiles}`,
+                `timelineSize=${session.timeline.length}`]
+        });
+    }
+
+    return stats;
 }
 
 /**
@@ -5077,6 +5337,17 @@ function shouldHideDcpUiMessage(message) {
             return;
         }
 
+        if (session.snapshotFinalizeReady === true) {
+            const pendingEpoch = typeof session.snapshotPendingEpoch === 'number' ? session.snapshotPendingEpoch : 0;
+            const emittedEpoch = typeof session.snapshotEmittedEpoch === 'number' ? session.snapshotEmittedEpoch : 0;
+            if (pendingEpoch > emittedEpoch) {
+                vscode.postMessage({
+                    type: 'ui-debug',
+                    payload: ['[WV][SNAPSHOT_ROUTE]', `sessionId=${activeSessionId}`, `reason=skip-switch-readonly`, `epochPending=${pendingEpoch}`, `epochEmitted=${emittedEpoch}`]
+                });
+            }
+        }
+
         const timeline = Array.isArray(session.timeline) ? session.timeline : [];
         const segments = Array.from(session.segmentsByNoticeKey.values());
         const derivedHiddenSet = session.hiddenSet; // Already computed by rebuildHiddenSetFromTimeline
@@ -5097,6 +5368,8 @@ function shouldHideDcpUiMessage(message) {
             hidden: 0,
             dcpHidden: 0,
             rendered: 0,
+            changeListSeen: 0,
+            changeListRendered: 0,
             skippedNoDom: 0,
             errors: 0,
             skippedSample: []
@@ -5125,6 +5398,9 @@ function shouldHideDcpUiMessage(message) {
             const afterChildren = chatContainer.childElementCount;
             if (afterChildren > beforeChildren) {
                 renderStats.rendered += 1;
+                if (msg?.meta?.kind === 'changeList' || (typeof id === 'string' && id.startsWith('system:changeList:'))) {
+                    renderStats.changeListRendered += 1;
+                }
                 return true;
             }
 
@@ -5138,6 +5414,10 @@ function shouldHideDcpUiMessage(message) {
             if (!msg) {
                 renderStats.missingMessage += 1;
                 continue;
+            }
+
+            if (msg?.meta?.kind === 'changeList' || (typeof id === 'string' && id.startsWith('system:changeList:'))) {
+                renderStats.changeListSeen += 1;
             }
 
             if (id.startsWith('system:undo:')) {
@@ -5178,6 +5458,8 @@ function shouldHideDcpUiMessage(message) {
                 '[WV][RENDER_AUDIT]',
                 `timeline=${timeline.length}`,
                 `rendered=${renderStats.rendered}`,
+                `changeListSeen=${renderStats.changeListSeen}`,
+                `changeListRendered=${renderStats.changeListRendered}`,
                 `hidden=${renderStats.hidden}`,
                 `dcpHidden=${renderStats.dcpHidden}`,
                 `missingMessage=${renderStats.missingMessage}`,
@@ -5278,62 +5560,14 @@ function shouldHideDcpUiMessage(message) {
                 payload: ['[WV][CSS_ORDER_SUSPECT]', `selector=${orderedChild.className || 'child'}`, `property=order:${window.getComputedStyle(orderedChild).order}`]
             });
         }
-        // 如果标记为 true，发送当前渲染的 timeline
+        // Legacy WebView snapshot catch-up is intentionally disabled: normal finalize
+        // snapshot persistence is owned by the extension-side finalize route.
         if (shouldEmitSnapshotOnNextRender && activeSessionId) {
-            const activeSession = getSessionOrNull(activeSessionId);
-            if (!activeSession) return;
-            const epochPending = typeof activeSession.snapshotPendingEpoch === 'number' ? activeSession.snapshotPendingEpoch : 0;
-            const epochEmitted = typeof activeSession.snapshotEmittedEpoch === 'number' ? activeSession.snapshotEmittedEpoch : 0;
-            const finalizeReady = activeSession.snapshotFinalizeReady === true;
-            if (!finalizeReady || epochPending <= epochEmitted || activeSession.awaitingFinalMapBind || Boolean(activeSession.pendingAssistantUpgrade)) {
-                vscode.postMessage({
-                    type: 'ui-debug',
-                    payload: [
-                        '[WV][SNAPSHOT_DEFER]',
-                        `sessionId=${activeSessionId}`,
-                        `reason=phase-not-ready`,
-                        `finalizeReady=${String(finalizeReady)}`,
-                        `epochPending=${epochPending}`,
-                        `epochEmitted=${epochEmitted}`,
-                        `awaitingFinalMapBind=${String(Boolean(activeSession.awaitingFinalMapBind))}`,
-                        `pendingAssistantUpgrade=${String(Boolean(activeSession.pendingAssistantUpgrade))}`
-                    ]
-                });
-                return;
-            }
-            const hasUnresolvedIds = renderKeys.some((id) => typeof id === 'string' && (id.startsWith('local-') || id.startsWith('tmp:')));
-            if (hasUnresolvedIds) {
-                vscode.postMessage({
-                    type: 'ui-debug',
-                    payload: ['[WV][SNAPSHOT_DEFER]', `sessionId=${activeSessionId}`, `reason=unresolved-local-id`, `first10=${renderKeys.slice(0, 10).join(',')}`]
-                });
-                return;
-            }
             shouldEmitSnapshotOnNextRender = false;
-            const visibleMessages = renderKeys
-                .map((id) => session.messagesById.get(id))
-                .filter((msg) => msg && typeof msg.id === 'string')
-                .map((msg) => ({
-                    id: msg.id,
-                    role: msg.role,
-                    text: typeof msg.text === 'string' ? msg.text : '',
-                    ...(typeof msg.messageIndex === 'number' ? { messageIndex: msg.messageIndex } : {}),
-                    ...(msg.meta && typeof msg.meta === 'object' ? { meta: sanitizeMetaForSnapshot(msg.meta) } : {})
-                }));
-            vscode.postMessage({
-                type: 'snapshotTimelineIds',
-                payload: {
-                    sessionId: activeSessionId,
-                    timelineIds: renderKeys.slice(),
-                    visibleMessages
-                }
-            });
             vscode.postMessage({
                 type: 'ui-debug',
-                payload: ['[WV][SNAPSHOT_EMIT]', `sessionId=${activeSessionId}`, `count=${renderKeys.length}`, `visibleMessages=${visibleMessages.length}`]
+                payload: ['[WV][SNAPSHOT_ROUTE]', `sessionId=${activeSessionId}`, `reason=drop-switch-readonly`, `rendered=${renderKeys.length}`]
             });
-            activeSession.snapshotEmittedEpoch = epochPending;
-            activeSession.snapshotFinalizeReady = false;
         }
     }
 
@@ -7807,7 +8041,9 @@ window.addEventListener('message', (event) => {
                             });
                         }
                     }
-                    
+
+                    materializeInjectedChangeLists(session, rawSessionMessages, 'sessionData');
+                     
                     // Snapshot notice if needed
                     if (message.meta?.source === 'snapshot') {
                         const noticeId = `system:snapshot:${Date.now()}`;
@@ -7904,12 +8140,24 @@ window.addEventListener('message', (event) => {
                     });
 
                     const preservedLive = restoreVolatileHydrationState(session, preservedHydrationState);
-                    if (preservedLive.missingIds.length || preservedLive.fieldNames.length) {
+                    const skippedTimelineArtifacts = preservedLive.skippedArtifacts?.timeline || 0;
+                    const skippedBackingArtifacts = preservedLive.skippedArtifacts?.backing || 0;
+                    const skippedCanonicalTimeline = preservedLive.skippedCanonicalizedVolatile?.timeline || 0;
+                    const skippedCanonicalBacking = preservedLive.skippedCanonicalizedVolatile?.backing || 0;
+                    const skippedCanonicalFields = preservedLive.skippedCanonicalizedVolatile?.fields || 0;
+                    if (preservedLive.missingIds.length || preservedLive.fieldNames.length || skippedTimelineArtifacts || skippedBackingArtifacts || skippedCanonicalTimeline || skippedCanonicalBacking || skippedCanonicalFields) {
                         vscode.postMessage({
                             type: 'ui-debug',
                             payload: ['[WV][HYDRATE_PRESERVE_VOLATILE]',
                                 `sessionId=${sessionId}`,
                                 `preservedIds=${preservedLive.missingIds.length}`,
+                                `skippedArtifacts=${skippedTimelineArtifacts + skippedBackingArtifacts}`,
+                                `skippedSnapshotChangeListTimeline=${skippedTimelineArtifacts}`,
+                                `skippedSnapshotChangeListBacking=${skippedBackingArtifacts}`,
+                                `skippedCanonicalizedVolatile=${skippedCanonicalTimeline + skippedCanonicalBacking + skippedCanonicalFields}`,
+                                `skippedCanonicalizedTimeline=${skippedCanonicalTimeline}`,
+                                `skippedCanonicalizedBacking=${skippedCanonicalBacking}`,
+                                `skippedCanonicalizedFields=${skippedCanonicalFields}`,
                                 `tail=[${formatTail(preservedLive.missingIds, 6)}]`,
                                 `fields=[${preservedLive.fieldNames.slice(0, 12).join(',')}]`,
                                 `timelineSize=${session.timeline.length}`]
@@ -8085,6 +8333,13 @@ window.addEventListener('message', (event) => {
                         'payloadInternalKey', payloadInternalKey || 'null',
                         'payloadServerId', payloadServerId || 'null']
                 });
+                break;
+            }
+            case 'userAckBind': {
+                const sessionId = getEventSessionId(message, 'userAckBind');
+                if (!sessionId) break;
+                const session = getSessionState(sessionId, true);
+                registerMessageIdMapping(session, message.localKey, message.msgId, 'userAckBind');
                 break;
             }
             case 'appendStatus': {
@@ -8417,7 +8672,10 @@ window.addEventListener('message', (event) => {
                     const pendingEpoch = typeof session.snapshotPendingEpoch === 'number' ? session.snapshotPendingEpoch : 0;
                     const emittedEpoch = typeof session.snapshotEmittedEpoch === 'number' ? session.snapshotEmittedEpoch : 0;
                     if (route.isActive && pendingEpoch > emittedEpoch) {
-                        shouldEmitSnapshotOnNextRender = true;
+                        vscode.postMessage({
+                            type: 'ui-debug',
+                            payload: ['[WV][SNAPSHOT_ROUTE]', `sessionId=${sessionId}`, `reason=skip-finalize-owned-extension`, `epochPending=${pendingEpoch}`, `epochEmitted=${emittedEpoch}`]
+                        });
                     }
                     maybeExitAppendInputModeAfterTurnEnd(sessionId, 'finalize_done');
                     if (route.isActive) setBusy(false);
@@ -8706,16 +8964,20 @@ window.addEventListener('message', (event) => {
                     : {};
                 const session = getSessionState(sessionId, true);
                 const existing = session.messagesById.get(changeListId);
-                let mergedFiles = files;
-                if (existing?.meta?.kind === 'changeList' && Array.isArray(existing.meta.files)) {
-                    const ordered = [...existing.meta.files, ...files]
-                        .filter((item) => typeof item === 'string' && item.length);
-                    mergedFiles = Array.from(new Set(ordered));
-                }
-                const mergedStats = {
-                    ...(existing?.meta?.statsByPath && typeof existing.meta.statsByPath === 'object' ? existing.meta.statsByPath : {}),
-                    ...statsByPath
-                };
+                const anchorMessageId = typeof message.anchorMessageId === 'string' && message.anchorMessageId.length
+                    ? message.anchorMessageId
+                    : '';
+                const stableAnchorMessageId = anchorMessageId
+                    ? (toStableMessageKey(session, anchorMessageId) || anchorMessageId)
+                    : '';
+                const existingFiles = existing?.meta?.kind === 'changeList' && Array.isArray(existing.meta.files)
+                    ? existing.meta.files.filter((item) => typeof item === 'string' && item.length)
+                    : [];
+                const mergedFiles = files;
+                const mergedFileSet = new Set(mergedFiles);
+                const mergedStats = Object.fromEntries(
+                    Object.entries(statsByPath).filter(([path]) => mergedFileSet.has(path))
+                );
                 upsertMessage(session, {
                     id: changeListId,
                     role: 'system',
@@ -8728,9 +8990,18 @@ window.addEventListener('message', (event) => {
                         commitHead: commitHead || undefined,
                         commitBase: commitBase || undefined,
                         reverted: message.reverted === true,
-                        statsByPath: mergedStats
+                        statsByPath: mergedStats,
+                        anchorMessageId: anchorMessageId || existing?.meta?.anchorMessageId,
+                        stableAnchorMessageId: stableAnchorMessageId || existing?.meta?.stableAnchorMessageId
                     }
                 });
+                vscode.postMessage({
+                    type: 'ui-debug',
+                    payload: ['[WV][DIFF_FILE_LIST]', `sessionId=${sessionId}`, `changeListId=${changeListId}`, `incomingFileCount=${files.length}`, `existingFileCount=${existingFiles.length}`, `finalFileCount=${mergedFiles.length}`]
+                });
+                if (stableAnchorMessageId) {
+                    placeMessageAfterAnchor(session, changeListId, stableAnchorMessageId, 'diffFileList');
+                }
                 renderIfActive(sessionId, 'diffFileList', { scroll: true });
                 break;
             }

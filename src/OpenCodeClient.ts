@@ -8,6 +8,7 @@ import * as os from 'os';
 import * as vscode from 'vscode';
 import { GitUndoEngine } from './undo/GitUndoEngine';
 import { normalizeTouchedFiles } from './undo/GitPathUtils';
+import { runGit } from './undo/GitRunner';
 import { GitCapabilities, FileChangeSpec } from './undo/types';
 
 export type ModelInfo = {
@@ -51,6 +52,7 @@ export type SessionInfo = {
     title: string;
     updated: string;
     cwd?: string;
+    parentID?: string;
 };
 
 export type QuestionOverlayOption = {
@@ -189,6 +191,30 @@ export type PermissionOverlayPayload = {
     patterns: string[];
     metadata?: any;
     toolCallId?: string;
+};
+
+export type SessionMessageDetail = {
+    info?: any;
+    parts?: any[];
+};
+
+export type AuthoritativeDiffFileSetResult = {
+    files: string[];
+    queriedIds: string[];
+    missingIds: string[];
+    source: 'message-summary-diffs';
+};
+
+export type CommitPendingTurnChangesResult = {
+    status: 'committed' | 'noop' | 'skipped' | 'failed';
+    msgToBaseCommit?: string;
+    msgToCommit?: string;
+    reason?: string;
+    touchedFiles?: string[];
+};
+
+export type CommitPendingTurnChangesOptions = {
+    authoritativeFiles?: string[];
 };
 
 export type ChatEvent = {
@@ -2310,6 +2336,19 @@ export class OpenCodeClient {
             || this.displayTurnUserMsgIdBySession.get(sessionId);
     }
 
+    public getLatestAppendUserMsgId(sessionId: string | undefined): string | undefined {
+        if (!sessionId) return undefined;
+        const state = this.appendTurnStateBySession.get(sessionId);
+        if (!state?.appendUserMsgIds?.size) return undefined;
+        return Array.from(state.appendUserMsgIds).pop();
+    }
+
+    public getCurrentTurnUserMsgId(sessionId: string | undefined): string | undefined {
+        if (!sessionId) return undefined;
+        return this.currentTurnUserMsgIdBySession.get(sessionId)
+            || this.displayTurnUserMsgIdBySession.get(sessionId);
+    }
+
     public canAppendToCurrentTurn(sessionId: string | undefined): boolean {
         if (!sessionId) return false;
         if (!this.turnStateBySession.has(sessionId)) return false;
@@ -3204,6 +3243,78 @@ export class OpenCodeClient {
         return candidate.startsWith('msg_') ? candidate : undefined;
     }
 
+    public async getSessionMessageDetail(sessionId: string, messageID: string): Promise<SessionMessageDetail> {
+        const encodedSession = encodeURIComponent(sessionId);
+        const encodedMessage = encodeURIComponent(messageID);
+        this.logUiDebug(`[EXT][AUTH_DIFF] detail.fetch.start | sessionId=${sessionId} | messageId=${messageID}`);
+        const detail = await this.requestJson<SessionMessageDetail>('GET', `/session/${encodedSession}/message/${encodedMessage}`);
+        const hasInfo = Boolean(detail?.info);
+        const partCount = Array.isArray(detail?.parts) ? detail.parts.length : 0;
+        this.logUiDebug(`[EXT][AUTH_DIFF] detail.fetch.done | sessionId=${sessionId} | messageId=${messageID} | hasInfo=${String(hasInfo)} | partCount=${partCount}`);
+        return detail;
+    }
+
+    /**
+     * OpenCode message detail is expected as `{ info, parts }`; changed-file data is exposed
+     * at `info.summary.diffs`. Static API inspection in this repository does not provide a
+     * narrower type, so this normalizer accepts common diff entry path fields defensively.
+     */
+    public extractFilesFromMessageSummaryDiffs(detail: SessionMessageDetail | undefined, context: { sessionId?: string; messageId?: string } = {}): string[] {
+        const diffs = detail?.info?.summary?.diffs;
+        if (!Array.isArray(diffs)) return [];
+        const rawPaths: string[] = [];
+        for (const diff of diffs) {
+            if (!diff || typeof diff !== 'object') continue;
+            const candidates = [
+                diff.path,
+                diff.file,
+                diff.filePath,
+                diff.filename,
+                diff.name,
+                diff.oldPath,
+                diff.newPath,
+                diff.from,
+                diff.to
+            ];
+            for (const candidate of candidates) {
+                if (typeof candidate === 'string' && candidate.trim()) rawPaths.push(candidate.trim());
+            }
+        }
+        const files = normalizeTouchedFiles(this.workspaceRoot, rawPaths).sort();
+        if (diffs.length > 0 && files.length === 0) {
+            this.logUiDebug(`[EXT][AUTH_DIFF] detail.drop | sessionId=${context.sessionId || 'null'} | messageId=${context.messageId || 'null'} | reason=no-files-from-nonempty-diffs | diffCount=${diffs.length}`);
+        }
+        return files;
+    }
+
+    public async getAuthoritativeDiffFileSet(input: {
+        sessionId: string;
+        rootUserMessageId?: string;
+        latestAppendUserMessageId?: string;
+    }): Promise<AuthoritativeDiffFileSetResult> {
+        const queriedIds = Array.from(new Set([
+            input.rootUserMessageId,
+            input.latestAppendUserMessageId
+        ].filter((id): id is string => typeof id === 'string' && id.startsWith('msg_'))));
+        const missingIds: string[] = [];
+        const fileSet = new Set<string>();
+        this.logUiDebug(`[EXT][AUTH_DIFF] union.start | sessionId=${input.sessionId} | queriedIds=${queriedIds.join(',') || 'none'}`);
+        for (const messageId of queriedIds) {
+            try {
+                const detail = await this.getSessionMessageDetail(input.sessionId, messageId);
+                const files = this.extractFilesFromMessageSummaryDiffs(detail, { sessionId: input.sessionId, messageId });
+                files.forEach((file) => fileSet.add(file));
+                this.logUiDebug(`[EXT][AUTH_DIFF] union.detail | sessionId=${input.sessionId} | messageId=${messageId} | fileCount=${files.length}`);
+            } catch (error) {
+                missingIds.push(messageId);
+                this.logUiDebug(`[EXT][AUTH_DIFF] detail.drop | sessionId=${input.sessionId} | messageId=${messageId} | reason=fetch-failed | err=${String(error)}`);
+            }
+        }
+        const files = Array.from(fileSet).sort();
+        this.logUiDebug(`[EXT][AUTH_DIFF] union.done | sessionId=${input.sessionId} | queriedIds=${queriedIds.join(',') || 'none'} | missingIds=${missingIds.join(',') || 'none'} | fileCount=${files.length}`);
+        return { files, queriedIds, missingIds, source: 'message-summary-diffs' };
+    }
+
     public async finalizeTurnBindingFromResolvedAssistant(sessionId: string, assistantMsgId: string): Promise<void> {
         if (!sessionId || !assistantMsgId || !assistantMsgId.startsWith('msg_')) return;
         if (!this.gitUndoAvailable) return;
@@ -3868,26 +3979,117 @@ export class OpenCodeClient {
         if (typeof command !== 'string' || !command.trim()) return [];
         const normalized = command.trim();
         const lower = normalized.toLowerCase();
-        let rawPath = '';
+        let rawArgs = '';
 
         if (lower.startsWith('rm ')) {
-            rawPath = normalized.slice(3).trim();
+            rawArgs = normalized.slice(3).trim();
         } else if (lower.startsWith('del ')) {
-            rawPath = normalized.slice(4).trim();
+            rawArgs = normalized.slice(4).trim();
         } else if (lower.startsWith('erase ')) {
-            rawPath = normalized.slice(6).trim();
+            rawArgs = normalized.slice(6).trim();
         } else if (lower.startsWith('remove-item ')) {
-            rawPath = normalized.slice(12).trim();
+            rawArgs = normalized.slice(12).trim();
         }
 
-        if (!rawPath) return [];
-        rawPath = rawPath.replace(/^['"]|['"]$/g, '').trim();
-        if (!rawPath) return [];
+        if (!rawArgs) return [];
 
-        const abs = path.isAbsolute(rawPath)
-            ? rawPath
-            : (cwd ? path.join(cwd, rawPath) : rawPath);
-        return [abs];
+        const tokens = this.tokenizeShellLikeArgs(rawArgs);
+        const rawPaths = this.extractConcreteDeletePathTokens(tokens, lower.startsWith('remove-item '));
+        const paths: string[] = [];
+        for (const rawPath of rawPaths) {
+            if (this.isUnsafeDeletePathToken(rawPath)) {
+                this.logUiDebug(`[EXT][DELETE_PATH] reject | reason=unsafe-token | token=${JSON.stringify(rawPath)}`);
+                continue;
+            }
+            const abs = path.isAbsolute(rawPath)
+                ? rawPath
+                : (cwd ? path.join(cwd, rawPath) : rawPath);
+            paths.push(abs);
+        }
+        return Array.from(new Set(paths));
+    }
+
+    private tokenizeShellLikeArgs(rawArgs: string): string[] {
+        const tokens: string[] = [];
+        let current = '';
+        let quote: '"' | "'" | undefined;
+        for (let i = 0; i < rawArgs.length; i++) {
+            const ch = rawArgs[i];
+            if (quote) {
+                if (ch === quote) {
+                    quote = undefined;
+                } else {
+                    current += ch;
+                }
+                continue;
+            }
+            if (ch === '"' || ch === "'") {
+                quote = ch;
+                continue;
+            }
+            if (/\s/.test(ch)) {
+                if (current) {
+                    tokens.push(current);
+                    current = '';
+                }
+                continue;
+            }
+            current += ch;
+        }
+        if (current) tokens.push(current);
+        return tokens;
+    }
+
+    private extractConcreteDeletePathTokens(tokens: string[], isPowerShellRemoveItem: boolean): string[] {
+        const paths: string[] = [];
+        const pathOptions = new Set(['-path', '-literalpath', '-pspath']);
+        const valueOptions = new Set(['-filter', '-include', '-exclude', '-credential', '-stream']);
+        const rmValueOptions = new Set(['--one-file-system']);
+
+        for (let i = 0; i < tokens.length; i++) {
+            const token = tokens[i];
+            const lower = token.toLowerCase();
+            if (isPowerShellRemoveItem) {
+                if (pathOptions.has(lower)) {
+                    const next = tokens[++i];
+                    if (next) paths.push(...next.split(',').map((item) => item.trim()).filter(Boolean));
+                    continue;
+                }
+                if (lower.startsWith('-path:') || lower.startsWith('-literalpath:') || lower.startsWith('-pspath:')) {
+                    const value = token.slice(token.indexOf(':') + 1).trim();
+                    if (value) paths.push(...value.split(',').map((item) => item.trim()).filter(Boolean));
+                    continue;
+                }
+                if (valueOptions.has(lower)) {
+                    i++;
+                    continue;
+                }
+                if (lower.startsWith('-')) continue;
+                paths.push(...token.split(',').map((item) => item.trim()).filter(Boolean));
+                continue;
+            }
+            if (lower === '--') {
+                paths.push(...tokens.slice(i + 1));
+                break;
+            }
+            if (lower.startsWith('--')) {
+                if (rmValueOptions.has(lower)) i++;
+                continue;
+            }
+            if (/^-[A-Za-z]+$/.test(token)) continue;
+            paths.push(token);
+        }
+        return paths;
+    }
+
+    private isUnsafeDeletePathToken(rawPath: string): boolean {
+        const value = rawPath.trim();
+        if (!value) return true;
+        if (value.startsWith('-')) return true;
+        if (/[\r\n]/.test(value)) return true;
+        if (/[*?]/.test(value)) return true;
+        if (/[|;&<>`]/.test(value)) return true;
+        return false;
     }
 
     private extractWrittenPathsFromBashCommand(command: unknown, cwd: string | undefined): string[] {
@@ -4124,31 +4326,154 @@ export class OpenCodeClient {
         this.queueTurnChanges(mainSessionId, turnKey, tmpKey, assistantId, changeSpecs);
     }
 
-    public async commitPendingTurnChanges(sessionId: string): Promise<void> {
-        if (!sessionId) return;
-        if (!this.gitUndoAvailable || !this.gitUndo) return;
-        if (!this.isSessionUndoEnabled(sessionId)) return;
+    private async setSessionBaseCommit(sessionId: string, turnKey: string, baseCommit: string, reason: string): Promise<boolean> {
+        if (!this.gitUndo) return false;
+        try {
+            const repo = await this.gitUndo['repoManager'].resolveRepo(sessionId, turnKey || sessionId);
+            const map = await this.gitUndo['mapStore'].loadSessionMap(sessionId, repo.repoId);
+            await this.gitUndo['mapStore'].saveSessionMap(sessionId, {
+                ...map,
+                currentBaseCommit: baseCommit
+            });
+            this.logUiDebug(`[EXT][COMMIT_BASE] update | sessionId=${sessionId} | base=${baseCommit} | reason=${reason}`);
+            return true;
+        } catch (error) {
+            this.logUiDebug(`[EXT][COMMIT_BASE] update.fail | sessionId=${sessionId} | base=${baseCommit} | reason=${reason} | err=${String(error)}`);
+            return false;
+        }
+    }
+
+    public async updateSessionBaseCommitAfterBind(sessionId: string, msgToCommit: string): Promise<boolean> {
+        if (!sessionId || !msgToCommit) {
+            this.logUiDebug(`[EXT][COMMIT_BASE] update.skip | sessionId=${sessionId || 'null'} | msgToCommit=${msgToCommit || 'null'} | reason=missing-input`);
+            return false;
+        }
+        return this.setSessionBaseCommit(sessionId, sessionId, msgToCommit, 'commit-bind-success');
+    }
+
+    private isConcreteAuthoritativePath(value: string): boolean {
+        const trimmed = typeof value === 'string' ? value.trim() : '';
+        if (!trimmed) return false;
+        if (trimmed.startsWith('-')) return false;
+        if (/[\r\n]/.test(trimmed)) return false;
+        if (/[*?]/.test(trimmed)) return false;
+        if (/[|;&<>`'"]/.test(trimmed)) return false;
+        return true;
+    }
+
+    private parseStatusPorcelainPath(line: string): string | undefined {
+        const raw = line.slice(3).trim();
+        if (!raw) return undefined;
+        const renameArrow = ' -> ';
+        const renameIndex = raw.indexOf(renameArrow);
+        const selected = renameIndex >= 0 ? raw.slice(renameIndex + renameArrow.length) : raw;
+        return selected.replace(/^"|"$/g, '').replace(/\\/g, '/');
+    }
+
+    private normalizeConcreteAuthoritativeFiles(authoritativeFiles: string[]): { normalized: string[]; rejectedCount: number } {
+        const concreteInputs = authoritativeFiles.filter((file) => this.isConcreteAuthoritativePath(file));
+        const normalized = normalizeTouchedFiles(this.workspaceRoot, concreteInputs).sort();
+        const rejectedCount = authoritativeFiles.length - normalized.length;
+        return { normalized, rejectedCount };
+    }
+
+    private async buildValidatedAuthoritativeChangeSpecs(sessionId: string, turnKey: string, authoritativeFiles: string[]): Promise<FileChangeSpec[]> {
+        const { normalized, rejectedCount } = this.normalizeConcreteAuthoritativeFiles(authoritativeFiles);
+        if (rejectedCount > 0) {
+            this.logUiDebug(`[EXT][TURN_COMMIT] auth.paths.reject | sessionId=${sessionId} | rejected=${rejectedCount}`);
+        }
+        if (!normalized.length || !this.gitUndo) return [];
+        const repo = await this.gitUndo['repoManager'].resolveRepo(sessionId, turnKey || sessionId);
+        const status = await runGit(repo, ['status', '--porcelain', '--untracked-files=all'], { paths: normalized });
+        const allowed = new Set(normalized);
+        const byPath = new Map<string, FileChangeSpec>();
+        for (const line of (status.stdout || '').split(/\r?\n/)) {
+            if (!line.trim()) continue;
+            const xy = line.slice(0, 2);
+            const statusPath = this.parseStatusPorcelainPath(line);
+            if (!statusPath || !allowed.has(statusPath)) continue;
+            if (xy.includes('D')) {
+                byPath.set(statusPath, { type: 'delete', path: statusPath });
+            } else if (xy === '??' || xy.includes('A')) {
+                byPath.set(statusPath, { type: 'create', path: statusPath });
+            } else if (xy.trim()) {
+                byPath.set(statusPath, { type: 'update', path: statusPath });
+            }
+        }
+        const specs = normalized.map((file) => byPath.get(file)).filter((spec): spec is FileChangeSpec => Boolean(spec));
+        this.logUiDebug(`[EXT][TURN_COMMIT] auth.validate | sessionId=${sessionId} | input=${authoritativeFiles.length} | normalized=${normalized.length} | delta=${specs.length}`);
+        return specs;
+    }
+
+    public async commitPendingTurnChanges(sessionId: string, options: CommitPendingTurnChangesOptions = {}): Promise<CommitPendingTurnChangesResult> {
+        if (!sessionId) {
+            return { status: 'skipped', reason: 'missing-session-id' };
+        }
+        this.logUiDebug(`[EXT][TURN_COMMIT] start | sessionId=${sessionId}`);
+        if (!this.gitUndoAvailable || !this.gitUndo) {
+            const result: CommitPendingTurnChangesResult = { status: 'skipped', reason: 'git-undo-unavailable' };
+            this.logUiDebug(`[EXT][TURN_COMMIT] result | sessionId=${sessionId} | status=${result.status} | reason=${result.reason}`);
+            return result;
+        }
+        if (!this.isSessionUndoEnabled(sessionId)) {
+            const result: CommitPendingTurnChangesResult = { status: 'skipped', reason: 'session-undo-disabled' };
+            this.logUiDebug(`[EXT][TURN_COMMIT] result | sessionId=${sessionId} | status=${result.status} | reason=${result.reason}`);
+            return result;
+        }
         const pending = this.pendingTurnChangesBySession.get(sessionId);
-        if (!pending?.changes?.length) return;
+        const hasPendingTurnChanges = Boolean(pending?.changes?.length);
+        const authoritativeFiles = Array.isArray(options.authoritativeFiles) ? options.authoritativeFiles : undefined;
+        const normalizedAuthoritativeFiles = authoritativeFiles
+            ? this.normalizeConcreteAuthoritativeFiles(authoritativeFiles).normalized
+            : [];
+        const hasAuthoritativeFiles = normalizedAuthoritativeFiles.length > 0;
+        if (!hasPendingTurnChanges && !hasAuthoritativeFiles) {
+            const result: CommitPendingTurnChangesResult = { status: 'noop', reason: 'no-pending-turn-changes' };
+            this.logUiDebug(`[EXT][TURN_COMMIT] result | sessionId=${sessionId} | status=${result.status} | reason=${result.reason}`);
+            return result;
+        }
         const state = this.turnStateBySession.get(sessionId);
-        const turnKey = pending.turnKey || state?.pendingUserLocalKey || sessionId;
-        const tmpKey = state?.pendingAssistantTmpKey || pending.tmpKey;
-        const assistantMsgId = state?.assistantMsgId || state?.lastResolvedAssistantMsgId || pending.lastAssistantMsgId;
+        const turnKey = pending?.turnKey || state?.pendingUserLocalKey || sessionId;
+        const tmpKey = state?.pendingAssistantTmpKey || pending?.tmpKey;
+        const assistantMsgId = state?.assistantMsgId || state?.lastResolvedAssistantMsgId || pending?.lastAssistantMsgId;
         const messageIndex = assistantMsgId ? this.messageIndexById.get(assistantMsgId) : undefined;
-        const merged = this.mergeChangeSpecs(pending.changes);
+        const merged = hasAuthoritativeFiles
+            ? await this.buildValidatedAuthoritativeChangeSpecs(sessionId, turnKey, normalizedAuthoritativeFiles)
+            : this.mergeChangeSpecs(pending?.changes || []);
+        if (hasAuthoritativeFiles) {
+            this.logUiDebug(`[EXT][TURN_COMMIT] auth.only | sessionId=${sessionId} | pendingSpecs=${pending?.changes?.length || 0} | commitSpecs=${merged.length}`);
+        }
+        if (!merged.length) {
+            const result: CommitPendingTurnChangesResult = {
+                status: 'noop',
+                reason: hasAuthoritativeFiles ? 'no-authoritative-git-delta' : 'no-pending-turn-changes'
+            };
+            this.logUiDebug(`[EXT][TURN_COMMIT] result | sessionId=${sessionId} | status=${result.status} | reason=${result.reason}`);
+            this.pendingTurnChangesBySession.delete(sessionId);
+            return result;
+        }
         // this.logUiDebug(`[DBG_TURN_COMMIT] session=${sessionId} turnKey=${turnKey} changes=${merged.length} assistantMsgId=${assistantMsgId || 'null'}`);
+        let msgToBaseCommit: string | undefined;
         try {
             try {
                 const repo = await this.gitUndo['repoManager'].resolveRepo(sessionId, turnKey || sessionId);
                 const map = await this.gitUndo['mapStore'].loadSessionMap(sessionId, repo.repoId);
-                const commitBase = map.currentBaseCommit || map.headCommit;
-                if (commitBase) {
-                    this.lastTurnCommitBaseBySession.set(sessionId, commitBase);
+                msgToBaseCommit = map.currentBaseCommit || map.headCommit;
+                if (msgToBaseCommit) {
+                    this.lastTurnCommitBaseBySession.set(sessionId, msgToBaseCommit);
                 }
-            } catch {
-                // Best effort only. Sidebar falls back to HEAD^ when unavailable.
+                this.logUiDebug(`[EXT][TURN_COMMIT] old-base | sessionId=${sessionId} | msgToBaseCommit=${msgToBaseCommit || 'null'}`);
+            } catch (error) {
+                const result: CommitPendingTurnChangesResult = { status: 'failed', reason: `old-base-read-failed:${String(error)}` };
+                this.logUiDebug(`[EXT][TURN_COMMIT] result | sessionId=${sessionId} | status=${result.status} | reason=${result.reason}`);
+                return result;
             }
-            await this.gitUndo.commitFileChanges(
+            if (!msgToBaseCommit) {
+                const result: CommitPendingTurnChangesResult = { status: 'failed', reason: 'old-session-base-unavailable' };
+                this.logUiDebug(`[EXT][TURN_COMMIT] result | sessionId=${sessionId} | status=${result.status} | reason=${result.reason}`);
+                return result;
+            }
+            const commitResult = await this.gitUndo.commitFileChanges(
                 sessionId,
                 turnKey,
                 tmpKey,
@@ -4156,8 +4481,29 @@ export class OpenCodeClient {
                 merged,
                 messageIndex
             );
+            if (!commitResult.commitHash) {
+                const status: CommitPendingTurnChangesResult['status'] = commitResult.touchedFiles.length ? 'noop' : 'skipped';
+                const result: CommitPendingTurnChangesResult = {
+                    status,
+                    msgToBaseCommit,
+                    reason: commitResult.touchedFiles.length ? 'no-commit-produced' : 'no-touched-files-or-baseline-not-ready',
+                    touchedFiles: commitResult.touchedFiles
+                };
+                this.logUiDebug(`[EXT][TURN_COMMIT] result | sessionId=${sessionId} | status=${result.status} | reason=${result.reason} | msgToBaseCommit=${msgToBaseCommit} | touchedFiles=${commitResult.touchedFiles.length}`);
+                return result;
+            }
+            await this.setSessionBaseCommit(sessionId, turnKey, msgToBaseCommit, 'awaiting-commit-bind');
+            const result: CommitPendingTurnChangesResult = {
+                status: 'committed',
+                msgToBaseCommit,
+                msgToCommit: commitResult.commitHash,
+                touchedFiles: commitResult.touchedFiles
+            };
+            this.logUiDebug(`[EXT][TURN_COMMIT] result | sessionId=${sessionId} | status=${result.status} | msgToBaseCommit=${msgToBaseCommit} | msgToCommit=${commitResult.commitHash} | touchedFiles=${commitResult.touchedFiles.length}`);
+            return result;
         } catch (error) {
-            this.logUiDebug(`commit.fail | sessionId=${sessionId} err=${String(error)}`);
+            this.logUiDebug(`[EXT][TURN_COMMIT] result | sessionId=${sessionId} | status=failed | reason=${String(error)} | msgToBaseCommit=${msgToBaseCommit || 'null'}`);
+            return { status: 'failed', msgToBaseCommit, reason: String(error) };
         } finally {
             this.pendingTurnChangesBySession.delete(sessionId);
         }
@@ -5247,7 +5593,7 @@ export class OpenCodeClient {
         retryOnAbort?: boolean;
         retryTimeoutMs?: number;
     } {
-        const messageMatch = /\/session\/[^/]+\/message(?:\?.*)?$/.test(reqPath);
+        const messageMatch = /\/session\/[^/]+\/message(?:\/[^/?]+)?(?:\?.*)?$/.test(reqPath);
         const promptAsyncMatch = /\/session\/[^/]+\/prompt_async(?:\?.*)?$/.test(reqPath);
         const summarizeMatch = /\/session\/[^/]+\/summarize(?:\?.*)?$/.test(reqPath);
         const sessionInfoMatch = /\/session\/[^/?]+(?:\?.*)?$/.test(reqPath);
@@ -8180,6 +8526,9 @@ export class OpenCodeClient {
             cwd: typeof session?.path?.cwd === 'string'
                 ? session.path.cwd
                 : (typeof session?.cwd === 'string' ? session.cwd : undefined),
+            parentID: typeof session?.parentID === 'string' && session.parentID
+                ? session.parentID
+                : undefined,
             updatedMs: typeof session?.time?.updated === 'number' ? session.time.updated : 0
         }));
         mapped.sort((a, b) => b.updatedMs - a.updatedMs);

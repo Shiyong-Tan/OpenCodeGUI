@@ -45,6 +45,16 @@ const flattenChanges = (changes: FileChangeSpec[]): FileChangeSpec[] => {
 
 const unique = (list: string[]): string[] => Array.from(new Set(list));
 
+const isCommandLikeTouchedPath = (value: string): boolean => {
+    const trimmed = typeof value === 'string' ? value.trim() : '';
+    if (!trimmed) return true;
+    if (trimmed.startsWith('-')) return true;
+    if (/[\r\n]/.test(trimmed)) return true;
+    if (/[*?]/.test(trimmed)) return true;
+    if (/[|;&<>`'"]/.test(trimmed)) return true;
+    return false;
+};
+
 export class GitUndoEngine {
     private readonly repoManager: GitRepoManager;
     private readonly mapStore: GitSessionMapStore;
@@ -410,6 +420,11 @@ export class GitUndoEngine {
                     continue;
                 }
                 if ('path' in item) {
+                    if (isCommandLikeTouchedPath(item.path)) {
+                        normalizationTrace.push(`path raw=${item.path} reason=command-like-rejected normalized=null`);
+                        this.logger(`commit.path.reject | sessionId=${sessionId} reason=command-like raw=${JSON.stringify(item.path)}`);
+                        continue;
+                    }
                     const explain = explainNormalizeRepoPath(this.workspaceRoot, item.path);
                     normalizationTrace.push(`path raw=${item.path} reason=${explain.reason} normalized=${explain.normalized || 'null'} abs=${explain.abs || 'null'} root=${explain.root || 'null'}`);
                     const normalized = explain.normalized;

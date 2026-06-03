@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as pathModule from "path";
-import { OpenCodeClient, ChatEvent, ModelInfo, SessionInfo, FileSnapshot, ConflictDetail, AgentInfo, ChatFilePart } from "./OpenCodeClient";
+import { OpenCodeClient, ChatEvent, ModelInfo, SessionInfo, FileSnapshot, ConflictDetail, AgentInfo, ChatFilePart, CommitPendingTurnChangesResult, AuthoritativeDiffFileSetResult } from "./OpenCodeClient";
 import { OpenCodeDiffProvider } from "./OpenCodeDiffProvider";
 import { GitRepoManager } from './undo/GitRepoManager';
 import { runGit } from './undo/GitRunner';
@@ -93,6 +93,17 @@ type SavedAttachment = {
     relPath: string;
 };
 
+type FinalizeTurnIdentity = {
+    sessionId: string;
+    reqId?: string;
+    clientMessageId?: string;
+    userMessageId?: string;
+    assistantMessageId?: string;
+    rootUserMessageId?: string;
+    latestAppendUserMessageId?: string;
+    commitResult?: CommitPendingTurnChangesResult;
+};
+
 type LocalQuestionRequest = {
     sessionId: string;
     resolve: (result: { selectedId?: string; selectedLabel?: string }) => void;
@@ -123,6 +134,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private client: OpenCodeClient;
     private currentSessionId?: string;
     private userOwnedSessionIds = new Set<string>();
+    private userOwnedSessionsLoaded: Promise<void>;
     private activeSubagentSessionIds = new Set<string>();
     private subagentProgressBySession = new Map<string, { taskId: string; parentSessionId: string; description: string; startedAt: number; title?: string; mode?: string; model?: string; providerId?: string; latestText?: string; latestTool?: string; latestToolInput?: string; isDone?: boolean; state?: SubagentLifecycleState; finishedAt?: number; dismissAt?: number; lastEventAt?: number; finalMessageId?: string; finalReason?: string }>();
     private readonly subagentDoneRetentionMs = 5000;
@@ -149,6 +161,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             this.userOwnedSessionIds.add(id);
             this._context.globalState.update(this.USER_OWNED_SESSIONS_KEY, JSON.stringify([...this.userOwnedSessionIds]));
         }
+    }
+
+    private async ensureUserOwnedSessionsLoaded(): Promise<void> {
+        await this.userOwnedSessionsLoaded;
     }
 
     private async loadUserOwnedSessions(): Promise<void> {
@@ -408,7 +424,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         });
         this.emitTurnFinalizePhase(webview, sessionId, 'stream_done');
         this.postMessageIndexMap(webview);
-        await this.client.commitPendingTurnChanges(sessionId);
+        const commitResult = await this.commitPendingTurnChangesFromAuthoritativeFiles(this.buildFinalizeTurnIdentity(sessionId, {
+            assistantMessageId: doneAssistantMsgId,
+            reqId: 'finalizeResolvedTurn'
+        }));
         if (doneAssistantMsgId) {
             await this.client.finalizeTurnBindingFromResolvedAssistant(sessionId, doneAssistantMsgId);
         }
@@ -420,11 +439,23 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             await this.client.consolidateCurrentContinuationOwner(sessionId);
         }
         this.postMessageIndexMap(webview);
-        await this.emitDiffFileListWithRetry(sessionId, webview);
+        const finalizeIdentity = this.buildFinalizeTurnIdentity(sessionId, {
+            assistantMessageId: doneAssistantMsgId,
+            commitResult,
+            reqId: 'finalizeResolvedTurn'
+        });
+        await this.emitDiffFileListWithRetry(finalizeIdentity, webview);
+        await this.writeFinalizeSnapshotFromCanonicalSession(finalizeIdentity);
         this.sendInFlightBySession.delete(sessionId);
         webview.postMessage({ type: 'turnInFlight', sessionId, inFlight: false });
         this.client.finishTurn(sessionId);
         this.emitTurnFinalizePhase(webview, sessionId, 'finalize_done');
+    }
+
+    private getRecentSessionIdForWorkspace(workspaceRoot: string | undefined): string | undefined {
+        if (!workspaceRoot) return undefined;
+        const workspaceKey = this.getWorkspaceKeyForRoot(workspaceRoot);
+        return this._context.globalState.get<string>(`recentSession.${workspaceKey}`);
     }
 
     private selectedModel?: string;
@@ -544,6 +575,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         for (let i = 0; i < checks; i++) {
             const candidate = sessions[i];
             if (!candidate?.id) continue;
+            if (candidate.parentID) continue;
             const matched = await this.sessionMatchesWorkspace(candidate.id, workspaceRoot);
             if (matched) {
                 return candidate;
@@ -557,43 +589,41 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         workspaceRoot: string | undefined,
         reason: string
     ): Promise<SessionInfo[]> {
+        await this.ensureUserOwnedSessionsLoaded();
         if (!workspaceRoot) {
-            const userOwnedSessions = sessions.filter(s => this.isUserOwnedSession(s.id));
+            const mainSessions = sessions.filter(s => !s.parentID);
+            const excludedChildSessions = sessions.length - mainSessions.length;
             this.uiDebugChannel.appendLine(
-                `[EXT][SESSION_LIST_FILTER] reason=${reason} workspace=null total=${sessions.length} userOwned=${userOwnedSessions.length} matched=${userOwnedSessions.length}`
+                `[EXT][SESSION_LIST_FILTER] reason=${reason} workspace=null total=${sessions.length} included=${mainSessions.length} mainIncluded=${mainSessions.length} excludedChildSessions=${excludedChildSessions}`
             );
-            return userOwnedSessions;
+            return mainSessions;
         }
 
         const filtered: SessionInfo[] = [];
-        let matched = 0;
-        let mismatch = 0;
+        let mainWorkspaceMatch = 0;
+        let mainWorkspaceMismatch = 0;
+        let mainWorkspaceUnknown = 0;
         let unknownIncluded = 0;
-        let unknownExcluded = 0;
-        let userOwned = 0;
+        let excludedChildSessions = 0;
         for (const session of sessions) {
-            const isUserOwned = this.isUserOwnedSession(session.id);
-            if (isUserOwned) {
-                userOwned++;
+            if (session.parentID) {
+                excludedChildSessions++;
+                continue;
             }
             const match = await this.getSessionWorkspaceMatch(session.id, workspaceRoot, session.cwd);
             if (match === 'match') {
                 filtered.push(session);
-                matched++;
+                mainWorkspaceMatch++;
             } else if (match === 'mismatch') {
-                mismatch++;
+                mainWorkspaceMismatch++;
             } else {
-                const hasWorkspaceSnapshot = fs.existsSync(this.getSnapshotFile(session.id));
-                if (hasWorkspaceSnapshot) {
-                    filtered.push(session);
-                    unknownIncluded++;
-                } else {
-                    unknownExcluded++;
-                }
+                filtered.push(session);
+                mainWorkspaceUnknown++;
+                unknownIncluded++;
             }
         }
         this.uiDebugChannel.appendLine(
-            `[EXT][SESSION_LIST_FILTER] reason=${reason} workspace=${workspaceRoot} total=${sessions.length} userOwned=${userOwned} included=${filtered.length} matched=${matched} mismatch=${mismatch} unknownIncluded=${unknownIncluded} unknownExcluded=${unknownExcluded}`
+            `[EXT][SESSION_LIST_FILTER] reason=${reason} workspace=${workspaceRoot} total=${sessions.length} included=${filtered.length} mainIncluded=${filtered.length} excludedChildSessions=${excludedChildSessions} mainWorkspaceMatch=${mainWorkspaceMatch} mainWorkspaceMismatch=${mainWorkspaceMismatch} mainWorkspaceUnknown=${mainWorkspaceUnknown} unknownIncluded=${unknownIncluded}`
         );
         return filtered;
     }
@@ -901,7 +931,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return survivors;
     }
 
-    private async upsertChangeList(sessionId: string, record: ChangeListRecord): Promise<void> {
+    private async upsertChangeList(sessionId: string, record: ChangeListRecord, options: { preserveAuthoritativeFiles?: boolean } = {}): Promise<void> {
         const resolvedAnchorMessageId = await this.resolveCurrentVisibleOwnerMessageId(sessionId, record.anchorMessageId);
         const nextRecord = {
             ...record,
@@ -920,13 +950,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 anchorMessageId: nextRecord.anchorMessageId || existingResolvedAnchorMessageId || existing.anchorMessageId
             };
         }
-        const collapsedRecords = await this.collapseOwnerChangeLists(
-            sessionId,
-            records,
-            nextRecord.anchorMessageId,
-            nextRecord
-        );
-        await this.writeChangeLists(sessionId, collapsedRecords);
+        const recordsToWrite = options.preserveAuthoritativeFiles
+            ? records
+            : await this.collapseOwnerChangeLists(
+                sessionId,
+                records,
+                nextRecord.anchorMessageId,
+                nextRecord
+            );
+        await this.writeChangeLists(sessionId, recordsToWrite);
         const persisted = await this.readChangeLists(sessionId);
         const persistedHit = persisted.some((item) => item.id === nextRecord.id);
         this.uiDebugChannel.appendLine(
@@ -995,23 +1027,83 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const idSet = new Set(messages.map((m) => m.id).filter((id): id is string => typeof id === 'string'));
         const byAnchor = new Map<string, ChangeListRecord[]>();
         const byId = new Map<string, ChangeListRecord>();
+        const ownershipMap = await this.readPersistedSessionMap(sessionId);
+        const counts = {
+            read: records.length,
+            injectedByResolvedAnchor: 0,
+            convertedByExistingId: 0,
+            skippedMissingAnchor: 0,
+            skippedDuplicate: 0
+        };
+        const collectStringCandidates = (value: unknown, out: string[] = []): string[] => {
+            if (typeof value === 'string' && value.length > 0) {
+                out.push(value);
+            } else if (Array.isArray(value)) {
+                for (const item of value) collectStringCandidates(item, out);
+            } else if (value && typeof value === 'object') {
+                for (const item of Object.values(value as Record<string, unknown>)) collectStringCandidates(item, out);
+            }
+            return out;
+        };
+        const resolveRecordAnchor = (record: ChangeListRecord): string | undefined => {
+            const rawRecord = record as ChangeListRecord & Record<string, unknown>;
+            const meta = rawRecord.metadata || rawRecord.meta;
+            const candidates = [
+                record.anchorMessageId,
+                rawRecord.ownerMsgId,
+                rawRecord.ownerMessageId,
+                rawRecord.currentOwnerMsgId,
+                rawRecord.currentOwnerMessageId,
+                rawRecord.finalAssistantMsgId,
+                rawRecord.assistantMsgId,
+                rawRecord.assistantMessageId,
+                rawRecord.messageId,
+                rawRecord.msgId,
+                ...collectStringCandidates(meta)
+            ].filter((id): id is string => typeof id === 'string' && id.length > 0);
+            const seen = new Set<string>();
+            for (const candidate of candidates) {
+                if (seen.has(candidate)) continue;
+                seen.add(candidate);
+                const resolved = resolveCurrentVisibleOwnerMsgId(ownershipMap, candidate) || candidate;
+                if (idSet.has(resolved)) return resolved;
+                if (idSet.has(candidate)) return candidate;
+            }
+            return undefined;
+        };
         for (const record of records) {
-            const resolvedAnchor = await this.resolveCurrentVisibleOwnerMessageId(sessionId, record.anchorMessageId) || record.anchorMessageId;
-            const effectiveRecord = resolvedAnchor !== record.anchorMessageId
+            const resolvedAnchor = resolveRecordAnchor(record);
+            const effectiveRecord = resolvedAnchor && resolvedAnchor !== record.anchorMessageId
                 ? { ...record, anchorMessageId: resolvedAnchor }
                 : record;
-            if (effectiveRecord.id) {
+            if (effectiveRecord.id && idSet.has(effectiveRecord.id)) {
+                if (byId.has(effectiveRecord.id)) {
+                    counts.skippedDuplicate++;
+                    continue;
+                }
                 byId.set(effectiveRecord.id, effectiveRecord);
-            }
-            if (!effectiveRecord.anchorMessageId || !idSet.has(effectiveRecord.anchorMessageId)) {
+                counts.convertedByExistingId++;
                 continue;
             }
-            if (!byAnchor.has(effectiveRecord.anchorMessageId)) {
-                byAnchor.set(effectiveRecord.anchorMessageId, []);
+            if (!resolvedAnchor || !idSet.has(resolvedAnchor)) {
+                if (!effectiveRecord.id || !idSet.has(effectiveRecord.id)) {
+                    counts.skippedMissingAnchor++;
+                    this.uiDebugChannel.appendLine(
+                        `[EXT][CHANGELIST_INJECT_SKIP] sessionId=${sessionId} changeListId=${record.id || 'null'} anchor=${record.anchorMessageId || 'null'} resolvedAnchor=${resolvedAnchor || 'null'} reason=missing-resolvable-anchor`
+                    );
+                }
+                continue;
             }
-            byAnchor.get(effectiveRecord.anchorMessageId)?.push(effectiveRecord);
+            if (!byAnchor.has(resolvedAnchor)) {
+                byAnchor.set(resolvedAnchor, []);
+            }
+            byAnchor.get(resolvedAnchor)?.push(effectiveRecord);
+            counts.injectedByResolvedAnchor++;
         }
-        if (!byAnchor.size) return formatted;
+        this.uiDebugChannel.appendLine(
+            `[EXT][CHANGELIST_INJECT] sessionId=${sessionId} read=${counts.read} injectedByResolvedAnchor=${counts.injectedByResolvedAnchor} convertedByExistingId=${counts.convertedByExistingId} skippedMissingAnchor=${counts.skippedMissingAnchor} skippedDuplicate=${counts.skippedDuplicate}`
+        );
+        if (!byAnchor.size && !byId.size) return formatted;
 
         for (const list of byAnchor.values()) {
             list.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
@@ -1032,7 +1124,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             ...(message.meta || {}),
                             kind: 'changeList',
                             files: bound.files,
-                            source: 'git',
+                            source: 'message-summary-diffs',
                             scope: 'turn',
                             commitHead: bound.commitHead,
                             commitBase: bound.commitBase,
@@ -1061,7 +1153,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     meta: {
                         kind: 'changeList',
                         files: record.files,
-                        source: 'git',
+                        source: 'message-summary-diffs',
                         scope: 'turn',
                         commitHead: record.commitHead,
                         commitBase: record.commitBase,
@@ -1417,48 +1509,60 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private async handleSnapshotTimelineIds(payload: any): Promise<void> {
-        if (!payload || !payload.sessionId || !Array.isArray(payload.timelineIds)) {
-            this.uiDebugChannel.appendLine('[EXT][SNAPSHOT_TIMELINE] Invalid payload, ignoring');
+        if (!payload || typeof payload.sessionId !== 'string' || !payload.sessionId) {
+            this.uiDebugChannel.appendLine(`[EXT][SNAPSHOT_ROUTE] reason=missing-session currentSessionId=${this.currentSessionId || 'null'}`);
             return;
         }
         const { sessionId } = payload;
         const payloadTimelineIds = Array.isArray(payload.timelineIds)
             ? payload.timelineIds.filter((id: unknown): id is string => typeof id === 'string' && Boolean(id))
             : [];
-        if (sessionId !== this.currentSessionId) {
-            this.uiDebugChannel.appendLine(`[EXT][SNAPSHOT_TIMELINE] Session mismatch, ignoring (current=${this.currentSessionId}, received=${sessionId})`);
-            return;
-        }
+        const source = typeof payload.source === 'string' ? payload.source : 'webview-render';
+        const reason = typeof payload.reason === 'string' ? payload.reason : 'legacy-webview-snapshotTimelineIds';
+        this.uiDebugChannel.appendLine(
+            `[EXT][SNAPSHOT_ROUTE] sessionId=${sessionId} currentSessionId=${this.currentSessionId || 'null'} reason=drop-switch-readonly source=${source} payloadReason=${reason} timelineCount=${payloadTimelineIds.length}`
+        );
+    }
+
+    private async writeFinalizeSnapshotFromCanonicalSession(identity: FinalizeTurnIdentity, title?: string): Promise<void> {
+        const sessionId = identity?.sessionId;
+        if (!sessionId) return;
         try {
-            const incomingMessages = Array.isArray(payload.visibleMessages)
-                ? payload.visibleMessages.filter((message: any): message is SessionMessage => {
+            const exportData = await this.client.exportSession(sessionId);
+            const formatted = this.formatSession(exportData);
+            const canonicalMessages = Array.isArray(formatted.messages)
+                ? formatted.messages.filter((message): message is SessionMessage => {
+                    const id = typeof message?.id === 'string' ? message.id : '';
                     const role = message?.role;
-                    return !!message
-                        && typeof message.id === 'string'
+                    return id.startsWith('msg_')
+                        && !id.startsWith('local-')
+                        && !id.startsWith('tmp:')
                         && (role === 'user' || role === 'assistant' || role === 'system');
                 })
                 : [];
-            const canonicalTimelineIds = incomingMessages
-                .map((message: SessionMessage) => (typeof message.id === 'string' ? message.id : ''))
-                .filter((id: string): id is string => Boolean(id));
-            const timelineIds = canonicalTimelineIds.length > 0 ? canonicalTimelineIds : payloadTimelineIds;
-            if (timelineIds.some((id: string) => id.startsWith('local-') || id.startsWith('tmp:'))) {
+            const timelineIds = Array.from(new Set(
+                canonicalMessages
+                    .map((message) => (typeof message.id === 'string' ? message.id : ''))
+                    .filter((id): id is string => id.startsWith('msg_') && !id.startsWith('local-') && !id.startsWith('tmp:'))
+            ));
+            if (!timelineIds.length || !canonicalMessages.length) {
                 this.uiDebugChannel.appendLine(
-                    `[EXT][SNAPSHOT_SKIP] sessionId=${sessionId} reason=unresolved-local-id first10=${timelineIds.slice(0, 10).join(',')}`
+                    `[EXT][SNAPSHOT_ROUTE] reason=finalize-owned-skip source=finalize-extension sessionId=${sessionId} activeSessionId=${this.currentSessionId || 'null'} timelineCount=${timelineIds.length} messageCount=${canonicalMessages.length} userMessageId=${identity.userMessageId || 'null'} assistantMessageId=${identity.assistantMessageId || 'null'} webviewSnapshotTimelineIdsRequired=false detail=empty-canonical-export`
                 );
                 return;
             }
+            const snapshotTitle = typeof title === 'string' && title.trim()
+                ? title
+                : formatted.title;
+            const bytes = await this.appendSnapshotIncremental(sessionId, timelineIds, canonicalMessages, snapshotTitle);
             this.uiTimelineBySession.set(sessionId, timelineIds);
             this.uiDebugChannel.appendLine(
-                `[EXT][SNAPSHOT_TIMELINE] sessionId=${sessionId}, count=${timelineIds.length}, first10=${timelineIds.slice(0, 10).join(',')} source=${canonicalTimelineIds.length > 0 ? 'visibleMessages' : 'payloadTimelineIds'}`
-            );
-            const incomingTitle = typeof payload.title === 'string' ? payload.title : undefined;
-            await this.appendSnapshotIncremental(sessionId, timelineIds, incomingMessages, incomingTitle);
-            this.uiDebugChannel.appendLine(
-                `[EXT][SNAPSHOT_WRITTEN] sessionId=${sessionId}, timelineCount=${timelineIds.length}, visibleMessages=${incomingMessages.length}`
+                `[EXT][SNAPSHOT_ROUTE] reason=finalize-owned-write source=finalize-extension sessionId=${sessionId} activeSessionId=${this.currentSessionId || 'null'} timelineCount=${timelineIds.length} messageCount=${canonicalMessages.length} userMessageId=${identity.userMessageId || 'null'} assistantMessageId=${identity.assistantMessageId || 'null'} webviewSnapshotTimelineIdsRequired=false bytes=${bytes}`
             );
         } catch (error) {
-            this.uiDebugChannel.appendLine(`[EXT][SNAPSHOT_WRITE_ERROR] ${String(error)}`);
+            this.uiDebugChannel.appendLine(
+                `[EXT][SNAPSHOT_ROUTE] reason=finalize-owned-error source=finalize-extension sessionId=${sessionId} activeSessionId=${this.currentSessionId || 'null'} userMessageId=${identity.userMessageId || 'null'} assistantMessageId=${identity.assistantMessageId || 'null'} webviewSnapshotTimelineIdsRequired=false err=${String(error)}`
+            );
         }
     }
 
@@ -1727,38 +1831,140 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return stats;
     }
 
-    private async emitDiffFileList(sessionId: string, webview: vscode.Webview): Promise<void> {
+    private isResolvableMessageId(messageId: string | undefined): messageId is string {
+        return typeof messageId === 'string'
+            && messageId.startsWith('msg_')
+            && !messageId.startsWith('local-')
+            && !messageId.startsWith('tmp:');
+    }
+
+    private buildFinalizeTurnIdentity(sessionId: string, partial: Partial<FinalizeTurnIdentity> = {}): FinalizeTurnIdentity {
+        const rootUserMessageId = partial.rootUserMessageId
+            || (typeof (this.client as any).getAppendRootUserMsgId === 'function' ? this.client.getAppendRootUserMsgId(sessionId) : undefined)
+            || (typeof (this.client as any).getCurrentTurnUserMsgId === 'function' ? this.client.getCurrentTurnUserMsgId(sessionId) : undefined);
+        const latestAppendUserMessageId = partial.latestAppendUserMessageId
+            || (typeof (this.client as any).getLatestAppendUserMsgId === 'function' ? this.client.getLatestAppendUserMsgId(sessionId) : undefined);
+        const userMessageId = partial.userMessageId
+            || latestAppendUserMessageId
+            || rootUserMessageId
+            || (typeof (this.client as any).getCurrentTurnUserMsgId === 'function' ? this.client.getCurrentTurnUserMsgId(sessionId) : undefined);
+        const assistantMessageId = partial.assistantMessageId
+            || (typeof (this.client as any).getTurnAssistantMsgId === 'function' ? this.client.getTurnAssistantMsgId(sessionId) : undefined);
+        return {
+            ...partial,
+            sessionId,
+            userMessageId,
+            assistantMessageId,
+            rootUserMessageId: rootUserMessageId || userMessageId,
+            latestAppendUserMessageId
+        };
+    }
+
+    private async resolveAuthoritativeFilesForCommit(identityInput: FinalizeTurnIdentity | string): Promise<AuthoritativeDiffFileSetResult> {
+        const identity = typeof identityInput === 'string'
+            ? this.buildFinalizeTurnIdentity(identityInput)
+            : identityInput;
+        const sessionId = identity.sessionId;
+        const rootUserMessageId = identity.rootUserMessageId || identity.userMessageId;
+        const latestAppendUserMessageId = identity.latestAppendUserMessageId;
+        const hasAuthoritativeHelper = typeof (this.client as any).getAuthoritativeDiffFileSet === 'function';
+        if (!hasAuthoritativeHelper || !sessionId) {
+            this.uiDebugChannel?.appendLine(`[EXT][AUTH_DIFF] commit.resolve.skip | sessionId=${sessionId || 'null'} | reason=helper-unavailable`);
+            return { files: [], queriedIds: [], missingIds: [], source: 'message-summary-diffs' };
+        }
+        if (!this.isResolvableMessageId(rootUserMessageId) && !this.isResolvableMessageId(latestAppendUserMessageId)) {
+            this.uiDebugChannel?.appendLine(`[EXT][AUTH_DIFF] commit.resolve.skip | sessionId=${sessionId} | reason=missing-resolvable-message-id | userMessageId=${identity.userMessageId || 'null'} | rootUserMessageId=${rootUserMessageId || 'null'} | latestAppendUserMessageId=${latestAppendUserMessageId || 'null'}`);
+            return { files: [], queriedIds: [], missingIds: [], source: 'message-summary-diffs' };
+        }
+        const result = await this.client.getAuthoritativeDiffFileSet({
+            sessionId,
+            rootUserMessageId: this.isResolvableMessageId(rootUserMessageId) ? rootUserMessageId : undefined,
+            latestAppendUserMessageId: this.isResolvableMessageId(latestAppendUserMessageId) ? latestAppendUserMessageId : undefined
+        });
+        this.uiDebugChannel?.appendLine(`[EXT][AUTH_DIFF] commit.resolve | sessionId=${sessionId} | queriedIds=${result.queriedIds.join(',') || 'none'} | authCount=${result.files.length} | source=${result.source}`);
+        return result;
+    }
+
+    private async commitPendingTurnChangesFromAuthoritativeFiles(identityInput: FinalizeTurnIdentity | string): Promise<CommitPendingTurnChangesResult> {
+        const identity = typeof identityInput === 'string'
+            ? this.buildFinalizeTurnIdentity(identityInput)
+            : identityInput;
+        const authResult = await this.resolveAuthoritativeFilesForCommit(identity);
+        return this.client.commitPendingTurnChanges(identity.sessionId, { authoritativeFiles: authResult.files });
+    }
+
+    private async emitDiffFileList(identityInput: FinalizeTurnIdentity | string, webview: vscode.Webview): Promise<void> {
+        const identity = typeof identityInput === 'string'
+            ? this.buildFinalizeTurnIdentity(identityInput)
+            : identityInput;
+        const sessionId = identity.sessionId;
         if (!this.gitUndoEnabled || !sessionId) return;
         const repo = await this.resolveInternalRepo(sessionId);
         if (!repo) return;
-        let headCommit: string | null = null;
-        let baseCommit: string | null = null;
-        const turnCommitBase = this.client.getLastTurnCommitBase(sessionId) || null;
+        let displayHeadCommit: string | null = null;
+        let displayBaseCommit: string | null = null;
+        const commitResult = identity.commitResult;
+        const canBindCommit = commitResult?.status === 'committed'
+            && !!commitResult.msgToBaseCommit
+            && !!commitResult.msgToCommit;
+        const bindBaseCommit = canBindCommit ? commitResult!.msgToBaseCommit! : null;
+        const bindHeadCommit = canBindCommit ? commitResult!.msgToCommit! : null;
+        const turnCommitBase = commitResult?.msgToBaseCommit || this.client.getLastTurnCommitBase(sessionId) || null;
         for (let attempt = 0; attempt < 5; attempt++) {
-            headCommit = await this.getInternalHeadCommit(repo);
-            if (headCommit && turnCommitBase) {
-                baseCommit = turnCommitBase;
-            } else if (headCommit) {
-                baseCommit = await this.getInternalParentCommit(repo, headCommit);
+            displayHeadCommit = bindHeadCommit || await this.getInternalHeadCommit(repo);
+            if (displayHeadCommit && turnCommitBase) {
+                displayBaseCommit = turnCommitBase;
+            } else if (displayHeadCommit) {
+                displayBaseCommit = await this.getInternalParentCommit(repo, displayHeadCommit);
             }
-            if (headCommit && baseCommit) break;
+            if (displayHeadCommit && displayBaseCommit) break;
             await this.waitMs(100);
         }
-        if (headCommit && !baseCommit) {
+        if (displayHeadCommit && !displayBaseCommit) {
             this.uiDebugChannel.appendLine('EXT: diff.skip | reason=baseline-only');
             return;
         }
-        if (!headCommit || !baseCommit) {
+        if (!displayHeadCommit || !displayBaseCommit) {
             return;
         }
-        const currentSet = await this.getInternalDiffFileSet(repo, baseCommit, headCommit);
-        const files = Array.from(currentSet);
+        if (commitResult && !canBindCommit) {
+            this.uiDebugChannel?.appendLine(`[EXT][COMMIT_BIND] suppress | sessionId=${sessionId} | status=${commitResult.status} | reason=${commitResult.reason || 'no-committed-result'} | msgToBaseCommit=${commitResult.msgToBaseCommit || 'null'} | msgToCommit=${commitResult.msgToCommit || 'null'}`);
+        } else if (!commitResult) {
+            this.uiDebugChannel?.appendLine(`[EXT][COMMIT_BIND] suppress | sessionId=${sessionId} | reason=missing-commit-result | displayHead=${displayHeadCommit} | displayBase=${displayBaseCommit}`);
+        }
+        const currentSet = await this.getInternalDiffFileSet(repo, displayBaseCommit, displayHeadCommit);
+        const gitDiffFiles = Array.from(currentSet).sort();
+        const rootUserMessageId = identity.rootUserMessageId || identity.userMessageId;
+        const latestAppendUserMessageId = identity.latestAppendUserMessageId;
+        const assistantMessageId = identity.assistantMessageId;
+        const hasAuthoritativeHelper = typeof (this.client as any).getAuthoritativeDiffFileSet === 'function';
+        if ((!this.isResolvableMessageId(rootUserMessageId) || !this.isResolvableMessageId(assistantMessageId)) && hasAuthoritativeHelper) {
+            this.uiDebugChannel?.appendLine(`[EXT][TURN_BIND] phase=defer_diff_list | sessionId=${sessionId} | reqId=${identity.reqId || 'null'} | reason=missing-final-bind | userMessageId=${identity.userMessageId || 'null'} | assistantMessageId=${assistantMessageId || 'null'} | rootUserMessageId=${rootUserMessageId || 'null'} | latestAppendUserMessageId=${latestAppendUserMessageId || 'null'}`);
+            return;
+        }
+        const authResult = hasAuthoritativeHelper
+            ? await this.client.getAuthoritativeDiffFileSet({
+                sessionId,
+                rootUserMessageId,
+                latestAppendUserMessageId: this.isResolvableMessageId(latestAppendUserMessageId) ? latestAppendUserMessageId : undefined
+            })
+            : {
+                files: gitDiffFiles,
+                queriedIds: [] as string[],
+                missingIds: [] as string[],
+                source: 'message-summary-diffs' as const
+            };
+        if (!hasAuthoritativeHelper) {
+            this.uiDebugChannel?.appendLine(`[EXT][AUTH_DIFF] detail.drop | sessionId=${sessionId} | reason=helper-unavailable-test-double | fallback=git-diff`);
+        }
+        const files = authResult.files;
+        this.uiDebugChannel?.appendLine(`[EXT][AUTH_DIFF] compare | sessionId=${sessionId} | queriedIds=${authResult.queriedIds.join(',') || 'none'} | authCount=${files.length} | gitDiffCount=${gitDiffFiles.length} | source=${authResult.source}`);
         if (!files.length) return;
         const alreadyEmitted = this.client.wasChangeListEmitted(sessionId);
         const lastEmittedHead = this.lastEmittedChangeListHeadBySession.get(sessionId);
-        if (alreadyEmitted && lastEmittedHead === headCommit) {
+        if (alreadyEmitted && lastEmittedHead === displayHeadCommit) {
             this.uiDebugChannel.appendLine(
-                `[LATE_DIFF] change-list already emitted for same head | sessionId=${sessionId} head=${headCommit} skipping=true`
+                `[LATE_DIFF] change-list already emitted for same head | sessionId=${sessionId} head=${displayHeadCommit} skipping=true`
             );
             return;
         }
@@ -1768,23 +1974,43 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
         } else {
             this.uiDebugChannel.appendLine(
-                `[LATE_DIFF] re-emitting change-list for advanced head | sessionId=${sessionId} prevHead=${lastEmittedHead || 'null'} nextHead=${headCommit}`
+                `[LATE_DIFF] re-emitting change-list for advanced head | sessionId=${sessionId} prevHead=${lastEmittedHead || 'null'} nextHead=${displayHeadCommit}`
             );
         }
-        files.sort();
-        const statsByPath = await this.getInternalDiffStats(repo, baseCommit, headCommit);
+        const statsByPath = await this.getInternalDiffStats(repo, displayBaseCommit, displayHeadCommit);
         const existingRecords = await this.readChangeLists(sessionId);
-        const matchedExisting = existingRecords.find((item) => item.commitHead === headCommit);
+        const matchedExisting = existingRecords.find((item) => item.commitHead === displayHeadCommit);
         const ownershipMap = await this.readPersistedSessionMap(sessionId);
-        const liveAnchor = this.client.getTurnAssistantMsgId(sessionId);
+        const currentTurnAnchorCandidates = new Set<string>();
+        for (const candidate of [assistantMessageId, latestAppendUserMessageId, rootUserMessageId, identity.userMessageId]) {
+            if (this.isResolvableMessageId(candidate)) {
+                currentTurnAnchorCandidates.add(candidate);
+            }
+        }
+        const matchedExistingAnchorMessageId = matchedExisting?.anchorMessageId;
+        const resolvedMatchedExistingAnchorMessageId = matchedExistingAnchorMessageId
+            ? await this.resolveCurrentVisibleOwnerMessageId(sessionId, matchedExistingAnchorMessageId)
+            : undefined;
+        const existingAnchorMatchesCurrentTurn = !!matchedExistingAnchorMessageId && (
+            currentTurnAnchorCandidates.has(matchedExistingAnchorMessageId)
+            || (!!resolvedMatchedExistingAnchorMessageId && currentTurnAnchorCandidates.has(resolvedMatchedExistingAnchorMessageId))
+        );
+        const anchorSeedMessageId = assistantMessageId
+            || (existingAnchorMatchesCurrentTurn ? (resolvedMatchedExistingAnchorMessageId || matchedExistingAnchorMessageId) : undefined)
+            || latestAppendUserMessageId
+            || rootUserMessageId
+            || identity.userMessageId
+            || undefined;
         const anchorMessageId = await this.resolveCurrentVisibleOwnerMessageId(
             sessionId,
-            matchedExisting?.anchorMessageId || liveAnchor || undefined
+            anchorSeedMessageId
         );
         let mergedFiles = [...files];
         let mergedStatsByPath = { ...statsByPath };
-        let changeListId = headCommit ? `system:changeList:${headCommit}` : `changes:${Date.now()}`;
-        const postFinalOverlay = this.client.getPostFinalWatchOverlay(sessionId);
+        let changeListId = displayHeadCommit ? `system:changeList:${displayHeadCommit}` : `changes:${Date.now()}`;
+        const postFinalOverlay = typeof (this.client as any).getPostFinalWatchOverlay === 'function'
+            ? this.client.getPostFinalWatchOverlay(sessionId)
+            : { files: [], statsByPath: {} };
         const currentOwnerMsgId = ownershipMap?.continuation?.currentOwnerMsgId;
         const predecessorOwnerMsgId = ownershipMap?.continuation?.predecessorOwnerMsgId;
         const currentOwnerIsContinuation = Array.isArray(ownershipMap?.entries)
@@ -1807,7 +2033,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 const primary = recordsForOwner.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))[0];
                 changeListId = primary.id || changeListId;
                 const orderedFiles = [
-                    ...recordsForOwner.flatMap((record) => Array.isArray(record.files) ? record.files : []),
                     ...files
                 ].filter((item): item is string => typeof item === 'string' && item.length > 0);
                 mergedFiles = Array.from(new Set(orderedFiles));
@@ -1826,72 +2051,74 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 || postFinalOverlay.ownerMsgId === currentOwnerMsgId
             );
         if (overlayApplies) {
-            mergedFiles = Array.from(new Set([...mergedFiles, ...postFinalOverlay.files]));
             mergedStatsByPath = {
                 ...postFinalOverlay.statsByPath,
                 ...mergedStatsByPath
             };
         }
-        this.uiDebugChannel?.appendLine(`[EXT][COMMIT_BIND] created | sessionId=${sessionId} commit=${headCommit} anchor=${anchorMessageId || 'null'} isMsg=${anchorMessageId?.startsWith('msg_') || false} source=${matchedExisting?.anchorMessageId ? 'existing-record' : 'live-turn'}`);
+        this.uiDebugChannel?.appendLine(`[EXT][COMMIT_BIND] created | sessionId=${sessionId} anchorMessageId=${anchorMessageId || 'null'} userMessageId=${identity.userMessageId || 'null'} assistantMessageId=${assistantMessageId || 'null'} rootUserMessageId=${rootUserMessageId || 'null'} latestAppendUserMessageId=${latestAppendUserMessageId || 'null'} displayHead=${displayHeadCommit} displayBase=${displayBaseCommit} msgToCommit=${bindHeadCommit || 'null'} msgToBaseCommit=${bindBaseCommit || 'null'} bind=${String(canBindCommit)} fileCount=${mergedFiles.length} source=${authResult.source}`);
         webview.postMessage({
             type: 'diffFileList',
             sessionId,
             files: mergedFiles,
-            source: 'git',
+            source: authResult.source,
             scope: 'turn',
-            commitHead: headCommit,
-            commitBase: baseCommit,
+            commitHead: displayHeadCommit,
+            commitBase: displayBaseCommit,
             statsByPath: mergedStatsByPath,
             anchorMessageId,
             changeListId
         });
-        if (anchorMessageId && headCommit && baseCommit) {
+        if (anchorMessageId && canBindCommit && bindHeadCommit && bindBaseCommit) {
             await this.upsertChangeList(sessionId, {
                 id: changeListId,
-                commitHead: headCommit,
-                commitBase: baseCommit,
+                commitHead: bindHeadCommit,
+                commitBase: bindBaseCommit,
                 files: mergedFiles,
                 statsByPath: mergedStatsByPath,
                 anchorMessageId,
                 createdAt: Date.now()
-            });
-            this.uiDebugChannel?.appendLine(`[EXT][COMMIT_BIND] bound | changeListId=${changeListId} anchor=${anchorMessageId} isMsg=${anchorMessageId.startsWith('msg_')} commitHead=${headCommit}`);
+            }, { preserveAuthoritativeFiles: true });
+            this.uiDebugChannel?.appendLine(`[EXT][COMMIT_BIND] bound | sessionId=${sessionId} | changeListId=${changeListId} | anchorMessageId=${anchorMessageId} | userMessageId=${identity.userMessageId || 'null'} | assistantMessageId=${assistantMessageId} | rootUserMessageId=${rootUserMessageId} | latestAppendUserMessageId=${latestAppendUserMessageId || 'null'} | msgToCommit=${bindHeadCommit} | msgToBaseCommit=${bindBaseCommit} | fileCount=${mergedFiles.length}`);
+            await this.client.updateSessionBaseCommitAfterBind(sessionId, bindHeadCommit);
+        } else {
+            this.uiDebugChannel?.appendLine(`[EXT][COMMIT_BIND] not-bound | sessionId=${sessionId} | anchorMessageId=${anchorMessageId || 'null'} | bind=${String(canBindCommit)} | status=${commitResult?.status || 'missing'} | reason=${commitResult?.reason || 'no-committed-result'}`);
         }
-        this.lastEmittedChangeListHeadBySession.set(sessionId, headCommit);
-        this.uiDebugChannel?.appendLine(`[EXT][DIFF_LIST] sessionId=${sessionId} count=${files.length} anchor=${anchorMessageId || 'null'}`);
+        this.lastEmittedChangeListHeadBySession.set(sessionId, displayHeadCommit);
+        this.uiDebugChannel?.appendLine(`[EXT][DIFF_LIST] sessionId=${sessionId} count=${files.length} anchor=${anchorMessageId || 'null'} source=${authResult.source}`);
     }
 
     /**
      * Wrapper for emitDiffFileList that retries until anchor message ID is ready.
      * Prevents race condition where anchor is still tmp: during finalization.
      */
-    private async emitDiffFileListWithRetry(sessionId: string, webview: vscode.Webview): Promise<void> {
+    private async emitDiffFileListWithRetry(identity: FinalizeTurnIdentity, webview: vscode.Webview): Promise<void> {
         const maxAttempts = 5;
         const delayMs = 50;
+        const sessionId = identity.sessionId;
         
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-            const anchorMessageId = this.client.getTurnAssistantMsgId(sessionId);
+            const anchorMessageId = identity.assistantMessageId || this.client.getTurnAssistantMsgId(sessionId);
             const isReady = anchorMessageId && 
                            !anchorMessageId.startsWith('tmp:') && 
-                           !anchorMessageId.startsWith('local-');
+                           !anchorMessageId.startsWith('local-') &&
+                           anchorMessageId.startsWith('msg_');
             
             if (isReady) {
                 this.uiDebugChannel?.appendLine(`[EXT][DIFF_LIST] anchor ready | attempt=${attempt}/${maxAttempts} anchor=${anchorMessageId}`);
-                await this.emitDiffFileList(sessionId, webview);
+                await this.emitDiffFileList({ ...identity, assistantMessageId: anchorMessageId }, webview);
                 return;
             }
             
-            this.uiDebugChannel?.appendLine(`[EXT][DIFF_LIST] anchor not ready | attempt=${attempt}/${maxAttempts} anchor=${anchorMessageId || 'null'} reason=${!anchorMessageId ? 'missing' : 'tmp/local'}`);
+            this.uiDebugChannel?.appendLine(`[EXT][TURN_BIND] phase=defer_diff_list | attempt=${attempt}/${maxAttempts} | sessionId=${sessionId} | reqId=${identity.reqId || 'null'} | anchor=${anchorMessageId || 'null'} | reason=${!anchorMessageId ? 'missing' : 'tmp/local/non-msg'}`);
             
             if (attempt < maxAttempts) {
                 await this.waitMs(delayMs);
             }
         }
         
-        // Max retries exceeded - emit anyway to avoid blocking turn completion
-        const finalAnchor = this.client.getTurnAssistantMsgId(sessionId);
-        this.uiDebugChannel?.appendLine(`[EXT][DIFF_LIST] max retries exceeded | emitting anyway | anchor=${finalAnchor || 'null'}`);
-        await this.emitDiffFileList(sessionId, webview);
+        const finalAnchor = identity.assistantMessageId || this.client.getTurnAssistantMsgId(sessionId);
+        this.uiDebugChannel?.appendLine(`[EXT][TURN_BIND] phase=defer_diff_list | sessionId=${sessionId} | reqId=${identity.reqId || 'null'} | reason=max-retries-final-bind-missing | anchor=${finalAnchor || 'null'}`);
     }
 
     private async getFileTextAtCommit(repo: GitRepoRef, commit: string, relativePath: string): Promise<string | null> {
@@ -1964,7 +2191,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.client.setStorage(this._context.globalState);
         this.uiDebugChannel = vscode.window.createOutputChannel('OpenCode UI Debug');
         this.client.setUiDebugChannel(this.uiDebugChannel);
-        void this.loadUserOwnedSessions();
+        this.userOwnedSessionsLoaded = this.loadUserOwnedSessions();
         this.client.setServerStatusHandler((status, reason) => {
             this.sendServerStatus(status, reason);
         });
@@ -2161,7 +2388,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         return;
                     }
 
-                    if (!this.currentSessionId) {
+                    const payloadSessionId = typeof data.sessionId === 'string' && data.sessionId.trim()
+                        ? data.sessionId.trim()
+                        : undefined;
+                    const currentSessionIdAtSend = this.currentSessionId;
+                    const routeSource = payloadSessionId ? 'payload' : 'current';
+
+                    if (!payloadSessionId && !this.currentSessionId) {
                         // this.uiDebugChannel.appendLine(`[EXT][SEND_CREATE_SESSION] reason=no-current`);
                         try {
                             const sessionInfo = await this.client.createSession();
@@ -2194,15 +2427,21 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         return;
                     }
 
-                    const targetSessionId = this.currentSessionId;
+                    const targetSessionId = payloadSessionId || this.currentSessionId;
                     if (!targetSessionId) {
-                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE_DROP] event=sendMessage reason=missing-target-session reqId=pending`);
+                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE_DROP] event=sendMessage reason=missing-target-session reqId=pending payloadSessionId=${payloadSessionId || 'none'} currentSessionId=${currentSessionIdAtSend || 'none'} routeSource=${routeSource}`);
                         vscode.window.showErrorMessage('OpenCode Error: No active session available for send.');
                         return;
                     }
 
+                    if (payloadSessionId) {
+                        this.currentSessionId = payloadSessionId;
+                        this.trackUserOwnedSession(payloadSessionId);
+                        this.client.setSessionId(payloadSessionId);
+                    }
+
                     if (this.sendInFlightBySession.has(targetSessionId)) {
-                        this.uiDebugChannel.appendLine(`EXT: send.blocked | sessionId=${targetSessionId} | reason=turn-in-flight`);
+                        this.uiDebugChannel.appendLine(`EXT: send.blocked | sessionId=${targetSessionId} | payloadSessionId=${payloadSessionId || 'none'} | currentSessionId=${currentSessionIdAtSend || 'none'} | routeSource=${routeSource} | reason=turn-in-flight`);
                         const liveWebview = this._view?.webview || activeWebview;
                         liveWebview.postMessage({ type: 'turnInFlight', sessionId: targetSessionId, inFlight: true });
                         return;
@@ -2220,8 +2459,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     try {
                         const attachments = Array.isArray(data.attachments) ? data.attachments as AttachmentPayload[] : [];
                         const attachKeys = attachments.length ? Object.keys(attachments[0] || {}).join(',') : '';
-                        this.uiDebugChannel.appendLine(`EXT: send.enter | reqId=${reqId} | sessionId=${targetSessionId} | hasAttachments=${String(Boolean(attachments.length))} | attachmentsCount=${attachments.length} | attachKeys=${attachKeys}`);
-                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=start reqId=${reqId} targetSessionId=${targetSessionId}`);
+                        this.uiDebugChannel.appendLine(`EXT: send.enter | reqId=${reqId} | sessionId=${targetSessionId} | payloadSessionId=${payloadSessionId || 'none'} | currentSessionId=${currentSessionIdAtSend || 'none'} | routeSource=${routeSource} | hasAttachments=${String(Boolean(attachments.length))} | attachmentsCount=${attachments.length} | attachKeys=${attachKeys}`);
+                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=start reqId=${reqId} payloadSessionId=${payloadSessionId || 'none'} currentSessionId=${currentSessionIdAtSend || 'none'} targetSessionId=${targetSessionId} routeSource=${routeSource}`);
                         const userText = (data.value as string) || '';
                         const referencedFiles = await this.normalizeReferencedWorkspaceFiles(data.files);
                         let modelText = userText;
@@ -2236,7 +2475,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         const tmpAssistantKey = typeof data.tmpKey === 'string' && data.tmpKey.startsWith('tmp:') ? data.tmpKey : undefined;
                         turnClientMessageId = clientMessageId;
                         turnTmpAssistantKey = tmpAssistantKey;
-                        this.uiDebugChannel.appendLine(`[EXT][TURN_BIND] phase=capture reqId=${reqId} targetSessionId=${targetSessionId} clientMessageId=${clientMessageId} tmpAssistantKey=${tmpAssistantKey || 'none'}`);
+                        this.uiDebugChannel.appendLine(`[EXT][TURN_BIND] phase=capture reqId=${reqId} payloadSessionId=${payloadSessionId || 'none'} currentSessionId=${currentSessionIdAtSend || 'none'} targetSessionId=${targetSessionId} routeSource=${routeSource} clientMessageId=${clientMessageId} tmpAssistantKey=${tmpAssistantKey || 'none'}`);
                         this.pendingClientMessageId = clientMessageId;
                         this.rememberDraft(clientMessageId, initialDraft);
                         this.rawUserTextByLocalKey.set(clientMessageId, userText);
@@ -2340,14 +2579,14 @@ ${attachmentLines.join('\n')}`
                         });
 
                         OpenCodeClient.outputChannel.appendLine(`[BRIDGE] Chat done`);
-                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=stream_done reqId=${reqId} targetSessionId=${targetSessionId}`);
+                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=stream_done reqId=${reqId} payloadSessionId=${payloadSessionId || 'none'} currentSessionId=${currentSessionIdAtSend || 'none'} targetSessionId=${targetSessionId} routeSource=${routeSource}`);
                         let doneAssistantMsgId = this.client.getTurnAssistantMsgId(targetSessionId) || undefined;
                         if (!doneAssistantMsgId) {
                             this.uiDebugChannel.appendLine(`EXT: chatdone.guard.wait-final | sessionId=${targetSessionId} | reason=missing-assistant-msg-id`);
                             doneAssistantMsgId = await this.client.waitForTurnAssistantMsgId(targetSessionId, 500);
                             this.uiDebugChannel.appendLine(`EXT: chatdone.guard.resolved | sessionId=${targetSessionId} | assistantMsgId=${doneAssistantMsgId}`);
                         }
-                        this.uiDebugChannel.appendLine(`[EXT][TURN_BIND] phase=stream_done reqId=${reqId} targetSessionId=${targetSessionId} clientMessageId=${clientMessageId} assistantMsgId=${doneAssistantMsgId || 'none'} tmpAssistantKey=${tmpAssistantKey || 'none'}`);
+                        this.uiDebugChannel.appendLine(`[EXT][TURN_BIND] phase=stream_done reqId=${reqId} payloadSessionId=${payloadSessionId || 'none'} currentSessionId=${currentSessionIdAtSend || 'none'} targetSessionId=${targetSessionId} routeSource=${routeSource} clientMessageId=${clientMessageId} assistantMsgId=${doneAssistantMsgId || 'none'} tmpAssistantKey=${tmpAssistantKey || 'none'}`);
                         liveWebview.postMessage({
                             type: 'chatDone',
                             sessionId: targetSessionId,
@@ -2357,21 +2596,33 @@ ${attachmentLines.join('\n')}`
                         this.emitTurnFinalizePhase(liveWebview, targetSessionId, 'stream_done');
                         this.postMessageIndexMap(liveWebview);
                         this.uiDebugChannel.appendLine(`EXT: finalize.order | sessionId=${targetSessionId} | phase=commit-start`);
-                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=commit_start reqId=${reqId} targetSessionId=${targetSessionId}`);
-                        await this.client.commitPendingTurnChanges(targetSessionId);
+                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=commit_start reqId=${reqId} payloadSessionId=${payloadSessionId || 'none'} currentSessionId=${currentSessionIdAtSend || 'none'} targetSessionId=${targetSessionId} routeSource=${routeSource}`);
+                        const preCommitIdentity = this.buildFinalizeTurnIdentity(targetSessionId, {
+                            reqId,
+                            clientMessageId,
+                            assistantMessageId: doneAssistantMsgId
+                        });
+                        const commitResult = await this.commitPendingTurnChangesFromAuthoritativeFiles(preCommitIdentity);
                         this.uiDebugChannel.appendLine(`EXT: finalize.order | sessionId=${targetSessionId} | phase=commit-done`);
-                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=commit_done reqId=${reqId} targetSessionId=${targetSessionId}`);
+                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=commit_done reqId=${reqId} payloadSessionId=${payloadSessionId || 'none'} currentSessionId=${currentSessionIdAtSend || 'none'} targetSessionId=${targetSessionId} routeSource=${routeSource}`);
                         this.emitTurnFinalizePhase(liveWebview, targetSessionId, 'commit_done');
                         this.uiDebugChannel.appendLine(`EXT: finalize.order | sessionId=${targetSessionId} | phase=upgrade-start`);
-                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=upgrade_start reqId=${reqId} targetSessionId=${targetSessionId}`);
+                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=upgrade_start reqId=${reqId} payloadSessionId=${payloadSessionId || 'none'} currentSessionId=${currentSessionIdAtSend || 'none'} targetSessionId=${targetSessionId} routeSource=${routeSource}`);
                         await this.resolvePendingUserUpgrade(targetSessionId, liveWebview);
                         this.uiDebugChannel.appendLine(`EXT: finalize.order | sessionId=${targetSessionId} | phase=upgrade-done`);
-                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=upgrade_done reqId=${reqId} targetSessionId=${targetSessionId}`);
+                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=upgrade_done reqId=${reqId} payloadSessionId=${payloadSessionId || 'none'} currentSessionId=${currentSessionIdAtSend || 'none'} targetSessionId=${targetSessionId} routeSource=${routeSource}`);
                         this.emitTurnFinalizePhase(liveWebview, targetSessionId, 'upgrade_done');
                         this.postMessageIndexMap(liveWebview);
-                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=diff_list_start reqId=${reqId} targetSessionId=${targetSessionId}`);
-                        await this.emitDiffFileListWithRetry(targetSessionId, liveWebview);
-                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=diff_list_done reqId=${reqId} targetSessionId=${targetSessionId}`);
+                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=diff_list_start reqId=${reqId} payloadSessionId=${payloadSessionId || 'none'} currentSessionId=${currentSessionIdAtSend || 'none'} targetSessionId=${targetSessionId} routeSource=${routeSource}`);
+                        const finalizeIdentity = this.buildFinalizeTurnIdentity(targetSessionId, {
+                            reqId,
+                            clientMessageId,
+                            assistantMessageId: doneAssistantMsgId,
+                            commitResult
+                        });
+                        await this.emitDiffFileListWithRetry(finalizeIdentity, liveWebview);
+                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=diff_list_done reqId=${reqId} payloadSessionId=${payloadSessionId || 'none'} currentSessionId=${currentSessionIdAtSend || 'none'} targetSessionId=${targetSessionId} routeSource=${routeSource}`);
+                        await this.writeFinalizeSnapshotFromCanonicalSession(finalizeIdentity);
                         this.client.finishTurn(targetSessionId);
                         this.postFinalWatchDiffFocusedBySession.delete(targetSessionId);
                         // Do not force "done" from main finalize; only subagent final-accepted can set done.
@@ -2379,8 +2630,8 @@ ${attachmentLines.join('\n')}`
                         this.markAllSubagentsTerminal('cancelled', 'main-finalize-cancel-active');
                         this.emitSubagentStatus();
                         this.clearSubagentSessions();
-                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=finalize_done reqId=${reqId} targetSessionId=${targetSessionId}`);
-                        this.uiDebugChannel.appendLine(`[EXT][TURN_BIND] phase=finalize_done reqId=${reqId} targetSessionId=${targetSessionId} clientMessageId=${clientMessageId} assistantMsgId=${doneAssistantMsgId || 'none'} tmpAssistantKey=${tmpAssistantKey || 'none'}`);
+                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=finalize_done reqId=${reqId} payloadSessionId=${payloadSessionId || 'none'} currentSessionId=${currentSessionIdAtSend || 'none'} targetSessionId=${targetSessionId} routeSource=${routeSource}`);
+                        this.uiDebugChannel.appendLine(`[EXT][TURN_BIND] phase=finalize_done reqId=${reqId} payloadSessionId=${payloadSessionId || 'none'} currentSessionId=${currentSessionIdAtSend || 'none'} targetSessionId=${targetSessionId} routeSource=${routeSource} clientMessageId=${clientMessageId} assistantMsgId=${doneAssistantMsgId || 'none'} tmpAssistantKey=${tmpAssistantKey || 'none'}`);
                         this.emitTurnFinalizePhase(liveWebview, targetSessionId, 'finalize_done');
                         await this.postModelQuota(liveWebview, 'chat-done');
                         if (this.pendingClientMessageId === clientMessageId) {
@@ -2400,8 +2651,8 @@ ${attachmentLines.join('\n')}`
                         }
                     } catch (error) {
                         const sessionId = activeSendSessionId;
-                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=error reqId=${reqId} targetSessionId=${sessionId || 'none'}`);
-                        this.uiDebugChannel.appendLine(`[EXT][TURN_BIND] phase=error reqId=${reqId} targetSessionId=${sessionId || 'none'} clientMessageId=${turnClientMessageId || 'none'} tmpAssistantKey=${turnTmpAssistantKey || 'none'}`);
+                        this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=error reqId=${reqId} payloadSessionId=${payloadSessionId || 'none'} currentSessionId=${currentSessionIdAtSend || 'none'} targetSessionId=${sessionId || 'none'} routeSource=${routeSource}`);
+                        this.uiDebugChannel.appendLine(`[EXT][TURN_BIND] phase=error reqId=${reqId} payloadSessionId=${payloadSessionId || 'none'} currentSessionId=${currentSessionIdAtSend || 'none'} targetSessionId=${sessionId || 'none'} routeSource=${routeSource} clientMessageId=${turnClientMessageId || 'none'} tmpAssistantKey=${turnTmpAssistantKey || 'none'}`);
                         this.uiDebugChannel.appendLine(`EXT: send.abort | reqId=${reqId} | reason=${String(error)}`);
                         OpenCodeClient.outputChannel.appendLine(`[BRIDGE] Error: ${error}`);
                         vscode.window.showErrorMessage(`OpenCode Error: ${error}`);
@@ -2417,7 +2668,10 @@ ${attachmentLines.join('\n')}`
                         });
                         this.emitTurnFinalizePhase(activeWebview, sessionId, 'stream_done');
                         if (sessionId) {
-                            await this.client.commitPendingTurnChanges(sessionId);
+                            await this.commitPendingTurnChangesFromAuthoritativeFiles(this.buildFinalizeTurnIdentity(sessionId, {
+                                reqId,
+                                assistantMessageId: doneAssistantMsgId
+                            }));
                             this.emitTurnFinalizePhase(activeWebview, sessionId, 'commit_done');
                         }
                         await this.resolvePendingUserUpgrade(sessionId, activeWebview);
@@ -3481,22 +3735,22 @@ ${attachmentLines.join('\n')}`
                         }
                         this.pendingClientMessageId = undefined;
                     }
-                    if (this.currentSessionId) {
-                        const tmpKey = this.pendingAssistantTmpKeyBySession.get(this.currentSessionId);
+                    if (cancelSessionId) {
+                        const tmpKey = this.pendingAssistantTmpKeyBySession.get(cancelSessionId);
                         const mappedAssistant = tmpKey ? this.clientMessageIdMap.get(tmpKey) : undefined;
-                        const pendingAssistant = this.pendingAssistantMessageIdBySession.get(this.currentSessionId);
+                        const pendingAssistant = this.pendingAssistantMessageIdBySession.get(cancelSessionId);
                         if (tmpKey) {
                             await this.handleAbortedMessage(tmpKey, activeWebview);
-                            this.pendingAssistantTmpKeyBySession.delete(this.currentSessionId);
+                            this.pendingAssistantTmpKeyBySession.delete(cancelSessionId);
                         }
                         if (pendingAssistant) {
                             await this.handleAbortedMessage(pendingAssistant, activeWebview);
-                            this.pendingAssistantMessageIdBySession.delete(this.currentSessionId);
+                            this.pendingAssistantMessageIdBySession.delete(cancelSessionId);
                         }
                         if (mappedAssistant && mappedAssistant !== tmpKey) {
                             await this.handleAbortedMessage(mappedAssistant, activeWebview);
                         }
-                        this.assistantTextBufferBySession.delete(this.currentSessionId);
+                        this.assistantTextBufferBySession.delete(cancelSessionId);
                     }
                     const draftToRestore = this.consumeDraft(restoreLocalKey);
                     if (draftToRestore) {
@@ -3506,23 +3760,26 @@ ${attachmentLines.join('\n')}`
                         });
                     }
                     // Cleanup before chatDone
-                    if (this.currentSessionId) {
-                        await this.client.commitPendingTurnChanges(this.currentSessionId);
+                    if (cancelSessionId) {
+                        await this.commitPendingTurnChangesFromAuthoritativeFiles(this.buildFinalizeTurnIdentity(cancelSessionId, {
+                            reqId: 'user-cancel',
+                            assistantMessageId: this.client.getTurnAssistantMsgId(cancelSessionId)
+                        }));
                     }
-                    if (this.currentSessionId) {
-                        this.client.finishTurn(this.currentSessionId);
-                        this.postFinalWatchDiffFocusedBySession.delete(this.currentSessionId);
+                    if (cancelSessionId) {
+                        this.client.finishTurn(cancelSessionId);
+                        this.postFinalWatchDiffFocusedBySession.delete(cancelSessionId);
                     }
                     this.markAllSubagentsTerminal('cancelled', 'user-cancel');
                     this.emitSubagentStatus();
                     this.clearSubagentSessions();
 
-                    const doneAssistantMsgId = this.currentSessionId
-                        ? this.client.getTurnAssistantMsgId(this.currentSessionId)
+                    const doneAssistantMsgId = cancelSessionId
+                        ? this.client.getTurnAssistantMsgId(cancelSessionId)
                         : undefined;
                     activeWebview.postMessage({
                         type: 'chatDone',
-                        sessionId: this.currentSessionId,
+                        sessionId: cancelSessionId,
                         assistantMsgId: doneAssistantMsgId,
                         lastAssistantMsgId: doneAssistantMsgId
                     });
@@ -5562,7 +5819,10 @@ ${attachmentLines.join('\n')}`
             liveWebview.postMessage({ type: 'addResponse', value: `Error: ${event.text}`, sessionId, skipSnapshot: true });
             // Cleanup before chatDone
             if (sessionId) {
-                await this.client.commitPendingTurnChanges(sessionId);
+                await this.commitPendingTurnChangesFromAuthoritativeFiles(this.buildFinalizeTurnIdentity(sessionId, {
+                    reqId: 'event-error-finalize',
+                    assistantMessageId: this.client.getTurnAssistantMsgId(sessionId)
+                }));
             }
             await this.resolvePendingUserUpgrade(sessionId, liveWebview);
             // Mark all active subagents as done before clearing (error event path)
@@ -5643,6 +5903,13 @@ ${attachmentLines.join('\n')}`
                     this.pendingClientMessageId = undefined;
                 }
                 this.uiDebugChannel.appendLine(`EXT: user.ack.bind | sessionId=${sessionId} | localKey=${localKey} | msgId=${event.text}`);
+                const liveWebview = this._view?.webview || webview;
+                liveWebview.postMessage({
+                    type: 'userAckBind',
+                    sessionId,
+                    localKey,
+                    msgId: event.text
+                });
             }
             return;
         }
@@ -5677,9 +5944,13 @@ ${attachmentLines.join('\n')}`
                     `[LATE_DIFF] event in recovery window | sessionId=${sessionId} eventType=files inGrace=${inGrace} recentFinish=${inRecentFinishWindow}`
                 );
                 if (!this.client.wasChangeListEmitted(sessionId)) {
+                    let commitResult: CommitPendingTurnChangesResult | undefined;
                     try {
-                        await this.client.commitPendingTurnChanges(sessionId);
-                        this.uiDebugChannel.appendLine(`[LATE_DIFF] committed pending turn changes | sessionId=${sessionId} reason=late-event-recovery`);
+                        commitResult = await this.commitPendingTurnChangesFromAuthoritativeFiles(this.buildFinalizeTurnIdentity(sessionId, {
+                            reqId: 'late-event-recovery',
+                            assistantMessageId: this.client.getTurnAssistantMsgId(sessionId)
+                        }));
+                        this.uiDebugChannel.appendLine(`[LATE_DIFF] committed pending turn changes | sessionId=${sessionId} reason=late-event-recovery status=${commitResult?.status || 'missing'}`);
                     } catch (error) {
                         this.uiDebugChannel.appendLine(`[LATE_DIFF] commit pending failed | sessionId=${sessionId} err=${String(error)}`);
                     }
@@ -5692,7 +5963,10 @@ ${attachmentLines.join('\n')}`
                         }
                     }
                     this.uiDebugChannel.appendLine(`[LATE_DIFF] emitting change-list | sessionId=${sessionId} reason=late-event-recovery`);
-                    void this.emitDiffFileListWithRetry(sessionId, liveWebview);
+                    void this.emitDiffFileListWithRetry(this.buildFinalizeTurnIdentity(sessionId, {
+                        reqId: 'late-event-recovery',
+                        commitResult
+                    }), liveWebview);
                 } else {
                     this.uiDebugChannel.appendLine(`[LATE_DIFF] change-list already emitted | sessionId=${sessionId} skipping=true`);
                 }
