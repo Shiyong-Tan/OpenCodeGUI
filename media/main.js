@@ -3089,6 +3089,10 @@ function handleUndoTimeout(sessionId, clientOpId) {
     window.__oc?.renderFromState?.();
 }
 
+function createOperationId() {
+    return `op_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
 /**
  * Handle restore segment request
  * Sends restore request to extension, which will respond with restoredSegment message
@@ -3117,10 +3121,13 @@ function handleRestoreSegment(sessionId, segmentId) {
         return;
     }
     
+    const operationId = createOperationId();
+
     // Send restore request to extension
     vscode.postMessage({
         type: 'restoreSegment',
         sessionId,
+        operationId,
         noticeKey: segment.noticeKey,
         anchorMsgId: segment.anchorMsgId,
         endMsgId: segment.endMsgId
@@ -3130,7 +3137,10 @@ function handleRestoreSegment(sessionId, segmentId) {
         type: 'ui-debug',
         payload: ['[WV][SEG_RESTORE_SEND]',
             `sessionId=${sessionId || 'null'}`,
+            `opId=${operationId || 'null'}`,
             `noticeKey=${noticeKey}`,
+            `anchorMsgId=${segment.anchorMsgId || 'null'}`,
+            `endMsgId=${segment.endMsgId || 'null'}`,
             'type=restoreSegment']
     });
 }
@@ -5271,12 +5281,18 @@ function shouldHideDcpUiMessage(message) {
             }
             const segKey = segment.noticeKey ?? segment.id ?? '';
             const noticeKey = typeof segKey === 'string' && segKey.startsWith('seg:') ? segKey.slice(4) : segKey;
+            const operationId = createOperationId();
             vscode.postMessage({
                 type: 'restoreSegment',
                 sessionId: activeSessionId,
+                operationId,
                 noticeKey: noticeKey,
                 anchorMsgId: anchorMsgId,
                 endMsgId: segment.endMsgId
+            });
+            vscode.postMessage({
+                type: 'ui-debug',
+                payload: ['[WV][SEG_RESTORE_SEND]', `sessionId=${activeSessionId || 'null'}`, `opId=${operationId || 'null'}`, `noticeKey=${noticeKey || 'null'}`, `anchorMsgId=${anchorMsgId || 'null'}`, `endMsgId=${segment.endMsgId || 'null'}`, 'type=restoreSegment']
             });
             logSessionState(activeSessionId, 'UI_RESTORE_SEGMENT');
         });
@@ -10170,6 +10186,20 @@ function postOpenGitDiff(filePath, sessionId, commitHead, commitBase) {
 function renderConflictCard(payload) {
     const chatContainer = document.getElementById('chat');
     if (!payload || !Array.isArray(payload.conflicts) || !chatContainer) return;
+    const conflictOwner = {
+        sessionId: typeof payload.sessionId === 'string' ? payload.sessionId : '',
+        operationId: typeof payload.operationId === 'string' ? payload.operationId : '',
+        conflictId: typeof payload.conflictId === 'string' ? payload.conflictId : '',
+        kind: typeof payload.kind === 'string' ? payload.kind : '',
+        source: typeof payload.source === 'string' ? payload.source : '',
+        startMessageId: typeof payload.startMessageId === 'string' ? payload.startMessageId : undefined,
+        endMessageId: typeof payload.endMessageId === 'string' ? payload.endMessageId : undefined,
+        noticeKey: typeof payload.noticeKey === 'string' ? payload.noticeKey : undefined
+    };
+    vscode.postMessage({
+        type: 'ui-debug',
+        payload: ['[WV][CONFLICT_RENDER]', `sessionId=${conflictOwner.sessionId || 'null'}`, `opId=${conflictOwner.operationId || 'null'}`, `conflictId=${conflictOwner.conflictId || 'null'}`, `kind=${conflictOwner.kind || 'null'}`, `source=${conflictOwner.source || 'null'}`]
+    });
     if (conflictCardEl && conflictCardEl.parentElement) {
         conflictCardEl.parentElement.removeChild(conflictCardEl);
     }
@@ -10242,7 +10272,18 @@ function renderConflictCard(payload) {
         }
         conflictCardEl = null;
         lastConflictPayload = null;
-        vscode.postMessage({ type: 'conflictDecision', decision: 'skip' });
+        vscode.postMessage({
+            type: 'conflictDecision',
+            decision: 'skip',
+            sessionId: conflictOwner.sessionId,
+            operationId: conflictOwner.operationId,
+            conflictId: conflictOwner.conflictId,
+            kind: conflictOwner.kind,
+            source: conflictOwner.source,
+            startMessageId: conflictOwner.startMessageId,
+            endMessageId: conflictOwner.endMessageId,
+            noticeKey: conflictOwner.noticeKey
+        });
     });
 
     const continueBtn = document.createElement('button');
@@ -10258,8 +10299,14 @@ function renderConflictCard(payload) {
         vscode.postMessage({
             type: 'conflictDecision',
             decision: 'override',
-            kind: payload.kind,
-            startMessageId: payload.startMessageId
+            sessionId: conflictOwner.sessionId,
+            operationId: conflictOwner.operationId,
+            conflictId: conflictOwner.conflictId,
+            kind: conflictOwner.kind,
+            source: conflictOwner.source,
+            startMessageId: conflictOwner.startMessageId,
+            endMessageId: conflictOwner.endMessageId,
+            noticeKey: conflictOwner.noticeKey
         });
     });
 

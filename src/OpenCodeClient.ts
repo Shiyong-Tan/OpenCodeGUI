@@ -4909,12 +4909,12 @@ export class OpenCodeClient {
         return { conflicts: [], touchedFiles, applied: false, reason: 'git-undo-unavailable' };
     }
 
-    public async restoreAll(options?: { force?: boolean }): Promise<{ conflicts: ConflictDetail[]; touchedFiles: string[]; applied: boolean }> {
+    public async restoreAll(options?: { force?: boolean; sessionId?: string }): Promise<{ conflicts: ConflictDetail[]; touchedFiles: string[]; applied: boolean }> {
         const segment = this.revertedSegment;
         if (!segment || segment.discarded) {
             throw new Error('No active reverted segment to restore.');
         }
-        const sessionId = this.currentSessionId;
+        const sessionId = typeof options?.sessionId === 'string' && options.sessionId ? options.sessionId : this.currentSessionId;
         if (!sessionId) {
             return { conflicts: [], touchedFiles: [], applied: false };
         }
@@ -4974,9 +4974,9 @@ export class OpenCodeClient {
     public async restoreFromMessage(
         startMessageId: string,
         endMessageId?: string,
-        options?: { force?: boolean; messageIds?: string[]; excludedMessageIds?: string[] }
+        options?: { force?: boolean; sessionId?: string; messageIds?: string[]; excludedMessageIds?: string[] }
     ): Promise<{ conflicts: ConflictDetail[]; touchedFiles: string[]; applied: boolean }> {
-        const sessionId = this.currentSessionId;
+        const sessionId = typeof options?.sessionId === 'string' && options.sessionId ? options.sessionId : this.currentSessionId;
         const touchedFiles: string[] = [];
         if (!sessionId) {
             return { conflicts: [], touchedFiles, applied: false };

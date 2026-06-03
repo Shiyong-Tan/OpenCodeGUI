@@ -512,7 +512,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private revertedSegment?: { conflicts: ConflictDetail[]; discarded?: boolean };
     private clientMessageIdMap = new Map<string, string>();
     private revertedSegmentHistory: Array<{ isActive: boolean; discarded: boolean; startMessageId?: string; startMessageIndex?: number; endMessageId?: string; endMessageIndex?: number; collapsed: boolean; messageIds?: string[] }> = [];
-    private pendingConflict?: { kind: 'undo' | 'restore' | 'restoreSegment'; startMessageId?: string; endMessageId?: string; operationId?: string; noticeKey?: string };
+    private pendingConflict?: {
+        kind: 'undo' | 'restore' | 'restoreSegment';
+        sessionId: string;
+        operationId: string;
+        conflictId: string;
+        startMessageId?: string;
+        endMessageId?: string;
+        noticeKey?: string;
+    };
     private uiDebugChannel!: vscode.OutputChannel;
     private undoSegmentsBySession: Map<string, Map<string, SegmentState>> = new Map();
     private readonly UNDO_SEGMENTS_KEY = 'opencode.undoSegmentsBySession.v1';
@@ -604,6 +612,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     private async sessionMatchesWorkspace(sessionId: string, workspaceRoot: string): Promise<boolean> {
         return (await this.getSessionWorkspaceMatch(sessionId, workspaceRoot)) === 'match';
+    }
+
+    private createConflictId(kind: string, operationId: string): string {
+        return `conflict_${kind}_${operationId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     }
 
     private async findMostRecentWorkspaceSession(
@@ -3607,13 +3619,16 @@ ${attachmentLines.join('\n')}`
                         this.uiDebugChannel.appendLine(`[EXT][UNDO_RESULT] applied=${result.applied} conflicts=${result.conflicts.length} touched=${result.touchedFiles.length} reason=${result.reason || 'null'} segmentStart=${currentSegment?.startMessageId || 'null'} segmentEnd=${currentSegment?.endMessageId || 'null'}`);
                         this.uiDebugChannel.appendLine(`[EXT][UNDO_DONE] applied=${result.applied} conflicts=${result.conflicts.length} sessionId=${ownerSessionId}`);
                             if (!result.applied && result.conflicts.length) {
-                                this.pendingConflict = { kind: 'undo', startMessageId: resolvedMessageId, operationId };
+                                const conflictId = this.createConflictId('undo', operationId);
+                                this.pendingConflict = { kind: 'undo', sessionId: ownerSessionId, operationId, conflictId, startMessageId: resolvedMessageId, noticeKey };
                                 const liveWebview = this._view?.webview || activeWebview;
-                                this.uiDebugChannel.appendLine(`[EXT][UNDO_TX] type=conflictCard sessionId=${ownerSessionId} opId=${operationId}`);
-                                this.uiDebugChannel.appendLine(`EXT: undo.postToWebview | type=conflictCard | sessionId | ${ownerSessionId} | opId | ${operationId}`);
+                                this.uiDebugChannel.appendLine(`[EXT][UNDO_TX] type=conflictCard sessionId=${ownerSessionId} opId=${operationId} conflictId=${conflictId} kind=undo`);
+                                this.uiDebugChannel.appendLine(`EXT: undo.postToWebview | type=conflictCard | sessionId | ${ownerSessionId} | opId | ${operationId} | conflictId | ${conflictId}`);
                                 liveWebview.postMessage({
                                     type: 'conflictCard',
                                     kind: 'undo',
+                                    source: 'undoToMessage',
+                                    conflictId,
                                     startMessageId: resolvedMessageId,
                                     conflicts: result.conflicts,
                                     sessionId: ownerSessionId,
@@ -3868,29 +3883,45 @@ ${attachmentLines.join('\n')}`
                     break;
                 }
                 case "restoreAll": {
-                    this.uiDebugChannel.appendLine(`[EXT][RESTORE_RX] type=restoreAll sessionId=${this.currentSessionId || 'null'} noticeKey=${typeof data.noticeKey === 'string' ? data.noticeKey : 'null'}`);
+                    const payloadSessionId = typeof data.sessionId === 'string' && data.sessionId.trim() ? data.sessionId.trim() : undefined;
+                    const operationId = typeof data.operationId === 'string' && data.operationId.trim() ? data.operationId.trim() : undefined;
+                    const noticeKey = typeof data.noticeKey === 'string' ? data.noticeKey : '';
+                    this.uiDebugChannel.appendLine(`[EXT][RESTORE_ROUTE] phase=rx type=restoreAll payloadSessionId=${payloadSessionId || 'null'} currentSessionId=${this.currentSessionId || 'null'} opId=${operationId || 'null'} noticeKey=${noticeKey || 'null'}`);
+                    if (!payloadSessionId || !operationId) {
+                        const missing = [!payloadSessionId ? 'sessionId' : undefined, !operationId ? 'operationId' : undefined].filter(Boolean).join(',');
+                        this.uiDebugChannel.appendLine(`[EXT][RESTORE_DROP] type=restoreAll reason=missing-${missing} payloadSessionId=${payloadSessionId || 'null'} currentSessionId=${this.currentSessionId || 'null'} opId=${operationId || 'null'} noticeKey=${noticeKey || 'null'}`);
+                        break;
+                    }
+                    const ownerSessionId = payloadSessionId;
+                    this.uiDebugChannel.appendLine(`[EXT][RESTORE_ROUTE] phase=owner-captured type=restoreAll ownerSessionId=${ownerSessionId} opId=${operationId} noticeKey=${noticeKey || 'null'}`);
                     try {
                         if (!this.gitUndoEnabled) {
-                            this.postAddResponse(activeWebview, 'Restore unavailable: Git not installed or version too old. Please install/upgrade Git and restart VS Code.');
+                            this.uiDebugChannel.appendLine(`[EXT][RESTORE_TX] type=addResponse sessionId=${ownerSessionId} opId=${operationId} reason=git-unavailable`);
+                            this.postAddResponse(activeWebview, 'Restore unavailable: Git not installed or version too old. Please install/upgrade Git and restart VS Code.', { operationId, sessionId: ownerSessionId });
                             break;
                         }
-                        const operationId = typeof data.operationId === 'string' ? data.operationId : undefined;
                         const currentSegment = this.client.getRevertedSegment();
                         const fallbackCommits = Array.isArray(currentSegment?.startCommits) && currentSegment?.startCommits?.length
                             ? currentSegment.startCommits
                             : (currentSegment?.startCommit ? [currentSegment.startCommit] : []);
-                        const commitsToClear = this.currentSessionId
-                            ? await this.resolveChangeListCommits(this.currentSessionId, currentSegment?.messageIds, fallbackCommits)
+                        const commitsToClear = ownerSessionId
+                            ? await this.resolveChangeListCommits(ownerSessionId, currentSegment?.messageIds, fallbackCommits)
                             : fallbackCommits;
-                        const result = await this.client.restoreAll();
+                        const result = await this.client.restoreAll({ sessionId: ownerSessionId });
                         if (!result.applied && result.conflicts.length) {
-                            this.pendingConflict = { kind: 'restore', operationId };
+                            const conflictId = this.createConflictId('restore', operationId);
+                            this.pendingConflict = { kind: 'restore', sessionId: ownerSessionId, operationId, conflictId, noticeKey };
                             const liveWebview = this._view?.webview || activeWebview;
+                            this.uiDebugChannel.appendLine(`[EXT][RESTORE_TX] type=conflictCard sessionId=${ownerSessionId} opId=${operationId} conflictId=${conflictId} kind=restore noticeKey=${noticeKey || 'null'}`);
                             liveWebview.postMessage({
                                 type: 'conflictCard',
                                 kind: 'restore',
+                                source: 'restoreAll',
+                                conflictId,
                                 conflicts: result.conflicts,
-                                sessionId: this.currentSessionId
+                                sessionId: ownerSessionId,
+                                operationId,
+                                noticeKey
                             });
                             // conflictCard provides the user-facing prompt; no extra system message needed.
                             break;
@@ -3901,89 +3932,108 @@ ${attachmentLines.join('\n')}`
                             noticeKey: typeof data.noticeKey === 'string' ? data.noticeKey : '',
                             applied: result.applied,
                             conflicts: result.conflicts,
-                            sessionId: this.currentSessionId
+                            sessionId: ownerSessionId,
+                            operationId
                         });
-                        this.uiDebugChannel.appendLine(`[EXT][RESTORE_TX] type=restoredSegment sessionId=${this.currentSessionId || 'null'} noticeKey=${typeof data.noticeKey === 'string' ? data.noticeKey : 'null'} applied=${result.applied}`);
+                        this.uiDebugChannel.appendLine(`[EXT][RESTORE_TX] type=restoredSegment sessionId=${ownerSessionId} opId=${operationId} noticeKey=${noticeKey || 'null'} applied=${result.applied}`);
                         this.client.discardRevertedSegment();
                         const discardedSegment = this.client.getRevertedSegment();
+                        this.uiDebugChannel.appendLine(`[EXT][RESTORE_TX] type=revertedSegmentDiscarded sessionId=${ownerSessionId} opId=${operationId}`);
                         activeWebview.postMessage({
                             type: 'revertedSegmentDiscarded',
                             segment: discardedSegment ? { ...discardedSegment, historySegments: this.revertedSegmentHistory } : discardedSegment,
-                            sessionId: this.currentSessionId
+                            sessionId: ownerSessionId,
+                            operationId
                         });
-                        if (this.currentSessionId) {
-                            await this.clearPersistedSegment(this.currentSessionId);
+                        if (ownerSessionId) {
+                            await this.clearPersistedSegment(ownerSessionId);
                         }
-                        if (this.currentSessionId && commitsToClear.length) {
+                        if (ownerSessionId && commitsToClear.length) {
                             for (const commitHash of commitsToClear) {
-                                await this.setChangeListReverted(this.currentSessionId, commitHash, false, activeWebview);
+                                await this.setChangeListReverted(ownerSessionId, commitHash, false, activeWebview);
                             }
                         }
-                        this.postAddResponse(activeWebview, 'Restore applied.', { operationId });
+                        this.uiDebugChannel.appendLine(`[EXT][RESTORE_TX] type=addResponse sessionId=${ownerSessionId} opId=${operationId}`);
+                        this.postAddResponse(activeWebview, 'Restore applied.', { operationId, sessionId: ownerSessionId });
                         this.refreshDiffIfTouched(result.touchedFiles);
-                        if (this.currentSessionId) {
-                            await this.clearPersistedSegment(this.currentSessionId);
+                        if (ownerSessionId) {
+                            await this.clearPersistedSegment(ownerSessionId);
                         }
                     } catch (error) {
                         vscode.window.showErrorMessage(`Restore failed: ${error}`);
-                        activeWebview.postMessage({ type: 'addResponse', value: `Restore failed: ${error}` });
+                        this.uiDebugChannel.appendLine(`[EXT][RESTORE_TX] type=error sessionId=${ownerSessionId} opId=${operationId}`);
+                        activeWebview.postMessage({ type: 'addResponse', value: `Restore failed: ${error}`, sessionId: ownerSessionId, operationId, meta: { operationId, sessionId: ownerSessionId } });
                     }
                     break;
                 }
                 case "restoreSegment": {
-                    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : this.currentSessionId;
-                    const anchorMsgId = typeof data.anchorMsgId === 'string' ? data.anchorMsgId : '';
+                    const payloadSessionId = typeof data.sessionId === 'string' && data.sessionId.trim() ? data.sessionId.trim() : undefined;
+                    const operationId = typeof data.operationId === 'string' && data.operationId.trim() ? data.operationId.trim() : undefined;
+                    const anchorMsgId = typeof data.anchorMsgId === 'string' && data.anchorMsgId.trim() ? data.anchorMsgId.trim() : '';
                     const noticeKey = typeof data.noticeKey === 'string' ? data.noticeKey : '';
                     const endMsgId = typeof data.endMsgId === 'string' ? data.endMsgId : undefined;
-                    this.uiDebugChannel.appendLine(`[EXT][RESTORE_RX] type=restoreSegment sessionId=${sessionId || 'null'} noticeKey=${noticeKey || 'null'} anchorMsgId=${anchorMsgId || 'null'}`);
-                    if (!sessionId || !anchorMsgId) {
-                        this.uiDebugChannel.appendLine(`[EXT][RESTORE_DROP] sessionId=${sessionId || 'null'} anchorMsgId=${anchorMsgId || 'null'}`);
+                    this.uiDebugChannel.appendLine(`[EXT][RESTORE_ROUTE] phase=rx type=restoreSegment payloadSessionId=${payloadSessionId || 'null'} currentSessionId=${this.currentSessionId || 'null'} opId=${operationId || 'null'} noticeKey=${noticeKey || 'null'} anchorMsgId=${anchorMsgId || 'null'} endMsgId=${endMsgId || 'null'}`);
+                    if (!payloadSessionId || !operationId || !anchorMsgId) {
+                        const missing = [!payloadSessionId ? 'sessionId' : undefined, !operationId ? 'operationId' : undefined, !anchorMsgId ? 'anchorMsgId' : undefined].filter(Boolean).join(',');
+                        this.uiDebugChannel.appendLine(`[EXT][RESTORE_DROP] type=restoreSegment reason=missing-${missing} payloadSessionId=${payloadSessionId || 'null'} currentSessionId=${this.currentSessionId || 'null'} opId=${operationId || 'null'} noticeKey=${noticeKey || 'null'} anchorMsgId=${anchorMsgId || 'null'} endMsgId=${endMsgId || 'null'}`);
                         break;
                     }
+                    const ownerSessionId = payloadSessionId;
+                    this.uiDebugChannel.appendLine(`[EXT][RESTORE_ROUTE] phase=owner-captured type=restoreSegment ownerSessionId=${ownerSessionId} opId=${operationId} noticeKey=${noticeKey || 'null'} anchorMsgId=${anchorMsgId} endMsgId=${endMsgId || 'null'}`);
                     try {
                         const currentSegment = this.client.getRevertedSegment();
-                        const segMap = this.undoSegmentsBySession.get(sessionId);
+                        const segMap = this.undoSegmentsBySession.get(ownerSessionId);
                         const persistedSegment = noticeKey ? segMap?.get(noticeKey) : undefined;
                         const messageIds = Array.isArray(persistedSegment?.memberMsgIds) && persistedSegment?.memberMsgIds?.length
                             ? persistedSegment.memberMsgIds
                             : (Array.isArray(currentSegment?.messageIds) ? currentSegment?.messageIds : []);
-                        const restoreScope = this.buildRestoreMessageScope(sessionId, noticeKey, messageIds, persistedSegment);
+                        const restoreScope = this.buildRestoreMessageScope(ownerSessionId, noticeKey, messageIds, persistedSegment);
                         const fallbackCommits = Array.isArray(currentSegment?.startCommits) && currentSegment?.startCommits?.length
                             ? currentSegment.startCommits
                             : (currentSegment?.startCommit ? [currentSegment.startCommit] : []);
-                        const commitsToClear = sessionId
-                            ? await this.resolveChangeListCommits(sessionId, restoreScope.activeRestoreMessageIds, fallbackCommits)
+                        const commitsToClear = ownerSessionId
+                            ? await this.resolveChangeListCommits(ownerSessionId, restoreScope.activeRestoreMessageIds, fallbackCommits)
                             : fallbackCommits;
                             const result = await this.client.restoreFromMessage(anchorMsgId, endMsgId, {
+                                sessionId: ownerSessionId,
                                 messageIds: restoreScope.activeRestoreMessageIds,
                                 excludedMessageIds: restoreScope.invalidMessageIds
                             });
                         const liveWebview = this._view?.webview || activeWebview;
-                        this.uiDebugChannel.appendLine(`[EXT][RESTORE_TX] type=restoredSegment sessionId=${sessionId || 'null'} noticeKey=${noticeKey || 'null'} applied=${result.applied}`);
+                        this.uiDebugChannel.appendLine(`[EXT][RESTORE_TX] type=restoredSegment sessionId=${ownerSessionId} opId=${operationId} noticeKey=${noticeKey || 'null'} applied=${result.applied}`);
                         if (result.applied) {
                             await this.applyRestoreSegmentSuccess(
-                                sessionId,
+                                ownerSessionId,
                                 noticeKey,
                                 anchorMsgId,
                                 endMsgId,
                                 result,
                                 commitsToClear,
-                                undefined,
+                                operationId,
                                 liveWebview
                             );
                         } else if (result.conflicts.length) {
-                            this.pendingConflict = { kind: 'restoreSegment', startMessageId: anchorMsgId, endMessageId: endMsgId, noticeKey };
+                            const conflictId = this.createConflictId('restoreSegment', operationId);
+                            this.pendingConflict = { kind: 'restoreSegment', sessionId: ownerSessionId, operationId, conflictId, startMessageId: anchorMsgId, endMessageId: endMsgId, noticeKey };
+                            this.uiDebugChannel.appendLine(`[EXT][RESTORE_TX] type=conflictCard sessionId=${ownerSessionId} opId=${operationId} conflictId=${conflictId} kind=restoreSegment noticeKey=${noticeKey || 'null'} anchorMsgId=${anchorMsgId} endMsgId=${endMsgId || 'null'}`);
                             liveWebview.postMessage({
                                 type: 'conflictCard',
-                                kind: 'restore',
+                                kind: 'restoreSegment',
+                                source: 'restoreSegment',
+                                conflictId,
                                 conflicts: result.conflicts,
-                                sessionId: sessionId
+                                sessionId: ownerSessionId,
+                                operationId,
+                                noticeKey,
+                                startMessageId: anchorMsgId,
+                                endMessageId: endMsgId
                             });
                             // conflictCard provides the user-facing prompt; no extra system message needed.
                         }
                     } catch (error) {
                         vscode.window.showErrorMessage(`Restore failed: ${error}`);
-                        activeWebview.postMessage({ type: 'addResponse', value: `Restore failed: ${error}` });
+                        this.uiDebugChannel.appendLine(`[EXT][RESTORE_TX] type=error sessionId=${ownerSessionId} opId=${operationId} noticeKey=${noticeKey || 'null'} anchorMsgId=${anchorMsgId}`);
+                        activeWebview.postMessage({ type: 'addResponse', value: `Restore failed: ${error}`, sessionId: ownerSessionId, operationId, meta: { operationId, sessionId: ownerSessionId } });
                     }
                     break;
                 }
@@ -4138,32 +4188,57 @@ ${attachmentLines.join('\n')}`
                     break;
                 }
                 case "conflictDecision": {
-                    if (!this.pendingConflict || !data.decision) return;
-                    const decision = data.decision as 'override' | 'skip' | 'continue' | 'cancel';
+                    const decision = (data.decision === 'override' || data.decision === 'continue' || data.decision === 'skip' || data.decision === 'cancel')
+                        ? data.decision as 'override' | 'skip' | 'continue' | 'cancel'
+                        : undefined;
+                    const payloadSessionId = typeof data.sessionId === 'string' && data.sessionId.trim() ? data.sessionId.trim() : undefined;
+                    const operationId = typeof data.operationId === 'string' && data.operationId.trim() ? data.operationId.trim() : undefined;
+                    const conflictId = typeof data.conflictId === 'string' && data.conflictId.trim() ? data.conflictId.trim() : undefined;
+                    const kind = typeof data.kind === 'string' && data.kind.trim() ? data.kind.trim() : undefined;
+                    this.uiDebugChannel.appendLine(`[EXT][CONFLICT_ROUTE] phase=rx decision=${decision || 'null'} payloadSessionId=${payloadSessionId || 'null'} currentSessionId=${this.currentSessionId || 'null'} opId=${operationId || 'null'} conflictId=${conflictId || 'null'} kind=${kind || 'null'}`);
+                    if (!decision || !payloadSessionId || !operationId || !conflictId || !kind) {
+                        const missing = [!decision ? 'decision' : undefined, !payloadSessionId ? 'sessionId' : undefined, !operationId ? 'operationId' : undefined, !conflictId ? 'conflictId' : undefined, !kind ? 'kind' : undefined].filter(Boolean).join(',');
+                        this.uiDebugChannel.appendLine(`[EXT][CONFLICT_DROP] reason=missing-${missing} payloadSessionId=${payloadSessionId || 'null'} opId=${operationId || 'null'} conflictId=${conflictId || 'null'} kind=${kind || 'null'} pending=${this.pendingConflict ? 'yes' : 'no'}`);
+                        break;
+                    }
+                    if (!this.pendingConflict) {
+                        this.uiDebugChannel.appendLine(`[EXT][CONFLICT_DROP] reason=no-pending sessionId=${payloadSessionId} opId=${operationId} conflictId=${conflictId} kind=${kind} decision=${decision}`);
+                        break;
+                    }
+                    if (
+                        this.pendingConflict.sessionId !== payloadSessionId ||
+                        this.pendingConflict.operationId !== operationId ||
+                        this.pendingConflict.conflictId !== conflictId ||
+                        this.pendingConflict.kind !== kind
+                    ) {
+                        this.uiDebugChannel.appendLine(`[EXT][CONFLICT_DROP] reason=owner-mismatch payloadSessionId=${payloadSessionId} payloadOpId=${operationId} payloadConflictId=${conflictId} payloadKind=${kind} pendingSessionId=${this.pendingConflict.sessionId} pendingOpId=${this.pendingConflict.operationId} pendingConflictId=${this.pendingConflict.conflictId} pendingKind=${this.pendingConflict.kind} decision=${decision}`);
+                        break;
+                    }
                     const conflictContext = this.pendingConflict;
                     this.pendingConflict = undefined;
+                    const ownerSessionId = conflictContext.sessionId;
+                    this.uiDebugChannel.appendLine(`[EXT][CONFLICT_ROUTE] phase=owner-validated sessionId=${ownerSessionId} opId=${conflictContext.operationId} conflictId=${conflictContext.conflictId} kind=${conflictContext.kind} decision=${decision}`);
                     if (decision === 'cancel' || decision === 'skip') {
                         // skip means abandon the operation; do nothing.
+                        this.uiDebugChannel.appendLine(`[EXT][CONFLICT_TX] type=skip sessionId=${ownerSessionId} opId=${conflictContext.operationId} conflictId=${conflictContext.conflictId} kind=${conflictContext.kind} decision=${decision}`);
                         break;
                     }
                     try {
                         if (conflictContext.kind === 'undo' && conflictContext.startMessageId) {
-                            if (this.currentSessionId) {
-                                this.clearClientRevertedSegmentIfNonRestorable(this.currentSessionId);
-                            }
+                            this.clearClientRevertedSegmentIfNonRestorable(ownerSessionId);
                             const previousSegment = this.client.getRevertedSegment();
                             const currentActiveNoticeKey = previousSegment?.startMessageId
                                 ? `system:undo:${previousSegment.startMessageId}`
                                 : undefined;
-                            const undoRange = this.client.getUndoRangeForAnchor(conflictContext.startMessageId, this.currentSessionId);
-                            const invalidMessageIds = this.currentSessionId && undoRange && undoRange.endIndex >= undoRange.startIndex
-                                ? Array.from(this.getInvalidSegmentMessageIds(this.currentSessionId, {
+                            const undoRange = this.client.getUndoRangeForAnchor(conflictContext.startMessageId, ownerSessionId);
+                            const invalidMessageIds = undoRange && undoRange.endIndex >= undoRange.startIndex
+                                ? Array.from(this.getInvalidSegmentMessageIds(ownerSessionId, {
                                     currentNoticeKey: currentActiveNoticeKey,
                                     rangeStartIndex: undoRange.startIndex,
                                     rangeEndIndex: undoRange.endIndex
                                 }))
                                 : [];
-                            const result = await this.client.undoFromMessage(conflictContext.startMessageId, { force: true, excludedMessageIds: invalidMessageIds });
+                            const result = await this.client.undoFromMessage(conflictContext.startMessageId, { force: true, excludedMessageIds: invalidMessageIds, sessionId: ownerSessionId });
                             if (result.applied && previousSegment) {
                                 const historyEntry = {
                                     isActive: false,
@@ -4199,18 +4274,20 @@ ${attachmentLines.join('\n')}`
                                         operationId: conflictContext.operationId,
                                         historySegments: this.revertedSegmentHistory
                                     },
-                                    sessionId: this.currentSessionId
+                                    sessionId: ownerSessionId,
+                                    operationId: conflictContext.operationId,
+                                    conflictId: conflictContext.conflictId
                                 });
-                                if (this.currentSessionId) {
-                                    await this.persistRevertedSegment(this.currentSessionId, segment, result.conflicts, false);
-                                }
+                                await this.persistRevertedSegment(ownerSessionId, segment, result.conflicts, false);
                             }
-                            this.postAddResponse(activeWebview, 'Undo applied.', { operationId: conflictContext.operationId });
+                            this.uiDebugChannel.appendLine(`[EXT][CONFLICT_TX] type=addResponse sessionId=${ownerSessionId} opId=${conflictContext.operationId} conflictId=${conflictContext.conflictId} kind=undo`);
+                            this.postAddResponse(activeWebview, 'Undo applied.', { operationId: conflictContext.operationId, sessionId: ownerSessionId });
                             this.refreshDiffIfTouched(result.touchedFiles);
                         }
                         if (conflictContext.kind === 'restore') {
-                            const result = await this.client.restoreAll({ force: true });
+                            const result = await this.client.restoreAll({ force: true, sessionId: ownerSessionId });
                             this.revertedSegmentHistory = [];
+                            this.uiDebugChannel.appendLine(`[EXT][CONFLICT_TX] type=revertedSegment sessionId=${ownerSessionId} opId=${conflictContext.operationId} conflictId=${conflictContext.conflictId} kind=restore`);
                             activeWebview.postMessage({
                                 type: 'revertedSegment',
                                 conflicts: result.conflicts || [],
@@ -4225,50 +4302,52 @@ ${attachmentLines.join('\n')}`
                                     endMessageId: '',
                                     endMessageIndex: 0
                                 },
-                                sessionId: this.currentSessionId
+                                sessionId: ownerSessionId,
+                                operationId: conflictContext.operationId,
+                                conflictId: conflictContext.conflictId
                             });
                             this.client.discardRevertedSegment();
                             const discardedSegment = this.client.getRevertedSegment();
+                            this.uiDebugChannel.appendLine(`[EXT][CONFLICT_TX] type=revertedSegmentDiscarded sessionId=${ownerSessionId} opId=${conflictContext.operationId} conflictId=${conflictContext.conflictId} kind=restore`);
                             activeWebview.postMessage({
                                 type: 'revertedSegmentDiscarded',
                                 segment: discardedSegment ? { ...discardedSegment, historySegments: this.revertedSegmentHistory } : discardedSegment,
-                                sessionId: this.currentSessionId
+                                sessionId: ownerSessionId,
+                                operationId: conflictContext.operationId,
+                                conflictId: conflictContext.conflictId
                             });
-                            if (this.currentSessionId) {
-                                await this.clearPersistedSegment(this.currentSessionId);
-                            }
-                            this.postAddResponse(activeWebview, 'Restore applied.', { operationId: conflictContext.operationId });
+                            await this.clearPersistedSegment(ownerSessionId);
+                            this.uiDebugChannel.appendLine(`[EXT][CONFLICT_TX] type=addResponse sessionId=${ownerSessionId} opId=${conflictContext.operationId} conflictId=${conflictContext.conflictId} kind=restore`);
+                            this.postAddResponse(activeWebview, 'Restore applied.', { operationId: conflictContext.operationId, sessionId: ownerSessionId });
                             this.refreshDiffIfTouched(result.touchedFiles);
                         }
                         if (conflictContext.kind === 'restoreSegment' && conflictContext.startMessageId) {
                             const currentSegment = this.client.getRevertedSegment();
-                            const segMap = this.undoSegmentsBySession.get(this.currentSessionId || '');
+                            const segMap = this.undoSegmentsBySession.get(ownerSessionId);
                             const persistedSegment = conflictContext.noticeKey ? segMap?.get(conflictContext.noticeKey) : undefined;
                             const messageIds = Array.isArray(persistedSegment?.memberMsgIds) && persistedSegment?.memberMsgIds?.length
                                 ? persistedSegment.memberMsgIds
                                 : (Array.isArray(currentSegment?.messageIds) ? currentSegment?.messageIds : []);
-                            const restoreScope = this.currentSessionId
-                                ? this.buildRestoreMessageScope(this.currentSessionId, conflictContext.noticeKey, messageIds, persistedSegment)
-                                : { restoreMessageIds: messageIds, invalidMessageIds: [], activeRestoreMessageIds: messageIds };
+                            const restoreScope = this.buildRestoreMessageScope(ownerSessionId, conflictContext.noticeKey, messageIds, persistedSegment);
                             const result = await this.client.restoreFromMessage(
                                 conflictContext.startMessageId,
                                 conflictContext.endMessageId,
                                 {
                                     force: true,
+                                    sessionId: ownerSessionId,
                                     messageIds: restoreScope.activeRestoreMessageIds,
                                     excludedMessageIds: restoreScope.invalidMessageIds
                                 }
                             );
-                            if (this.currentSessionId && conflictContext.noticeKey) {
+                            if (conflictContext.noticeKey) {
                                 const currentSegment = this.client.getRevertedSegment();
-                            const fallbackCommits = Array.isArray(currentSegment?.startCommits) && currentSegment?.startCommits?.length
-                                ? currentSegment.startCommits
-                                : (currentSegment?.startCommit ? [currentSegment.startCommit] : []);
-                            const commitsToClear = this.currentSessionId
-                                ? await this.resolveChangeListCommits(this.currentSessionId, restoreScope.activeRestoreMessageIds, fallbackCommits)
-                                : fallbackCommits;
+                                const fallbackCommits = Array.isArray(currentSegment?.startCommits) && currentSegment?.startCommits?.length
+                                    ? currentSegment.startCommits
+                                    : (currentSegment?.startCommit ? [currentSegment.startCommit] : []);
+                                const commitsToClear = await this.resolveChangeListCommits(ownerSessionId, restoreScope.activeRestoreMessageIds, fallbackCommits);
+                                this.uiDebugChannel.appendLine(`[EXT][CONFLICT_TX] type=applyRestoreSegmentSuccess sessionId=${ownerSessionId} opId=${conflictContext.operationId} conflictId=${conflictContext.conflictId} kind=restoreSegment noticeKey=${conflictContext.noticeKey || 'null'}`);
                                 await this.applyRestoreSegmentSuccess(
-                                    this.currentSessionId,
+                                    ownerSessionId,
                                     conflictContext.noticeKey,
                                     conflictContext.startMessageId,
                                     conflictContext.endMessageId,
@@ -4281,7 +4360,8 @@ ${attachmentLines.join('\n')}`
                         }
                     } catch (error) {
                         vscode.window.showErrorMessage(`Conflict resolution failed: ${error}`);
-                        activeWebview.postMessage({ type: 'addResponse', value: `Conflict resolution failed: ${error}` });
+                        this.uiDebugChannel.appendLine(`[EXT][CONFLICT_TX] type=error sessionId=${ownerSessionId} opId=${conflictContext.operationId} conflictId=${conflictContext.conflictId} kind=${conflictContext.kind}`);
+                        activeWebview.postMessage({ type: 'addResponse', value: `Conflict resolution failed: ${error}`, sessionId: ownerSessionId, operationId: conflictContext.operationId, meta: { operationId: conflictContext.operationId, sessionId: ownerSessionId } });
                     }
                     break;
                 }
@@ -5316,16 +5396,20 @@ ${attachmentLines.join('\n')}`
             anchorMsgId,
             applied: true,
             conflicts: result.conflicts,
-            sessionId
+            sessionId,
+            operationId
         });
         this.client.discardRevertedSegment();
         const discardedSegment = this.client.getRevertedSegment();
         liveWebview.postMessage({
             type: 'revertedSegmentDiscarded',
             segment: discardedSegment ? { ...discardedSegment, historySegments: this.revertedSegmentHistory, noticeKey } : discardedSegment,
-            sessionId: this.currentSessionId
+            sessionId,
+            operationId
         });
-        this.postAddResponse(liveWebview, 'Restore applied.', { operationId });
+        this.uiDebugChannel.appendLine(`[EXT][RESTORE_TX] type=revertedSegmentDiscarded sessionId=${sessionId} opId=${operationId || 'null'} noticeKey=${noticeKey || 'null'}`);
+        this.uiDebugChannel.appendLine(`[EXT][RESTORE_TX] type=addResponse sessionId=${sessionId} opId=${operationId || 'null'} noticeKey=${noticeKey || 'null'}`);
+        this.postAddResponse(liveWebview, 'Restore applied.', { operationId, sessionId });
         this.refreshDiffIfTouched(result.touchedFiles);
     }
 
