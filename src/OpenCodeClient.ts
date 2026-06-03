@@ -221,6 +221,9 @@ export type ChatEvent = {
     type: 'text' | 'session' | 'raw' | 'permission' | 'diff' | 'message' | 'appendUserMessage' | 'error' | 'tool' | 'toolPatch' | 'files' | 'assistantMessageMeta' | 'assistantPhase' | 'questionOverlay' | 'permissionRequest' | 'permissionReplied' | 'autoResumeStallWarn' | 'autoResumeStallClear' | 'autoResumeHardStop' | 'todoUpdate' | 'sessionUsage' | 'turnInFlight' | 'turnResolved' | 'backgroundActivityPulse';
     text?: string;
     sessionId?: string;
+    parentSessionId?: string;
+    agentSessionId?: string;
+    displayTarget?: 'parent' | 'agent-lane';
     files?: FileSnapshot[];
     messageId?: string;
     messageIndex?: number;
@@ -640,6 +643,11 @@ export class OpenCodeClient {
     private readonly replayMirroredChangeIdsBySession = new Map<string, Set<string>>();
 
     public resetSessionState(): void {
+        const subagentMapCount = this.subagentToParentSessionMap.size;
+        const stablePulseRootCount = this.stablePulseRootSessionBySubagent.size;
+        if (subagentMapCount > 0 || stablePulseRootCount > 0) {
+            this.logUiDebug(`[EXT][SUBAGENT_ROUTE] phase=clear scope=global-reset parentSessionId=* agentSessionId=* displayTarget=parent reason=resetSessionState subagentMappings=${subagentMapCount} stablePulseRoots=${stablePulseRootCount}`);
+        }
         this.currentSessionId = undefined;
         this.messageIndexById.clear();
         this.messageOrder = [];
@@ -720,6 +728,7 @@ export class OpenCodeClient {
         this.pendingQuestionCallIdsBySession.clear();
         this.pendingPermissionIdsBySession.clear();
         this.ignoredSummaryMessageIdsBySession.clear();
+        this.subagentToParentSessionMap.clear();
         this.stablePulseRootSessionBySubagent.clear();
         for (const entry of this.lateDiffGraceBySession.values()) {
             if (entry.timer) {
@@ -2172,12 +2181,31 @@ export class OpenCodeClient {
      * @param parentSessionId - The parent session ID
      */
     public registerSubagentSession(subagentSessionId: string, parentSessionId: string): void {
-        if (!subagentSessionId || !parentSessionId) return;
+        if (!subagentSessionId || !parentSessionId) {
+            this.logUiDebug(`[EXT][SUBAGENT_ROUTE_DROP] phase=register reason=missing-parent parentSessionId=${parentSessionId || 'null'} agentSessionId=${subagentSessionId || 'null'} displayTarget=parent`);
+            return;
+        }
+        const existingParent = this.subagentToParentSessionMap.get(subagentSessionId);
+        if (existingParent && existingParent !== parentSessionId) {
+            this.logUiDebug(`[EXT][SUBAGENT_ROUTE_DROP] phase=register reason=parent-conflict parentSessionId=${parentSessionId} existingParentSessionId=${existingParent} agentSessionId=${subagentSessionId} displayTarget=parent`);
+            return;
+        }
         this.subagentToParentSessionMap.set(subagentSessionId, parentSessionId);
         if (!this.stablePulseRootSessionBySubagent.has(subagentSessionId)) {
             this.stablePulseRootSessionBySubagent.set(subagentSessionId, parentSessionId);
+        } else {
+            const stableParent = this.stablePulseRootSessionBySubagent.get(subagentSessionId);
+            if (stableParent !== parentSessionId) {
+                this.logUiDebug(`[EXT][SUBAGENT_ROUTE] phase=register parentSessionId=${parentSessionId} stableParentSessionId=${stableParent || 'null'} agentSessionId=${subagentSessionId} displayTarget=parent reason=stable-pulse-root-preserved`);
+            }
         }
+        this.logUiDebug(`[EXT][SUBAGENT_ROUTE] phase=register parentSessionId=${parentSessionId} agentSessionId=${subagentSessionId} displayTarget=parent reason=mapped`);
         this.logUiDebug(`EXT: session.group.register | subagent=${subagentSessionId} | parent=${parentSessionId}`);
+    }
+
+    public getParentSessionForSubagent(subagentSessionId: string | undefined): string | undefined {
+        if (!subagentSessionId) return undefined;
+        return this.subagentToParentSessionMap.get(subagentSessionId) || this.stablePulseRootSessionBySubagent.get(subagentSessionId);
     }
 
     /**
@@ -2187,7 +2215,9 @@ export class OpenCodeClient {
     public clearSubagentSession(subagentSessionId: string): void {
         if (!subagentSessionId) return;
         const hadParent = this.subagentToParentSessionMap.delete(subagentSessionId);
-        if (hadParent) {
+        const hadStablePulseRoot = this.stablePulseRootSessionBySubagent.delete(subagentSessionId);
+        if (hadParent || hadStablePulseRoot) {
+            this.logUiDebug(`[EXT][SUBAGENT_ROUTE] phase=clear scope=parent-scoped parentSessionId=null agentSessionId=${subagentSessionId} displayTarget=parent reason=clear-subagent-map stablePulseRootCleared=${hadStablePulseRoot}`);
             this.logUiDebug(`EXT: session.group.clear | subagent=${subagentSessionId}`);
         }
     }
@@ -2200,16 +2230,27 @@ export class OpenCodeClient {
     public clearSubagentsForParent(parentSessionId: string): void {
         if (!parentSessionId) return;
         const subagentIds: string[] = [];
+        const stablePulseRootIds: string[] = [];
         for (const [subagentId, mappedParentId] of this.subagentToParentSessionMap.entries()) {
             if (mappedParentId === parentSessionId) {
                 subagentIds.push(subagentId);
             }
         }
+        for (const [subagentId, stableParentId] of this.stablePulseRootSessionBySubagent.entries()) {
+            if (stableParentId === parentSessionId) {
+                stablePulseRootIds.push(subagentId);
+            }
+        }
         for (const subagentId of subagentIds) {
             this.subagentToParentSessionMap.delete(subagentId);
         }
-        if (subagentIds.length > 0) {
-            this.logUiDebug(`EXT: session.group.clear-parent | parent=${parentSessionId} | cleared=${subagentIds.length}`);
+        for (const subagentId of stablePulseRootIds) {
+            this.stablePulseRootSessionBySubagent.delete(subagentId);
+        }
+        if (subagentIds.length > 0 || stablePulseRootIds.length > 0) {
+            const clearedAgentIds = Array.from(new Set([...subagentIds, ...stablePulseRootIds]));
+            this.logUiDebug(`[EXT][SUBAGENT_ROUTE] phase=clear-parent scope=parent-scoped parentSessionId=${parentSessionId} agentSessionId=${clearedAgentIds.join(',')} displayTarget=parent reason=clear-parent-map subagentMappings=${subagentIds.length} stablePulseRoots=${stablePulseRootIds.length}`);
+            this.logUiDebug(`EXT: session.group.clear-parent | parent=${parentSessionId} | cleared=${clearedAgentIds.length}`);
         }
     }
 
@@ -6000,6 +6041,17 @@ export class OpenCodeClient {
             phase,
             lane
         };
+        if (lane === 'subagent' && sessionId) {
+            const parentSessionId = this.getParentSessionForSubagent(sessionId);
+            if (parentSessionId) {
+                evt.parentSessionId = parentSessionId;
+                evt.agentSessionId = sessionId;
+                evt.displayTarget = 'agent-lane';
+                this.logUiDebug(`[EXT][SUBAGENT_ROUTE] phase=assistantPhase parentSessionId=${parentSessionId} agentSessionId=${sessionId} displayTarget=agent-lane reason=${reason}`);
+            } else {
+                this.logUiDebug(`[EXT][SUBAGENT_ROUTE_DROP] phase=assistantPhase reason=missing-parent parentSessionId=null agentSessionId=${sessionId} displayTarget=agent-lane`);
+            }
+        }
         if (events) {
             events.push(evt);
         } else {
@@ -6548,7 +6600,11 @@ export class OpenCodeClient {
     private classifyEventLane(sessionId: string | undefined): EventLane {
         if (!sessionId) return 'unknown';
         if (this.subagentToParentSessionMap.has(sessionId)) return 'subagent';
-        if (sessionId === this.currentSessionId || this.turnStateBySession.has(sessionId)) return 'main';
+        if (this.turnStateBySession.has(sessionId)) return 'main';
+        if (sessionId === this.currentSessionId) {
+            this.logUiDebug(`[EXT][SUBAGENT_ROUTE] phase=classify parentSessionId=${sessionId} agentSessionId=null displayTarget=parent reason=current-session-fallback-deferred-main-smoke`);
+            return 'main';
+        }
         return 'unknown';
     }
 
@@ -6678,17 +6734,34 @@ export class OpenCodeClient {
         return '';
     }
 
-    private resolveBackgroundPulseTarget(sessionId: string): { targetSessionId: string; anchorAssistantId: string | undefined } {
-        const targetSessionId = this.stablePulseRootSessionBySubagent.get(sessionId)
-            || this.subagentToParentSessionMap.get(sessionId)
-            || sessionId;
+    private resolveBackgroundPulseTarget(sessionId: string, lane: EventLane): { targetSessionId: string; parentSessionId: string; agentSessionId?: string; anchorAssistantId: string | undefined; displayTarget: 'parent' } | undefined {
+        const mappedParent = this.stablePulseRootSessionBySubagent.get(sessionId)
+            || this.subagentToParentSessionMap.get(sessionId);
+        const isKnownSubagent = lane === 'subagent' || this.subagentToParentSessionMap.has(sessionId) || this.stablePulseRootSessionBySubagent.has(sessionId);
+        if (isKnownSubagent && !mappedParent) {
+            this.logUiDebug(`[EXT][SUBAGENT_ROUTE_DROP] phase=pulse reason=missing-parent parentSessionId=null agentSessionId=${sessionId} displayTarget=parent`);
+            return undefined;
+        }
+        if (!mappedParent && lane === 'unknown') {
+            this.logUiDebug(`[EXT][SUBAGENT_ROUTE_DROP] phase=pulse reason=unknown-session-parent parentSessionId=null agentSessionId=${sessionId} displayTarget=parent`);
+            return undefined;
+        }
+        const targetSessionId = mappedParent || sessionId;
         const anchorAssistantId = this.postFinalWatchStateBySession.get(targetSessionId)?.ownerMsgId
             || this.turnFinalMsgIdBySession.get(targetSessionId)
             || this.finalizingMsgIdBySession.get(targetSessionId)
             || this.currentTurnAssistantMsgIdBySession.get(targetSessionId)
             || this.turnStateBySession.get(targetSessionId)?.assistantMsgId
             || undefined;
-        return { targetSessionId, anchorAssistantId };
+        const route = {
+            targetSessionId,
+            parentSessionId: targetSessionId,
+            agentSessionId: mappedParent ? sessionId : undefined,
+            anchorAssistantId,
+            displayTarget: 'parent' as const
+        };
+        this.logUiDebug(`[EXT][SUBAGENT_ROUTE] phase=pulse parentSessionId=${route.parentSessionId} agentSessionId=${route.agentSessionId || 'null'} displayTarget=parent reason=resolved`);
+        return route;
     }
 
     private mapServerEventToChatEvents(type: string, props: any, source: EventSource = 'sse'): ChatEvent[] {
@@ -6699,14 +6772,19 @@ export class OpenCodeClient {
             this.logUiDebug(`EXT: event.normalized | type=${normalized.type} | lane=${normalized.lane} | sessionId=${normalized.sessionId} | messageId=${normalized.messageId || 'null'} | parentId=${normalized.parentId || 'null'} | finish=${normalized.finish || 'null'} | partType=${normalized.partType || 'null'} | source=${normalized.source}`);
         }
         if (source === 'sse' && sessionId) {
-            const { targetSessionId, anchorAssistantId } = this.resolveBackgroundPulseTarget(sessionId);
-            events.push({
-                type: 'backgroundActivityPulse',
-                sessionId: targetSessionId,
-                assistantMsgId: anchorAssistantId,
-                source,
-                lane: normalized.lane
-            });
+            const pulseRoute = this.resolveBackgroundPulseTarget(sessionId, normalized.lane);
+            if (pulseRoute) {
+                events.push({
+                    type: 'backgroundActivityPulse',
+                    sessionId: pulseRoute.targetSessionId,
+                    parentSessionId: pulseRoute.parentSessionId,
+                    agentSessionId: pulseRoute.agentSessionId,
+                    displayTarget: pulseRoute.displayTarget,
+                    assistantMsgId: pulseRoute.anchorAssistantId,
+                    source,
+                    lane: normalized.lane
+                });
+            }
         }
         // Background completion signal must be intercepted BEFORE the turnFinished guard,
         // because it arrives during the post-final watch window (after finishTurn).
@@ -6892,7 +6970,7 @@ export class OpenCodeClient {
             }
             if (role === 'assistant' && messageId) {
                 const isSubagentLane = typeof sessionId === 'string' && this.subagentToParentSessionMap.has(sessionId);
-                const lane: EventLane = isSubagentLane ? 'subagent' : (sessionId === this.currentSessionId || this.turnStateBySession.has(sessionId || '') ? 'main' : 'unknown');
+                const lane: EventLane = isSubagentLane ? 'subagent' : this.classifyEventLane(sessionId);
                 const tokens = info?.tokens;
                 if (sessionId && tokens && typeof tokens === 'object') {
                     const input = Number(tokens?.input || 0);
@@ -7007,6 +7085,11 @@ export class OpenCodeClient {
                             messageId,
                             messageIndex,
                             tmpKey: this.getPendingAssistantTmpKey(sessionId),
+                            ...(isSubagentLane ? {
+                                parentSessionId: this.getParentSessionForSubagent(sessionId),
+                                agentSessionId: sessionId,
+                                displayTarget: 'agent-lane' as const
+                            } : {}),
                             source,
                         });
                     }
@@ -7167,6 +7250,7 @@ export class OpenCodeClient {
                 }
                 if (msgId && !this.assistantStatusCleared.has(msgId)) {
                     if (msgId === this.getFinalizingMsgId(sessionId)) {
+                        const statusParentSessionId = this.getParentSessionForSubagent(sessionId);
                         events.push({
                             type: 'assistantMessageMeta',
                             sessionId,
@@ -7174,12 +7258,30 @@ export class OpenCodeClient {
                             lastText: 'Finalizing the response...',
                             tmpKey: this.getPendingAssistantTmpKey(sessionId),
                             isStatusUpdate: true,
+                            ...(statusParentSessionId ? {
+                                parentSessionId: statusParentSessionId,
+                                agentSessionId: sessionId,
+                                displayTarget: 'agent-lane' as const
+                            } : {}),
                             source,
                         });
                     }
                     this.assistantStatusCleared.add(msgId);
                 }
-                events.push({ type: 'text', text: chunk, sessionId, assistantMsgId: part?.messageID, tmpKey: this.getPendingAssistantTmpKey(sessionId) , source });
+                const textParentSessionId = this.getParentSessionForSubagent(sessionId);
+                events.push({
+                    type: 'text',
+                    text: chunk,
+                    sessionId,
+                    assistantMsgId: part?.messageID,
+                    tmpKey: this.getPendingAssistantTmpKey(sessionId),
+                    ...(textParentSessionId ? {
+                        parentSessionId: textParentSessionId,
+                        agentSessionId: sessionId,
+                        displayTarget: 'agent-lane' as const
+                    } : {}),
+                    source
+                });
             }
             if (part?.type === 'tool') {
                 const messageId = typeof part?.messageID === 'string' ? part.messageID : undefined;
@@ -7209,14 +7311,32 @@ export class OpenCodeClient {
                 if (statusText && source !== 'resync') {
                     const resolvedId = this.getTurnAssistantMsgId(sessionId);
                     const assistantMsgId = resolvedId || part?.messageID;
-                    events.push({ type: 'assistantMessageMeta', sessionId, assistantMsgId, lastText: statusText, tmpKey: this.getPendingAssistantTmpKey(sessionId), isStatusUpdate: true , source });
+                    const statusParentSessionId = this.getParentSessionForSubagent(sessionId);
+                    events.push({
+                        type: 'assistantMessageMeta',
+                        sessionId,
+                        assistantMsgId,
+                        lastText: statusText,
+                        tmpKey: this.getPendingAssistantTmpKey(sessionId),
+                        isStatusUpdate: true,
+                        ...(statusParentSessionId ? {
+                            parentSessionId: statusParentSessionId,
+                            agentSessionId: sessionId,
+                            displayTarget: 'agent-lane' as const
+                        } : {}),
+                        source
+                    });
                 }
                 if (typeof sessionId === 'string' && this.subagentToParentSessionMap.has(sessionId)) {
+                    const parentSessionId = this.getParentSessionForSubagent(sessionId);
                     const status = part?.state?.status;
                     if ((status === 'running' || status === 'pending') && source !== 'resync') {
                         events.push({
                             type: 'tool',
                             sessionId,
+                            parentSessionId,
+                            agentSessionId: sessionId,
+                            displayTarget: 'agent-lane',
                             tool: statusText || (typeof part?.tool === 'string' ? part.tool : ''),
                             toolState: {
                                 status,
@@ -7243,7 +7363,24 @@ export class OpenCodeClient {
                     const todos = part?.state?.metadata?.todos;
                     if (Array.isArray(todos) && todos.length > 0 && sessionId) {
                         const msgId = this.getTurnAssistantMsgId(sessionId) || part?.messageID || '';
-                        events.push({ type: 'todoUpdate', todos, sessionId, assistantMsgId: msgId , source });
+                        const parentSessionId = this.getParentSessionForSubagent(sessionId);
+                        if (parentSessionId) {
+                            events.push({
+                                type: 'todoUpdate',
+                                todos,
+                                sessionId: parentSessionId,
+                                parentSessionId,
+                                agentSessionId: sessionId,
+                                displayTarget: 'parent',
+                                assistantMsgId: msgId,
+                                source
+                            });
+                            this.logUiDebug(`[EXT][SUBAGENT_ROUTE] phase=todoUpdate parentSessionId=${parentSessionId} agentSessionId=${sessionId} displayTarget=parent reason=mapped`);
+                        } else if (this.subagentToParentSessionMap.has(sessionId)) {
+                            this.logUiDebug(`[EXT][SUBAGENT_ROUTE_DROP] phase=todoUpdate reason=missing-parent parentSessionId=null agentSessionId=${sessionId} displayTarget=parent`);
+                        } else {
+                            events.push({ type: 'todoUpdate', todos, sessionId, assistantMsgId: msgId , source });
+                        }
                     }
                 }
                 if (source === 'sse' && sessionId && toolState.becameTerminal && !this.hasPendingOrRunningTools(sessionId) && !this.turnFinalResolvedBySession.has(sessionId)) {

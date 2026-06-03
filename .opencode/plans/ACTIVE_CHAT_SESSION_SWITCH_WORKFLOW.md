@@ -330,7 +330,7 @@ The following clarifications were requested in review and should be treated as p
 
 ## Slice 7 - Append Workflow Isolation
 
-**Status:** Pending.
+**Status:** Completed. Wave plan/audit: `.opencode/plans/2026-06-03-slice8-subagent-routing-wave.md` and `.opencode/plans/2026-06-03-slice8-wave0-audit.md`. Extension payload ownership, WebView parent-visible routing, agent-lane preservation, and parent-scoped terminal/clear behavior were implemented and verifier-accepted. Manual log validation from `OpenCode-UI-Debug.log` showed parent-visible routing and agent-lane state routing without active/current fallback pollution; conservative `unknown-session-parent` drops were observed and treated as designed drops, not route leakage.
 
 **Goal:** Append remains compatible with session switching and root continuation ownership.
 
@@ -375,16 +375,16 @@ The following clarifications were requested in review and should be treated as p
 - `media/main.js`
 
 **Tasks:**
-- [ ] S8.T1 Audit `subagentToParentSessionMap`, stable pulse root mappings, lane classification, and parent association sources.
-- [ ] S8.T2 Ensure extension messages include both `parentSessionId` and `agentSessionId` plus `displayTarget` when ambiguous.
-- [ ] S8.T3 Scope subagent terminal/clear operations by parent session; reserve global clear only for named shutdown paths.
-- [ ] S8.T4 In webview, route parent-visible status/progress/todos/pulse to parent session state and render only when parent active.
-- [ ] S8.T5 Keep agent session message/final content in agent lane unless an explicit existing summary/promote path handles it.
+- [x] S8.T1 Audit `subagentToParentSessionMap`, stable pulse root mappings, lane classification, and parent association sources.
+- [x] S8.T2 Ensure extension messages include both `parentSessionId` and `agentSessionId` plus `displayTarget` when ambiguous.
+- [x] S8.T3 Scope subagent terminal/clear operations by parent session; reserve global clear only for named shutdown paths.
+- [x] S8.T4 In webview, route parent-visible status/progress/todos/pulse to parent session state and render only when parent active.
+- [x] S8.T5 Keep agent session message/final content in agent lane unless an explicit existing summary/promote path handles it.
 
 **Validation:**
-- [ ] S8.V1 A active, B parent has subagent C update; B state changes, A DOM/send gate unchanged.
-- [ ] S8.V2 C emits diff/todo/progress while B background; switching to B shows expected parent UI/agent-lane state.
-- [ ] S8.V3 Parent B terminal/clear does not clear parent A/D subagents.
+- [x] S8.V1 A active, B parent has subagent C update; B state changes, A DOM/send gate unchanged.
+- [x] S8.V2 C emits diff/todo/progress while B background; switching to B shows expected parent UI/agent-lane state.
+- [x] S8.V3 Parent B terminal/clear does not clear parent A/D subagents.
 
 ## Slice 9 - End-To-End Acceptance
 

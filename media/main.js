@@ -1111,7 +1111,11 @@ function sessionHasVisibleThinkingAssistant(session) {
     return false;
 }
 
-function requestBackgroundPulseRender() {
+function requestBackgroundPulseRender(sessionId) {
+    if (sessionId && sessionId !== activeSessionId) {
+        logBackgroundStateUpdate(sessionId, 'background-pulse', { extra: ['render=false'] });
+        return;
+    }
     if (window.__oc && typeof window.__oc.renderFromState === 'function') {
         window.__oc.renderFromState('background-pulse');
         return;
@@ -1213,7 +1217,7 @@ function removeMessageFromSession(session, messageId) {
 }
 
 function armBackgroundSubagentIndicator(sessionId, anchorAssistantId) {
-    const session = getSessionState(sessionId);
+    const session = getSessionState(sessionId, true);
     if (!session) return;
     if (session.backgroundSubagentIndicatorVisible) {
         return;
@@ -1235,9 +1239,9 @@ function armBackgroundSubagentIndicator(sessionId, anchorAssistantId) {
         latest.backgroundSubagentIndicatorUntil = 0;
         latest.backgroundSubagentIndicatorTimer = null;
         latest.backgroundSubagentIndicatorAnchorId = null;
-        requestBackgroundPulseRender();
+        requestBackgroundPulseRender(sessionId);
     }, 3000);
-    requestBackgroundPulseRender();
+    requestBackgroundPulseRender(sessionId);
 }
 
 function clearBackgroundSubagentIndicator(session) {
@@ -1334,6 +1338,125 @@ function resolveEventSessionId(message, eventName, options = {}) {
 function getEventSessionId(message, eventName) {
     const route = resolveEventSessionId(message, eventName);
     return route?.sessionId || null;
+}
+
+function resolveParentVisibleSubagentRoute(message, eventName) {
+    const parentSessionId = typeof message?.parentSessionId === 'string' ? message.parentSessionId : '';
+    const agentSessionId = typeof message?.agentSessionId === 'string' ? message.agentSessionId : '';
+    const displayTarget = typeof message?.displayTarget === 'string' ? message.displayTarget : '';
+    const isActiveParent = parentSessionId === activeSessionId;
+    const baseLog = [
+        '[WV][SUBAGENT_ROUTE]',
+        `event=${eventName || 'unknown'}`,
+        `parentSessionId=${parentSessionId || 'null'}`,
+        `agentSessionId=${agentSessionId || 'null'}`,
+        `displayTarget=${displayTarget || 'null'}`,
+        `activeSessionId=${activeSessionId || 'null'}`,
+        `isActiveParent=${isActiveParent ? 'true' : 'false'}`
+    ];
+    if (!parentSessionId) {
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: [...baseLog, 'shouldRender=false', 'decision=drop', 'reason=missing-parentSessionId']
+        });
+        console.warn(`[WV][SUBAGENT_ROUTE] drop event=${eventName || 'unknown'} reason=missing-parentSessionId`, message);
+        return null;
+    }
+    if (displayTarget !== 'parent') {
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: [...baseLog, 'shouldRender=false', 'decision=drop', 'reason=displayTarget-not-parent']
+        });
+        console.warn(`[WV][SUBAGENT_ROUTE] drop event=${eventName || 'unknown'} reason=displayTarget-not-parent parentSessionId=${parentSessionId}`, message);
+        return null;
+    }
+    const shouldRender = isActiveParent;
+    vscode.postMessage({
+        type: 'ui-debug',
+        payload: [
+            ...baseLog,
+            `shouldRender=${shouldRender ? 'true' : 'false'}`,
+            `decision=${shouldRender ? 'render' : 'state-only'}`
+        ]
+    });
+    return { parentSessionId, agentSessionId, displayTarget, isActiveParent, shouldRender };
+}
+
+function resolveAgentLaneSubagentRoute(message, eventName) {
+    const parentSessionId = typeof message?.parentSessionId === 'string' ? message.parentSessionId : '';
+    const agentSessionId = typeof message?.agentSessionId === 'string' ? message.agentSessionId : '';
+    const payloadSessionId =
+        (typeof message?.sessionID === 'string' && message.sessionID) ||
+        (typeof message?.sessionId === 'string' && message.sessionId) ||
+        (typeof message?.part?.sessionID === 'string' && message.part.sessionID) ||
+        (typeof message?.part?.sessionId === 'string' && message.part.sessionId) ||
+        '';
+    const displayTarget = typeof message?.displayTarget === 'string' ? message.displayTarget : '';
+    const isActiveAgent = agentSessionId === activeSessionId;
+    const baseLog = [
+        '[WV][SUBAGENT_ROUTE]',
+        `event=${eventName || 'unknown'}`,
+        `parentSessionId=${parentSessionId || 'null'}`,
+        `agentSessionId=${agentSessionId || 'null'}`,
+        `sessionId=${payloadSessionId || 'null'}`,
+        `displayTarget=${displayTarget || 'null'}`,
+        `activeSessionId=${activeSessionId || 'null'}`,
+        `isActiveParent=${parentSessionId && parentSessionId === activeSessionId ? 'true' : 'false'}`,
+        `isActiveAgent=${isActiveAgent ? 'true' : 'false'}`
+    ];
+    if (displayTarget !== 'agent-lane') {
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: [...baseLog, 'shouldRender=false', 'decision=drop', 'reason=displayTarget-not-agent-lane']
+        });
+        console.warn(`[WV][SUBAGENT_ROUTE] drop event=${eventName || 'unknown'} reason=displayTarget-not-agent-lane displayTarget=${displayTarget || 'null'}`, message);
+        return null;
+    }
+    if (!agentSessionId) {
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: [...baseLog, 'shouldRender=false', 'decision=drop', 'reason=missing-agentSessionId']
+        });
+        console.warn(`[WV][SUBAGENT_ROUTE] drop event=${eventName || 'unknown'} reason=missing-agentSessionId`, message);
+        return null;
+    }
+    const shouldRender = isActiveAgent;
+    vscode.postMessage({
+        type: 'ui-debug',
+        payload: [
+            ...baseLog,
+            `targetSessionId=${agentSessionId}`,
+            `shouldRender=${shouldRender ? 'true' : 'false'}`,
+            `decision=${shouldRender ? 'render-agent-lane' : 'state-only-agent-lane'}`,
+            payloadSessionId && payloadSessionId !== agentSessionId ? 'note=sessionId-ignored-agentSessionId-authoritative' : 'note=agentSessionId-authoritative'
+        ]
+    });
+    return {
+        sessionId: agentSessionId,
+        parentSessionId,
+        agentSessionId,
+        displayTarget,
+        source: 'agent-lane',
+        isActive: isActiveAgent,
+        isActiveAgent,
+        shouldRender
+    };
+}
+
+function resolveContentEventRoute(message, eventName) {
+    if (message?.displayTarget === 'agent-lane') {
+        return resolveAgentLaneSubagentRoute(message, eventName);
+    }
+    return resolveEventSessionId(message, eventName);
+}
+
+function retainAgentLaneParentAssociation(session, route) {
+    if (!session || !route || route.displayTarget !== 'agent-lane') return;
+    if (!session.meta) session.meta = {};
+    session.meta.agentSessionId = route.agentSessionId;
+    if (route.parentSessionId) {
+        session.meta.parentSessionId = route.parentSessionId;
+    }
 }
 
 function logBackgroundStateUpdate(sessionId, reason, options = {}) {
@@ -8056,8 +8179,11 @@ window.addEventListener('message', (event) => {
                 break;
             }
             case 'subagentStatus': {
-              const { active, agents, sessionId } = message;
-              const sess = getSessionState(sessionId || activeSessionId);
+              const route = resolveParentVisibleSubagentRoute(message, 'subagentStatus');
+              if (!route) break;
+              const { agents } = message;
+              const sessionId = route.parentSessionId;
+              const sess = getSessionState(sessionId, true);
               const incomingAgents = Array.isArray(agents) ? agents : [];
               const runningCount = typeof message.runningCount === 'number' ? message.runningCount : incomingAgents.filter((a) => a?.state === 'running').length;
               const finalizingCount = typeof message.finalizingCount === 'number' ? message.finalizingCount : incomingAgents.filter((a) => a?.state === 'finalizing').length;
@@ -8090,7 +8216,7 @@ window.addEventListener('message', (event) => {
                 }
               }
 
-              const indicator = document.getElementById('subagent-indicator');
+              const indicator = route.shouldRender ? document.getElementById('subagent-indicator') : null;
               if (indicator) {
                 const hasIndicator = runningCount > 0 || finalizingCount > 0 || doneJustNowCount > 0;
                 indicator.style.display = hasIndicator ? '' : 'none';
@@ -8100,20 +8226,23 @@ window.addEventListener('message', (event) => {
                   indicator.textContent = `Done just now (${doneJustNowCount})`;
                 }
               }
-              scheduleRenderFromState();
+              renderIfActive(sessionId, 'subagentStatus', { extra: [`agentSessionId=${route.agentSessionId || 'null'}`] });
               break;
             }
             case 'backgroundActivityPulse': {
-              const sessionId = getEventSessionId(message, 'backgroundActivityPulse');
-              if (!sessionId) break;
+              const route = resolveParentVisibleSubagentRoute(message, 'backgroundActivityPulse');
+              if (!route) break;
+              const sessionId = route.parentSessionId;
               const anchorAssistantId = typeof message.assistantMsgId === 'string' ? message.assistantMsgId : null;
               armBackgroundSubagentIndicator(sessionId, anchorAssistantId);
               break;
             }
             case 'subagentStateDelta': {
-              const sess = getSessionState(message.sessionId || activeSessionId);
+              const route = resolveParentVisibleSubagentRoute(message, 'subagentStateDelta');
+              if (!route) break;
+              const sess = getSessionState(route.parentSessionId, true);
               if (sess && Array.isArray(sess.activeSubagents)) {
-                const idx = sess.activeSubagents.findIndex((a) => a?.sessionId === message.agentSessionId);
+                const idx = sess.activeSubagents.findIndex((a) => a?.sessionId === route.agentSessionId);
                 if (idx >= 0) {
                   const cur = sess.activeSubagents[idx] || {};
                   sess.activeSubagents[idx] = {
@@ -8123,7 +8252,7 @@ window.addEventListener('message', (event) => {
                   };
                 }
               }
-              scheduleRenderFromState();
+              renderIfActive(route.parentSessionId, 'subagentStateDelta', { extra: [`agentSessionId=${route.agentSessionId || 'null'}`] });
               break;
             }
             case 'resetUiState': {
@@ -8977,10 +9106,11 @@ window.addEventListener('message', (event) => {
                 break;
             }
             case 'assistantMessageMeta': {
-                const route = resolveEventSessionId(message, 'assistantMessageMeta');
+                const route = resolveContentEventRoute(message, 'assistantMessageMeta');
                 if (!route) break;
                 const sessionId = route.sessionId;
                 const session = getSessionState(sessionId, false);
+                retainAgentLaneParentAssociation(session, route);
                 if (session?.canceledActiveTurn) {
                     vscode.postMessage({
                         type: 'ui-debug',
@@ -9023,6 +9153,7 @@ window.addEventListener('message', (event) => {
                     break;
                 }
                 const sessionStateForAllowed = getSessionState(sessionId, true);
+                retainAgentLaneParentAssociation(sessionStateForAllowed, route);
 
                 // P2: Suppress synthetic auto-continuation turns
                 if (message.isSyntheticTurn === true) {
@@ -9046,9 +9177,11 @@ window.addEventListener('message', (event) => {
                 break;
             }
             case 'assistantPhase': {
-                const sessionId = getEventSessionId(message, 'assistantPhase');
-                if (!sessionId) break;
+                const route = resolveContentEventRoute(message, 'assistantPhase');
+                if (!route) break;
+                const sessionId = route.sessionId;
                 const session = getSessionState(sessionId, true);
+                retainAgentLaneParentAssociation(session, route);
                 if (!session.meta) session.meta = {};
                 if (!session.meta.assistantPhases) session.meta.assistantPhases = {};
                 const msgId = typeof message.messageId === 'string' ? message.messageId : '';
@@ -9075,10 +9208,11 @@ window.addEventListener('message', (event) => {
                 break;
             }
             case 'chatChunk': {
-                const route = resolveEventSessionId(message, 'chatChunk');
+                const route = resolveContentEventRoute(message, 'chatChunk');
                 if (!route) break;
                 const sessionId = route.sessionId;
                 const session = getSessionState(sessionId);
+                retainAgentLaneParentAssociation(session, route);
                 if (session?.canceledActiveTurn) {
                     vscode.postMessage({
                         type: 'ui-debug',
@@ -9125,11 +9259,12 @@ window.addEventListener('message', (event) => {
                 break;
             }
             case 'chatDone': {
-                const route = resolveEventSessionId(message, 'chatDone');
+                const route = resolveContentEventRoute(message, 'chatDone');
                 if (!route) break;
                 const sessionId = route.sessionId;
                 logIdCandidates('[DBG_CHATDONE]', message, sessionId, activeSessionId);
                 const session = getSessionState(sessionId);
+                retainAgentLaneParentAssociation(session, route);
                 if (session) {
                     const tail = formatTail(session.timeline);
                     vscode.postMessage({ type: 'ui-debug', payload: ['[DBG_CHATDONE]', `timelineTail=${tail}`] });
@@ -9369,10 +9504,11 @@ window.addEventListener('message', (event) => {
                 break;
             }
             case 'diffChunk': {
-                const route = resolveEventSessionId(message, 'diffChunk');
+                const route = resolveContentEventRoute(message, 'diffChunk');
                 if (!route) break;
                 const sessionId = route.sessionId;
                 const session = getSessionState(sessionId, true);
+                retainAgentLaneParentAssociation(session, route);
                 if (!shouldRenderDiffChunk(session, message)) {
                     break;
                 }
@@ -9465,12 +9601,15 @@ window.addEventListener('message', (event) => {
                 break;
             }
             case 'todoUpdate': {
-                const route = resolveEventSessionId(message, 'todoUpdate');
+                const parentVisible = message?.displayTarget === 'parent' || typeof message?.parentSessionId === 'string';
+                const route = parentVisible
+                    ? resolveParentVisibleSubagentRoute(message, 'todoUpdate')
+                    : resolveEventSessionId(message, 'todoUpdate');
                 if (!route) break;
-                const sessionId = route.sessionId;
+                const sessionId = parentVisible ? route.parentSessionId : route.sessionId;
                 const { todos, anchorMessageId } = message;
                 if (!Array.isArray(todos)) break;
-                const session = getSessionState(sessionId);
+                const session = getSessionState(sessionId, parentVisible);
                 if (!session) break;
                 const activeTargetId = session.currentTurnAssistantKey || session.thinkingId || null;
                 let msg = activeTargetId ? session.messagesById.get(activeTargetId) : null;
@@ -9483,14 +9622,15 @@ window.addEventListener('message', (event) => {
                 if (!msg) break;
                 if (!msg.meta) msg.meta = {};
                 msg.meta.todos = todos;
-                renderIfActive(sessionId, 'todoUpdate');
+                renderIfActive(sessionId, 'todoUpdate', parentVisible ? { extra: [`agentSessionId=${route.agentSessionId || 'null'}`] } : undefined);
                 break;
             }
             case 'messageAppend': {
-                const route = resolveEventSessionId(message, 'messageAppend');
+                const route = resolveContentEventRoute(message, 'messageAppend');
                 if (!route) break;
                 const sessionId = route.sessionId;
                 const session = getSessionState(sessionId, true);
+                retainAgentLaneParentAssociation(session, route);
                 if (session?.canceledActiveTurn && message?.message?.id === session.lastTurnUserId) {
                     vscode.postMessage({
                         type: 'ui-debug',
@@ -9568,10 +9708,11 @@ window.addEventListener('message', (event) => {
                 break;
             }
             case 'diffChunk': {
-                const route = resolveEventSessionId(message, 'diffChunk');
+                const route = resolveContentEventRoute(message, 'diffChunk');
                 if (!route) break;
                 const sessionId = route.sessionId;
                 const session = getSessionState(sessionId, true);
+                retainAgentLaneParentAssociation(session, route);
                 if (!shouldRenderDiffChunk(session, message)) {
                     break;
                 }
@@ -9585,10 +9726,11 @@ window.addEventListener('message', (event) => {
                 break;
             }
             case 'messageAppend': {
-                const route = resolveEventSessionId(message, 'messageAppend');
+                const route = resolveContentEventRoute(message, 'messageAppend');
                 if (!route) break;
                 const sessionId = route.sessionId;
                 const session = getSessionState(sessionId, true);
+                retainAgentLaneParentAssociation(session, route);
                 if (message.message && message.message.role === 'user' && isHiddenControlUserText(message.message.text || '')) {
                     if (typeof message.message.id === 'string' && message.message.id.length) {
                         session.hiddenControlUserIds.add(message.message.id);

@@ -199,8 +199,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
     }
 
-    private clearSubagentSessions(): void {
+    private clearSubagentSessions(globalReason: 'global-retention-sweep' | 'global-shutdown' | 'global-reset' = 'global-retention-sweep'): void {
         const now = Date.now();
+        this.uiDebugChannel.appendLine(`[EXT][SUBAGENT_ROUTE] phase=clear scope=${globalReason} parentSessionId=* agentSessionId=* displayTarget=parent reason=clear-terminal-retention`);
         for (const [sessionId, entry] of this.subagentProgressBySession.entries()) {
             const st = entry.state || (entry.isDone ? 'done' : 'running');
             const expired = typeof entry.dismissAt === 'number' && entry.dismissAt <= now;
@@ -219,6 +220,36 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             this.subagentProgressBySession.delete(sessionId);
             this.uiDebugChannel.appendLine(`[SidebarProvider] Cleared subagent session mapping: ${sessionId}`);
         }
+    }
+
+    private clearSubagentSessionsForParent(parentSessionId: string | undefined, reason: string): void {
+        if (!parentSessionId) {
+            this.uiDebugChannel.appendLine(`[EXT][SUBAGENT_ROUTE_DROP] phase=clear-parent scope=parent-scoped parentSessionId=null agentSessionId=null displayTarget=parent reason=${reason}:missing-parent`);
+            return;
+        }
+        const now = Date.now();
+        const clearedSessionIds: string[] = [];
+        for (const [sessionId, entry] of this.subagentProgressBySession.entries()) {
+            if (entry.parentSessionId !== parentSessionId) continue;
+            const st = entry.state || (entry.isDone ? 'done' : 'running');
+            const expired = typeof entry.dismissAt === 'number' && entry.dismissAt <= now;
+            const canClear = st === 'dismissed' || ((st === 'done' || st === 'failed' || st === 'cancelled') && expired);
+            if (!canClear) continue;
+            if ((st === 'done' || st === 'failed' || st === 'cancelled') && typeof entry.finishedAt === 'number') {
+                const visibleMs = Math.max(0, now - entry.finishedAt);
+                this.task1DoneVisibleTotalMs += visibleMs;
+                this.task1DoneVisibleCount += 1;
+                const avgDoneVisibleMs = this.task1DoneVisibleCount > 0 ? Math.round(this.task1DoneVisibleTotalMs / this.task1DoneVisibleCount) : 0;
+                const falseDoneRate = this.task1DoneVisibleCount > 0 ? (this.task1FalseDoneEvents / this.task1DoneVisibleCount) : 0;
+                this.uiDebugChannel.appendLine(`[SidebarProvider] metrics.task1 done_visible_ms=${avgDoneVisibleMs} false_done_rate=${falseDoneRate.toFixed(4)}`);
+            }
+            this.activeSubagentSessionIds.delete(sessionId);
+            this.subagentProgressBySession.delete(sessionId);
+            clearedSessionIds.push(sessionId);
+            this.uiDebugChannel.appendLine(`[SidebarProvider] Cleared parent-scoped subagent session mapping: parent=${parentSessionId} subagent=${sessionId}`);
+        }
+        this.client.clearSubagentsForParent(parentSessionId);
+        this.uiDebugChannel.appendLine(`[EXT][SUBAGENT_ROUTE] phase=clear-parent scope=parent-scoped parentSessionId=${parentSessionId} agentSessionId=${clearedSessionIds.join(',') || 'none'} displayTarget=parent reason=${reason} cleared=${clearedSessionIds.length}`);
     }
 
     private isTerminalSubagentState(state: SubagentLifecycleState | undefined): boolean {
@@ -386,12 +417,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.emitSubagentStatus();
     }
 
+    private logSubagentRoute(phase: string, parentSessionId: string | undefined, agentSessionId: string | undefined, displayTarget: 'parent' | 'agent-lane', reason: string, dropped = false): void {
+        const tag = dropped ? '[EXT][SUBAGENT_ROUTE_DROP]' : '[EXT][SUBAGENT_ROUTE]';
+        this.uiDebugChannel.appendLine(`${tag} phase=${phase} parentSessionId=${parentSessionId || 'null'} agentSessionId=${agentSessionId || 'null'} displayTarget=${displayTarget} reason=${reason}`);
+    }
+
     private emitSubagentStatus(active?: boolean): void {
         const liveWebview = this._view?.webview;
         if (!liveWebview) return;
-        const agents = Array.from(this.subagentProgressBySession.values()).map(entry => ({
+        const agentsByParent = new Map<string, any[]>();
+        for (const entry of Array.from(this.subagentProgressBySession.values())) {
+            if (!entry.parentSessionId) {
+                this.logSubagentRoute('status', undefined, entry.taskId, 'parent', 'missing-parent', true);
+                continue;
+            }
+            const agent = {
             sessionId: entry.taskId,
+            agentSessionId: entry.taskId,
             parentSessionId: entry.parentSessionId,
+            displayTarget: 'parent',
             description: entry.description,
             mode: entry.mode || '',
             startedAt: entry.startedAt,
@@ -403,12 +447,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             latestToolInput: entry.latestToolInput || '',
             state: entry.state || (entry.isDone ? 'done' : 'running'),
             isDone: (entry.state || (entry.isDone ? 'done' : 'running')) === 'done'
-        }));
-        const runningCount = agents.filter((a: any) => a.state === 'running').length;
-        const finalizingCount = agents.filter((a: any) => a.state === 'finalizing').length;
-        const doneJustNowCount = agents.filter((a: any) => a.state === 'done').length;
-        const isActive = active !== undefined ? active : (runningCount + finalizingCount) > 0;
-        liveWebview.postMessage({ type: 'subagentStatus', active: isActive, agents, count: agents.length, runningCount, finalizingCount, doneJustNowCount, sessionId: this.currentSessionId });
+            };
+            const group = agentsByParent.get(entry.parentSessionId) || [];
+            group.push(agent);
+            agentsByParent.set(entry.parentSessionId, group);
+        }
+        for (const [parentSessionId, agents] of agentsByParent.entries()) {
+            const runningCount = agents.filter((a: any) => a.state === 'running').length;
+            const finalizingCount = agents.filter((a: any) => a.state === 'finalizing').length;
+            const doneJustNowCount = agents.filter((a: any) => a.state === 'done').length;
+            const isActive = active !== undefined ? active : (runningCount + finalizingCount) > 0;
+            this.logSubagentRoute('status', parentSessionId, agents.map((a: any) => a.agentSessionId).join(','), 'parent', 'emit-parent-status');
+            liveWebview.postMessage({ type: 'subagentStatus', active: isActive, agents, count: agents.length, runningCount, finalizingCount, doneJustNowCount, sessionId: parentSessionId, parentSessionId, displayTarget: 'parent' });
+        }
     }
     private scheduleSubagentRetentionSweep(): void {
         if (this.subagentRetentionTimer) {
@@ -433,11 +484,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private emitSubagentStateDelta(sessionId: string, from: string, to: string, reason: string, entry: any): void {
         const liveWebview = this._view?.webview;
         if (!liveWebview || from === to) return;
+        const parentSessionId = entry?.parentSessionId;
+        if (!parentSessionId) {
+            this.logSubagentRoute('stateDelta', undefined, sessionId, 'parent', 'missing-parent', true);
+            return;
+        }
         liveWebview.postMessage({
             type: 'subagentStateDelta',
-            sessionId: this.currentSessionId,
-            parentSessionId: entry?.parentSessionId || this.currentSessionId,
+            sessionId: parentSessionId,
+            parentSessionId,
             agentSessionId: sessionId,
+            displayTarget: 'parent',
             from,
             to,
             reason,
@@ -447,19 +504,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 finalReason: entry?.finalReason || ''
             }
         });
-    }
-
-    private markAllSubagentsTerminal(kind: 'done' | 'failed' | 'cancelled', reason: string): void {
-        const now = Date.now();
-        for (const [sessionId, entry] of this.subagentProgressBySession.entries()) {
-            const st = entry.state || (entry.isDone ? 'done' : 'running');
-            if (st === 'running' || st === 'finalizing' || st === 'queued') {
-                this.transitionSubagentState(sessionId, entry, kind, reason);
-                entry.finishedAt = now;
-                entry.dismissAt = now + this.subagentDoneRetentionMs;
-                this.scheduleSubagentRetentionSweep();
-            }
-        }
     }
 
     private emitTurnFinalizePhase(webview: vscode.Webview, sessionId: string | undefined, phase: 'stream_done' | 'commit_done' | 'upgrade_done' | 'finalize_done'): void {
@@ -1728,6 +1772,29 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
     }
 
+    private markSubagentsTerminalForParent(parentSessionId: string | undefined, kind: 'done' | 'failed' | 'cancelled', reason: string): void {
+        if (!parentSessionId) {
+            this.uiDebugChannel.appendLine(`[EXT][SUBAGENT_ROUTE_DROP] phase=terminal scope=parent-scoped parentSessionId=null agentSessionId=null displayTarget=parent reason=${reason}:missing-parent terminalState=${kind}`);
+            return;
+        }
+        const now = Date.now();
+        const terminalSessionIds: string[] = [];
+        for (const [sessionId, entry] of this.subagentProgressBySession.entries()) {
+            if (entry.parentSessionId !== parentSessionId) continue;
+            const st = entry.state || (entry.isDone ? 'done' : 'running');
+            if (st === 'running' || st === 'finalizing' || st === 'queued') {
+                this.transitionSubagentState(sessionId, entry, kind, reason);
+                entry.finishedAt = now;
+                entry.dismissAt = now + this.subagentDoneRetentionMs;
+                terminalSessionIds.push(sessionId);
+            }
+        }
+        if (terminalSessionIds.length > 0) {
+            this.scheduleSubagentRetentionSweep();
+        }
+        this.uiDebugChannel.appendLine(`[EXT][SUBAGENT_ROUTE] phase=terminal scope=parent-scoped parentSessionId=${parentSessionId} agentSessionId=${terminalSessionIds.join(',') || 'none'} displayTarget=parent reason=${reason} terminalState=${kind} affected=${terminalSessionIds.length}`);
+    }
+
     private shouldWriteSnapshot(sessionId: string, reason: string): boolean {
         if (!this.uiTimelineBySession.has(sessionId)) {
             this.uiDebugChannel.appendLine(`[EXT][SNAP_SAVE_SKIP] sessionId=${sessionId} reason=${reason} detail=missing-ui-timeline`);
@@ -2808,9 +2875,9 @@ ${attachmentLines.join('\n')}`
                         this.postFinalWatchDiffFocusedBySession.delete(targetSessionId);
                         // Do not force "done" from main finalize; only subagent final-accepted can set done.
                         // Any still-active subagents at this point are treated as cancelled.
-                        this.markAllSubagentsTerminal('cancelled', 'main-finalize-cancel-active');
+                        this.markSubagentsTerminalForParent(targetSessionId, 'cancelled', 'main-finalize-cancel-active');
                         this.emitSubagentStatus();
-                        this.clearSubagentSessions();
+                        this.clearSubagentSessionsForParent(targetSessionId, 'main-finalize-cancel-active');
                         this.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=finalize_done reqId=${reqId} payloadSessionId=${payloadSessionId || 'none'} currentSessionId=${currentSessionIdAtSend || 'none'} targetSessionId=${targetSessionId} routeSource=${routeSource}`);
                         this.uiDebugChannel.appendLine(`[EXT][TURN_BIND] phase=finalize_done reqId=${reqId} payloadSessionId=${payloadSessionId || 'none'} currentSessionId=${currentSessionIdAtSend || 'none'} targetSessionId=${targetSessionId} routeSource=${routeSource} clientMessageId=${clientMessageId} assistantMsgId=${doneAssistantMsgId || 'none'} tmpAssistantKey=${tmpAssistantKey || 'none'}`);
                         this.emitTurnFinalizePhase(liveWebview, targetSessionId, 'finalize_done');
@@ -2875,9 +2942,9 @@ ${attachmentLines.join('\n')}`
                             this.client.finishTurn(sessionId);
                         }
                         // Mark all active subagents as failed before clearing (error path)
-                        this.markAllSubagentsTerminal('failed', 'main-error-finalize');
+                        this.markSubagentsTerminalForParent(sessionId, 'failed', 'main-error-finalize');
                         this.emitSubagentStatus();
-                        this.clearSubagentSessions();
+                        this.clearSubagentSessionsForParent(sessionId, 'main-error-finalize');
                         this.emitTurnFinalizePhase(activeWebview, sessionId, 'finalize_done');
                         await this.postModelQuota(activeWebview, 'chat-error');
                     } finally {
@@ -4024,9 +4091,9 @@ ${attachmentLines.join('\n')}`
                         this.client.finishTurn(cancelSessionId);
                         this.postFinalWatchDiffFocusedBySession.delete(cancelSessionId);
                     }
-                    this.markAllSubagentsTerminal('cancelled', 'user-cancel');
+                    this.markSubagentsTerminalForParent(cancelSessionId, 'cancelled', 'user-cancel');
                     this.emitSubagentStatus();
-                    this.clearSubagentSessions();
+                    this.clearSubagentSessionsForParent(cancelSessionId, 'user-cancel');
 
                     const doneAssistantMsgId = cancelSessionId
                         ? this.client.getTurnAssistantMsgId(cancelSessionId)
@@ -5658,13 +5725,16 @@ ${attachmentLines.join('\n')}`
     }
 
     private async handleChatEvent(event: ChatEvent, webview: vscode.Webview): Promise<void> {
-        // Handle todoUpdate event for main session only
-        if (event.type === 'todoUpdate' && this.isUserOwnedSession(event.sessionId || '')) {
+        // Handle todoUpdate event for main session or parent-mapped subagent todos.
+        if (event.type === 'todoUpdate' && (this.isUserOwnedSession(event.sessionId || '') || event.displayTarget === 'parent')) {
             webview.postMessage({
                 type: 'todoUpdate',
                 todos: event.todos,
                 anchorMessageId: event.assistantMsgId,
                 sessionId: event.sessionId,
+                parentSessionId: event.parentSessionId,
+                agentSessionId: event.agentSessionId,
+                displayTarget: event.displayTarget,
             });
             return;
         }
@@ -5674,6 +5744,9 @@ ${attachmentLines.join('\n')}`
                 sessionId: event.sessionId,
                 messageId: event.messageId || event.assistantMsgId || '',
                 parentId: event.parentId,
+                parentSessionId: event.parentSessionId,
+                agentSessionId: event.agentSessionId,
+                displayTarget: event.displayTarget,
                 phase: event.phase || '',
                 lane: event.lane || 'unknown',
                 ts: Date.now()
@@ -5718,9 +5791,12 @@ ${attachmentLines.join('\n')}`
                 this.uiDebugChannel.appendLine(`[SidebarProvider] Promoted first session to currentSessionId: ${event.sessionId}`);
                 return;
             }
-            if (!this.isUserOwnedSession(event.sessionId) && this.sendInFlightBySession.has(this.currentSessionId!)) {
+            const inFlightParentSessionId = this.currentSessionId && this.sendInFlightBySession.has(this.currentSessionId)
+                ? this.currentSessionId
+                : undefined;
+            if (!this.isUserOwnedSession(event.sessionId) && inFlightParentSessionId) {
                 this.activeSubagentSessionIds.add(event.sessionId);
-                this.client.registerSubagentSession(event.sessionId, this.currentSessionId || '');
+                this.client.registerSubagentSession(event.sessionId, inFlightParentSessionId);
                 const existing = this.subagentProgressBySession.get(event.sessionId);
                 const initialMode = event.mode || event.agent || '';
                 const initialModel = event.modelID || '';
@@ -5736,13 +5812,14 @@ ${attachmentLines.join('\n')}`
                     if (initialProvider) {
                         existing.providerId = initialProvider;
                     }
+                    this.logSubagentRoute('register', existing.parentSessionId || inFlightParentSessionId, event.sessionId, 'parent', 'existing-entry');
                     this.uiDebugChannel.appendLine(`[SidebarProvider] Subagent session event: ${event.sessionId} | mode=${event.mode || 'null'} | agent=${event.agent || 'null'} | modelID=${event.modelID || 'null'} | providerID=${event.providerID || 'null'}`);
                     this.emitSubagentStatus();
                     return;
                 }
                 this.subagentProgressBySession.set(event.sessionId, {
                     taskId: event.sessionId,
-                    parentSessionId: this.currentSessionId || '',
+                    parentSessionId: inFlightParentSessionId,
                     description: initialMode,
                     mode: initialMode,
                     model: initialModel,
@@ -5752,7 +5829,8 @@ ${attachmentLines.join('\n')}`
                     lastEventAt: Date.now(),
                     startedAt: Date.now()
                 });
-                this.uiDebugChannel.appendLine(`[SidebarProvider] Registered subagent session mapping: ${event.sessionId} -> ${this.currentSessionId}`);
+                this.logSubagentRoute('register', inFlightParentSessionId, event.sessionId, 'parent', 'send-in-flight-parent');
+                this.uiDebugChannel.appendLine(`[SidebarProvider] Registered subagent session mapping: ${event.sessionId} -> ${inFlightParentSessionId}`);
                 this.uiDebugChannel.appendLine(`[SidebarProvider] Subagent session event: ${event.sessionId} | mode=${event.mode || 'null'} | agent=${event.agent || 'null'} | modelID=${event.modelID || 'null'} | providerID=${event.providerID || 'null'}`);
                 const sessionId = event.sessionId;
                 this.client.getSessionInfo(sessionId).then((info: any) => {
@@ -5772,7 +5850,14 @@ ${attachmentLines.join('\n')}`
 
             // Guard: Prevent subagent session IDs from hijacking currentSessionId
             if (!this.isUserOwnedSession(event.sessionId)) {
+                const mappedParentSessionId = this.subagentProgressBySession.get(event.sessionId)?.parentSessionId
+                    || this.client.getParentSessionForSubagent(event.sessionId);
+                if (!mappedParentSessionId) {
+                    this.logSubagentRoute('register', undefined, event.sessionId, 'parent', 'missing-parent', true);
+                    return;
+                }
                 this.activeSubagentSessionIds.add(event.sessionId);
+                this.client.registerSubagentSession(event.sessionId, mappedParentSessionId);
                 const existing = this.subagentProgressBySession.get(event.sessionId);
                 const initialMode = event.mode || event.agent || '';
                 const initialModel = event.modelID || '';
@@ -5788,13 +5873,14 @@ ${attachmentLines.join('\n')}`
                     if (initialProvider) {
                         existing.providerId = initialProvider;
                     }
+                    this.logSubagentRoute('register', existing.parentSessionId || mappedParentSessionId, event.sessionId, 'parent', 'existing-entry');
                     this.uiDebugChannel.appendLine(`[SidebarProvider] Subagent session event: ${event.sessionId} | mode=${event.mode || 'null'} | agent=${event.agent || 'null'} | modelID=${event.modelID || 'null'} | providerID=${event.providerID || 'null'}`);
                     this.emitSubagentStatus();
                     return;
                 }
                 this.subagentProgressBySession.set(event.sessionId, {
                     taskId: event.sessionId,
-                    parentSessionId: this.currentSessionId || '',
+                    parentSessionId: mappedParentSessionId,
                     description: initialMode,
                     mode: initialMode,
                     model: initialModel,
@@ -5804,6 +5890,7 @@ ${attachmentLines.join('\n')}`
                     lastEventAt: Date.now(),
                     startedAt: Date.now()
                 });
+                this.logSubagentRoute('register', mappedParentSessionId, event.sessionId, 'parent', 'mapped-parent');
                 this.uiDebugChannel.appendLine(`[SidebarProvider] Subagent session event: ${event.sessionId} | mode=${event.mode || 'null'} | agent=${event.agent || 'null'} | modelID=${event.modelID || 'null'} | providerID=${event.providerID || 'null'}`);
                 const sessionId = event.sessionId;
                 this.client.getSessionInfo(sessionId).then((info: any) => {
@@ -5857,8 +5944,14 @@ ${attachmentLines.join('\n')}`
 
         if (event.sessionId && this.activeSubagentSessionIds.has(event.sessionId)) {
             // Intercept subagent events to update progress
+            const subagentEntry = this.subagentProgressBySession.get(event.sessionId);
+            const parentSessionId = subagentEntry?.parentSessionId;
+            if (!subagentEntry || !parentSessionId) {
+                this.logSubagentRoute(String(event.type || 'event'), parentSessionId, event.sessionId, 'parent', subagentEntry ? 'missing-parent' : 'missing-entry', true);
+                return;
+            }
             if (event.type === 'text' && typeof event.text === 'string') {
-                const entry = this.subagentProgressBySession.get(event.sessionId);
+                const entry = subagentEntry;
                 if (entry) {
                     if (entry.isDone) {
                         return;
@@ -5872,7 +5965,7 @@ ${attachmentLines.join('\n')}`
             }
             // Handle generic tool events (e.g., grep, read, etc.)
             if (event.type === 'tool' && event.tool) {
-                const entry = this.subagentProgressBySession.get(event.sessionId);
+                const entry = subagentEntry;
                 if (entry) {
                     if (entry.isDone) {
                         return;
@@ -5895,7 +5988,7 @@ ${attachmentLines.join('\n')}`
                 }
             }
             if (event.type === 'toolPatch' && typeof event.text === 'string') {
-                const entry = this.subagentProgressBySession.get(event.sessionId);
+                const entry = subagentEntry;
                 if (entry) {
                     if (entry.isDone) {
                         return;
@@ -5910,7 +6003,7 @@ ${attachmentLines.join('\n')}`
                 }
             }
             if (event.type === 'diff' && typeof event.text === 'string') {
-                const entry = this.subagentProgressBySession.get(event.sessionId);
+                const entry = subagentEntry;
                 if (entry) {
                     if (entry.isDone) {
                         return;
@@ -5924,11 +6017,12 @@ ${attachmentLines.join('\n')}`
                     this.emitSubagentStatus();
                 }
             }
-            if (event.type === 'files' && event.files && event.files.length && this.currentSessionId) {
-                const entry = this.subagentProgressBySession.get(event.sessionId!);
+            if (event.type === 'files' && event.files && event.files.length) {
+                const entry = subagentEntry;
                 const isReplay = event.source === 'resync';
                 if (!isReplay) {
-                    this.client.queueSubagentChanges(this.currentSessionId, event.files);
+                    this.client.queueSubagentChanges(parentSessionId, event.files);
+                    this.logSubagentRoute('files', parentSessionId, event.sessionId, 'parent', 'queue-subagent-changes');
                 }
                 if (entry && event.files && event.files.length && !entry.isDone) {
                     const firstFile = typeof event.files[0] === 'string' ? event.files[0] : (event.files[0] as any).path || '';
@@ -5942,11 +6036,14 @@ ${attachmentLines.join('\n')}`
                 if (!isReplay) {
                     liveWebview.postMessage({
                         type: 'segmentRestoreLock',
-                        sessionId: this.currentSessionId,
+                        sessionId: parentSessionId,
+                        parentSessionId,
+                        agentSessionId: event.sessionId,
+                        displayTarget: 'parent',
                         reason: 'file-change-detected'
                     });
                     event.files.forEach((file, index) => {
-                        this.tryOpenDiffForEventFile(file, liveWebview, index, this.currentSessionId || '', 'subagent');
+                        this.tryOpenDiffForEventFile(file, liveWebview, index, parentSessionId, 'subagent');
                     });
                     
                     // Detect .md files and send plan file card
@@ -5954,13 +6051,16 @@ ${attachmentLines.join('\n')}`
                         .map(f => (typeof f === 'string' ? f : (f as any).path))
                         .filter((path): path is string => typeof path === 'string' && path.endsWith('.md'));
                     if (mdFiles.length) {
-                        const anchorMessageId = this.client.getTurnAssistantMsgId(this.currentSessionId);
+                        const anchorMessageId = this.client.getTurnAssistantMsgId(parentSessionId);
                         if (anchorMessageId) {
                             liveWebview.postMessage({
                                 type: 'planFileCard',
                                 files: mdFiles,
                                 anchorMessageId,
-                                sessionId: this.currentSessionId
+                                sessionId: parentSessionId,
+                                parentSessionId,
+                                agentSessionId: event.sessionId,
+                                displayTarget: 'parent'
                             });
                         }
                     }
@@ -5970,7 +6070,7 @@ ${attachmentLines.join('\n')}`
                 // This prevents premature change-list emission before final assistant message
             }
             if (event.type === 'assistantMessageMeta' && event.sessionId && !event.isStatusUpdate) {
-                const entry = this.subagentProgressBySession.get(event.sessionId);
+                const entry = subagentEntry;
                 if (entry) {
                     entry.finalMessageId = event.assistantMsgId || event.messageId;
                     this.transitionSubagentState(event.sessionId, entry, 'done', 'assistant-final-accepted');
@@ -6082,6 +6182,9 @@ ${attachmentLines.join('\n')}`
             liveWebview.postMessage({
                 type: 'backgroundActivityPulse',
                 sessionId: event.sessionId,
+                parentSessionId: event.parentSessionId,
+                agentSessionId: event.agentSessionId,
+                displayTarget: event.displayTarget,
                 assistantMsgId: event.assistantMsgId,
                 ts: Date.now()
             });
@@ -6111,10 +6214,15 @@ ${attachmentLines.join('\n')}`
                 messageIndex: event.messageIndex,
                 lastText: event.lastText,
                 sessionId,
+                parentSessionId: event.parentSessionId,
+                agentSessionId: event.agentSessionId,
+                displayTarget: event.displayTarget,
                 assistantMsgId: event.assistantMsgId,
                 tmpKey,
                 isStatusUpdate: event.isStatusUpdate,
-                allowedSessionIds: this.getAssistantMetaAllowedSessionIds(),
+                allowedSessionIds: event.displayTarget === 'agent-lane' && event.agentSessionId
+                    ? [event.agentSessionId, ...(event.parentSessionId ? [event.parentSessionId] : [])]
+                    : this.getAssistantMetaAllowedSessionIds(),
                 ...(isSyntheticTurn ? { isSyntheticTurn: true } : {})
             });
             if (sessionId && typeof event.assistantMsgId === 'string' && typeof event.messageIndex === 'number') {
@@ -6139,10 +6247,15 @@ ${attachmentLines.join('\n')}`
                 liveWebview?.postMessage({
                     type: 'assistantMessageMeta',
                     sessionId,
+                    parentSessionId: event.parentSessionId,
+                    agentSessionId: event.agentSessionId,
+                    displayTarget: event.displayTarget,
                     tmpKey: this.pendingAssistantTmpKeyBySession?.get(sessionId),
                     lastText: event.text,
                     isStatusUpdate: false,
-                    allowedSessionIds: this.getAssistantMetaAllowedSessionIds(),
+                    allowedSessionIds: event.displayTarget === 'agent-lane' && event.agentSessionId
+                        ? [event.agentSessionId, ...(event.parentSessionId ? [event.parentSessionId] : [])]
+                        : this.getAssistantMetaAllowedSessionIds(),
                     ...(isSyntheticTurn ? { isSyntheticTurn: true } : {})
                 });
             }
@@ -6162,9 +6275,9 @@ ${attachmentLines.join('\n')}`
             }
             await this.resolvePendingUserUpgrade(sessionId, liveWebview);
             // Mark all active subagents as done before clearing (error event path)
-            this.markAllSubagentsTerminal('failed', 'event-error-finalize');
+            this.markSubagentsTerminalForParent(sessionId, 'failed', 'event-error-finalize');
             this.emitSubagentStatus();
-            this.clearSubagentSessions();
+            this.clearSubagentSessionsForParent(sessionId, 'event-error-finalize');
 
             const doneAssistantMsgId = sessionId
                 ? this.client.getTurnAssistantMsgId(sessionId)
