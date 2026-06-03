@@ -494,6 +494,8 @@ export class OpenCodeClient {
     private currentSessionId?: string;
     private messageIndexById = new Map<string, number>();
     private messageOrder: string[] = [];
+    private messageIndexByIdBySession = new Map<string, Map<string, number>>();
+    private messageOrderBySession = new Map<string, string[]>();
     private nextMessageIndex = 0;
     private internalMessageSeq = 0;
     private seqCounter = 0;
@@ -641,6 +643,8 @@ export class OpenCodeClient {
         this.currentSessionId = undefined;
         this.messageIndexById.clear();
         this.messageOrder = [];
+        this.messageIndexByIdBySession.clear();
+        this.messageOrderBySession.clear();
         this.nextMessageIndex = 0;
         this.internalMessageSeq = 0;
         this.seqCounter = 0;
@@ -3461,7 +3465,7 @@ export class OpenCodeClient {
                     }
                     if (messageId && onEvent) {
                         onEvent({ type: 'message', text: messageId, sessionId });
-                        this.registerMessageId(messageId);
+                        this.registerMessageId(messageId, resolvedSessionId);
                         if (resolvedSessionId && typeof messageId === 'string') {
                             this.trackTurnMessageId(resolvedSessionId, messageId);
                         }
@@ -4436,7 +4440,7 @@ export class OpenCodeClient {
         const turnKey = pending?.turnKey || state?.pendingUserLocalKey || sessionId;
         const tmpKey = state?.pendingAssistantTmpKey || pending?.tmpKey;
         const assistantMsgId = state?.assistantMsgId || state?.lastResolvedAssistantMsgId || pending?.lastAssistantMsgId;
-        const messageIndex = assistantMsgId ? this.messageIndexById.get(assistantMsgId) : undefined;
+        const messageIndex = assistantMsgId ? this.getMessageIndex(assistantMsgId, sessionId) : undefined;
         const merged = hasAuthoritativeFiles
             ? await this.buildValidatedAuthoritativeChangeSpecs(sessionId, turnKey, normalizedAuthoritativeFiles)
             : this.mergeChangeSpecs(pending?.changes || []);
@@ -4537,20 +4541,54 @@ export class OpenCodeClient {
         await this.gitUndo.forceRestore(sessionId, restoreCommit, fileSet);
     }
 
-    private registerMessageId(messageId: string): number {
-        if (!messageId || (!messageId.startsWith('msg_') && !messageId.startsWith('local-'))) {
-            return this.messageIndexById.get(messageId) ?? -1;
+    private getScopedMessageIndexMap(sessionId?: string): Map<string, number> {
+        if (!sessionId) return this.messageIndexById;
+        let map = this.messageIndexByIdBySession.get(sessionId);
+        if (!map) {
+            map = new Map<string, number>();
+            this.messageIndexByIdBySession.set(sessionId, map);
         }
-        const existing = this.messageIndexById.get(messageId);
+        return map;
+    }
+
+    private getScopedMessageOrder(sessionId?: string): string[] {
+        if (!sessionId) return this.messageOrder;
+        let order = this.messageOrderBySession.get(sessionId);
+        if (!order) {
+            order = [];
+            this.messageOrderBySession.set(sessionId, order);
+        }
+        return order;
+    }
+
+    private getReadonlyMessageIndexMap(sessionId?: string): Map<string, number> {
+        return sessionId ? (this.messageIndexByIdBySession.get(sessionId) || new Map<string, number>()) : this.messageIndexById;
+    }
+
+    private getReadonlyMessageOrder(sessionId?: string): string[] {
+        return sessionId ? (this.messageOrderBySession.get(sessionId) || []) : this.messageOrder;
+    }
+
+    private registerMessageId(messageId: string, sessionId?: string): number {
+        if (!messageId || (!messageId.startsWith('msg_') && !messageId.startsWith('local-'))) {
+            return this.getReadonlyMessageIndexMap(sessionId).get(messageId) ?? this.messageIndexById.get(messageId) ?? -1;
+        }
+        const scopedMap = this.getScopedMessageIndexMap(sessionId);
+        const scopedOrder = this.getScopedMessageOrder(sessionId);
+        const existing = scopedMap.get(messageId);
         if (existing !== undefined) return existing;
-        const index = this.nextMessageIndex++;
-        this.messageIndexById.set(messageId, index);
-        this.messageOrder.push(messageId);
+        const index = scopedOrder.length;
+        scopedMap.set(messageId, index);
+        scopedOrder.push(messageId);
+        if (!this.messageIndexById.has(messageId)) {
+            this.messageIndexById.set(messageId, this.nextMessageIndex++);
+            this.messageOrder.push(messageId);
+        }
         return index;
     }
 
-    public registerMessage(messageId: string): number {
-        return this.registerMessageId(messageId);
+    public registerMessage(messageId: string, sessionId?: string): number {
+        return this.registerMessageId(messageId, sessionId);
     }
 
     public async getCommitHashesForMessageIds(sessionId: string, messageIds: string[]): Promise<string[]> {
@@ -4565,12 +4603,12 @@ export class OpenCodeClient {
         return Array.from(new Set(commits));
     }
 
-    public getMessageIndex(messageId: string): number | undefined {
-        return this.messageIndexById.get(messageId);
+    public getMessageIndex(messageId: string, sessionId?: string): number | undefined {
+        return this.getReadonlyMessageIndexMap(sessionId).get(messageId) ?? (!sessionId ? undefined : this.messageIndexById.get(messageId));
     }
 
-    public getMessageIndexMap(): Array<{ messageId: string; messageIndex: number }> {
-        return Array.from(this.messageIndexById.entries())
+    public getMessageIndexMap(sessionId?: string): Array<{ messageId: string; messageIndex: number }> {
+        return Array.from(this.getReadonlyMessageIndexMap(sessionId).entries())
             .filter(([messageId]) => messageId.startsWith('msg_'))
             .map(([messageId, messageIndex]) => ({
                 messageId,
@@ -4578,17 +4616,19 @@ export class OpenCodeClient {
             }));
     }
 
-    public getUndoRangeForAnchor(startMessageId: string): { startIndex: number; endIndex: number } | undefined {
-        const startIndex = this.messageIndexById.get(startMessageId);
+    public getUndoRangeForAnchor(startMessageId: string, sessionId?: string): { startIndex: number; endIndex: number } | undefined {
+        const indexMap = this.getReadonlyMessageIndexMap(sessionId);
+        const order = this.getReadonlyMessageOrder(sessionId);
+        const startIndex = indexMap.get(startMessageId);
         if (typeof startIndex !== 'number') return undefined;
-        const tailIndex = this.messageOrder.length ? this.messageOrder.length - 1 : startIndex;
+        const tailIndex = order.length ? order.length - 1 : startIndex;
         let effectiveEndIndex = tailIndex;
         const prevSeg = this.revertedSegment;
         const hasActivePrev = Boolean(prevSeg && prevSeg.isActive && !prevSeg.discarded);
         if (hasActivePrev && prevSeg) {
             const prevStartIndex = typeof prevSeg.startMessageIndex === 'number'
                 ? prevSeg.startMessageIndex
-                : this.messageIndexById.get(prevSeg.startMessageId);
+                : indexMap.get(prevSeg.startMessageId);
             if (typeof prevStartIndex === 'number') {
                 effectiveEndIndex = Math.min(effectiveEndIndex, prevStartIndex - 1);
             }
@@ -4603,29 +4643,36 @@ export class OpenCodeClient {
     }
 
     public aliasMessageId(existingId: string, newId: string): void {
-        const existingIndex = this.messageIndexById.get(existingId);
-        if (existingIndex === undefined) return;
-        if (this.messageIndexById.has(newId)) return;
-        this.messageIndexById.set(newId, existingIndex);
-        const orderIndex = this.messageOrder.indexOf(existingId);
-        if (orderIndex !== -1) {
-            this.messageOrder[orderIndex] = newId;
+        const aliasIn = (indexMap: Map<string, number>, order: string[]) => {
+            const existingIndex = indexMap.get(existingId);
+            if (existingIndex === undefined || indexMap.has(newId)) return;
+            indexMap.set(newId, existingIndex);
+            const orderIndex = order.indexOf(existingId);
+            if (orderIndex !== -1) order[orderIndex] = newId;
+            indexMap.delete(existingId);
+        };
+        aliasIn(this.messageIndexById, this.messageOrder);
+        for (const [sessionId, indexMap] of this.messageIndexByIdBySession.entries()) {
+            aliasIn(indexMap, this.messageOrderBySession.get(sessionId) || []);
         }
-        this.messageIndexById.delete(existingId);
     }
 
     public upgradeMessageId(localKey: string, serverMsgId: string): boolean {
-        const existingIndex = this.messageIndexById.get(localKey);
-        if (existingIndex === undefined) return false;
-        if (this.messageIndexById.has(serverMsgId)) return false;
-
-        this.messageIndexById.set(serverMsgId, existingIndex);
-        const orderIndex = this.messageOrder.indexOf(localKey);
-        if (orderIndex !== -1) {
-            this.messageOrder[orderIndex] = serverMsgId;
+        let upgraded = false;
+        const upgradeIn = (indexMap: Map<string, number>, order: string[]) => {
+            const existingIndex = indexMap.get(localKey);
+            if (existingIndex === undefined || indexMap.has(serverMsgId)) return;
+            indexMap.set(serverMsgId, existingIndex);
+            const orderIndex = order.indexOf(localKey);
+            if (orderIndex !== -1) order[orderIndex] = serverMsgId;
+            indexMap.delete(localKey);
+            upgraded = true;
+        };
+        upgradeIn(this.messageIndexById, this.messageOrder);
+        for (const [sessionId, indexMap] of this.messageIndexByIdBySession.entries()) {
+            upgradeIn(indexMap, this.messageOrderBySession.get(sessionId) || []);
         }
-        this.messageIndexById.delete(localKey);
-        return true;
+        return upgraded;
     }
 
     private hashText(text: string): string {
@@ -4645,15 +4692,18 @@ export class OpenCodeClient {
     }
 
 
-    private getMessageIdsInRange(startIndex: number, endIndex: number): string[] {
-        return this.messageOrder.filter((id) => {
+    private getMessageIdsInRange(startIndex: number, endIndex: number, sessionId?: string): string[] {
+        const indexMap = this.getReadonlyMessageIndexMap(sessionId);
+        const order = this.getReadonlyMessageOrder(sessionId);
+        return order.filter((id) => {
             if (typeof id !== 'string' || !id.startsWith('msg_')) return false;
-            const index = this.messageIndexById.get(id);
+            const index = indexMap.get(id);
             return typeof index === 'number' && index >= startIndex && index <= endIndex;
         });
     }
 
-    private orderedUnionMessageIds(currentIds: string[], previousIds: string[]): string[] {
+    private orderedUnionMessageIds(currentIds: string[], previousIds: string[], sessionId?: string): string[] {
+        const indexMap = this.getReadonlyMessageIndexMap(sessionId);
         const merged = new Set<string>();
         for (const id of currentIds) {
             if (typeof id === 'string' && id.startsWith('msg_')) merged.add(id);
@@ -4662,8 +4712,8 @@ export class OpenCodeClient {
             if (typeof id === 'string' && id.startsWith('msg_')) merged.add(id);
         }
         return Array.from(merged).sort((a, b) => {
-            const ai = this.messageIndexById.get(a);
-            const bi = this.messageIndexById.get(b);
+            const ai = indexMap.get(a);
+            const bi = indexMap.get(b);
             const av = typeof ai === 'number' ? ai : Number.MAX_SAFE_INTEGER;
             const bv = typeof bi === 'number' ? bi : Number.MAX_SAFE_INTEGER;
             return av - bv;
@@ -4678,7 +4728,8 @@ export class OpenCodeClient {
         this.revertedSegment = segment;
     }
 
-    private isValidActiveRevertedSegmentForUndo(prevSeg: RevertedSegment | undefined, startIndex: number): prevSeg is RevertedSegment {
+    private isValidActiveRevertedSegmentForUndo(prevSeg: RevertedSegment | undefined, startIndex: number, sessionId?: string): prevSeg is RevertedSegment {
+        const indexMap = this.getReadonlyMessageIndexMap(sessionId);
         if (!prevSeg || !prevSeg.isActive || prevSeg.discarded) return false;
         const memberMsgIds = Array.isArray(prevSeg.messageIds)
             ? prevSeg.messageIds.filter((id) => typeof id === 'string' && id.startsWith('msg_'))
@@ -4686,40 +4737,77 @@ export class OpenCodeClient {
         if (!memberMsgIds.length) return false;
         const prevStartIndex = typeof prevSeg.startMessageIndex === 'number'
             ? prevSeg.startMessageIndex
-            : this.messageIndexById.get(prevSeg.startMessageId);
+            : indexMap.get(prevSeg.startMessageId);
         if (typeof prevStartIndex !== 'number') return false;
         if (prevStartIndex <= startIndex) return false;
-        return memberMsgIds.every((id) => typeof this.messageIndexById.get(id) === 'number');
+        return memberMsgIds.every((id) => typeof indexMap.get(id) === 'number');
     }
 
-    public async undoFromMessage(startMessageId: string, options?: { force?: boolean; excludedMessageIds?: string[] }): Promise<{ conflicts: ConflictDetail[]; touchedFiles: string[]; applied: boolean; reason?: string }> {
+    private resolveOperationOrderFallback(startMessageId: string, options?: { visibleMessageIds?: string[]; forwardMessageIdsFromAnchor?: string[] }): string[] {
+        const sanitize = (ids: unknown): string[] => Array.isArray(ids)
+            ? ids.filter((id): id is string => typeof id === 'string' && id.startsWith('msg_'))
+            : [];
+        const forward = sanitize(options?.forwardMessageIdsFromAnchor);
+        if (forward.length && forward[0] === startMessageId) return Array.from(new Set(forward));
+        const visible = sanitize(options?.visibleMessageIds);
+        const anchorIndex = visible.indexOf(startMessageId);
+        if (anchorIndex >= 0) return Array.from(new Set(visible.slice(anchorIndex)));
+        return [];
+    }
+
+    public async undoFromMessage(startMessageId: string, options?: { force?: boolean; excludedMessageIds?: string[]; sessionId?: string; visibleMessageIds?: string[]; forwardMessageIdsFromAnchor?: string[] }): Promise<{ conflicts: ConflictDetail[]; touchedFiles: string[]; applied: boolean; reason?: string }> {
         const force = options?.force === true;
         const excludedMessageIds = new Set(
             Array.isArray(options?.excludedMessageIds)
                 ? options!.excludedMessageIds.filter((id) => typeof id === 'string' && id.startsWith('msg_'))
                 : []
         );
-        const startIndex = this.messageIndexById.get(startMessageId);
-        this.logUiDebug(`EXT: undo.enter | startMessageId | ${startMessageId || 'null'} | force | ${String(force)} | hasSession | ${String(Boolean(this.currentSessionId))} | messageOrderLen | ${this.messageOrder.length}`);
+        const explicitSessionId = typeof options?.sessionId === 'string' && options.sessionId.trim()
+            ? options.sessionId.trim()
+            : undefined;
+        const sessionId = explicitSessionId || this.currentSessionId;
+        const sessionOrder = this.getReadonlyMessageOrder(explicitSessionId);
+        const sessionIndexMap = this.getReadonlyMessageIndexMap(explicitSessionId);
+        const fallbackOrder = this.resolveOperationOrderFallback(startMessageId, options);
+        const hasSessionCache = Boolean(explicitSessionId && sessionOrder.length && sessionIndexMap.size);
+        const cacheStartIndex = sessionIndexMap.get(startMessageId);
+        const useFallbackOrder = explicitSessionId && cacheStartIndex === undefined && fallbackOrder.length > 0;
+        const orderSource = cacheStartIndex !== undefined ? 'session-cache' : useFallbackOrder ? 'webview-visible' : 'missing';
+        const activeOrder = useFallbackOrder ? fallbackOrder : explicitSessionId ? sessionOrder : this.messageOrder;
+        const activeIndexMap = useFallbackOrder
+            ? new Map(fallbackOrder.map((id, index) => [id, index] as [string, number]))
+            : explicitSessionId ? sessionIndexMap : this.messageIndexById;
+        const startIndex = activeIndexMap.get(startMessageId);
+        this.logUiDebug(`EXT: undo.enter | startMessageId | ${startMessageId || 'null'} | force | ${String(force)} | hasSession | ${String(Boolean(sessionId))} | explicitSession | ${explicitSessionId || 'null'} | currentSession | ${this.currentSessionId || 'null'} | messageOrderLen | ${activeOrder.length} | undo.order.source=${orderSource}`);
+        this.logUiDebug(`EXT: undo.order.source=${orderSource} | sessionId=${explicitSessionId || this.currentSessionId || 'null'} | cacheOrderLen=${sessionOrder.length} | cacheMapSize=${sessionIndexMap.size} | fallbackOrderLen=${fallbackOrder.length}`);
         if (startIndex === undefined) {
-            this.logUiDebug(`EXT: undo.anchor.missing | startMessageId | ${startMessageId || 'null'} | startsWithMsg | ${String(startMessageId?.startsWith('msg_'))}`);
+            const reason = !startMessageId?.startsWith('msg_')
+                ? 'invalid-anchor-id'
+                : !sessionId
+                    ? 'missing-session'
+                    : hasSessionCache
+                        ? 'anchor-not-in-session-cache'
+                        : fallbackOrder.length
+                            ? 'anchor-not-in-ui-visible-order'
+                            : 'missing-session-cache-and-ui-order';
+            this.logUiDebug(`EXT: undo.anchor.missing | startMessageId | ${startMessageId || 'null'} | startsWithMsg | ${String(startMessageId?.startsWith('msg_'))} | sessionId | ${sessionId || 'null'} | reason | ${reason} | undo.order.source=${orderSource}`);
             throw new Error('Unknown message for undo.');
         }
-        this.logUiDebug(`EXT: undo.anchor.ok | startMessageId | ${startMessageId} | startIndex | ${startIndex}`);
-        const tailIndex = this.messageOrder.length ? this.messageOrder.length - 1 : startIndex;
+        this.logUiDebug(`EXT: undo.anchor.ok | startMessageId | ${startMessageId} | startIndex | ${startIndex} | undo.order.source=${orderSource}`);
+        const tailIndex = activeOrder.length ? activeOrder.length - 1 : startIndex;
         let effectiveEndIndex = tailIndex;
         const prevSeg = this.revertedSegment;
-        const hasActivePrev = this.isValidActiveRevertedSegmentForUndo(prevSeg, startIndex);
+        const hasActivePrev = !useFallbackOrder && this.isValidActiveRevertedSegmentForUndo(prevSeg, startIndex, explicitSessionId);
         let prevStartIndex: number | undefined;
         let prevEndIndex: number | undefined;
         let canMergePrev = false;
         if (hasActivePrev && prevSeg) {
             prevStartIndex = typeof prevSeg.startMessageIndex === 'number'
                 ? prevSeg.startMessageIndex
-                : this.messageIndexById.get(prevSeg.startMessageId);
+                : activeIndexMap.get(prevSeg.startMessageId);
             prevEndIndex = typeof prevSeg.endMessageIndex === 'number'
                 ? prevSeg.endMessageIndex
-                : this.messageIndexById.get(prevSeg.endMessageId);
+                : activeIndexMap.get(prevSeg.endMessageId);
             const prevMemberIds = Array.isArray(prevSeg.messageIds)
                 ? prevSeg.messageIds.filter((id) => typeof id === 'string' && id.startsWith('msg_'))
                 : [];
@@ -4736,7 +4824,6 @@ export class OpenCodeClient {
         // this.logUiDebug(`EXT: undo.segment.state | hasActivePrev | ${String(hasActivePrev)} | prevStartIndex | ${typeof prevStartIndex === 'number' ? prevStartIndex : 'null'} | prevEndIndex | ${typeof prevEndIndex === 'number' ? prevEndIndex : 'null'} | prevStartId | ${prevSeg?.startMessageId || 'null'} | prevEndId | ${prevSeg?.endMessageId || 'null'}`);
         // this.logUiDebug(`EXT: undo.range | tailIndex | ${tailIndex} | effectiveEndIndex | ${effectiveEndIndex} | startIndex | ${startIndex} | selectedEndIndex | ${effectiveEndIndex}`);
         // OpenCodeClient.outputChannel.appendLine(`[UNDO] startId=${startMessageId} startIndex=${startIndex} endIndex=${effectiveEndIndex}`);
-        const sessionId = this.currentSessionId;
         const touchedFiles: string[] = [];
         if (!sessionId) {
             return { conflicts: [], touchedFiles, applied: false, reason: 'missing-session' };
@@ -4754,7 +4841,12 @@ export class OpenCodeClient {
             return { conflicts: [], touchedFiles: [], applied: true, reason: 'empty-range' };
         }
 
-        const messageIds = this.getMessageIdsInRange(startIndex, effectiveEndIndex)
+        const messageIds = (useFallbackOrder
+            ? activeOrder.filter((id) => {
+                const index = activeIndexMap.get(id);
+                return typeof index === 'number' && index >= startIndex && index <= effectiveEndIndex;
+            })
+            : this.getMessageIdsInRange(startIndex, effectiveEndIndex, explicitSessionId))
             .filter((id) => !excludedMessageIds.has(id));
         const firstMsgId = messageIds[0] || 'null';
         const lastMsgId = messageIds.length ? messageIds[messageIds.length - 1] : 'null';
@@ -4787,12 +4879,12 @@ export class OpenCodeClient {
                 mergedStartCommits = Array.from(new Set(mergedStartCommits));
             }
             const mergedMessageIds = canMergePrev && prevSeg
-                ? this.orderedUnionMessageIds(messageIds, Array.isArray(prevSeg.messageIds) ? prevSeg.messageIds : [])
+                ? this.orderedUnionMessageIds(messageIds, Array.isArray(prevSeg.messageIds) ? prevSeg.messageIds : [], explicitSessionId)
                 : messageIds;
             if (mergedMessageIds.length) {
                 mergedEndId = mergedMessageIds[mergedMessageIds.length - 1];
             }
-            const mergedEndIndex = this.messageIndexById.get(mergedEndId) ?? effectiveEndIndex;
+            const mergedEndIndex = activeIndexMap.get(mergedEndId) ?? effectiveEndIndex;
 
             this.revertedSegment = {
                 isActive: true,
@@ -4933,6 +5025,13 @@ export class OpenCodeClient {
     public removeMessageId(messageId: string): void {
         this.messageIndexById.delete(messageId);
         this.messageOrder = this.messageOrder.filter((id) => id !== messageId);
+        for (const [sessionId, indexMap] of this.messageIndexByIdBySession.entries()) {
+            if (!indexMap.has(messageId)) continue;
+            const order = (this.messageOrderBySession.get(sessionId) || []).filter((id) => id !== messageId);
+            this.messageOrderBySession.set(sessionId, order);
+            indexMap.clear();
+            order.forEach((id, index) => indexMap.set(id, index));
+        }
         this.assistantTextById.delete(messageId);
         for (const set of this.ignoredSummaryMessageIdsBySession.values()) {
             set.delete(messageId);
@@ -6822,7 +6921,7 @@ export class OpenCodeClient {
                         phase: 'assistant_final_candidate',
                         reason: 'finish-stop'
                     });
-                    const messageIndex = this.registerMessage(messageId);
+                    const messageIndex = this.registerMessage(messageId, sessionId);
                     this.recordAssistantMsgId(sessionId, messageId);
                     let acceptedFinal = false;
                     if (sessionId && !isSubagentLane) {
@@ -8046,7 +8145,7 @@ export class OpenCodeClient {
                         phase: 'assistant_final_accepted',
                         reason: isSubagentLane ? 'subagent-final-accepted' : 'turn-final-accepted'
                     });
-                    const messageIndex = this.registerMessage(messageId);
+                    const messageIndex = this.registerMessage(messageId, sessionId);
                     this.recordAssistantMsgId(sessionId, messageId);
                     this.emitChatEvents([
                         {

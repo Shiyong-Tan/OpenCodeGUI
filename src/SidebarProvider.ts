@@ -276,8 +276,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             : [];
         const startMessageId = seg.anchorMsgId || memberMsgIds[0] || '';
         const endMessageId = seg.endMsgId || memberMsgIds[memberMsgIds.length - 1] || startMessageId;
-        const startMessageIndex = this.client.getMessageIndex(startMessageId);
-        const endMessageIndex = this.client.getMessageIndex(endMessageId);
+        const startMessageIndex = this.client.getMessageIndex(startMessageId, sessionId);
+        const endMessageIndex = this.client.getMessageIndex(endMessageId, sessionId);
         this.client.setRevertedSegment({
             isActive: true,
             discarded: false,
@@ -302,6 +302,46 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             this.client.setRevertedSegment(undefined);
             this.uiDebugChannel.appendLine(`[EXT][UNDO_SEGMENT] cleared non-restorable revertedSegment sessionId=${sessionId} noticeKey=${noticeKey}`);
         }
+    }
+
+    private sanitizeUndoRangeMessageIds(value: unknown): string[] {
+        if (!Array.isArray(value)) return [];
+        const ids: string[] = [];
+        const seen = new Set<string>();
+        for (const raw of value) {
+            if (typeof raw !== 'string' || !raw.startsWith('msg_') || seen.has(raw)) continue;
+            seen.add(raw);
+            ids.push(raw);
+        }
+        return ids;
+    }
+
+    private resolveUndoUiVisibleRange(
+        data: any,
+        anchorMessageId: string,
+        canonicalMessageIds: string[],
+        extAnchorIndex: number
+    ): { messageIds: string[]; source: 'webview-visible' | 'extension-canonical' | 'fallback'; uiAnchorIndex: number; extAnchorIndex: number } {
+        const uiAnchorIndex = typeof data?.anchorIndex === 'number' && Number.isFinite(data.anchorIndex)
+            ? data.anchorIndex
+            : -1;
+        const explicitForward = this.sanitizeUndoRangeMessageIds(data?.forwardMessageIdsFromAnchor);
+        if (explicitForward.length && explicitForward[0] === anchorMessageId) {
+            return { messageIds: explicitForward, source: 'webview-visible', uiAnchorIndex, extAnchorIndex };
+        }
+
+        const visibleMessageIds = this.sanitizeUndoRangeMessageIds(data?.visibleMessageIds);
+        if (visibleMessageIds.length && uiAnchorIndex >= 0 && uiAnchorIndex < visibleMessageIds.length && visibleMessageIds[uiAnchorIndex] === anchorMessageId) {
+            return { messageIds: visibleMessageIds.slice(uiAnchorIndex), source: 'webview-visible', uiAnchorIndex, extAnchorIndex };
+        }
+
+        const fallbackIds = canonicalMessageIds.length ? canonicalMessageIds : [anchorMessageId];
+        return {
+            messageIds: fallbackIds,
+            source: explicitForward.length || visibleMessageIds.length ? 'fallback' : 'extension-canonical',
+            uiAnchorIndex,
+            extAnchorIndex
+        };
     }
 
     private transitionSubagentState(sessionId: string, entry: { state?: SubagentLifecycleState; isDone?: boolean; finalReason?: string; lastEventAt?: number }, to: SubagentLifecycleState, reason: string): void {
@@ -2496,7 +2536,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             this.client.setPendingAssistantTmpKey(targetSessionId, tmpAssistantKey);
                         }
 
-                        const messageIndex = this.client.registerMessage(clientMessageId);
+                        const messageIndex = this.client.registerMessage(clientMessageId, targetSessionId);
                         const liveWebview = this._view?.webview || activeWebview;
                         this.clientMessageIdMap.set(clientMessageId, clientMessageId);
 
@@ -2522,7 +2562,7 @@ ${attachmentLines.join('\n')}`
                         };
 
                         const assistantMessageId = this.client.createInternalMessageId('assistant', targetSessionId);
-                        const assistantMessageIndex = this.client.registerMessage(assistantMessageId);
+                        const assistantMessageIndex = this.client.registerMessage(assistantMessageId, targetSessionId);
                         this.pendingAssistantMessageIdBySession.set(targetSessionId, assistantMessageId);
                         liveWebview.postMessage({
                             type: 'messageAppend',
@@ -3512,55 +3552,71 @@ ${attachmentLines.join('\n')}`
                     break;
                 }
                 case "undoToMessage": {
-                    this.uiDebugChannel.appendLine(`[EXT][UNDO_CASE] messageId=${data.messageId || 'NULL'} checkFailed=${!data.messageId}`);
-                    if (!data.messageId) {
-                        this.uiDebugChannel.appendLine(`[EXT][UNDO_DROP] reason=no-messageId fullData=${JSON.stringify(data)}`);
+                    const payloadSessionId = typeof data.sessionId === 'string' && data.sessionId.trim() ? data.sessionId.trim() : undefined;
+                    const operationId = typeof data.operationId === 'string' && data.operationId.trim() ? data.operationId.trim() : undefined;
+                    const payloadMessageId = typeof data.messageId === 'string' && data.messageId.trim() ? data.messageId.trim() : undefined;
+                    this.uiDebugChannel.appendLine(`[EXT][UNDO_ROUTE] phase=rx payloadSessionId=${payloadSessionId || 'null'} currentSessionId=${this.currentSessionId || 'null'} opId=${operationId || 'null'} messageId=${payloadMessageId || 'null'}`);
+                    this.uiDebugChannel.appendLine(`[EXT][UNDO_CASE] messageId=${payloadMessageId || 'NULL'} checkFailed=${!payloadMessageId}`);
+                    if (!payloadSessionId || !operationId || !payloadMessageId) {
+                        const missing = [
+                            !payloadSessionId ? 'sessionId' : undefined,
+                            !operationId ? 'operationId' : undefined,
+                            !payloadMessageId ? 'messageId' : undefined
+                        ].filter(Boolean).join(',');
+                        this.uiDebugChannel.appendLine(`[EXT][UNDO_DROP] reason=missing-${missing} payloadSessionId=${payloadSessionId || 'null'} currentSessionId=${this.currentSessionId || 'null'} opId=${operationId || 'null'} messageId=${payloadMessageId || 'null'}`);
                         return;
                     }
+                    const ownerSessionId = payloadSessionId;
+                    const resolvedMessageId = this.clientMessageIdMap.get(payloadMessageId) || payloadMessageId;
+                    this.uiDebugChannel.appendLine(`[EXT][UNDO_ROUTE] phase=owner-captured ownerSessionId=${ownerSessionId} opId=${operationId} anchorMsgId=${resolvedMessageId}`);
                     if (!this.gitUndoEnabled) {
-                        this.postAddResponse(activeWebview, 'Undo unavailable: Git not installed or version too old. Please install/upgrade Git and restart VS Code.');
+                        this.uiDebugChannel.appendLine(`[EXT][UNDO_TX] type=addResponse sessionId=${ownerSessionId} opId=${operationId}`);
+                        this.postAddResponse(activeWebview, 'Undo unavailable: Git not installed or version too old. Please install/upgrade Git and restart VS Code.', { operationId, sessionId: ownerSessionId });
                         return;
                     }
                     if (!this.baselineReady) {
-                        this.postAddResponse(activeWebview, 'Undo unavailable: Git baseline not ready.');
+                        this.uiDebugChannel.appendLine(`[EXT][UNDO_TX] type=addResponse sessionId=${ownerSessionId} opId=${operationId}`);
+                        this.postAddResponse(activeWebview, 'Undo unavailable: Git baseline not ready.', { operationId, sessionId: ownerSessionId });
                         return;
                     }
                     try {
-                        const sessionId = this.currentSessionId;
-                        const operationId = typeof data.operationId === 'string' ? data.operationId : undefined;
-                        const resolvedMessageId = this.clientMessageIdMap.get(data.messageId) || data.messageId;
                         const noticeKey = `system:undo:${resolvedMessageId}`;
-                        this.uiDebugChannel.appendLine(`[EXT][UNDO_CALL] anchorMsgId=${resolvedMessageId} sessionId=${sessionId || 'null'} opId=${operationId || 'null'}`);
-                        this.uiDebugChannel.appendLine(`[EXT][UNDO_RX] anchorMsgId=${data.messageId} resolvedMsgId=${resolvedMessageId} sessionId=${sessionId || 'null'} opId=${operationId || 'null'}`);
-                        if (sessionId) {
-                            this.clearClientRevertedSegmentIfNonRestorable(sessionId);
-                        }
+                        this.uiDebugChannel.appendLine(`[EXT][UNDO_CALL] sessionId=${ownerSessionId} opId=${operationId}`);
+                        this.uiDebugChannel.appendLine(`[EXT][UNDO_RX] anchorMsgId=${payloadMessageId} resolvedMsgId=${resolvedMessageId} sessionId=${ownerSessionId} opId=${operationId}`);
+                        this.clearClientRevertedSegmentIfNonRestorable(ownerSessionId);
                         const previousSegment = this.client.getRevertedSegment();
                         const currentActiveNoticeKey = previousSegment?.startMessageId
                             ? `system:undo:${previousSegment.startMessageId}`
                             : undefined;
-                        const undoRange = this.client.getUndoRangeForAnchor(resolvedMessageId);
-                        const invalidMessageIds = sessionId && undoRange && undoRange.endIndex >= undoRange.startIndex
-                            ? Array.from(this.getInvalidSegmentMessageIds(sessionId, {
+                        const undoRange = this.client.getUndoRangeForAnchor(resolvedMessageId, ownerSessionId);
+                        const extAnchorIndex = typeof undoRange?.startIndex === 'number' ? undoRange.startIndex : -1;
+                        const invalidMessageIds = undoRange && undoRange.endIndex >= undoRange.startIndex
+                            ? Array.from(this.getInvalidSegmentMessageIds(ownerSessionId, {
                                 currentNoticeKey: currentActiveNoticeKey,
                                 rangeStartIndex: undoRange.startIndex,
                                 rangeEndIndex: undoRange.endIndex
                             }))
                             : [];
-                        const result = await this.client.undoFromMessage(resolvedMessageId, { excludedMessageIds: invalidMessageIds });
+                        const result = await this.client.undoFromMessage(resolvedMessageId, {
+                            excludedMessageIds: invalidMessageIds,
+                            sessionId: ownerSessionId,
+                            visibleMessageIds: this.sanitizeUndoRangeMessageIds(data?.visibleMessageIds),
+                            forwardMessageIdsFromAnchor: this.sanitizeUndoRangeMessageIds(data?.forwardMessageIdsFromAnchor)
+                        });
                         const currentSegment = this.client.getRevertedSegment();
                         this.uiDebugChannel.appendLine(`[EXT][UNDO_RESULT] applied=${result.applied} conflicts=${result.conflicts.length} touched=${result.touchedFiles.length} reason=${result.reason || 'null'} segmentStart=${currentSegment?.startMessageId || 'null'} segmentEnd=${currentSegment?.endMessageId || 'null'}`);
-                        this.uiDebugChannel.appendLine(`[EXT][UNDO_DONE] applied=${result.applied} conflicts=${result.conflicts.length} sessionId=${sessionId || 'null'}`);
+                        this.uiDebugChannel.appendLine(`[EXT][UNDO_DONE] applied=${result.applied} conflicts=${result.conflicts.length} sessionId=${ownerSessionId}`);
                             if (!result.applied && result.conflicts.length) {
                                 this.pendingConflict = { kind: 'undo', startMessageId: resolvedMessageId, operationId };
                                 const liveWebview = this._view?.webview || activeWebview;
-                                this.uiDebugChannel.appendLine(`EXT: undo.postToWebview | type=conflictCard | sessionId | ${sessionId || 'null'} | opId | ${operationId || 'null'}`);
+                                this.uiDebugChannel.appendLine(`[EXT][UNDO_TX] type=conflictCard sessionId=${ownerSessionId} opId=${operationId}`);
+                                this.uiDebugChannel.appendLine(`EXT: undo.postToWebview | type=conflictCard | sessionId | ${ownerSessionId} | opId | ${operationId}`);
                                 liveWebview.postMessage({
                                     type: 'conflictCard',
                                     kind: 'undo',
                                     startMessageId: resolvedMessageId,
                                     conflicts: result.conflicts,
-                                    sessionId: sessionId,
+                                    sessionId: ownerSessionId,
                                     operationId,
                                     noticeKey
                                 });
@@ -3570,19 +3626,26 @@ ${attachmentLines.join('\n')}`
                         if (!result.applied && !result.conflicts.length) {
                             this.uiDebugChannel.appendLine(`[EXT][UNDO_CLASSIFY] kind=noop-or-missing reason=${result.reason || 'unknown'} anchor=${resolvedMessageId}`);
                             const liveWebview = this._view?.webview || activeWebview;
-                            const finalSessionId = sessionId || this.currentSessionId;
-                            this.uiDebugChannel.appendLine(`[EXT][UNDO_TX] type=revertedSegment sessionId=${finalSessionId || 'null'} anchorMsgId=${resolvedMessageId} endMsgId=${resolvedMessageId} applied=false opId=${operationId || 'null'} reason=missing-startCommit-or-noop`);
+                            const finalSessionId = ownerSessionId;
+                            const canonicalMessageIds = [resolvedMessageId];
+                            const uiRange = this.resolveUndoUiVisibleRange(data, resolvedMessageId, canonicalMessageIds, extAnchorIndex);
+                            this.uiDebugChannel.appendLine(`[EXT][UNDO_RANGE] source=${uiRange.source} sessionId=${finalSessionId || 'null'} opId=${operationId || 'null'} uiAnchorIndex=${uiRange.uiAnchorIndex} extAnchorIndex=${uiRange.extAnchorIndex} messageIds=${uiRange.messageIds.length}`);
+                            if (uiRange.uiAnchorIndex >= 0 && uiRange.extAnchorIndex >= 0 && uiRange.uiAnchorIndex !== uiRange.extAnchorIndex) {
+                                this.uiDebugChannel.appendLine(`[EXT][UNDO_RANGE_MISMATCH] sessionId=${finalSessionId || 'null'} opId=${operationId || 'null'} uiAnchorIndex=${uiRange.uiAnchorIndex} extAnchorIndex=${uiRange.extAnchorIndex} messageIds=${uiRange.messageIds.length}`);
+                            }
+                            this.uiDebugChannel.appendLine(`[EXT][UNDO_TX] type=revertedSegment sessionId=${finalSessionId || 'null'} anchorMsgId=${resolvedMessageId} endMsgId=${resolvedMessageId} applied=false opId=${operationId || 'null'} messageIds=${uiRange.messageIds.length} reason=missing-startCommit-or-noop`);
                             liveWebview.postMessage({
                                 type: 'revertedSegment',
                                 conflicts: [],
+                                messageIds: uiRange.messageIds,
                                 segment: {
                                     isActive: false,
                                     startMessageId: resolvedMessageId,
                                     startMessageIndex: -1,
-                                    endMessageId: resolvedMessageId,
+                                    endMessageId: uiRange.messageIds[uiRange.messageIds.length - 1] || resolvedMessageId,
                                     endMessageIndex: -1,
                                     collapsed: true,
-                                    messageIds: [resolvedMessageId],
+                                    messageIds: uiRange.messageIds,
                                     operationId,
                                     applied: false
                                 },
@@ -3595,10 +3658,12 @@ ${attachmentLines.join('\n')}`
                                 : result.reason === 'missing-headCommit'
                                     ? 'Undo failed: repository head commit is unavailable.'
                                     : 'Undo could not be applied for the selected range.';
-                            this.postAddResponse(activeWebview, reasonText, { operationId });
+                            this.uiDebugChannel.appendLine(`[EXT][UNDO_TX] type=addResponse sessionId=${ownerSessionId} opId=${operationId}`);
+                            this.postAddResponse(activeWebview, reasonText, { operationId, sessionId: ownerSessionId });
                             break;
                         }
-                        this.postMessageIndexMap(activeWebview);
+                        this.uiDebugChannel.appendLine(`[EXT][UNDO_TX] type=messageIndexMap sessionId=${ownerSessionId} opId=${operationId}`);
+                        this.postMessageIndexMap(activeWebview, ownerSessionId);
                         if (result.applied && previousSegment) {
                             const current = this.client.getRevertedSegment();
                             const currentSet = new Set(current?.messageIds ?? []);
@@ -3633,19 +3698,33 @@ ${attachmentLines.join('\n')}`
                                 this.client.setRevertedSegment(segment);
                             }
                             this.revertedSegment = { conflicts: result.conflicts };
-                            const finalSessionId = sessionId || this.currentSessionId;
-                            this.uiDebugChannel.appendLine(`[EXT][UNDO_TX] type=revertedSegment sessionId=${finalSessionId || 'null'} anchorMsgId=${segment.startMessageId} endMsgId=${segment.endMessageId} applied=true opId=${operationId || 'null'}`);
+                            const finalSessionId = ownerSessionId;
+                            const canonicalMessageIds = Array.isArray(segment.messageIds)
+                                ? segment.messageIds.filter((id) => typeof id === 'string' && id.startsWith('msg_'))
+                                : [];
+                            const uiRange = this.resolveUndoUiVisibleRange(data, resolvedMessageId, canonicalMessageIds, extAnchorIndex);
+                            const uiSegment = {
+                                ...segment,
+                                endMessageId: uiRange.messageIds[uiRange.messageIds.length - 1] || segment.endMessageId,
+                                messageIds: uiRange.messageIds
+                            };
+                            this.uiDebugChannel.appendLine(`[EXT][UNDO_RANGE] source=${uiRange.source} sessionId=${finalSessionId || 'null'} opId=${operationId || 'null'} uiAnchorIndex=${uiRange.uiAnchorIndex} extAnchorIndex=${uiRange.extAnchorIndex} messageIds=${uiRange.messageIds.length}`);
+                            if (uiRange.uiAnchorIndex >= 0 && uiRange.extAnchorIndex >= 0 && uiRange.uiAnchorIndex !== uiRange.extAnchorIndex) {
+                                this.uiDebugChannel.appendLine(`[EXT][UNDO_RANGE_MISMATCH] sessionId=${finalSessionId || 'null'} opId=${operationId || 'null'} uiAnchorIndex=${uiRange.uiAnchorIndex} extAnchorIndex=${uiRange.extAnchorIndex} messageIds=${uiRange.messageIds.length}`);
+                            }
+                            this.uiDebugChannel.appendLine(`[EXT][UNDO_TX] type=revertedSegment sessionId=${finalSessionId || 'null'} anchorMsgId=${segment.startMessageId} endMsgId=${uiSegment.endMessageId} applied=true opId=${operationId || 'null'} messageIds=${uiRange.messageIds.length}`);
                             liveWebview.postMessage({
                                 type: 'revertedSegment',
                                 conflicts: result.conflicts || [],
+                                messageIds: uiRange.messageIds,
                                 segment: {
-                                    isActive: segment.isActive,
-                                    startMessageId: segment.startMessageId,
-                                    startMessageIndex: segment.startMessageIndex,
-                                    endMessageId: segment.endMessageId,
-                                    endMessageIndex: segment.endMessageIndex,
-                                    collapsed: segment.collapsed,
-                                    messageIds: segment.messageIds,
+                                    isActive: uiSegment.isActive,
+                                    startMessageId: uiSegment.startMessageId,
+                                    startMessageIndex: uiSegment.startMessageIndex,
+                                    endMessageId: uiSegment.endMessageId,
+                                    endMessageIndex: uiSegment.endMessageIndex,
+                                    collapsed: uiSegment.collapsed,
+                                    messageIds: uiSegment.messageIds,
                                     operationId,
                                     historySegments: this.revertedSegmentHistory
                                 },
@@ -3664,31 +3743,34 @@ ${attachmentLines.join('\n')}`
                                     await this.setChangeListReverted(finalSessionId, commitHash, true, liveWebview);
                                 }
                             }
-                            if (this.currentSessionId) {
-                                await this.persistRevertedSegment(this.currentSessionId, segment, result.conflicts, false);
-                            }
+                            await this.persistRevertedSegment(ownerSessionId, uiSegment, result.conflicts, false);
                         } else {
                             this.revertedSegment = { conflicts: result.conflicts };
-                            const finalSessionId = sessionId || this.currentSessionId;
-                            this.uiDebugChannel.appendLine(`[EXT][UNDO_TX] type=revertedSegment sessionId=${finalSessionId || 'null'} anchorMsgId=null endMsgId=null applied=true opId=${operationId || 'null'}`);
+                            const finalSessionId = ownerSessionId;
+                            this.uiDebugChannel.appendLine(`[EXT][UNDO_TX] type=revertedSegment sessionId=${finalSessionId || 'null'} anchorMsgId=null endMsgId=null applied=true opId=${operationId || 'null'} messageIds=0`);
                             liveWebview.postMessage({
                                 type: 'revertedSegment',
                                 conflicts: result.conflicts || [],
                                 segment: null,
+                                messageIds: [],
                                 sessionId: finalSessionId,
                                 operationId,
                                 noticeKey
                             });
                         }
                         if (!result.touchedFiles.length) {
-                            this.postAddResponse(activeWebview, 'Undo applied. No tracked file changes were available to revert. The current model may not support file change tracks. Please consider use OpenAI Codex.', { operationId });
+                            this.uiDebugChannel.appendLine(`[EXT][UNDO_TX] type=addResponse sessionId=${ownerSessionId} opId=${operationId}`);
+                            this.postAddResponse(activeWebview, 'Undo applied. No tracked file changes were available to revert. The current model may not support file change tracks. Please consider use OpenAI Codex.', { operationId, sessionId: ownerSessionId });
                         } else {
-                            this.postAddResponse(activeWebview, 'Undo applied.', { operationId });
+                            this.uiDebugChannel.appendLine(`[EXT][UNDO_TX] type=addResponse sessionId=${ownerSessionId} opId=${operationId}`);
+                            this.postAddResponse(activeWebview, 'Undo applied.', { operationId, sessionId: ownerSessionId });
                         }
                         this.refreshDiffIfTouched(result.touchedFiles);
                     } catch (error) {
                         vscode.window.showErrorMessage(`Undo failed: ${error}`);
-                        activeWebview.postMessage({ type: 'addResponse', value: `Undo failed: ${error}` });
+                        this.uiDebugChannel.appendLine(`[EXT][UNDO_TX] type=error sessionId=${ownerSessionId} opId=${operationId}`);
+                        const liveWebview = this._view?.webview || activeWebview;
+                        liveWebview.postMessage({ type: 'addResponse', value: `Undo failed: ${error}`, sessionId: ownerSessionId, operationId, meta: { operationId } });
                     }
                     break;
                 }
@@ -4073,7 +4155,7 @@ ${attachmentLines.join('\n')}`
                             const currentActiveNoticeKey = previousSegment?.startMessageId
                                 ? `system:undo:${previousSegment.startMessageId}`
                                 : undefined;
-                            const undoRange = this.client.getUndoRangeForAnchor(conflictContext.startMessageId);
+                            const undoRange = this.client.getUndoRangeForAnchor(conflictContext.startMessageId, this.currentSessionId);
                             const invalidMessageIds = this.currentSessionId && undoRange && undoRange.endIndex >= undoRange.startIndex
                                 ? Array.from(this.getInvalidSegmentMessageIds(this.currentSessionId, {
                                     currentNoticeKey: currentActiveNoticeKey,
@@ -5268,11 +5350,11 @@ ${attachmentLines.join('\n')}`
         const shouldCheckRange = hasRange && rangeEndIndex! >= rangeStartIndex!;
         const segmentOverlapsRange = (segment: SegmentState): boolean => {
             if (!shouldCheckRange) return true;
-            let segStart = this.client.getMessageIndex(segment.anchorMsgId || '');
-            let segEnd = this.client.getMessageIndex(segment.endMsgId || '');
+            let segStart = this.client.getMessageIndex(segment.anchorMsgId || '', sessionId);
+            let segEnd = this.client.getMessageIndex(segment.endMsgId || '', sessionId);
             if (typeof segStart !== 'number' || typeof segEnd !== 'number') {
                 const indices = (Array.isArray(segment.memberMsgIds) ? segment.memberMsgIds : [])
-                    .map((id) => this.client.getMessageIndex(id))
+                    .map((id) => this.client.getMessageIndex(id, sessionId))
                     .filter((idx): idx is number => typeof idx === 'number');
                 if (!indices.length) return false;
                 indices.sort((a, b) => a - b);
@@ -5881,8 +5963,8 @@ ${attachmentLines.join('\n')}`
                 || (sessionId ? this.pendingLocalKeyBySession.get(sessionId) : undefined)
                 || null;
             if (localKey && sessionId) {
-                const mappedMessageIndex = this.client.getMessageIndex(localKey)
-                    ?? this.client.registerMessage(localKey);
+                const mappedMessageIndex = this.client.getMessageIndex(localKey, sessionId)
+                    ?? this.client.registerMessage(localKey, sessionId);
                 this.client.aliasMessageId(localKey, event.text);
                 const internalId = this.clientMessageIdMap.get(localKey);
                 if (internalId && internalId !== event.text) {
@@ -6820,6 +6902,7 @@ ${attachmentLines.join('\n')}`
     private formatMessagesByIds(exportData: any, messageIds: Set<string>): SessionMessage[] {
         if (!(messageIds instanceof Set) || messageIds.size === 0) return [];
         const rawMessages = Array.isArray(exportData?.messages) ? exportData.messages : [];
+        const sessionId = exportData?.session?.id || exportData?.info?.id || exportData?.info?.sessionId || this.currentSessionId;
         const formatted: SessionMessage[] = [];
         const seenIds = new Set<string>();
         for (const message of rawMessages) {
@@ -6836,7 +6919,7 @@ ${attachmentLines.join('\n')}`
             if (!displayText.trim()) continue;
             if (role === 'user' && this.isHiddenControlUserText(displayText)) continue;
             if (role === 'assistant' && this.isHiddenControlAssistantText(displayText)) continue;
-            const messageIndex = this.client.registerMessage(resolvedId);
+            const messageIndex = this.client.registerMessage(resolvedId, sessionId);
             formatted.push({ role, text: displayText, id: resolvedId, messageIndex });
             seenIds.add(resolvedId);
         }
@@ -7005,7 +7088,7 @@ ${attachmentLines.join('\n')}`
             const displayText = role === 'user' ? this.stripModeInjectionBlock(text) : text;
             if (!displayText.trim()) continue;
             if (role === 'assistant' && this.isHiddenControlAssistantText(displayText)) continue;
-            const messageIndex = this.client.registerMessage(resolvedId);
+            const messageIndex = this.client.registerMessage(resolvedId, sessionId);
             const meta: Record<string, unknown> | undefined = role === 'assistant'
                 ? {
                     ...(parentId ? { parentID: parentId } : {}),
@@ -7120,27 +7203,29 @@ ${attachmentLines.join('\n')}`
         webview.postMessage({ type: 'removeMessage', messageId, sessionId: this.currentSessionId });
     }
 
-    private postAddResponse(webview: vscode.Webview, value: string, meta?: { operationId?: string }): void {
-        const messageId = this.client.createInternalMessageId('assistant', this.currentSessionId);
-        const messageIndex = this.client.registerMessage(messageId);
+    private postAddResponse(webview: vscode.Webview, value: string, meta?: { operationId?: string; sessionId?: string }): void {
+        const targetSessionId = meta?.sessionId || this.currentSessionId;
+        const messageId = this.client.createInternalMessageId('assistant', targetSessionId);
+        const messageIndex = this.client.registerMessage(messageId, targetSessionId);
         const liveWebview = this._view?.webview || webview;
         liveWebview.postMessage({
             type: 'addResponse',
             value,
             messageId,
             messageIndex,
-            sessionId: this.currentSessionId,
+            sessionId: targetSessionId,
+            operationId: meta?.operationId,
             meta
         });
     }
 
-    private postMessageIndexMap(webview: vscode.Webview): void {
-        const map = this.client.getMessageIndexMap();
+    private postMessageIndexMap(webview: vscode.Webview, sessionId?: string): void {
+        const map = this.client.getMessageIndexMap(sessionId || this.currentSessionId);
         const liveWebview = this._view?.webview || webview;
         liveWebview.postMessage({
             type: 'messageIndexMap',
             map,
-            sessionId: this.currentSessionId
+            sessionId: sessionId || this.currentSessionId
         });
     }
 

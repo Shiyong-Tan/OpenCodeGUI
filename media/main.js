@@ -1788,11 +1788,21 @@ function computeMemberMsgIdsFromTimeline(session, anchorMsgId, endMsgId) {
         return [];
     }
     
-    // If end not found or invalid, degrade to single-item interval [anchor, anchor]
-    if (endIdx === -1 || endIdx < anchorIdx) {
+    if (endIdx < anchorIdx) {
         vscode.postMessage({
             type: 'ui-debug',
-            payload: ['[WV][COMPUTE_MEMBERS]', 'end-missing-or-invalid', 
+            payload: ['[WV][COMPUTE_MEMBERS]', 'inverted-range-drop',
+                `anchorMsgId=${anchorMsgId}`, `endMsgId=${endMsgId || 'null'}`, 
+                `anchorIdx=${anchorIdx}`, `endIdx=${endIdx}`]
+        });
+        return [];
+    }
+
+    // If end not found or invalid, degrade to single-item interval [anchor, anchor]
+    if (endIdx === -1) {
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: ['[WV][COMPUTE_MEMBERS]', 'end-missing', 
                 `anchorMsgId=${anchorMsgId}`, `endMsgId=${endMsgId || 'null'}`, 
                 'degrade-to-anchor-only']
         });
@@ -1830,12 +1840,56 @@ function resolveSegmentMessageId(session, messageId) {
 }
 
 function normalizeSegmentMembersFromTimeline(session, anchorMsgId, endMsgId, candidateMsgIds, noticeKey) {
+    const explicitMemberMsgIds = Array.isArray(candidateMsgIds)
+        ? candidateMsgIds
+            .map((id) => resolveSegmentMessageId(session, id) || id)
+            .filter((id) => typeof id === 'string' && id.startsWith('msg_'))
+        : [];
+    if (explicitMemberMsgIds.length) {
+        const deduped = [];
+        const seen = new Set();
+        for (const id of explicitMemberMsgIds) {
+            if (seen.has(id)) continue;
+            seen.add(id);
+            deduped.push(id);
+        }
+        const resolvedAnchor = resolveSegmentMessageId(session, anchorMsgId) || deduped[0];
+        const resolvedEnd = resolveSegmentMessageId(session, endMsgId) || deduped[deduped.length - 1] || resolvedAnchor;
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: ['[WV][SEG_MEMBERS]', 'source=explicit',
+                `noticeKey=${noticeKey || 'null'}`,
+                `anchor=${resolvedAnchor || 'null'}`,
+                `end=${resolvedEnd || 'null'}`,
+                `count=${deduped.length}`]
+        });
+        return {
+            anchorMsgId: deduped[0] || resolvedAnchor,
+            endMsgId: deduped[deduped.length - 1] || resolvedEnd,
+            memberMsgIds: deduped
+        };
+    }
+
     const resolvedAnchor = resolveSegmentMessageId(session, anchorMsgId);
     if (!resolvedAnchor) {
         return { anchorMsgId: null, endMsgId: null, memberMsgIds: [] };
     }
 
     const resolvedEnd = resolveSegmentMessageId(session, endMsgId) || resolvedAnchor;
+    const resolvedAnchorIdx = session.timeline.indexOf(resolvedAnchor);
+    const resolvedEndIdx = session.timeline.indexOf(resolvedEnd);
+    if (resolvedEndIdx >= 0 && resolvedEndIdx < resolvedAnchorIdx) {
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: ['[WV][SEG_MEMBERS]', 'source=timeline', 'inverted-range-drop',
+                `noticeKey=${noticeKey || 'null'}`,
+                `anchor=${resolvedAnchor}`,
+                `end=${resolvedEnd}`,
+                `anchorIdx=${resolvedAnchorIdx}`,
+                `endIdx=${resolvedEndIdx}`]
+        });
+        return { anchorMsgId: resolvedAnchor, endMsgId: resolvedEnd, memberMsgIds: [] };
+    }
     let memberMsgIds = computeMemberMsgIdsFromTimeline(session, resolvedAnchor, resolvedEnd);
     if (memberMsgIds.length === 0 && typeof resolvedAnchor === 'string' && resolvedAnchor.startsWith('msg_')) {
         memberMsgIds = [resolvedAnchor];
@@ -1859,6 +1913,15 @@ function normalizeSegmentMembersFromTimeline(session, anchorMsgId, endMsgId, can
             });
         }
     }
+
+    vscode.postMessage({
+        type: 'ui-debug',
+        payload: ['[WV][SEG_MEMBERS]', 'source=timeline',
+            `noticeKey=${noticeKey || 'null'}`,
+            `anchor=${resolvedAnchor || 'null'}`,
+            `end=${resolvedEnd || 'null'}`,
+            `count=${memberMsgIds.length}`]
+    });
 
     return {
         anchorMsgId: resolvedAnchor,
@@ -2563,6 +2626,7 @@ function applyRevertedSegmentPayload(sessionId, payload, noticeKeyFromCaller) {
             payload: ['[WV][APPLY_REVERTED_WARN]', 'reason=no-members-computed',
                 `anchorMsgId=${anchorMsgId}`, `endMsgId=${endMsgId || 'null'}`]
         });
+        return;
     }
     
     // Store segment locally
@@ -2870,6 +2934,31 @@ function attemptAssistantUpgrade(sessionId, payload, source) {
 
 const UNDO_TIMEOUT_MS = 10000;
 
+function isUndoRangeVisibleMessageId(session, id) {
+    if (typeof id !== 'string' || !id.startsWith('msg_')) return false;
+    if (session?.hiddenSet instanceof Set && session.hiddenSet.has(id)) return false;
+    const message = session?.messagesById instanceof Map ? session.messagesById.get(id) : null;
+    if (isHydrationPersistenceArtifact(id, message)) return false;
+    const kind = message?.meta?.kind;
+    if (kind === 'undoNotice' || kind === 'snapshotNotice' || kind === 'changeList') return false;
+    return true;
+}
+
+function buildUndoVisibleRangeSnapshot(session, anchorMsgId) {
+    const timeline = Array.isArray(session?.timeline) ? session.timeline : [];
+    const visibleMessageIds = [];
+    for (const id of timeline) {
+        if (isUndoRangeVisibleMessageId(session, id)) {
+            visibleMessageIds.push(id);
+        }
+    }
+    const anchorIndex = visibleMessageIds.indexOf(anchorMsgId);
+    const forwardMessageIdsFromAnchor = anchorIndex >= 0
+        ? visibleMessageIds.slice(anchorIndex)
+        : [];
+    return { visibleMessageIds, anchorIndex, forwardMessageIdsFromAnchor };
+}
+
 function handleUndoToMessage(sessionId, targetMessageId) {
     try {
         vscode.postMessage({ type: 'ui-debug', payload: ['[WV][UNDO_FUNC_ENTER]', 'sessionId', sessionId || 'NULL', 'typeof', typeof sessionId, 'targetMessageId', targetMessageId || 'NULL', 'activeSessionId', activeSessionId || 'NULL'] });
@@ -2920,7 +3009,20 @@ function handleUndoToMessage(sessionId, targetMessageId) {
         vscode.postMessage({ type: 'ui-debug', payload: ['undo.send', 'clientOpId', opId, 'noticeKey', noticeKey, 'anchorMsgId', targetMessageId, 'sessionId', sessionId] });
         vscode.postMessage({ type: 'ui-debug', payload: ['WV', 'undo', 'pending', 'noticeKey', noticeKey, 'clientOpId', opId, 'sessionId', sessionId] });
         vscode.postMessage({ type: 'ui-debug', payload: ['[WV][UNDO_PRE_SEND]', 'sessionId', sessionId || 'NULL', 'opId', opId || 'NULL', 'serverId', serverId || 'NULL', 'typeof_sessionId', typeof sessionId, 'typeof_opId', typeof opId, 'typeof_serverId', typeof serverId] });
-        const undoMessage = { type: 'undoToMessage', sessionId, operationId: opId, messageId: serverId };
+        const undoRangeSnapshot = buildUndoVisibleRangeSnapshot(session, serverId);
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: ['[WV][UNDO_RANGE_TX]', `sessionId=${sessionId || 'null'}`, `opId=${opId || 'null'}`, `anchorIndex=${undoRangeSnapshot.anchorIndex}`, `visibleCount=${undoRangeSnapshot.visibleMessageIds.length}`, `forwardCount=${undoRangeSnapshot.forwardMessageIdsFromAnchor.length}`]
+        });
+        const undoMessage = {
+            type: 'undoToMessage',
+            sessionId,
+            operationId: opId,
+            messageId: serverId,
+            visibleMessageIds: undoRangeSnapshot.visibleMessageIds,
+            anchorIndex: undoRangeSnapshot.anchorIndex,
+            forwardMessageIdsFromAnchor: undoRangeSnapshot.forwardMessageIdsFromAnchor
+        };
         vscode.postMessage({ type: 'ui-debug', payload: ['[WV][UNDO_MSG_OBJ]', JSON.stringify(undoMessage)] });
         
         // Send a test ping immediately before undoToMessage to verify channel is working
@@ -9329,10 +9431,18 @@ window.addEventListener('message', (event) => {
                         logSessionState(sessionId, 'revertedSegment.notApplied');
                         break;
                     }
-                    const payloadMemberMsgIds = Array.isArray(segPayload?.messageIds)
-                        ? segPayload.messageIds.filter((id) => typeof id === 'string' && id.startsWith('msg_'))
-                        : [];
-                    let memberMsgIds = payloadMemberMsgIds;
+                    const explicitPayloadMessageIds = Array.isArray(segPayload?.messageIds)
+                        ? segPayload.messageIds
+                        : (Array.isArray(message?.messageIds) ? message.messageIds : []);
+                    const fallbackAnchor = resolveSegmentMessageId(session, anchorForUpsert) || anchorForUpsert;
+                    const fallbackEnd = resolveSegmentMessageId(session, endForUpsert) || fallbackAnchor;
+                    const payloadMemberMsgIds = explicitPayloadMessageIds
+                        .map((id) => resolveSegmentMessageId(session, id) || id)
+                        .filter((id) => typeof id === 'string' && id.startsWith('msg_'));
+                    const hasExplicitMemberIds = payloadMemberMsgIds.length > 0;
+                    let memberMsgIds = hasExplicitMemberIds
+                        ? payloadMemberMsgIds
+                        : computeMemberMsgIdsFromTimeline(session, fallbackAnchor, fallbackEnd);
                     if (!memberMsgIds.length) {
                         vscode.postMessage({
                             type: 'ui-debug',
@@ -9340,8 +9450,6 @@ window.addEventListener('message', (event) => {
                         });
                         break;
                     }
-                    const fallbackAnchor = resolveSegmentMessageId(session, anchorForUpsert) || anchorForUpsert;
-                    const fallbackEnd = resolveSegmentMessageId(session, endForUpsert) || fallbackAnchor;
                     const normalizedAnchorForUpsert = memberMsgIds[0] || fallbackAnchor;
                     const normalizedEndForUpsert = memberMsgIds.length
                         ? memberMsgIds[memberMsgIds.length - 1]
@@ -9349,7 +9457,7 @@ window.addEventListener('message', (event) => {
                     endForUpsert = normalizedEndForUpsert;
                     vscode.postMessage({
                         type: 'ui-debug',
-                        payload: ['[WV][SEG_MEMBERS]',
+                        payload: ['[WV][SEG_MEMBERS]', `source=${hasExplicitMemberIds ? 'explicit' : 'timeline'}`,
                             `anchor=${normalizedAnchorForUpsert || 'null'}`,
                             `end=${endForUpsert || 'null'}`,
                             `count=${memberMsgIds.length}`]
