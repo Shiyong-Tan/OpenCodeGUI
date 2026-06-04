@@ -365,6 +365,90 @@ describe('append runtime isolation', () => {
         expect(client.getLatestAppendUserMsgId('ses_A')).toBe('msg_append_child_A');
     });
 
+    it('retains only allowlisted client turn binding for requested in-flight sessions on reset', () => {
+        const client = new OpenCodeClient() as any;
+        createdClients.push(client as OpenCodeClient);
+
+        client.startTurn('ses_keep', 'local-user-keep');
+        client.setPendingAssistantTmpKey('ses_keep', 'tmp:assistant-keep');
+        client.queueTurnChanges('ses_keep', 'local-user-keep', 'tmp:assistant-keep', 'msg_assistant_keep', [{ path: 'keep.txt', status: 'modified' }]);
+        client.markTurnHasWrites('ses_keep', 'test');
+        client.displayTurnUserMsgIdBySession.set('ses_keep', 'msg_visible_keep');
+        client.canceledActiveTurnBySession.set('ses_keep', true);
+
+        client.startTurn('ses_drop', 'local-user-drop');
+        client.setPendingAssistantTmpKey('ses_drop', 'tmp:assistant-drop');
+        client.queueTurnChanges('ses_drop', 'local-user-drop', 'tmp:assistant-drop', 'msg_assistant_drop', [{ path: 'drop.txt', status: 'modified' }]);
+        client.markTurnHasWrites('ses_drop', 'test');
+
+        client.resetSessionState({ preserveInFlightSessionIds: new Set(['ses_keep']) });
+
+        expect(client.turnStateBySession.get('ses_keep')).toEqual(expect.objectContaining({
+            pendingUserLocalKey: 'local-user-keep',
+            pendingAssistantTmpKey: 'tmp:assistant-keep',
+        }));
+        expect(client.pendingTurnChangesBySession.get('ses_keep')).toEqual(expect.objectContaining({
+            turnKey: 'local-user-keep',
+            tmpKey: 'tmp:assistant-keep',
+        }));
+        expect(client.turnWriteStateBySession.get('ses_keep')).toEqual({ turnKey: 'local-user-keep', hasWrites: true });
+
+        expect(client.turnStateBySession.has('ses_drop')).toBe(false);
+        expect(client.pendingTurnChangesBySession.has('ses_drop')).toBe(false);
+        expect(client.turnWriteStateBySession.has('ses_drop')).toBe(false);
+        expect(client.displayTurnUserMsgIdBySession.has('ses_keep')).toBe(false);
+        expect(client.canceledActiveTurnBySession.has('ses_keep')).toBe(false);
+    });
+
+    it('retains only allowlisted provider bindings for pre-reset send-in-flight sessions', () => {
+        const provider = createProvider();
+        provider.client.resetSessionState = jest.fn();
+
+        provider.sendInFlightBySession.add('ses_keep');
+        provider.pendingLocalKeyBySession.set('ses_keep', 'local-user-keep');
+        provider.pendingAssistantTmpKeyBySession.set('ses_keep', 'tmp:assistant-keep');
+        provider.pendingAssistantMessageIdBySession.set('ses_keep', 'msg_assistant_keep');
+        provider.assistantTextBufferBySession.set('ses_keep', 'stream text');
+        provider.rawUserTextByLocalKey.set('local-user-keep', 'raw prompt');
+        provider.pendingAssistantTmpKeyByLocalKey.set('local-user-keep', 'tmp:assistant-keep');
+        provider.appendSubmitInFlightBySession.add('ses_keep');
+        provider.pendingBaselineTurnKey = 'baseline-stale';
+        provider.draftByLocalKey.set('local-user-keep', { text: 'draft', attachments: [] });
+        provider.uiTimelineBySession.set('ses_keep', ['local-user-keep', 'tmp:assistant-keep']);
+
+        provider.pendingLocalKeyBySession.set('ses_drop', 'local-user-drop');
+        provider.pendingAssistantTmpKeyBySession.set('ses_drop', 'tmp:assistant-drop');
+        provider.pendingAssistantMessageIdBySession.set('ses_drop', 'msg_assistant_drop');
+        provider.assistantTextBufferBySession.set('ses_drop', 'drop stream');
+        provider.rawUserTextByLocalKey.set('local-user-drop', 'drop prompt');
+        provider.pendingAssistantTmpKeyByLocalKey.set('local-user-drop', 'tmp:assistant-drop');
+
+        provider.resetSessionState();
+
+        expect(provider.client.resetSessionState).toHaveBeenCalledWith({ preserveInFlightSessionIds: expect.any(Set) });
+        const preserveSet = provider.client.resetSessionState.mock.calls[0][0].preserveInFlightSessionIds;
+        expect(Array.from(preserveSet)).toEqual(['ses_keep']);
+
+        expect(provider.sendInFlightBySession.has('ses_keep')).toBe(true);
+        expect(provider.pendingLocalKeyBySession.get('ses_keep')).toBe('local-user-keep');
+        expect(provider.pendingAssistantTmpKeyBySession.get('ses_keep')).toBe('tmp:assistant-keep');
+        expect(provider.pendingAssistantMessageIdBySession.get('ses_keep')).toBe('msg_assistant_keep');
+        expect(provider.assistantTextBufferBySession.get('ses_keep')).toBe('stream text');
+        expect(provider.rawUserTextByLocalKey.get('local-user-keep')).toBe('raw prompt');
+        expect(provider.pendingAssistantTmpKeyByLocalKey.get('local-user-keep')).toBe('tmp:assistant-keep');
+
+        expect(provider.pendingLocalKeyBySession.has('ses_drop')).toBe(false);
+        expect(provider.pendingAssistantTmpKeyBySession.has('ses_drop')).toBe(false);
+        expect(provider.pendingAssistantMessageIdBySession.has('ses_drop')).toBe(false);
+        expect(provider.assistantTextBufferBySession.has('ses_drop')).toBe(false);
+        expect(provider.rawUserTextByLocalKey.has('local-user-drop')).toBe(false);
+        expect(provider.pendingAssistantTmpKeyByLocalKey.has('local-user-drop')).toBe(false);
+        expect(provider.appendSubmitInFlightBySession.has('ses_keep')).toBe(false);
+        expect(provider.pendingBaselineTurnKey).toBeUndefined();
+        expect(provider.draftByLocalKey.has('local-user-keep')).toBe(false);
+        expect(provider.uiTimelineBySession.has('ses_keep')).toBe(false);
+    });
+
     it('merges cached append metadata into canonical snapshot root without replacing unrelated meta', () => {
         const provider = createProvider();
         provider.cacheAppendSnapshotMeta({

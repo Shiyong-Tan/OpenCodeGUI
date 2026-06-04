@@ -7528,15 +7528,54 @@ ${attachmentLines.join('\n')}`
 
     private resetSessionState(): void {
         const retainedSendInFlightBySession = new Set(this.sendInFlightBySession);
-        this.client.resetSessionState();
+        const retainedPendingLocalKeyBySession = new Map<string, string>();
+        const retainedPendingAssistantTmpKeyBySession = new Map<string, string>();
+        const retainedPendingAssistantMessageIdBySession = new Map<string, string>();
+        const retainedAssistantTextBufferBySession = new Map<string, string>();
+        const retainedRawUserTextByLocalKey = new Map<string, string>();
+        const retainedPendingAssistantTmpKeyByLocalKey = new Map<string, string>();
+        const isRetainableTmpKey = (value: string | undefined): value is string => Boolean(value && (value.startsWith('tmp:') || value.startsWith('local-')));
+        for (const sessionId of retainedSendInFlightBySession) {
+            if (typeof sessionId !== 'string' || !sessionId) continue;
+            const pendingLocalKey = this.pendingLocalKeyBySession.get(sessionId);
+            if (pendingLocalKey) {
+                retainedPendingLocalKeyBySession.set(sessionId, pendingLocalKey);
+                const rawUserText = this.rawUserTextByLocalKey.get(pendingLocalKey);
+                if (rawUserText !== undefined) {
+                    retainedRawUserTextByLocalKey.set(pendingLocalKey, rawUserText);
+                }
+                const tmpKeyByLocalKey = this.pendingAssistantTmpKeyByLocalKey.get(pendingLocalKey);
+                if (isRetainableTmpKey(tmpKeyByLocalKey)) {
+                    retainedPendingAssistantTmpKeyByLocalKey.set(pendingLocalKey, tmpKeyByLocalKey);
+                }
+            }
+            const tmpKey = this.pendingAssistantTmpKeyBySession.get(sessionId);
+            if (isRetainableTmpKey(tmpKey)) {
+                retainedPendingAssistantTmpKeyBySession.set(sessionId, tmpKey);
+            }
+            const assistantMessageId = this.pendingAssistantMessageIdBySession.get(sessionId);
+            if (assistantMessageId) {
+                retainedPendingAssistantMessageIdBySession.set(sessionId, assistantMessageId);
+            }
+            const assistantTextBuffer = this.assistantTextBufferBySession.get(sessionId);
+            if (assistantTextBuffer !== undefined) {
+                retainedAssistantTextBufferBySession.set(sessionId, assistantTextBuffer);
+            }
+        }
+        this.client.resetSessionState({ preserveInFlightSessionIds: retainedSendInFlightBySession });
         this.clientMessageIdMap.clear();
         this.revertedSegment = undefined;
         this.revertedSegmentHistory = [];
         this.pendingConflict = undefined;
         this.pendingClientMessageId = undefined;
+        this.lastDraft = undefined;
+        this.draftByLocalKey.clear();
+        this.appendSubmitInFlightBySession.clear();
+        this.pendingBaselineTurnKey = undefined;
         this.currentDiffFilePath = null;
         this.diffHashes.clear();
         this.shownDiffKeysBySession.clear();
+        this.uiTimelineBySession.clear();
         this.assistantTextBufferBySession.clear();
         this.pendingAssistantTmpKeyBySession.clear();
         this.pendingAssistantTmpKeyByLocalKey.clear();
@@ -7548,8 +7587,43 @@ ${attachmentLines.join('\n')}`
         for (const sessionId of retainedSendInFlightBySession) {
             this.sendInFlightBySession.add(sessionId);
         }
+        let retainedProviderTurnBindingSessions = 0;
+        for (const sessionId of retainedSendInFlightBySession) {
+            if (typeof sessionId !== 'string' || !sessionId) continue;
+            let restored = false;
+            const pendingLocalKey = retainedPendingLocalKeyBySession.get(sessionId);
+            if (pendingLocalKey) {
+                this.pendingLocalKeyBySession.set(sessionId, pendingLocalKey);
+                restored = true;
+            }
+            const tmpKey = retainedPendingAssistantTmpKeyBySession.get(sessionId);
+            if (tmpKey) {
+                this.pendingAssistantTmpKeyBySession.set(sessionId, tmpKey);
+                restored = true;
+            }
+            const assistantMessageId = retainedPendingAssistantMessageIdBySession.get(sessionId);
+            if (assistantMessageId) {
+                this.pendingAssistantMessageIdBySession.set(sessionId, assistantMessageId);
+                restored = true;
+            }
+            const assistantTextBuffer = retainedAssistantTextBufferBySession.get(sessionId);
+            if (assistantTextBuffer !== undefined) {
+                this.assistantTextBufferBySession.set(sessionId, assistantTextBuffer);
+                restored = true;
+            }
+            if (restored) retainedProviderTurnBindingSessions += 1;
+        }
+        for (const [localKey, rawUserText] of retainedRawUserTextByLocalKey) {
+            this.rawUserTextByLocalKey.set(localKey, rawUserText);
+        }
+        for (const [localKey, tmpKey] of retainedPendingAssistantTmpKeyByLocalKey) {
+            this.pendingAssistantTmpKeyByLocalKey.set(localKey, tmpKey);
+        }
         if (retainedSendInFlightBySession.size) {
             this.uiDebugChannel.appendLine(`[EXT][APPEND_RETAIN] preserved sendInFlight sessions=${retainedSendInFlightBySession.size} reason=ui-reset`);
+        }
+        if (retainedProviderTurnBindingSessions) {
+            this.uiDebugChannel.appendLine(`[EXT][APPEND_RETAIN] preserved turnBinding sessions=${retainedProviderTurnBindingSessions} reason=ui-reset`);
         }
     }
 

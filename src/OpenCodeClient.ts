@@ -642,7 +642,34 @@ export class OpenCodeClient {
     private readonly groupedResyncActivityEnabled = false;
     private readonly replayMirroredChangeIdsBySession = new Map<string, Set<string>>();
 
-    public resetSessionState(): void {
+    public resetSessionState(options?: { preserveInFlightSessionIds?: ReadonlySet<string> }): void {
+        const preserveInFlightSessionIds = options?.preserveInFlightSessionIds;
+        const retainedTurnStateBySession = new Map<string, TurnState>();
+        const retainedPendingTurnChangesBySession = new Map<string, PendingTurnChanges>();
+        const retainedTurnWriteStateBySession = new Map<string, { turnKey: string; hasWrites: boolean }>();
+        if (preserveInFlightSessionIds?.size) {
+            for (const sessionId of preserveInFlightSessionIds) {
+                if (typeof sessionId !== 'string' || !sessionId) continue;
+                const turnState = this.turnStateBySession.get(sessionId);
+                if (turnState) {
+                    retainedTurnStateBySession.set(sessionId, {
+                        ...turnState,
+                        turnMessageIds: turnState.turnMessageIds ? new Set(turnState.turnMessageIds) : undefined,
+                    });
+                }
+                const pendingChanges = this.pendingTurnChangesBySession.get(sessionId);
+                if (pendingChanges) {
+                    retainedPendingTurnChangesBySession.set(sessionId, {
+                        ...pendingChanges,
+                        changes: [...pendingChanges.changes],
+                    });
+                }
+                const writeState = this.turnWriteStateBySession.get(sessionId);
+                if (writeState) {
+                    retainedTurnWriteStateBySession.set(sessionId, { ...writeState });
+                }
+            }
+        }
         const subagentMapCount = this.subagentToParentSessionMap.size;
         const stablePulseRootCount = this.stablePulseRootSessionBySubagent.size;
         if (subagentMapCount > 0 || stablePulseRootCount > 0) {
@@ -659,6 +686,7 @@ export class OpenCodeClient {
         this.revertedSegment = undefined;
         this.turnStateBySession.clear();
         this.pendingTurnChangesBySession.clear();
+        this.turnWriteStateBySession.clear();
         this.sessionUndoEnabled.clear();
         this.assistantTextLengths.clear();
         this.assistantTextById.clear();
@@ -745,6 +773,30 @@ export class OpenCodeClient {
         this.watchdogDrainDelayTimerBySession.clear();
         this.falsePositiveResetCountBySession.clear();
         this.lockedFinalSettleAttemptsBySession.clear();
+        let retainedClientTurnBindingSessions = 0;
+        for (const sessionId of preserveInFlightSessionIds || []) {
+            if (typeof sessionId !== 'string' || !sessionId) continue;
+            let restored = false;
+            const turnState = retainedTurnStateBySession.get(sessionId);
+            if (turnState) {
+                this.turnStateBySession.set(sessionId, turnState);
+                restored = true;
+            }
+            const pendingChanges = retainedPendingTurnChangesBySession.get(sessionId);
+            if (pendingChanges) {
+                this.pendingTurnChangesBySession.set(sessionId, pendingChanges);
+                restored = true;
+            }
+            const writeState = retainedTurnWriteStateBySession.get(sessionId);
+            if (writeState) {
+                this.turnWriteStateBySession.set(sessionId, writeState);
+                restored = true;
+            }
+            if (restored) retainedClientTurnBindingSessions += 1;
+        }
+        if (retainedClientTurnBindingSessions) {
+            this.logUiDebug(`[EXT][APPEND_RETAIN] preserved clientTurnBinding sessions=${retainedClientTurnBindingSessions} reason=resetSessionState`);
+        }
     }
 
     constructor() {
