@@ -160,6 +160,8 @@ let currentModelQuota = null;
 let quotaTooltipEl = null;
 let inputEl = null;
 let appendInputMode = null;
+let appendHoverActiveKey = null;
+let appendHoverHideTimer = null;
 let inputDefaultPlaceholder = 'Ask anything...';
 let freeModelIds = new Set();
 const pendingUiPrompts = [];
@@ -4422,9 +4424,44 @@ document.addEventListener('DOMContentLoaded', () => {
         refreshSendButtonState();
     }
 
+    function buildAppendHoverKey(sessionId, rootUserKey) {
+        if (!sessionId || !rootUserKey) return null;
+        return `${sessionId}::${rootUserKey}`;
+    }
+
+    function setAppendHoverActive(key) {
+        if (!key) return;
+        if (appendHoverHideTimer) {
+            clearTimeout(appendHoverHideTimer);
+            appendHoverHideTimer = null;
+        }
+        appendHoverActiveKey = key;
+    }
+
+    function scheduleClearAppendHover(key) {
+        if (!key || appendHoverActiveKey !== key) return;
+        if (appendHoverHideTimer) clearTimeout(appendHoverHideTimer);
+        appendHoverHideTimer = setTimeout(() => {
+            appendHoverHideTimer = null;
+            if (appendHoverActiveKey === key) {
+                appendHoverActiveKey = null;
+                window.__oc?.renderFromState?.();
+            }
+        }, 180);
+    }
+
+    function clearAppendHover(reason = 'unknown') {
+        if (appendHoverHideTimer) {
+            clearTimeout(appendHoverHideTimer);
+            appendHoverHideTimer = null;
+        }
+        appendHoverActiveKey = null;
+    }
+
     function enterAppendInputMode(rootUserKey, initialText) {
         const session = getSessionState(activeSessionId);
         if (!session || !rootUserKey || !input) return;
+        setAppendHoverActive(buildAppendHoverKey(activeSessionId, rootUserKey));
         if (!(session.appendComposerDrafts instanceof Map)) {
             session.appendComposerDrafts = new Map();
         }
@@ -4493,6 +4530,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function clearAppendInputForSessionChange(nextSessionId) {
+        if (appendHoverActiveKey && !appendHoverActiveKey.startsWith(`${nextSessionId || ''}::`)) {
+            clearAppendHover('session-change');
+        }
         if (!appendInputMode || appendInputMode.sessionId === nextSessionId) return;
         appendInputMode = null;
         if (input) {
@@ -5371,6 +5411,7 @@ function renderMessageElement(message, renderedSet) {
                 const fullText = typeof options.fullText === 'string' ? options.fullText : previewText;
                 const expandedKey = typeof options.expandedKey === 'string' ? options.expandedKey : '';
                 const canExpandToFullText = fullText && fullText !== previewText;
+                const hasToggleText = Boolean(previewText || fullText);
                 let expanded = expandedKey ? subagentTextExpandedByKey.get(expandedKey) === true : false;
 
                 const renderCurrentText = () => {
@@ -5389,34 +5430,21 @@ function renderMessageElement(message, renderedSet) {
                     textRow.style.setProperty('overflow-x', expanded ? 'visible' : 'hidden', 'important');
                     textRow.style.setProperty('overflow-y', expanded ? 'visible' : 'hidden', 'important');
                 };
+                renderCurrentText();
                 setTextRowClamp();
 
                 const toggleButton = document.createElement('button');
                 toggleButton.type = 'button';
-                toggleButton.textContent = 'Show more';
-                toggleButton.setAttribute('aria-expanded', 'false');
-                toggleButton.style.display = 'none';
-                toggleButton.style.marginTop = '4px';
-                toggleButton.style.padding = '0';
-                toggleButton.style.border = '0';
-                toggleButton.style.background = 'transparent';
-                toggleButton.style.color = 'var(--vscode-textLink-foreground, #3794ff)';
-                toggleButton.style.cursor = 'pointer';
-                toggleButton.style.font = 'inherit';
-                toggleButton.style.fontSize = 'inherit';
-                toggleButton.style.lineHeight = 'inherit';
-                toggleButton.style.alignSelf = 'flex-start';
-                toggleButton.style.textAlign = 'left';
+                toggleButton.className = 'subagent-inline-text-toggle';
+                toggleButton.textContent = expanded ? 'Show less' : 'Show more';
+                toggleButton.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+                toggleButton.style.display = hasToggleText ? 'block' : 'none';
 
                 const computeCollapsedMaxHeight = () => {
                     const computed = window.getComputedStyle(textRow);
                     const fontSize = Number.parseFloat(computed.fontSize || '0') || 12;
                     const lineHeight = Number.parseFloat(computed.lineHeight || '0') || (fontSize * 1.4);
                     collapsedMaxHeight = `${Math.ceil(lineHeight * collapsedLineCount) + 2}px`;
-                    toggleButton.style.fontSize = computed.fontSize || 'inherit';
-                    toggleButton.style.lineHeight = computed.lineHeight || 'inherit';
-                    toggleButton.style.marginLeft = computed.marginLeft || '0';
-                    toggleButton.style.paddingLeft = computed.paddingLeft || '0';
                 };
 
                 const updateExpandedState = () => {
@@ -5442,9 +5470,7 @@ function renderMessageElement(message, renderedSet) {
                 requestAnimationFrame(() => {
                     if (!textRow.isConnected) return;
                     computeCollapsedMaxHeight();
-                    updateExpandedState();
-                    const exceedsCollapsedHeight = textRow.scrollHeight > textRow.clientHeight + 1;
-                    toggleButton.style.display = (canExpandToFullText || exceedsCollapsedHeight) ? 'block' : 'none';
+                    setTextRowClamp();
                 });
 
                 return toggleButton;
@@ -5570,6 +5596,24 @@ function renderMessageElement(message, renderedSet) {
             const actions = document.createElement('div');
             actions.className = 'message-actions';
             const isAppendableActiveUserMessage = canAppendToMessage(session, message);
+            const appendHoverKey = isAppendableActiveUserMessage
+                ? buildAppendHoverKey(activeSessionId, message.id)
+                : null;
+            if (appendHoverKey && appendHoverActiveKey === appendHoverKey) {
+                div.classList.add('append-hover-active');
+            }
+            if (appendHoverKey) {
+                const keepAppendHoverActive = () => setAppendHoverActive(appendHoverKey);
+                const releaseAppendHoverActive = () => scheduleClearAppendHover(appendHoverKey);
+                div.addEventListener('mouseenter', keepAppendHoverActive);
+                div.addEventListener('mouseleave', releaseAppendHoverActive);
+                div.addEventListener('focusin', keepAppendHoverActive);
+                div.addEventListener('focusout', releaseAppendHoverActive);
+                actions.addEventListener('mouseenter', keepAppendHoverActive);
+                actions.addEventListener('mouseleave', releaseAppendHoverActive);
+                actions.addEventListener('focusin', keepAppendHoverActive);
+                actions.addEventListener('focusout', releaseAppendHoverActive);
+            }
             if (isAppendableActiveUserMessage) {
                 const appendBtn = document.createElement('button');
                 appendBtn.className = 'append-btn';
@@ -5577,6 +5621,7 @@ function renderMessageElement(message, renderedSet) {
                 appendBtn.title = 'Append to this message';
                 appendBtn.textContent = '+';
                 appendBtn.addEventListener('click', () => {
+                    setAppendHoverActive(appendHoverKey);
                     enterAppendInputMode(message.id);
                 });
                 actions.appendChild(appendBtn);

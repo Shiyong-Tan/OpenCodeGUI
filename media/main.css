@@ -664,12 +664,14 @@ body {
 }
 
 .message.user:hover,
-.message.user:focus-within {
+.message.user:focus-within,
+.message.user.append-hover-active {
     transform: translateX(-36px);
 }
 
 .message.user:hover .message-actions,
-.message.user:focus-within .message-actions {
+.message.user:focus-within .message-actions,
+.message.user.append-hover-active .message-actions {
     opacity: 1;
     pointer-events: auto;
 }
@@ -2574,6 +2576,23 @@ select#mode-select {
 
 .subagent-inline-text > :last-child {
   margin-bottom: 0;
+}
+
+.subagent-inline-text-toggle {
+  display: block;
+  margin-top: 4px;
+  margin-left: 14px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--vscode-textLink-foreground, #3794ff);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.78em;
+  font-style: normal;
+  line-height: inherit;
+  align-self: flex-start;
+  text-align: left;
 }
 
 .subagent-inline-meta {
