@@ -1102,6 +1102,20 @@ body {
     margin-right: 8px;
 }
 
+.question-panel {
+    flex-shrink: 0;
+    box-sizing: border-box;
+    margin: 0 10px;
+    max-height: 50vh;
+    overflow-y: auto;
+}
+
+.question-panel-card {
+    width: 100%;
+    max-width: none;
+    margin: 0;
+}
+
 .question-overlay {
     position: fixed;
     inset: 0;
@@ -1338,19 +1352,63 @@ body {
 
 .question-card-actions {
     display: flex;
-    flex-direction: column;
+    flex-wrap: wrap;
     align-items: flex-start;
     justify-content: flex-start;
     gap: 8px;
     margin-top: 8px;
+    max-width: 100%;
+}
+
+.question-card-actions-measuring {
+    flex-direction: row;
 }
 
 .question-card-btn {
-    width: var(--question-option-width, fit-content);
+    width: var(--question-option-width, auto);
     max-width: 98%;
     text-align: left;
     white-space: normal;
     line-height: 1.3;
+}
+
+.question-card-actions-row {
+    flex-direction: row;
+    align-items: flex-start;
+    flex-wrap: wrap;
+}
+
+.question-card-actions-row .question-card-btn:not(.question-card-submit) {
+    min-width: var(--question-option-width, 6ch);
+    width: var(--question-option-width, auto);
+    text-align: center;
+    white-space: nowrap;
+    flex: 0 0 var(--question-option-width, auto);
+}
+
+.question-card-actions-column-compact {
+    flex-direction: column;
+    align-items: flex-start;
+}
+
+.question-card-actions-column-compact .question-card-btn:not(.question-card-submit) {
+    min-width: var(--question-option-width, 6ch);
+    width: var(--question-option-width, auto);
+    max-width: 100%;
+    text-align: center;
+    white-space: nowrap;
+    flex: 0 0 auto;
+}
+
+.question-card-actions-column-full {
+    flex-direction: column;
+    align-items: stretch;
+}
+
+.question-card-actions-column-full .question-card-btn:not(.question-card-submit) {
+    width: var(--question-option-width, 100%);
+    max-width: 100%;
+    white-space: normal;
 }
 
 .question-card-btn.active {
@@ -1360,6 +1418,13 @@ body {
 
 .question-card-submit {
     margin-left: 0;
+    min-width: var(--question-option-width, 88px);
+    width: auto;
+    text-align: center;
+}
+
+.question-card-actions-column-full .question-card-submit {
+    width: fit-content;
 }
 
 
@@ -1367,8 +1432,11 @@ body {
     display: flex;
     gap: 8px;
     margin-top: 10px;
-    width: 98%;
+    width: 100%;
+    max-width: 100%;
+    flex: 1 0 100%;
     box-sizing: border-box;
+    order: 20;
 }
 
 .question-free-text-input {

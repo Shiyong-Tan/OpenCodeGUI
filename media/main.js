@@ -10943,15 +10943,80 @@ function commitCurrentQuestionAnswers(answersForCurrent) {
 }
 
 function renderQuestionCardInTimeline() {
-    // Intentionally empty: question card now uses centered modal overlay.
+    // Intentionally empty: question card now uses an inline pinned panel near the composer.
 }
 
 function applyQuestionOptionWidth(actionsEl, options) {
     if (!actionsEl) return;
-    const labels = Array.isArray(options) ? options.map((opt) => (typeof opt?.label === 'string' ? opt.label : '')) : [];
-    const longest = labels.reduce((max, label) => Math.max(max, label.length), 0);
-    const widthCh = Math.max(12, longest + 4);
-    actionsEl.style.setProperty('--question-option-width', `${widthCh}ch`);
+    const layoutClasses = [
+        'question-card-actions-measuring',
+        'question-card-actions-row',
+        'question-card-actions-column-compact',
+        'question-card-actions-column-full'
+    ];
+    if (actionsEl.classList.contains('permission-card-actions')) {
+        actionsEl.classList.remove(...layoutClasses);
+        actionsEl.style.removeProperty('--question-option-width');
+        return;
+    }
+    actionsEl.classList.remove(...layoutClasses);
+    actionsEl.classList.add('question-card-actions-measuring');
+    actionsEl.style.removeProperty('--question-option-width');
+
+    const measure = () => {
+        if (!actionsEl.isConnected) return;
+        const optionButtons = Array.from(actionsEl.querySelectorAll('.question-card-btn:not(.question-card-submit)'));
+        if (!optionButtons.length) {
+            actionsEl.classList.remove('question-card-actions-measuring');
+            actionsEl.classList.add('question-card-actions-column-full');
+            actionsEl.style.setProperty('--question-option-width', '100%');
+            return;
+        }
+
+        const availableWidth = Math.floor(actionsEl.clientWidth || actionsEl.getBoundingClientRect().width || 0);
+        const styles = window.getComputedStyle(actionsEl);
+        const parsedGap = Number.parseFloat(styles.columnGap || styles.gap || '0');
+        const gap = Number.isFinite(parsedGap) ? parsedGap : 0;
+        const naturalWidths = optionButtons.map((button) => {
+            const previous = {
+                width: button.style.width,
+                minWidth: button.style.minWidth,
+                maxWidth: button.style.maxWidth,
+                flex: button.style.flex,
+                whiteSpace: button.style.whiteSpace
+            };
+            button.style.width = 'auto';
+            button.style.minWidth = '0';
+            button.style.maxWidth = 'none';
+            button.style.flex = '0 0 auto';
+            button.style.whiteSpace = 'nowrap';
+            const width = Math.ceil(button.getBoundingClientRect().width || button.scrollWidth || 0);
+            button.style.width = previous.width;
+            button.style.minWidth = previous.minWidth;
+            button.style.maxWidth = previous.maxWidth;
+            button.style.flex = previous.flex;
+            button.style.whiteSpace = previous.whiteSpace;
+            return width;
+        });
+        const optionWidth = Math.max(...naturalWidths, 0);
+        const totalRowWidth = (optionWidth * optionButtons.length) + (gap * Math.max(0, optionButtons.length - 1));
+        const compactColumnMaxWidth = Math.min(360, availableWidth * 0.72);
+        const canUseRow = availableWidth > 0 && totalRowWidth <= availableWidth;
+        const canUseCompactColumn = availableWidth > 0 && optionWidth <= compactColumnMaxWidth;
+        const layoutClass = canUseRow
+            ? 'question-card-actions-row'
+            : (canUseCompactColumn ? 'question-card-actions-column-compact' : 'question-card-actions-column-full');
+
+        actionsEl.classList.remove('question-card-actions-measuring');
+        actionsEl.classList.add(layoutClass);
+        actionsEl.style.setProperty('--question-option-width', layoutClass === 'question-card-actions-column-full' ? '100%' : `${optionWidth}px`);
+    };
+
+    if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+        window.requestAnimationFrame(measure);
+    } else {
+        setTimeout(measure, 0);
+    }
 }
 
 function renderQuestionOverlayModal() {
@@ -10971,16 +11036,10 @@ function renderQuestionOverlayModal() {
     }
 
     const wrapper = document.createElement('div');
-    wrapper.className = 'question-overlay';
-
-    const backdrop = document.createElement('div');
-    backdrop.className = 'question-overlay-backdrop';
-    wrapper.appendChild(backdrop);
+    wrapper.className = 'question-panel';
 
     const card = document.createElement('div');
-    card.className = 'conflict-card question-card question-overlay-card';
-    card.style.maxHeight = '60vh';
-    card.style.overflowY = 'auto';
+    card.className = 'conflict-card question-card question-panel-card';
 
     const header = document.createElement('div');
     header.className = 'conflict-card-header';
@@ -11085,7 +11144,13 @@ function renderQuestionOverlayModal() {
 
     card.appendChild(actions);
     wrapper.appendChild(card);
-    document.body.appendChild(wrapper);
+
+    const inputContainer = document.querySelector('.input-container');
+    if (inputContainer && inputContainer.parentElement) {
+        inputContainer.parentElement.insertBefore(wrapper, inputContainer);
+    } else {
+        document.body.appendChild(wrapper);
+    }
     questionOverlayEl = wrapper;
 }
 
