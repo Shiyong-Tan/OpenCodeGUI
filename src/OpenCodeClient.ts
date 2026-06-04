@@ -499,6 +499,7 @@ export class OpenCodeClient {
     private messageOrder: string[] = [];
     private messageIndexByIdBySession = new Map<string, Map<string, number>>();
     private messageOrderBySession = new Map<string, string[]>();
+    private messageIdAliasBySession = new Map<string, Map<string, string>>();
     private nextMessageIndex = 0;
     private internalMessageSeq = 0;
     private seqCounter = 0;
@@ -647,6 +648,7 @@ export class OpenCodeClient {
         const retainedTurnStateBySession = new Map<string, TurnState>();
         const retainedPendingTurnChangesBySession = new Map<string, PendingTurnChanges>();
         const retainedTurnWriteStateBySession = new Map<string, { turnKey: string; hasWrites: boolean }>();
+        const retainedMessageIdAliasBySession = new Map<string, Map<string, string>>();
         if (preserveInFlightSessionIds?.size) {
             for (const sessionId of preserveInFlightSessionIds) {
                 if (typeof sessionId !== 'string' || !sessionId) continue;
@@ -668,6 +670,10 @@ export class OpenCodeClient {
                 if (writeState) {
                     retainedTurnWriteStateBySession.set(sessionId, { ...writeState });
                 }
+                const aliasMap = this.messageIdAliasBySession.get(sessionId);
+                if (aliasMap) {
+                    retainedMessageIdAliasBySession.set(sessionId, new Map(aliasMap));
+                }
             }
         }
         const subagentMapCount = this.subagentToParentSessionMap.size;
@@ -680,6 +686,7 @@ export class OpenCodeClient {
         this.messageOrder = [];
         this.messageIndexByIdBySession.clear();
         this.messageOrderBySession.clear();
+        this.messageIdAliasBySession.clear();
         this.nextMessageIndex = 0;
         this.internalMessageSeq = 0;
         this.seqCounter = 0;
@@ -790,6 +797,11 @@ export class OpenCodeClient {
             const writeState = retainedTurnWriteStateBySession.get(sessionId);
             if (writeState) {
                 this.turnWriteStateBySession.set(sessionId, writeState);
+                restored = true;
+            }
+            const aliasMap = retainedMessageIdAliasBySession.get(sessionId);
+            if (aliasMap) {
+                this.messageIdAliasBySession.set(sessionId, aliasMap);
                 restored = true;
             }
             if (restored) retainedClientTurnBindingSessions += 1;
@@ -2450,19 +2462,105 @@ export class OpenCodeClient {
             || this.displayTurnUserMsgIdBySession.get(sessionId);
     }
 
-    public canAppendToCurrentTurn(sessionId: string | undefined): boolean {
-        if (!sessionId) return false;
-        if (!this.turnStateBySession.has(sessionId)) return false;
-        if (!this.displayTurnUserMsgIdBySession.has(sessionId)) return false;
-        if (this.turnFinalAtBySession.has(sessionId)) return false;
-        if (this.turnFinalResolvedBySession.has(sessionId)) return false;
-        if (this.canceledActiveTurnBySession.get(sessionId) === true) return false;
+    private getAppendRootCandidates(sessionId: string): Set<string> {
+        const candidates = new Set<string>();
+        const appendState = this.appendTurnStateBySession.get(sessionId);
+        const add = (value: string | undefined) => {
+            if (typeof value === 'string' && value) candidates.add(value);
+        };
+        add(appendState?.rootUserMsgId);
+        add(this.currentTurnUserMsgIdBySession.get(sessionId));
+        add(this.displayTurnUserMsgIdBySession.get(sessionId));
+        add(this.turnStateBySession.get(sessionId)?.pendingUserLocalKey);
+        return candidates;
+    }
+
+    private appendRootMatchesCandidate(sessionId: string, requestedRootUserMsgId: string, candidates: Set<string>): boolean {
+        if (candidates.has(requestedRootUserMsgId)) return true;
+        if (!requestedRootUserMsgId.startsWith('msg_')) return false;
+
+        const turnState = this.turnStateBySession.get(sessionId);
+        const pendingUserLocalKey = turnState?.pendingUserLocalKey;
+        if (!pendingUserLocalKey || !pendingUserLocalKey.startsWith('local-')) return false;
+        if (!candidates.has(pendingUserLocalKey)) return false;
+
+        return turnState?.resolvedUserMsgId === requestedRootUserMsgId
+            || this.messageIdsAreSessionAliases(sessionId, pendingUserLocalKey, requestedRootUserMsgId);
+    }
+
+    private messageIdsAreSessionAliases(sessionId: string, leftId: string, rightId: string): boolean {
+        const aliasMap = this.messageIdAliasBySession.get(sessionId);
+        if (!aliasMap) return false;
+        return aliasMap.get(leftId) === rightId || aliasMap.get(rightId) === leftId;
+    }
+
+    private hasCurrentTurnFinalMarker(sessionId: string): boolean {
+        if (this.turnFinalResolvedBySession.has(sessionId)) return true;
+        const currentAssistantMsgId = this.currentTurnAssistantMsgIdBySession.get(sessionId)
+            || this.turnStateBySession.get(sessionId)?.assistantMsgId;
+        const lockedFinalMsgId = this.finalizingMsgIdBySession.get(sessionId);
+        const finalMsgId = this.turnFinalMsgIdBySession.get(sessionId);
+        if (lockedFinalMsgId) {
+            return !currentAssistantMsgId || lockedFinalMsgId === currentAssistantMsgId;
+        }
+        if (finalMsgId) {
+            return !currentAssistantMsgId || finalMsgId === currentAssistantMsgId;
+        }
+        return this.turnFinalAtBySession.has(sessionId);
+    }
+
+    private logCanAppendDeny(sessionId: string | undefined, rootUserMsgId: string | undefined, sub: 'missing-session' | 'no-turn-state' | 'root-not-in-candidates' | 'final-marker-set' | 'canceled' | 'missing-display-root' | 'unknown'): void {
+        const id = sessionId || '';
+        const rootCandidates = id ? Array.from(this.getAppendRootCandidates(id)) : [];
+        const compactCandidates = rootCandidates.slice(0, 6).join(',');
+        const turnState = id ? this.turnStateBySession.get(id) : undefined;
+        const appendState = id ? this.appendTurnStateBySession.get(id) : undefined;
+        const currentAssistantMsgId = id ? this.currentTurnAssistantMsgIdBySession.get(id) : undefined;
+        const turnStateAssistantMsgId = turnState?.assistantMsgId;
+        const finalMsgId = id ? this.turnFinalMsgIdBySession.get(id) : undefined;
+        const finalizingMsgId = id ? this.finalizingMsgIdBySession.get(id) : undefined;
+        const canceled = id ? this.canceledActiveTurnBySession.get(id) === true : false;
+        this.logUiDebug(`[EXT][CAN_APPEND] result=deny sub=${sub} sessionId=${sessionId || 'null'} rootUserMsgId=${rootUserMsgId || 'null'} rootCandidatesCount=${rootCandidates.length} rootCandidates=[${compactCandidates}] hasTurnState=${!!turnState} hasDisplayRoot=${id ? this.displayTurnUserMsgIdBySession.has(id) : false} hasCurrentRoot=${id && rootUserMsgId ? rootCandidates.includes(rootUserMsgId) : false} hasAppendState=${!!appendState} hasFinalAt=${id ? this.turnFinalAtBySession.has(id) : false} hasFinalResolved=${id ? this.turnFinalResolvedBySession.has(id) : false} hasFinalMsgId=${!!finalMsgId} hasFinalizingMsgId=${!!finalizingMsgId} canceled=${canceled} currentAssistantMsgId=${currentAssistantMsgId || 'null'} turnStateAssistantMsgId=${turnStateAssistantMsgId || 'null'} finalMsgId=${finalMsgId || 'null'} finalizingMsgId=${finalizingMsgId || 'null'}`);
+    }
+
+    public canAppendToCurrentTurn(sessionId: string | undefined, rootUserMsgId?: string): boolean {
+        if (!sessionId) {
+            this.logCanAppendDeny(sessionId, rootUserMsgId, 'missing-session');
+            return false;
+        }
+        if (!this.turnStateBySession.has(sessionId)) {
+            this.logCanAppendDeny(sessionId, rootUserMsgId, 'no-turn-state');
+            return false;
+        }
+        const rootCandidates = this.getAppendRootCandidates(sessionId);
+        if (rootUserMsgId) {
+            if (!this.appendRootMatchesCandidate(sessionId, rootUserMsgId, rootCandidates)) {
+                this.logCanAppendDeny(sessionId, rootUserMsgId, 'root-not-in-candidates');
+                return false;
+            }
+        } else if (!this.displayTurnUserMsgIdBySession.has(sessionId)) {
+            this.logCanAppendDeny(sessionId, rootUserMsgId, 'missing-display-root');
+            return false;
+        }
+        if (this.hasCurrentTurnFinalMarker(sessionId)) {
+            this.logCanAppendDeny(sessionId, rootUserMsgId, 'final-marker-set');
+            return false;
+        }
+        if (this.canceledActiveTurnBySession.get(sessionId) === true) {
+            this.logCanAppendDeny(sessionId, rootUserMsgId, 'canceled');
+            return false;
+        }
         return true;
     }
 
+    public canAppendToCurrentTurnRoot(sessionId: string | undefined, rootUserMsgId: string | undefined): boolean {
+        if (!rootUserMsgId) return false;
+        return this.canAppendToCurrentTurn(sessionId, rootUserMsgId);
+    }
+
     public beginAppendPrompt(sessionId: string, clientMessageId: string, text: string, rootUserMsgIdFromIngress?: string): BeginAppendPromptResult | null {
-        if (!this.canAppendToCurrentTurn(sessionId)) return null;
         const rootUserMsgId = rootUserMsgIdFromIngress || this.getAppendRootUserMsgId(sessionId);
+        if (!this.canAppendToCurrentTurn(sessionId, rootUserMsgId)) return null;
         if (!rootUserMsgId) return null;
         const state = this.appendTurnStateBySession.get(sessionId) || {
             rootUserMsgId,
@@ -4767,18 +4865,35 @@ export class OpenCodeClient {
         return `internal:${role}:${session}:${seq}`;
     }
 
+    private rememberSessionMessageAlias(sessionId: string, existingId: string, newId: string): void {
+        if (!sessionId) return;
+        const existingIsLocal = existingId.startsWith('local-');
+        const newIsLocal = newId.startsWith('local-');
+        const existingIsServer = existingId.startsWith('msg_');
+        const newIsServer = newId.startsWith('msg_');
+        if (!((existingIsLocal && newIsServer) || (existingIsServer && newIsLocal))) return;
+        let aliasMap = this.messageIdAliasBySession.get(sessionId);
+        if (!aliasMap) {
+            aliasMap = new Map<string, string>();
+            this.messageIdAliasBySession.set(sessionId, aliasMap);
+        }
+        aliasMap.set(existingId, newId);
+        aliasMap.set(newId, existingId);
+    }
+
     public aliasMessageId(existingId: string, newId: string): void {
-        const aliasIn = (indexMap: Map<string, number>, order: string[]) => {
+        const aliasIn = (indexMap: Map<string, number>, order: string[], sessionId?: string) => {
             const existingIndex = indexMap.get(existingId);
             if (existingIndex === undefined || indexMap.has(newId)) return;
             indexMap.set(newId, existingIndex);
             const orderIndex = order.indexOf(existingId);
             if (orderIndex !== -1) order[orderIndex] = newId;
             indexMap.delete(existingId);
+            if (sessionId) this.rememberSessionMessageAlias(sessionId, existingId, newId);
         };
         aliasIn(this.messageIndexById, this.messageOrder);
         for (const [sessionId, indexMap] of this.messageIndexByIdBySession.entries()) {
-            aliasIn(indexMap, this.messageOrderBySession.get(sessionId) || []);
+            aliasIn(indexMap, this.messageOrderBySession.get(sessionId) || [], sessionId);
         }
     }
 
@@ -8446,13 +8561,16 @@ export class OpenCodeClient {
     public async appendPrompt(
         sessionId: string,
         message: string,
-        options: { model?: string; mode?: string; clientMessageId?: string } = {}
+        options: { model?: string; mode?: string; clientMessageId?: string; rootUserMsgId?: string } = {}
     ): Promise<void> {
         await this.ensureServer();
         if (!sessionId) {
             throw new Error('Missing session ID for append request.');
         }
-        if (!this.canAppendToCurrentTurn(sessionId)) {
+        const rootUserMsgId = typeof options.rootUserMsgId === 'string' && options.rootUserMsgId
+            ? options.rootUserMsgId
+            : undefined;
+        if (!this.canAppendToCurrentTurn(sessionId, rootUserMsgId)) {
             throw new Error('This turn can no longer be appended to.');
         }
         const clientMessageId = typeof options.clientMessageId === 'string' ? options.clientMessageId : '';

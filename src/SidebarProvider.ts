@@ -2985,7 +2985,7 @@ ${attachmentLines.join('\n')}`
                         break;
                     }
                     const hasTurnInFlight = this.sendInFlightBySession.has(sessionId);
-                    const canAppend = this.client.canAppendToCurrentTurn(sessionId);
+                    const canAppend = this.client.canAppendToCurrentTurn(sessionId, requestedRootUserMsgId);
                     if (!hasTurnInFlight || !canAppend) {
                         const reason = !hasTurnInFlight ? 'turn-not-in-flight' : 'finalized';
                         this.uiDebugChannel.appendLine(`[EXT][APPEND_ROUTE] rejected sessionId=${sessionId} rootUserMsgId=${requestedRootUserMsgId} clientMessageId=${clientMessageId} reason=${reason}`);
@@ -3030,7 +3030,8 @@ ${attachmentLines.join('\n')}`
                         await this.client.appendPrompt(sessionId, value, {
                             model: this.selectedModel,
                             mode: this.selectedMode,
-                            clientMessageId
+                            clientMessageId,
+                            rootUserMsgId: beginAppend.rootUserMsgId
                         });
                         liveWebview.postMessage({
                             type: 'appendStatus',

@@ -1859,6 +1859,31 @@ function collectAppendSnapshotMetadata(session) {
     return entries;
 }
 
+function hasProtectedInflightAppendRoot(session) {
+    if (!session || !(session.messagesById instanceof Map)) return false;
+    if (session.backendTurnInFlight !== true) return false;
+    if (session.turnFullyFinalized === true) return false;
+    if (session.canceledActiveTurn === true) return false;
+    if (typeof session.finalAssistantLock?.assistantMsgId === 'string' && session.finalAssistantLock.assistantMsgId.length) return false;
+
+    const key = session.appendRootUserKey;
+    if (typeof key !== 'string' || !key.length) return false;
+
+    const candidates = new Set([key]);
+    const resolved = resolveSnapshotMessageKey(session, key);
+    if (typeof resolved === 'string' && resolved.length) candidates.add(resolved);
+    const mappedServer = session.clientKeyToServerId?.get?.(key);
+    if (typeof mappedServer === 'string' && mappedServer.length) candidates.add(mappedServer);
+    const mappedClient = session.serverIdToClientKey?.get?.(key);
+    if (typeof mappedClient === 'string' && mappedClient.length) candidates.add(mappedClient);
+
+    for (const candidate of candidates) {
+        const message = session.messagesById.get(candidate);
+        if (message?.role === 'user') return true;
+    }
+    return false;
+}
+
 function syncAppendSnapshotMetadata(sessionId, reason = 'unknown') {
     if (typeof sessionId !== 'string' || !sessionId.length) return;
     const session = getSessionState(sessionId);
@@ -1877,6 +1902,7 @@ function restoreAppendHydrationMetadata(sessionId, session) {
     let rootCount = 0;
     let appendCount = 0;
     let restoredRootUserKey = '';
+    const protectInflightAppendRoot = hasProtectedInflightAppendRoot(session);
     const shouldNormalizeFinalizedAppendItems = session.turnFullyFinalized === true;
     for (const message of session.messagesById.values()) {
         if (!message || message.role !== 'user') continue;
@@ -1892,7 +1918,7 @@ function restoreAppendHydrationMetadata(sessionId, session) {
             restoredRootUserKey = message.id;
         }
     }
-    if (restoredRootUserKey) session.appendRootUserKey = restoredRootUserKey;
+    if (restoredRootUserKey && !protectInflightAppendRoot) session.appendRootUserKey = restoredRootUserKey;
     if (rootCount > 0) {
         vscode.postMessage({
             type: 'ui-debug',
@@ -1935,19 +1961,79 @@ function addAppendChildPresentationEntry(index, childId, rootId) {
     }
 }
 
+function getAppendPresentationParentId(message) {
+    return (
+        (typeof message?.parentId === 'string' && message.parentId) ||
+        (typeof message?.parentID === 'string' && message.parentID) ||
+        (typeof message?.parentMessageId === 'string' && message.parentMessageId) ||
+        (typeof message?.meta?.parentId === 'string' && message.meta.parentId) ||
+        (typeof message?.meta?.parentID === 'string' && message.meta.parentID) ||
+        ''
+    );
+}
+
+function addPresentationKeyVariants(session, targetSet, key) {
+    if (!(targetSet instanceof Set) || typeof key !== 'string' || !key.length) return;
+    targetSet.add(key);
+    for (const candidate of getPresentationMessageKeyVariants(session, key)) {
+        targetSet.add(candidate);
+    }
+}
+
+function buildAppendChainAssistantHiddenKeys(session, hiddenParentKeys) {
+    const hiddenAssistantKeys = new Set();
+    if (!session || !(session.messagesById instanceof Map) || !(hiddenParentKeys instanceof Set) || hiddenParentKeys.size === 0) {
+        return hiddenAssistantKeys;
+    }
+
+    for (const [messageKey, message] of session.messagesById.entries()) {
+        if (!message || message.role !== 'assistant') continue;
+        const parentId = getAppendPresentationParentId(message);
+        if (typeof parentId !== 'string' || !parentId.length) continue;
+
+        let parentMatchesAppendChain = false;
+        for (const candidate of getPresentationMessageKeyVariants(session, parentId)) {
+            if (hiddenParentKeys.has(candidate)) {
+                parentMatchesAppendChain = true;
+                break;
+            }
+        }
+        if (!parentMatchesAppendChain && hiddenParentKeys.has(parentId)) {
+            parentMatchesAppendChain = true;
+        }
+        if (!parentMatchesAppendChain) continue;
+
+        if (typeof messageKey === 'string' && messageKey.length) {
+            addPresentationKeyVariants(session, hiddenAssistantKeys, messageKey);
+        }
+        if (typeof message.id === 'string' && message.id.length) {
+            addPresentationKeyVariants(session, hiddenAssistantKeys, message.id);
+        }
+    }
+
+    return hiddenAssistantKeys;
+}
+
 function buildAppendChildPresentationIndex(session) {
     const index = new Map();
     if (!session || !(session.messagesById instanceof Map)) return index;
 
+    const hiddenAssistantParentKeys = new Set();
+
     for (const root of session.messagesById.values()) {
         if (!root || root.role !== 'user') continue;
         const items = Array.isArray(root.meta?.appendedPrompts) ? root.meta.appendedPrompts : [];
-        if (!items.length) continue;
+        const appendUserIds = items
+            .map((item) => item?.appendUserMsgId)
+            .filter((appendUserMsgId) => typeof appendUserMsgId === 'string' && appendUserMsgId.length);
+        if (!appendUserIds.length) continue;
 
         const rootId = typeof root.id === 'string' ? root.id : '';
-        for (const item of items) {
-            const appendUserMsgId = item?.appendUserMsgId;
-            if (typeof appendUserMsgId !== 'string' || !appendUserMsgId.length) continue;
+        addPresentationKeyVariants(session, hiddenAssistantParentKeys, rootId);
+        for (let i = 0; i < appendUserIds.length - 1; i++) {
+            addPresentationKeyVariants(session, hiddenAssistantParentKeys, appendUserIds[i]);
+        }
+        for (const appendUserMsgId of appendUserIds) {
             const childVariants = getPresentationMessageKeyVariants(session, appendUserMsgId);
             if (!childVariants.size) childVariants.add(appendUserMsgId);
             for (const childId of childVariants) {
@@ -1955,6 +2041,8 @@ function buildAppendChildPresentationIndex(session) {
             }
         }
     }
+
+    index.appendChainAssistantHiddenKeys = buildAppendChainAssistantHiddenKeys(session, hiddenAssistantParentKeys);
 
     return index;
 }
@@ -1980,6 +2068,28 @@ function isAppendChildTopLevelUser(session, msg, id, appendChildPresentationInde
         if (!roots.has(candidate)) return true;
         if (typeof id === 'string' && !roots.has(id)) return true;
         if (typeof msg.id === 'string' && !roots.has(msg.id)) return true;
+    }
+    return false;
+}
+
+function isAppendChainTopLevelAssistantHidden(session, msg, id, appendChildPresentationIndex) {
+    if (!session || !msg || msg.role !== 'assistant') return false;
+    const index = appendChildPresentationIndex instanceof Map
+        ? appendChildPresentationIndex
+        : buildAppendChildPresentationIndex(session);
+    const hiddenAssistantKeys = index?.appendChainAssistantHiddenKeys;
+    if (!(hiddenAssistantKeys instanceof Set) || hiddenAssistantKeys.size === 0) return false;
+
+    const candidates = new Set();
+    if (typeof id === 'string' && id.length) {
+        addPresentationKeyVariants(session, candidates, id);
+    }
+    if (typeof msg.id === 'string' && msg.id.length) {
+        addPresentationKeyVariants(session, candidates, msg.id);
+    }
+
+    for (const candidate of candidates) {
+        if (hiddenAssistantKeys.has(candidate)) return true;
     }
     return false;
 }
@@ -6084,6 +6194,7 @@ function shouldHideDcpUiMessage(message) {
             missingMessage: 0,
             hidden: 0,
             appendChildHidden: 0,
+            appendAssistantHidden: 0,
             dcpHidden: 0,
             rendered: 0,
             changeListSeen: 0,
@@ -6166,6 +6277,11 @@ function shouldHideDcpUiMessage(message) {
                 trackSkipped(id, msg?.role, 'append-child-top-level');
                 continue;
             }
+            if (isAppendChainTopLevelAssistantHidden(session, msg, id, appendChildPresentationIndex)) {
+                renderStats.appendAssistantHidden += 1;
+                trackSkipped(id, msg?.role, 'append-chain-assistant-top-level');
+                continue;
+            }
             if (shouldHideDcpUiMessage(msg)) {
                 renderStats.dcpHidden += 1;
                 continue;
@@ -6185,6 +6301,7 @@ function shouldHideDcpUiMessage(message) {
                 `changeListRendered=${renderStats.changeListRendered}`,
                 `hidden=${renderStats.hidden}`,
                 `appendChildHidden=${renderStats.appendChildHidden}`,
+                `appendAssistantHidden=${renderStats.appendAssistantHidden}`,
                 `dcpHidden=${renderStats.dcpHidden}`,
                 `missingMessage=${renderStats.missingMessage}`,
                 `skippedNoDom=${renderStats.skippedNoDom}`,

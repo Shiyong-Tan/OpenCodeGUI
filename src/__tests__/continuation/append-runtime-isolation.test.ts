@@ -51,6 +51,54 @@ function createClientWithAppendTurn(sessionId: string, rootUserMsgId: string): a
     return client;
 }
 
+function createClientWithRetainedAppendRootAfterDisplayReset(sessionId: string, rootUserMsgId: string): any {
+    const client = createClientWithAppendTurn(sessionId, rootUserMsgId);
+    expect(client.beginAppendPrompt(sessionId, 'seed-append-client', 'seed follow-up', rootUserMsgId)).toEqual(expect.objectContaining({
+        sessionId,
+        rootUserMsgId,
+    }));
+
+    client.resetSessionState({ preserveInFlightSessionIds: new Set([sessionId]) });
+
+    expect(client.turnStateBySession.has(sessionId)).toBe(true);
+    expect(client.getAppendRootUserMsgId(sessionId)).toBe(rootUserMsgId);
+    expect(client.displayTurnUserMsgIdBySession.has(sessionId)).toBe(false);
+    return client;
+}
+
+function createClientWithResolvedLocalRootAlias(sessionId: string, localRootKey: string, serverRootId: string): any {
+    const client = new OpenCodeClient() as any;
+    createdClients.push(client as OpenCodeClient);
+    client.startTurn(sessionId, localRootKey);
+    const turnState = client.turnStateBySession.get(sessionId);
+    expect(turnState).toBeDefined();
+    // Existing OpenCodeClient alias source: export resolution stores the server user id
+    // that resolved the active turn state's pending local user key.
+    turnState.resolvedUserMsgId = serverRootId;
+    expect(client.displayTurnUserMsgIdBySession.has(sessionId)).toBe(false);
+    return client;
+}
+
+function createClientWithAckBoundLocalRootAlias(sessionId: string, localRootKey: string, serverRootId: string): any {
+    const client = new OpenCodeClient() as any;
+    createdClients.push(client as OpenCodeClient);
+    client.startTurn(sessionId, localRootKey);
+    client.registerMessage(localRootKey, sessionId);
+    client.aliasMessageId(localRootKey, serverRootId);
+    expect(client.turnStateBySession.get(sessionId)?.resolvedUserMsgId).toBeUndefined();
+    expect(client.displayTurnUserMsgIdBySession.has(sessionId)).toBe(false);
+    expect(client.getAppendRootCandidates(sessionId)).toEqual(new Set([localRootKey]));
+    return client;
+}
+
+function canAppendForExplicitRoot(client: any, sessionId: string, rootUserMsgId: string): boolean {
+    if (typeof client.canAppendToCurrentTurnRoot === 'function') {
+        return client.canAppendToCurrentTurnRoot(sessionId, rootUserMsgId);
+    }
+    return client.canAppendToCurrentTurn(sessionId, rootUserMsgId)
+        && client.getAppendRootUserMsgId(sessionId) === rootUserMsgId;
+}
+
 function createProvider(): any {
     const context: any = {
         globalState: {
@@ -332,6 +380,7 @@ describe('append runtime isolation', () => {
         expect(provider.client.beginAppendPrompt).toHaveBeenCalledWith('ses_A_payload', 'append-client-1', 'follow-up text', 'msg_root_A');
         expect(provider.client.appendPrompt).toHaveBeenCalledWith('ses_A_payload', 'follow-up text', expect.objectContaining({
             clientMessageId: 'append-client-1',
+            rootUserMsgId: 'msg_root_A',
         }));
         expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
             type: 'appendStatus',
@@ -343,6 +392,137 @@ describe('append runtime isolation', () => {
             type: 'appendStatus',
             status: 'rejected',
             reason: 'finalized',
+        }));
+    });
+
+    it('allows append availability for retained active root when display root was cleared by reset', () => {
+        const client = createClientWithRetainedAppendRootAfterDisplayReset('ses_A', 'msg_root_A');
+
+        expect(canAppendForExplicitRoot(client, 'ses_A', 'msg_root_A')).toBe(true);
+    });
+
+    it('allows append availability when explicit server root aliases retained local root candidate', () => {
+        const client = createClientWithResolvedLocalRootAlias('ses_A', 'local-1780591738769-0', 'msg_e9389bfa4001ZknKQ7VC1euYup');
+
+        expect(canAppendForExplicitRoot(client, 'ses_A', 'msg_e9389bfa4001ZknKQ7VC1euYup')).toBe(true);
+        expect(canAppendForExplicitRoot(client, 'ses_A', 'msg_wrong_root')).toBe(false);
+
+        client.turnFinalResolvedBySession.add('ses_A');
+        expect(canAppendForExplicitRoot(client, 'ses_A', 'msg_e9389bfa4001ZknKQ7VC1euYup')).toBe(false);
+
+        client.turnFinalResolvedBySession.delete('ses_A');
+        client.canceledActiveTurnBySession.set('ses_A', true);
+        expect(canAppendForExplicitRoot(client, 'ses_A', 'msg_e9389bfa4001ZknKQ7VC1euYup')).toBe(false);
+    });
+
+    it('threads accepted explicit root into appendPrompt send gate when display root is absent', async () => {
+        const sessionId = 'ses_A';
+        const localRootKey = 'local-1780591738769-0';
+        const serverRootId = 'msg_e9389bfa4001ZknKQ7VC1euYup';
+        const client = createClientWithResolvedLocalRootAlias(sessionId, localRootKey, serverRootId);
+        client.ensureServer = jest.fn().mockResolvedValue(undefined);
+        client.requestJson = jest.fn().mockResolvedValue(undefined);
+
+        expect(client.displayTurnUserMsgIdBySession.has(sessionId)).toBe(false);
+        expect(client.beginAppendPrompt(sessionId, 'append-client-1', 'follow-up text', serverRootId)).toEqual(expect.objectContaining({
+            sessionId,
+            rootUserMsgId: serverRootId,
+            clientMessageId: 'append-client-1',
+        }));
+
+        await expect(client.appendPrompt(sessionId, 'follow-up text', {
+            clientMessageId: 'append-client-1',
+            rootUserMsgId: serverRootId,
+        })).resolves.toBeUndefined();
+
+        expect(client.canAppendToCurrentTurn(sessionId, serverRootId)).toBe(true);
+        expect(client.requestJson).toHaveBeenCalledWith('POST', `/session/${sessionId}/prompt_async`, expect.objectContaining({
+            parts: [{ type: 'text', text: 'follow-up text' }],
+        }));
+    });
+
+    it('keeps appendPrompt no-explicit-root denial when display root is absent', async () => {
+        const sessionId = 'ses_A';
+        const localRootKey = 'local-1780591738769-0';
+        const serverRootId = 'msg_e9389bfa4001ZknKQ7VC1euYup';
+        const client = createClientWithResolvedLocalRootAlias(sessionId, localRootKey, serverRootId);
+        client.ensureServer = jest.fn().mockResolvedValue(undefined);
+        client.requestJson = jest.fn().mockResolvedValue(undefined);
+
+        expect(client.beginAppendPrompt(sessionId, 'append-client-1', 'follow-up text', serverRootId)).toEqual(expect.objectContaining({
+            rootUserMsgId: serverRootId,
+        }));
+
+        await expect(client.appendPrompt(sessionId, 'follow-up text', {
+            clientMessageId: 'append-client-1',
+        })).rejects.toThrow('This turn can no longer be appended to.');
+
+        expect(client.canAppendToCurrentTurn(sessionId)).toBe(false);
+        expect(client.requestJson).not.toHaveBeenCalled();
+    });
+
+    it('allows append availability when ack-bound server root aliases retained local root candidate', () => {
+        const sessionId = 'ses_A';
+        const localRootKey = 'local-1780599666471-0';
+        const serverRootId = 'msg_e9402b73f001BuciWBPFnix51V';
+        const client = createClientWithAckBoundLocalRootAlias(sessionId, localRootKey, serverRootId);
+
+        expect(canAppendForExplicitRoot(client, sessionId, serverRootId)).toBe(true);
+        expect(canAppendForExplicitRoot(client, sessionId, 'msg_wrong_root')).toBe(false);
+
+        client.resetSessionState({ preserveInFlightSessionIds: new Set([sessionId]) });
+        expect(client.getAppendRootCandidates(sessionId)).toEqual(new Set([localRootKey]));
+        expect(client.displayTurnUserMsgIdBySession.has(sessionId)).toBe(false);
+        expect(canAppendForExplicitRoot(client, sessionId, serverRootId)).toBe(true);
+
+        client.turnFinalResolvedBySession.add(sessionId);
+        expect(canAppendForExplicitRoot(client, sessionId, serverRootId)).toBe(false);
+
+        client.turnFinalResolvedBySession.delete(sessionId);
+        client.canceledActiveTurnBySession.set(sessionId, true);
+        expect(canAppendForExplicitRoot(client, sessionId, serverRootId)).toBe(false);
+    });
+
+    it('rejects append availability for wrong explicit root during an active retained turn', () => {
+        const client = createClientWithRetainedAppendRootAfterDisplayReset('ses_A', 'msg_root_A');
+
+        expect(canAppendForExplicitRoot(client, 'ses_A', 'msg_wrong_root')).toBe(false);
+    });
+
+    it('rejects append availability for a finalized active turn with the same root', () => {
+        const client = createClientWithRetainedAppendRootAfterDisplayReset('ses_A', 'msg_root_A');
+        client.turnFinalResolvedBySession.add('ses_A');
+
+        expect(canAppendForExplicitRoot(client, 'ses_A', 'msg_root_A')).toBe(false);
+    });
+
+    it('rejects append availability for a canceled active turn with the same root', () => {
+        const client = createClientWithRetainedAppendRootAfterDisplayReset('ses_A', 'msg_root_A');
+        client.canceledActiveTurnBySession.set('ses_A', true);
+
+        expect(canAppendForExplicitRoot(client, 'ses_A', 'msg_root_A')).toBe(false);
+    });
+
+    it('rejects appendMessage as turn-not-in-flight even when client availability would allow append', async () => {
+        const provider = createProvider();
+        const { postMessage, receive } = attachWebview(provider);
+
+        await receive({
+            type: 'appendMessage',
+            sessionId: 'ses_A_payload',
+            rootUserKey: 'msg_root_A',
+            clientMessageId: 'append-client-1',
+            value: 'follow-up text',
+        });
+
+        expect(provider.client.canAppendToCurrentTurn).toHaveBeenCalledWith('ses_A_payload', 'msg_root_A');
+        expect(provider.client.beginAppendPrompt).not.toHaveBeenCalled();
+        expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+            type: 'appendStatus',
+            sessionId: 'ses_A_payload',
+            clientMessageId: 'append-client-1',
+            status: 'rejected',
+            reason: 'turn-not-in-flight',
         }));
     });
 
@@ -528,6 +708,53 @@ describe('append runtime isolation', () => {
             type: 'ui-debug',
             payload: expect.arrayContaining(['[WV][APPEND_HYDRATE_META]']),
         }));
+    });
+
+    it('does not replace protected in-flight append root with older hydrated append metadata', () => {
+        const { context } = loadAppendSnapshotMetaHarness();
+        const session = {
+            messagesById: new Map<string, any>([
+                ['msg_root_old', {
+                    id: 'msg_root_old',
+                    role: 'user',
+                    text: 'older root prompt',
+                    meta: {
+                        appendedPrompts: [{
+                            clientMessageId: 'append-client-old',
+                            appendUserMsgId: 'msg_append_child_old',
+                            text: 'older follow-up',
+                            status: 'queued',
+                            nested: { drop: true },
+                        }],
+                    },
+                }],
+                ['msg_root_active', {
+                    id: 'msg_root_active',
+                    role: 'user',
+                    text: 'active root prompt',
+                    meta: {},
+                }],
+                ['msg_append_child_old', { id: 'msg_append_child_old', role: 'user', text: 'older follow-up', meta: {} }],
+            ]),
+            appendRootUserKey: 'msg_root_active',
+            lastTurnUserId: 'msg_root_active',
+            backendTurnInFlight: true,
+            turnFullyFinalized: false,
+            canceledActiveTurn: false,
+            finalAssistantLock: null,
+        };
+
+        const result = context.restoreAppendHydrationMetadata('ses_A', session);
+
+        expect(result).toEqual(expect.objectContaining({ rootCount: 1, appendCount: 1, restoredRootUserKey: 'msg_root_old' }));
+        expect(session.appendRootUserKey).toBe('msg_root_active');
+        expect(session.messagesById.get('msg_root_old').meta.appendedPrompts[0]).toEqual(expect.objectContaining({
+            clientMessageId: 'append-client-old',
+            appendUserMsgId: 'msg_append_child_old',
+            text: 'older follow-up',
+            status: 'queued',
+        }));
+        expect(session.messagesById.get('msg_root_old').meta.appendedPrompts[0].nested).toBeUndefined();
     });
 
     it('derives append child presentation index without deleting child evidence messages', () => {
