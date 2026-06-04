@@ -148,7 +148,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private userOwnedSessionIds = new Set<string>();
     private userOwnedSessionsLoaded: Promise<void>;
     private activeSubagentSessionIds = new Set<string>();
-    private subagentProgressBySession = new Map<string, { taskId: string; parentSessionId: string; description: string; startedAt: number; title?: string; mode?: string; model?: string; providerId?: string; latestText?: string; latestTool?: string; latestToolInput?: string; isDone?: boolean; state?: SubagentLifecycleState; finishedAt?: number; dismissAt?: number; lastEventAt?: number; finalMessageId?: string; finalReason?: string }>();
+    private subagentProgressBySession = new Map<string, { taskId: string; parentSessionId: string; description: string; startedAt: number; title?: string; mode?: string; model?: string; providerId?: string; latestText?: string; latestFullText?: string; latestTool?: string; latestToolInput?: string; isDone?: boolean; state?: SubagentLifecycleState; finishedAt?: number; dismissAt?: number; lastEventAt?: number; finalMessageId?: string; finalReason?: string }>();
     private readonly subagentDoneRetentionMs = 5000;
     private subagentRetentionTimer?: NodeJS.Timeout;
     private task1DoneVisibleTotalMs = 0;
@@ -402,6 +402,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         entry.lastEventAt = Date.now();
         if (to === 'done') {
             (entry as any).latestText = 'Task done.';
+            (entry as any).latestFullText = 'Task done.';
             (entry as any).latestTool = '';
             (entry as any).latestToolInput = '';
         }
@@ -443,6 +444,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             model: entry.model || '',
             providerId: entry.providerId || '',
             latestText: entry.latestText || '',
+            latestFullText: entry.latestFullText || entry.latestText || '',
             latestTool: entry.latestTool || '',
             latestToolInput: entry.latestToolInput || '',
             state: entry.state || (entry.isDone ? 'done' : 'running'),
@@ -5956,6 +5958,7 @@ ${attachmentLines.join('\n')}`
                     if (entry.isDone) {
                         return;
                     }
+                    entry.latestFullText = event.text;
                     entry.latestText = event.text.length > 200
                         ? event.text.slice(0, 200) + '...'
                         : event.text;

@@ -111,6 +111,7 @@ let messageCounter = 0;
 let collapsedProviders = new Set();
 let modelDropdownOutsideHandler = null;
 let simpleDropdownHandlers = new Map();
+const subagentTextExpandedByKey = new Map();
 let conflictCardEl = null;
 let stallCardEl = null;
 let lastConflictPayload = null;
@@ -4402,6 +4403,13 @@ document.addEventListener('DOMContentLoaded', () => {
         updateSendGate();
     }
 
+    function refreshSendButtonStateAfterSessionSwitch() {
+        refreshSendButtonState();
+        requestAnimationFrame(() => {
+            refreshSendButtonState();
+        });
+    }
+
     function updateAppendInputUi() {
         const container = getInputContainer();
         if (container) {
@@ -5356,6 +5364,92 @@ function renderMessageElement(message, renderedSet) {
                 return modelId || providerId || '';
             }
 
+            function addSubagentTextToggle(textRow, options = {}) {
+                const collapsedLineCount = 5;
+                let collapsedMaxHeight = '7.5em';
+                const previewText = typeof options.previewText === 'string' ? options.previewText : '';
+                const fullText = typeof options.fullText === 'string' ? options.fullText : previewText;
+                const expandedKey = typeof options.expandedKey === 'string' ? options.expandedKey : '';
+                const canExpandToFullText = fullText && fullText !== previewText;
+                let expanded = expandedKey ? subagentTextExpandedByKey.get(expandedKey) === true : false;
+
+                const renderCurrentText = () => {
+                    renderMarkdownInto(textRow, expanded && canExpandToFullText ? fullText : previewText);
+                };
+
+                const setTextRowClamp = () => {
+                    textRow.style.setProperty('display', 'block', 'important');
+                    textRow.style.setProperty('white-space', 'normal', 'important');
+                    textRow.style.setProperty('text-overflow', 'clip', 'important');
+                    textRow.style.setProperty('-webkit-line-clamp', 'unset', 'important');
+                    textRow.style.setProperty('-webkit-box-orient', 'initial', 'important');
+                    textRow.style.setProperty('max-height', expanded ? 'none' : collapsedMaxHeight, 'important');
+                    textRow.style.setProperty('height', expanded ? 'auto' : 'auto', 'important');
+                    textRow.style.setProperty('overflow', expanded ? 'visible' : 'hidden', 'important');
+                    textRow.style.setProperty('overflow-x', expanded ? 'visible' : 'hidden', 'important');
+                    textRow.style.setProperty('overflow-y', expanded ? 'visible' : 'hidden', 'important');
+                };
+                setTextRowClamp();
+
+                const toggleButton = document.createElement('button');
+                toggleButton.type = 'button';
+                toggleButton.textContent = 'Show more';
+                toggleButton.setAttribute('aria-expanded', 'false');
+                toggleButton.style.display = 'none';
+                toggleButton.style.marginTop = '4px';
+                toggleButton.style.padding = '0';
+                toggleButton.style.border = '0';
+                toggleButton.style.background = 'transparent';
+                toggleButton.style.color = 'var(--vscode-textLink-foreground, #3794ff)';
+                toggleButton.style.cursor = 'pointer';
+                toggleButton.style.font = 'inherit';
+                toggleButton.style.fontSize = 'inherit';
+                toggleButton.style.lineHeight = 'inherit';
+                toggleButton.style.alignSelf = 'flex-start';
+                toggleButton.style.textAlign = 'left';
+
+                const computeCollapsedMaxHeight = () => {
+                    const computed = window.getComputedStyle(textRow);
+                    const fontSize = Number.parseFloat(computed.fontSize || '0') || 12;
+                    const lineHeight = Number.parseFloat(computed.lineHeight || '0') || (fontSize * 1.4);
+                    collapsedMaxHeight = `${Math.ceil(lineHeight * collapsedLineCount) + 2}px`;
+                    toggleButton.style.fontSize = computed.fontSize || 'inherit';
+                    toggleButton.style.lineHeight = computed.lineHeight || 'inherit';
+                    toggleButton.style.marginLeft = computed.marginLeft || '0';
+                    toggleButton.style.paddingLeft = computed.paddingLeft || '0';
+                };
+
+                const updateExpandedState = () => {
+                    renderCurrentText();
+                    setTextRowClamp();
+                    toggleButton.textContent = expanded ? 'Show less' : 'Show more';
+                    toggleButton.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+                };
+
+                toggleButton.addEventListener('click', () => {
+                    expanded = !expanded;
+                    if (expandedKey) {
+                        subagentTextExpandedByKey.set(expandedKey, expanded);
+                    }
+                    updateExpandedState();
+                    requestAnimationFrame(() => {
+                        if (!textRow.isConnected) return;
+                        computeCollapsedMaxHeight();
+                        setTextRowClamp();
+                    });
+                });
+
+                requestAnimationFrame(() => {
+                    if (!textRow.isConnected) return;
+                    computeCollapsedMaxHeight();
+                    updateExpandedState();
+                    const exceedsCollapsedHeight = textRow.scrollHeight > textRow.clientHeight + 1;
+                    toggleButton.style.display = (canExpandToFullText || exceedsCollapsedHeight) ? 'block' : 'none';
+                });
+
+                return toggleButton;
+            }
+
              subagents.forEach((agent, index) => {
                  const entry = document.createElement('div');
                  entry.className = 'subagent-inline-entry';
@@ -5386,6 +5480,7 @@ function renderMessageElement(message, renderedSet) {
                  }
 
                 const latestText = typeof agent.latestText === 'string' ? agent.latestText.trim() : '';
+                const latestFullText = typeof agent.latestFullText === 'string' ? agent.latestFullText.trim() : latestText;
                 const latestTool = typeof agent.latestTool === 'string' ? agent.latestTool.trim() : '';
                 const latestToolInput = typeof agent.latestToolInput === 'string' ? agent.latestToolInput.trim() : '';
                 const state = typeof agent.state === 'string' ? agent.state : (agent.isDone === true ? 'done' : 'running');
@@ -5410,15 +5505,30 @@ function renderMessageElement(message, renderedSet) {
                 } else if (latestText) {
                     const textRow = document.createElement('div');
                     textRow.className = 'subagent-inline-text';
-                    // Dedupe: remove leading title prefix from latestText if present
-                    let textToRender = latestText;
-                    if (rawTitleText && latestText.startsWith(rawTitleText)) {
-                        textToRender = latestText.slice(rawTitleText.length).trim();
-                    } else if (titleText && latestText.startsWith(titleText)) {
-                        textToRender = latestText.slice(titleText.length).trim();
-                    }
-                   renderMarkdownInto(textRow, textToRender);
+                    const dedupeSubagentText = (value) => {
+                        let textToRender = typeof value === 'string' ? value : '';
+                        if (rawTitleText && textToRender.startsWith(rawTitleText)) {
+                            textToRender = textToRender.slice(rawTitleText.length).trim();
+                        } else if (titleText && textToRender.startsWith(titleText)) {
+                            textToRender = textToRender.slice(titleText.length).trim();
+                        }
+                        return textToRender;
+                    };
+                    const previewTextToRender = dedupeSubagentText(latestText);
+                    const fullTextToRender = dedupeSubagentText(latestFullText || latestText);
+                    const subagentIdentity = agent.agentSessionId || agent.sessionId || agent.taskId || '';
+                    const parentIdentity = agent.parentSessionId || message.sessionId || activeSessionId || '';
+                    const messageIdentity = message.id || message.messageId || '';
+                    const expandedKey = subagentIdentity
+                        ? `${parentIdentity}:${messageIdentity}:${subagentIdentity}`
+                        : '';
+                    renderMarkdownInto(textRow, subagentTextExpandedByKey.get(expandedKey) === true ? fullTextToRender : previewTextToRender);
                     entry.appendChild(textRow);
+                    entry.appendChild(addSubagentTextToggle(textRow, {
+                        previewText: previewTextToRender,
+                        fullText: fullTextToRender,
+                        expandedKey
+                    }));
                 }
 
                  // 4) indented latest tool (streaming only)
@@ -8206,6 +8316,7 @@ window.addEventListener('message', (event) => {
                     state,
                     isDone: state === 'done' || state === 'failed' || state === 'cancelled',
                     latestText: typeof agent.latestText === 'string' ? agent.latestText : (prev.latestText || ''),
+                    latestFullText: typeof agent.latestFullText === 'string' ? agent.latestFullText : (prev.latestFullText || prev.latestText || ''),
                     latestTool: typeof agent.latestTool === 'string' ? agent.latestTool : (prev.latestTool || ''),
                     latestToolInput: typeof agent.latestToolInput === 'string' ? agent.latestToolInput : (prev.latestToolInput || '')
                   };
@@ -8747,8 +8858,10 @@ window.addEventListener('message', (event) => {
                     hydratedSessions.add(sessionId);
                     if (shouldActivateSession) {
                         closeSessionPanel();
+                        refreshSendButtonStateAfterSessionSwitch();
+                    } else {
+                        updateSendGate();
                     }
-                    updateSendGate();
                     
                 } catch (err) {
                     vscode.postMessage({
@@ -8759,6 +8872,7 @@ window.addEventListener('message', (event) => {
                     const didRender = renderIfActive(sessionId, 'sessionData-finally', { extra: ['phase=finally'] });
                     if (didRender) {
                         requestAnimationFrame(() => {
+                            refreshSendButtonState();
                             scrollToBottom();
                         });
                     }
@@ -8829,7 +8943,7 @@ window.addEventListener('message', (event) => {
                     window.__oc?.renderFromState?.();
                     logSessionState(sessionId, 'flushPendingPrompts');
                 }
-                refreshSendButtonState();
+                refreshSendButtonStateAfterSessionSwitch();
                 break;
             }
             case 'sessionUsage': {
