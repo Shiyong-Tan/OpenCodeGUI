@@ -1515,8 +1515,12 @@ function isActiveSessionBusy() {
 function syncSendButtonBusyVisual() {
     if (!sendBtn || !sendButtonSendIconHtml || !sendButtonStopIconHtml) return;
     const activeBusy = isActiveSessionBusy();
-    sendBtn.innerHTML = activeBusy && !appendInputMode ? sendButtonStopIconHtml : sendButtonSendIconHtml;
-    sendBtn.classList.toggle('is-busy', activeBusy && !appendInputMode);
+    const showsStopIcon = activeBusy && !appendInputMode;
+    sendBtn.innerHTML = showsStopIcon ? sendButtonStopIconHtml : sendButtonSendIconHtml;
+    sendBtn.classList.toggle('is-busy', showsStopIcon);
+    if (showsStopIcon) {
+        sendBtn.classList.remove('has-quota');
+    }
 }
 
 function canSendAppendFromInput() {
