@@ -370,6 +370,7 @@ type NormalizedEvent = {
 type TurnState = {
     pendingUserLocalKey?: string;
     pendingAssistantTmpKey?: string;
+    noCommitTerminalTmpKey?: string;
     assistantMsgId?: string;
     exportInFlight: boolean;
     exportResolved: boolean;
@@ -3405,7 +3406,14 @@ export class OpenCodeClient {
                         sessionId,
                         state.pendingAssistantTmpKey,
                         resolved.assistantMsgId,
-                        rootUserMsgId || undefined
+                        rootUserMsgId || undefined,
+                        {
+                            allowNoCommitTerminal: Boolean(
+                                state.noCommitTerminalTmpKey
+                                && state.pendingAssistantTmpKey
+                                && state.noCommitTerminalTmpKey === state.pendingAssistantTmpKey
+                            )
+                        }
                     );
                 }
             }
@@ -3529,7 +3537,9 @@ export class OpenCodeClient {
         const userMsgId = this.getAppendRootUserMsgId(sessionId) || this.currentTurnUserMsgIdBySession.get(sessionId);
         state.lastResolvedAssistantMsgId = assistantMsgId;
         try {
-            await this.gitUndo?.finalizeBinding(sessionId, tmpKey, assistantMsgId, userMsgId || undefined);
+            await this.gitUndo?.finalizeBinding(sessionId, tmpKey, assistantMsgId, userMsgId || undefined, {
+                allowNoCommitTerminal: state.noCommitTerminalTmpKey === tmpKey
+            });
             this.logUiDebug(`EXT: finalizeBinding.direct.ok | sessionId=${sessionId} assistantMsgId=${assistantMsgId} tmpKey=${tmpKey}`);
         } catch (error) {
             this.logUiDebug(`EXT: finalizeBinding.direct.fail | sessionId=${sessionId} assistantMsgId=${assistantMsgId} tmpKey=${tmpKey} err=${String(error)}`);
@@ -4710,6 +4720,12 @@ export class OpenCodeClient {
             );
             if (!commitResult.commitHash) {
                 const status: CommitPendingTurnChangesResult['status'] = commitResult.touchedFiles.length ? 'noop' : 'skipped';
+                if (status === 'noop' && tmpKey) {
+                    const currentState = this.turnStateBySession.get(sessionId);
+                    if (currentState?.pendingAssistantTmpKey === tmpKey) {
+                        currentState.noCommitTerminalTmpKey = tmpKey;
+                    }
+                }
                 const result: CommitPendingTurnChangesResult = {
                     status,
                     msgToBaseCommit,
@@ -6769,8 +6785,7 @@ export class OpenCodeClient {
         if (this.subagentToParentSessionMap.has(sessionId)) return 'subagent';
         if (this.turnStateBySession.has(sessionId)) return 'main';
         if (sessionId === this.currentSessionId) {
-            this.logUiDebug(`[EXT][SUBAGENT_ROUTE] phase=classify parentSessionId=${sessionId} agentSessionId=null displayTarget=parent reason=current-session-fallback-deferred-main-smoke`);
-            return 'main';
+            this.logUiDebug(`[EXT][SUBAGENT_ROUTE_DROP] phase=classify reason=current-session-fallback-disabled parentSessionId=null agentSessionId=${sessionId} displayTarget=parent`);
         }
         return 'unknown';
     }
@@ -6992,9 +7007,13 @@ export class OpenCodeClient {
         }
         if (type === 'session.created' || type === 'session.updated') {
             if (props?.info?.id) {
+                const parentSessionId = typeof props.info?.parentID === 'string' && props.info.parentID.length
+                    ? props.info.parentID
+                    : undefined;
                 events.push({
                     type: 'session',
                     sessionId: props.info.id,
+                    parentSessionId,
                     mode: typeof props.info?.mode === 'string' ? props.info.mode : undefined,
                     agent: typeof props.info?.agent === 'string' ? props.info.agent : undefined,
                     modelID: typeof props.info?.modelID === 'string' ? props.info.modelID : undefined,

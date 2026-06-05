@@ -5794,12 +5794,10 @@ ${attachmentLines.join('\n')}`
                 this.uiDebugChannel.appendLine(`[SidebarProvider] Promoted first session to currentSessionId: ${event.sessionId}`);
                 return;
             }
-            const inFlightParentSessionId = this.currentSessionId && this.sendInFlightBySession.has(this.currentSessionId)
-                ? this.currentSessionId
-                : undefined;
-            if (!this.isUserOwnedSession(event.sessionId) && inFlightParentSessionId) {
+            const explicitParentSessionId = event.parentSessionId;
+            if (!this.isUserOwnedSession(event.sessionId) && explicitParentSessionId) {
                 this.activeSubagentSessionIds.add(event.sessionId);
-                this.client.registerSubagentSession(event.sessionId, inFlightParentSessionId);
+                this.client.registerSubagentSession(event.sessionId, explicitParentSessionId);
                 const existing = this.subagentProgressBySession.get(event.sessionId);
                 const initialMode = event.mode || event.agent || '';
                 const initialModel = event.modelID || '';
@@ -5815,14 +5813,14 @@ ${attachmentLines.join('\n')}`
                     if (initialProvider) {
                         existing.providerId = initialProvider;
                     }
-                    this.logSubagentRoute('register', existing.parentSessionId || inFlightParentSessionId, event.sessionId, 'parent', 'existing-entry');
+                    this.logSubagentRoute('register', existing.parentSessionId || explicitParentSessionId, event.sessionId, 'parent', 'existing-entry');
                     this.uiDebugChannel.appendLine(`[SidebarProvider] Subagent session event: ${event.sessionId} | mode=${event.mode || 'null'} | agent=${event.agent || 'null'} | modelID=${event.modelID || 'null'} | providerID=${event.providerID || 'null'}`);
                     this.emitSubagentStatus();
                     return;
                 }
                 this.subagentProgressBySession.set(event.sessionId, {
                     taskId: event.sessionId,
-                    parentSessionId: inFlightParentSessionId,
+                    parentSessionId: explicitParentSessionId,
                     description: initialMode,
                     mode: initialMode,
                     model: initialModel,
@@ -5832,8 +5830,8 @@ ${attachmentLines.join('\n')}`
                     lastEventAt: Date.now(),
                     startedAt: Date.now()
                 });
-                this.logSubagentRoute('register', inFlightParentSessionId, event.sessionId, 'parent', 'send-in-flight-parent');
-                this.uiDebugChannel.appendLine(`[SidebarProvider] Registered subagent session mapping: ${event.sessionId} -> ${inFlightParentSessionId}`);
+                this.logSubagentRoute('register', explicitParentSessionId, event.sessionId, 'parent', 'explicit-parent');
+                this.uiDebugChannel.appendLine(`[SidebarProvider] Registered subagent session mapping: ${event.sessionId} -> ${explicitParentSessionId}`);
                 this.uiDebugChannel.appendLine(`[SidebarProvider] Subagent session event: ${event.sessionId} | mode=${event.mode || 'null'} | agent=${event.agent || 'null'} | modelID=${event.modelID || 'null'} | providerID=${event.providerID || 'null'}`);
                 const sessionId = event.sessionId;
                 this.client.getSessionInfo(sessionId).then((info: any) => {

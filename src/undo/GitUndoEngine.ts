@@ -22,6 +22,10 @@ import {
 
 type Logger = (message: string) => void;
 
+type FinalizeBindingOptions = {
+    allowNoCommitTerminal?: boolean;
+};
+
 type BaselineConfig = {
     mode: 'heuristic' | 'allowGlobsOnly';
     allowGlobs: string[];
@@ -501,7 +505,7 @@ export class GitUndoEngine {
         });
     }
 
-    public async finalizeBinding(sessionId: string, tmpKey: string | undefined, finalMsgId: string, userMsgId?: string): Promise<void> {
+    public async finalizeBinding(sessionId: string, tmpKey: string | undefined, finalMsgId: string, userMsgId?: string, options: FinalizeBindingOptions = {}): Promise<void> {
         if (!this.isEnabled()) return;
         if (!sessionId || !tmpKey || !finalMsgId) {
             this.logger(`finalizeBinding.skip | sessionId=${sessionId || 'null'} tmpKey=${tmpKey || 'null'} finalMsgId=${finalMsgId || 'null'}`);
@@ -512,6 +516,18 @@ export class GitUndoEngine {
             const map = await this.mapStore.loadSessionMap(sessionId, repo.repoId);
             const commitHash = map.tmpToCommit[tmpKey];
             if (!commitHash) {
+                const alreadyBoundCommit = map.msgToCommit?.[finalMsgId];
+                const alreadyBoundEntry = alreadyBoundCommit
+                    ? map.entries.some((entry) => entry.commitHash === alreadyBoundCommit)
+                    : false;
+                if (alreadyBoundCommit && alreadyBoundEntry) {
+                    this.logger(`finalizeBinding.noop | reason=already-bound sessionId=${sessionId} tmpKey=${tmpKey} finalMsgId=${finalMsgId} commitHash=${alreadyBoundCommit}`);
+                    return;
+                }
+                if (options.allowNoCommitTerminal === true) {
+                    this.logger(`finalizeBinding.noop | reason=no-commit-terminal sessionId=${sessionId} tmpKey=${tmpKey} finalMsgId=${finalMsgId}`);
+                    return;
+                }
                 this.logger(`finalizeBinding.noop | reason=missing-tmpKey sessionId=${sessionId} tmpKey=${tmpKey}`);
                 return;
             }
