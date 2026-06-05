@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.0
+
+- Hardened multi-session isolation so active/background session switches no longer steal selection, render ownership, or in-flight turn state from the intended session.
+- Fixed active-turn append after session switches, including retained root binding, local/server root alias resolution, explicit-root propagation through the append send gate, and append-chain presentation so appended prompts stay under the correct root message.
+- Improved subagent ownership routing so missing-parent subagent events no longer attach to the active session; subagent status, diffs, tools, and final output now stay scoped to the explicit or stable parent session.
+- Stabilized background turn finalization for no-file-change turns by treating confirmed no-commit terminal states and already-bound message IDs as clean finalize outcomes instead of repeatedly reporting missing temporary bindings.
+- Improved change-list, commit, undo, restore, and conflict ownership by keeping file ownership tied to authoritative message/session data and preventing unrelated session state from driving restore or commit decisions.
+- Refined chat UI interactions, including cleaner send/stop button visuals, question panel layout, subagent text expansion, and safer append hydration during active turns.
+- Added targeted regression coverage for append runtime isolation, subagent session ownership, and finalize-binding terminal behavior.
+
 ## 2.0.5
 
 - Added current-session search controls with match highlighting, first-match auto-jump, and previous/next navigation.
