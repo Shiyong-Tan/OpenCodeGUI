@@ -522,6 +522,21 @@ body {
     background: linear-gradient(180deg, rgba(0,0,0,0.04) 0%, rgba(0,0,0,0) 35%);
 }
 
+.message-row {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    box-sizing: border-box;
+}
+
+.message-row.user {
+    justify-content: flex-end;
+}
+
+.message-row.bot {
+    justify-content: flex-start;
+}
+
 .message {
     max-width: 85%;
     padding: 8px 12px;
@@ -540,7 +555,7 @@ body {
     color: var(--vscode-button-foreground);
     border-color: rgba(0,0,0,0.08);
     overflow: visible;
-    transition: transform 0.16s ease;
+    transition: transform 0.16s ease, max-width 0.16s ease;
 }
 
 .message.bot {
@@ -594,6 +609,68 @@ body {
 }
 
 .code-block-wrap:hover .code-copy-btn {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.message-copy-btn {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 26px;
+    height: 26px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    border-radius: 999px;
+    background: var(--vscode-button-secondaryBackground);
+    color: var(--vscode-button-secondaryForeground);
+    cursor: pointer;
+    font-size: 0.95em;
+    line-height: 1;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.15s ease, background-color 0.15s ease;
+    user-select: none;
+    z-index: 3;
+}
+
+.message-copy-btn:hover,
+.message-copy-btn:focus-visible {
+    background: var(--vscode-toolbar-hoverBackground);
+}
+
+.message-copy-btn .codicon {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    background-color: currentColor;
+    flex: 0 0 auto;
+}
+
+.message-copy-btn .codicon-copy {
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M2 2h8v2H9V3H3v10h1v1H2V2zm4 4h8v8H6V6zm1 1v6h6V7H7z'/%3E%3C/svg%3E") center / 16px 16px no-repeat;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M2 2h8v2H9V3H3v10h1v1H2V2zm4 4h8v8H6V6zm1 1v6h6V7H7z'/%3E%3C/svg%3E") center / 16px 16px no-repeat;
+}
+
+.message-copy-btn .codicon-check {
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 1 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0z'/%3E%3C/svg%3E") center / 16px 16px no-repeat;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 1 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0z'/%3E%3C/svg%3E") center / 16px 16px no-repeat;
+}
+
+.message-copy-btn.user-copy {
+    left: -34px;
+}
+
+.message-copy-btn.assistant-copy {
+    right: -34px;
+}
+
+.message:hover > .message-copy-btn,
+.message:focus-within > .message-copy-btn,
+.message-row:hover > .message > .message-copy-btn,
+.message-row:focus-within > .message > .message-copy-btn {
     opacity: 1;
     pointer-events: auto;
 }
@@ -665,8 +742,11 @@ body {
 
 .message.user:hover,
 .message.user:focus-within,
-.message.user.append-hover-active {
-    transform: translateX(-36px);
+.message.user.append-hover-active,
+.message-row.user:hover > .message.user,
+.message-row.user:focus-within > .message.user {
+    max-width: min(85%, calc(100% - 78px));
+    transform: translateX(-24px);
 }
 
 .message.user:hover .message-actions,

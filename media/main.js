@@ -3897,6 +3897,39 @@ function renderMarkdownInto(element, text, options = {}) {
     }
 }
 
+async function writeTextToClipboard(text) {
+    if (!text) return false;
+    let copied = false;
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        try {
+            await navigator.clipboard.writeText(text);
+            copied = true;
+        } catch {
+            copied = false;
+        }
+    }
+    if (!copied) {
+        let textarea = null;
+        try {
+            textarea = document.createElement('textarea');
+            textarea.value = text;
+            textarea.setAttribute('readonly', '');
+            textarea.style.position = 'absolute';
+            textarea.style.left = '-9999px';
+            document.body.appendChild(textarea);
+            textarea.select();
+            copied = document.execCommand('copy');
+        } catch {
+            copied = false;
+        } finally {
+            if (textarea && textarea.parentNode) {
+                textarea.parentNode.removeChild(textarea);
+            }
+        }
+    }
+    return copied;
+}
+
 function enhanceCodeBlocksWithCopyButtons(root) {
     if (!root || typeof root.querySelectorAll !== 'function') return;
     if (root.closest && root.closest('.conflict-card')) return;
@@ -3930,30 +3963,7 @@ function enhanceCodeBlocksWithCopyButtons(root) {
                 event.stopPropagation();
                 const text = code.innerText || '';
                 if (!text) return;
-                let copied = false;
-                if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-                    try {
-                        await navigator.clipboard.writeText(text);
-                        copied = true;
-                    } catch {
-                        copied = false;
-                    }
-                }
-                if (!copied) {
-                    try {
-                        const textarea = document.createElement('textarea');
-                        textarea.value = text;
-                        textarea.setAttribute('readonly', '');
-                        textarea.style.position = 'absolute';
-                        textarea.style.left = '-9999px';
-                        document.body.appendChild(textarea);
-                        textarea.select();
-                        copied = document.execCommand('copy');
-                        document.body.removeChild(textarea);
-                    } catch {
-                        copied = false;
-                    }
-                }
+                const copied = await writeTextToClipboard(text);
                 const prev = 'Copy';
                 if (btn._copyResetTimer) {
                     clearTimeout(btn._copyResetTimer);
@@ -4186,7 +4196,7 @@ function isSessionSearchTextNode(node, queryLower) {
     const parent = node.parentElement;
     if (!parent) return false;
     if (parent.closest('button, input, textarea, select, mark.session-search-hit')) return false;
-    if (parent.closest('.message-actions, .copy-btn, .session-search-bar')) return false;
+    if (parent.closest('.message-actions, .copy-btn, .message-copy-btn, .session-search-bar')) return false;
     return true;
 }
 
@@ -5031,6 +5041,90 @@ document.addEventListener('DOMContentLoaded', () => {
         return /\.(png|jpe?g|gif|webp|bmp|svg|tiff?|ico|heic)$/.test(lower);
     }
 
+    function getDisplayedAssistantCopyText(message) {
+        if (!message || message.role !== 'assistant') return '';
+        if (message.meta?.isDiff) {
+            return String(message.meta.diffText || message.text || '').trim();
+        }
+        const isCompleted = message.meta?.isThinking !== true;
+        if (isCompleted && Array.isArray(message.meta?.textSegments) && message.meta.textSegments.length > 0) {
+            const finalSegment = message.meta.textSegments[message.meta.textSegments.length - 1];
+            const finalText = typeof finalSegment === 'string' ? finalSegment.trim() : '';
+            if (finalText) return finalText;
+        }
+        return String(message.text || '').trim();
+    }
+
+    function getUserMessageCopyText(message) {
+        if (!message || message.role !== 'user') return '';
+        const raw = String(message.text || '');
+        const sanitized = stripSystemInjections(stripAttachmentManifest(raw));
+        const parts = [];
+        if (sanitized.trim()) parts.push(sanitized.trim());
+        for (const item of getAppendItems(message)) {
+            if (!item || typeof item.text !== 'string' || !item.text.trim()) continue;
+            parts.push(item.text.trim());
+        }
+        return parts.join('\n\n').trim();
+    }
+
+    function getMessageCopyText(message) {
+        if (message?.role === 'assistant') return getDisplayedAssistantCopyText(message);
+        if (message?.role === 'user') return getUserMessageCopyText(message);
+        return '';
+    }
+
+    function createMessageCopyCodicon(iconName) {
+        const icon = document.createElement('span');
+        icon.className = `codicon codicon-${iconName}`;
+        icon.setAttribute('aria-hidden', 'true');
+        return icon;
+    }
+
+    function setMessageCopyButtonState(btn, state) {
+        if (!btn) return;
+        const isCopied = state === 'copied';
+        const isFailed = state === 'failed';
+        const label = isCopied ? 'Copied' : isFailed ? 'Copy failed' : 'Copy message';
+        btn.replaceChildren(createMessageCopyCodicon(isCopied ? 'check' : 'copy'));
+        btn.title = label;
+        btn.setAttribute('aria-label', label);
+    }
+
+    function attachMessageCopyButton(container, message) {
+        if (!container || !message || (message.role !== 'assistant' && message.role !== 'user')) return;
+        const text = getMessageCopyText(message);
+        if (!text) return;
+
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = `message-copy-btn ${message.role === 'user' ? 'user-copy' : 'assistant-copy'}`;
+        setMessageCopyButtonState(btn, 'copy');
+        btn.addEventListener('click', async (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const copied = await writeTextToClipboard(text);
+            if (btn._copyResetTimer) clearTimeout(btn._copyResetTimer);
+            setMessageCopyButtonState(btn, copied ? 'copied' : 'failed');
+            btn._copyResetTimer = setTimeout(() => {
+                setMessageCopyButtonState(btn, 'copy');
+            }, copied ? 900 : 1200);
+        });
+        container.appendChild(btn);
+    }
+
+    function appendMessageToChat(messageElement, message) {
+        if (!messageElement) return;
+        if (message?.role !== 'assistant' && message?.role !== 'user') {
+            chatContainer.appendChild(messageElement);
+            return;
+        }
+        const row = document.createElement('div');
+        row.className = `message-row ${message.role === 'user' ? 'user' : 'bot'}`;
+        row.appendChild(messageElement);
+        chatContainer.appendChild(row);
+    }
+
     function renderNestedMessageElement(message) {
         const messageType = message.role === 'assistant'
             ? 'bot'
@@ -5067,6 +5161,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
         div.appendChild(content);
+        attachMessageCopyButton(div, message);
 
         appendMessageImages(div, message);
 
@@ -5472,6 +5567,7 @@ function renderMessageElement(message, renderedSet) {
             }
         }
         div.appendChild(content);
+        attachMessageCopyButton(div, message);
 
         if (shouldShowBackgroundSubagentIndicator(session, message)) {
             div.classList.add('has-background-subagent-indicator');
@@ -5742,12 +5838,12 @@ function renderMessageElement(message, renderedSet) {
             }
             if (!gitUndoEnabled) {
                 div.appendChild(actions);
-                chatContainer.appendChild(div);
+                appendMessageToChat(div, message);
                 return;
             }
             if (isAppendableActiveUserMessage) {
                 div.appendChild(actions);
-                chatContainer.appendChild(div);
+                appendMessageToChat(div, message);
                 return;
             }
             const undoBtn = document.createElement('button');
@@ -5821,7 +5917,7 @@ function renderMessageElement(message, renderedSet) {
             }
             div.appendChild(todoCard);
         }
-        chatContainer.appendChild(div);
+        appendMessageToChat(div, message);
     }
 
     function stripAttachmentManifest(text) {
