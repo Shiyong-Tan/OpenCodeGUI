@@ -739,6 +739,7 @@ function createSessionState() {
         activeTurnOpId: null,
         backendTurnInFlight: false,
         pendingAssistantUpgrade: null,
+        lastAssistantUpgradeFallback: null,
         awaitingFinalMapBind: false,
         streamMode: null,
         seenDiffKeys: new Set(),
@@ -1114,20 +1115,146 @@ function sessionHasVisibleThinkingAssistant(session) {
     return false;
 }
 
-function requestBackgroundPulseRender(sessionId) {
+const BACKGROUND_RENDER_FALLBACK_THROTTLE_LIMIT = 2;
+const BACKGROUND_RENDER_FALLBACK_THROTTLE_WINDOW_MS = 1000;
+const backgroundRenderFallbackWindows = new Map();
+const renderStormCounters = {
+    fullRenderRequestsByReason: Object.create(null),
+    suppressedFallbackRenderRequestsByReason: Object.create(null),
+    backgroundIndicatorApplyResults: Object.create(null),
+    localPatchFailedByReason: Object.create(null),
+    assistantUpgradeFallbackResults: Object.create(null),
+    userAppendFastPathResults: Object.create(null),
+    userAppendFastPathBailReasons: Object.create(null),
+    assistantStreamingPatchResults: Object.create(null),
+    assistantStreamingPatchBailReasons: Object.create(null)
+};
+
+function incrementRenderStormCounter(bucketName, key) {
+    const bucket = renderStormCounters[bucketName];
+    if (!bucket) return 0;
+    const safeKey = key || 'unknown';
+    bucket[safeKey] = (bucket[safeKey] || 0) + 1;
+    return bucket[safeKey];
+}
+
+function logRenderStormMetric(eventName, fields = []) {
+    vscode.postMessage({
+        type: 'ui-debug',
+        payload: ['[WV][RENDER_STORM]', eventName || 'metric', ...fields]
+    });
+}
+
+function countBackgroundIndicatorApplyResult(result, fields = []) {
+    const reason = result?.reason || 'unknown';
+    const total = incrementRenderStormCounter('backgroundIndicatorApplyResults', reason);
+    logRenderStormMetric('background-indicator-apply', [
+        `applied=${result?.applied === true ? 'true' : 'false'}`,
+        `reason=${reason}`,
+        `count=${total}`,
+        ...fields
+    ]);
+}
+
+function countLocalPatchFailed(reason, fields = []) {
+    const total = incrementRenderStormCounter('localPatchFailedByReason', reason);
+    logRenderStormMetric('local-patch-failed', [`reason=${reason || 'unknown'}`, `count=${total}`, ...fields]);
+}
+
+function countAssistantUpgradeFallbackResult(reason, fields = []) {
+    const total = incrementRenderStormCounter('assistantUpgradeFallbackResults', reason);
+    vscode.postMessage({
+        type: 'ui-debug',
+        payload: ['[WV][ASSIST_UPGRADE_FALLBACK]', `reason=${reason || 'unknown'}`, `count=${total}`, ...fields]
+    });
+}
+
+function countUserMessageAppendFastPathResult(result, fields = []) {
+    const key = result || 'unknown';
+    const total = incrementRenderStormCounter('userAppendFastPathResults', key);
+    logRenderStormMetric('user-message-append-fast-path', [`result=${key}`, `count=${total}`, ...fields]);
+}
+
+function countUserMessageAppendFastPathBail(reason, fields = []) {
+    const key = reason || 'unknown';
+    const total = incrementRenderStormCounter('userAppendFastPathBailReasons', key);
+    logRenderStormMetric('user-message-append-bail', [`reason=${key}`, `count=${total}`, ...fields]);
+}
+
+function countAssistantStreamingPatchResult(result, fields = []) {
+    const key = result || 'unknown';
+    const total = incrementRenderStormCounter('assistantStreamingPatchResults', key);
+    logRenderStormMetric('assistant-streaming-patch', [`result=${key}`, `count=${total}`, ...fields]);
+}
+
+function countAssistantStreamingPatchBail(reason, fields = []) {
+    const key = reason || 'unknown';
+    const total = incrementRenderStormCounter('assistantStreamingPatchBailReasons', key);
+    logRenderStormMetric('assistant-streaming-patch-bail', [`reason=${key}`, `count=${total}`, ...fields]);
+}
+
+function noteFullRenderRequest(reason, fields = []) {
+    const total = incrementRenderStormCounter('fullRenderRequestsByReason', reason);
+    logRenderStormMetric('full-render-request', [`reason=${reason || 'unknown'}`, `count=${total}`, ...fields]);
+}
+
+function suppressFallbackRender(reason, fields = []) {
+    const total = incrementRenderStormCounter('suppressedFallbackRenderRequestsByReason', reason);
+    logRenderStormMetric('fallback-render-suppressed', [`reason=${reason || 'unknown'}`, `count=${total}`, ...fields]);
+}
+
+function requestThrottledBackgroundFallbackRender(sessionId, reason, fields = []) {
+    const renderReason = reason || 'background-fallback';
     if (sessionId && sessionId !== activeSessionId) {
-        logBackgroundStateUpdate(sessionId, 'background-pulse', { extra: ['render=false'] });
-        return;
+        suppressFallbackRender(renderReason, [`sessionId=${sessionId}`, `activeSessionId=${activeSessionId || 'null'}`, 'reason=inactive-session', ...fields]);
+        logBackgroundStateUpdate(sessionId, renderReason, { extra: ['render=false', 'fallback=suppressed-inactive', ...fields] });
+        return false;
     }
+    const now = Date.now();
+    let windowState = backgroundRenderFallbackWindows.get(renderReason);
+    if (!windowState || now - windowState.startedAt >= BACKGROUND_RENDER_FALLBACK_THROTTLE_WINDOW_MS) {
+        windowState = { startedAt: now, count: 0 };
+        backgroundRenderFallbackWindows.set(renderReason, windowState);
+    }
+    if (windowState.count >= BACKGROUND_RENDER_FALLBACK_THROTTLE_LIMIT) {
+        suppressFallbackRender(renderReason, [
+            `sessionId=${sessionId || 'null'}`,
+            `activeSessionId=${activeSessionId || 'null'}`,
+            `windowMs=${BACKGROUND_RENDER_FALLBACK_THROTTLE_WINDOW_MS}`,
+            `limit=${BACKGROUND_RENDER_FALLBACK_THROTTLE_LIMIT}`,
+            ...fields
+        ]);
+        return false;
+    }
+    windowState.count += 1;
+    logRenderStormMetric('fallback-render-allowed', [`reason=${renderReason}`, `sessionId=${sessionId || 'null'}`, `windowCount=${windowState.count}`, ...fields]);
     if (window.__oc && typeof window.__oc.renderFromState === 'function') {
-        window.__oc.renderFromState('background-pulse');
-        return;
+        window.__oc.renderFromState(renderReason);
+        return true;
     }
     requestAnimationFrame(() => {
         if (window.__oc && typeof window.__oc.renderFromState === 'function') {
-            window.__oc.renderFromState('background-pulse-raf');
+            window.__oc.renderFromState(`${renderReason}-raf`);
         }
     });
+    return true;
+}
+
+function escapeMessageIdForSelector(messageId) {
+    const value = String(messageId || '');
+    if (window.CSS && typeof window.CSS.escape === 'function') {
+        return window.CSS.escape(value);
+    }
+    return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function requestBackgroundPulseRender(sessionId) {
+    if (sessionId && sessionId !== activeSessionId) {
+        suppressFallbackRender('background-pulse', [`sessionId=${sessionId}`, `activeSessionId=${activeSessionId || 'null'}`, 'reason=inactive-session']);
+        logBackgroundStateUpdate(sessionId, 'background-pulse', { extra: ['render=false', 'fallback=suppressed-inactive'] });
+        return;
+    }
+    requestThrottledBackgroundFallbackRender(sessionId || activeSessionId, 'background-pulse', ['source=requestBackgroundPulseRender']);
 }
 
 function shouldShowBackgroundSubagentIndicator(session, message) {
@@ -1159,8 +1286,11 @@ function shouldShowBackgroundSubagentIndicator(session, message) {
 }
 
 function applyBackgroundSubagentIndicator(session) {
+    if (session && session !== getSessionState(activeSessionId)) {
+        return { applied: false, reason: 'inactive-session' };
+    }
     const chatContainer = document.getElementById('chat');
-    if (!chatContainer) return;
+    if (!chatContainer) return { applied: false, reason: 'missing-chat-container' };
     for (const existing of chatContainer.querySelectorAll('.message-background-subagent-indicator')) {
         existing.remove();
     }
@@ -1168,10 +1298,10 @@ function applyBackgroundSubagentIndicator(session) {
         bubble.classList.remove('has-background-subagent-indicator');
     }
     if (!sessionHasActiveBackgroundSubagents(session)) {
-        return;
+        return { applied: true, reason: 'no-active-indicator' };
     }
     if (sessionHasVisibleThinkingAssistant(session)) {
-        return;
+        return { applied: true, reason: 'no-active-indicator' };
     }
     const anchoredAssistantId = typeof session?.backgroundSubagentIndicatorAnchorId === 'string'
         ? session.backgroundSubagentIndicatorAnchorId
@@ -1185,11 +1315,17 @@ function applyBackgroundSubagentIndicator(session) {
     const fallbackAssistantId = finalAssistantId || earlyFinalAssistantId || null;
     let targetBubble = null;
     const targetId = anchoredAssistantId || fallbackAssistantId;
+    if (anchoredAssistantId && fallbackAssistantId && anchoredAssistantId !== fallbackAssistantId) {
+        return { applied: false, reason: 'unclear-anchor' };
+    }
+    if (!targetId) {
+        return { applied: false, reason: 'unclear-anchor' };
+    }
     if (targetId) {
-        targetBubble = chatContainer.querySelector(`.message.bot[data-message-id="${targetId}"]`);
+        targetBubble = chatContainer.querySelector(`.message.bot[data-message-id="${escapeMessageIdForSelector(targetId)}"]`);
     }
     if (!targetBubble) {
-        return;
+        return { applied: false, reason: 'missing-target-bubble' };
     }
     if (!targetBubble.querySelector('.message-background-subagent-indicator')) {
         targetBubble.classList.add('has-background-subagent-indicator');
@@ -1199,6 +1335,25 @@ function applyBackgroundSubagentIndicator(session) {
         bgIndicator.setAttribute('aria-label', 'Background subagent is still running');
         targetBubble.appendChild(bgIndicator);
     }
+    return { applied: true, reason: 'applied' };
+}
+
+function handleBackgroundIndicatorPatchResult(sessionId, result, source) {
+    countBackgroundIndicatorApplyResult(result, [`sessionId=${sessionId || 'null'}`, `source=${source || 'unknown'}`]);
+    if (result?.applied === true) return true;
+    const reason = result?.reason || 'unknown';
+    if (reason === 'missing-target-bubble' || reason === 'unclear-anchor') {
+        countLocalPatchFailed(reason, [`sessionId=${sessionId || 'null'}`, `source=${source || 'unknown'}`]);
+        requestThrottledBackgroundFallbackRender(sessionId, `background-pulse-${reason}`, [`source=${source || 'unknown'}`]);
+        return false;
+    }
+    if (reason === 'inactive-session') {
+        suppressFallbackRender(`background-pulse-${reason}`, [`sessionId=${sessionId || 'null'}`, `source=${source || 'unknown'}`]);
+        logBackgroundStateUpdate(sessionId, 'background-pulse', { extra: [`apply=${reason}`, `source=${source || 'unknown'}`, 'render=false'] });
+        return false;
+    }
+    countLocalPatchFailed(reason, [`sessionId=${sessionId || 'null'}`, `source=${source || 'unknown'}`]);
+    return false;
 }
 
 function removeMessageFromSession(session, messageId) {
@@ -1242,9 +1397,9 @@ function armBackgroundSubagentIndicator(sessionId, anchorAssistantId) {
         latest.backgroundSubagentIndicatorUntil = 0;
         latest.backgroundSubagentIndicatorTimer = null;
         latest.backgroundSubagentIndicatorAnchorId = null;
-        requestBackgroundPulseRender(sessionId);
+        handleBackgroundIndicatorPatchResult(sessionId, applyBackgroundSubagentIndicator(latest), 'timer-expiry-hide');
     }, 3000);
-    requestBackgroundPulseRender(sessionId);
+    handleBackgroundIndicatorPatchResult(sessionId, applyBackgroundSubagentIndicator(session), 'arm-show');
 }
 
 function clearBackgroundSubagentIndicator(session) {
@@ -1278,6 +1433,7 @@ function clearBackgroundSubagentIndicator(session) {
     session.cancelledTurn = true;
     session.canceledActiveTurn = true;
     session.pendingAssistantUpgrade = null;
+    session.lastAssistantUpgradeFallback = null;
     session.awaitingFinalMapBind = false;
     session.backendTurnInFlight = false;
     session.currentTurnAssistantKey = null;
@@ -1485,6 +1641,71 @@ function renderIfActive(sessionId, reason, options = {}) {
         }
     }
     return true;
+}
+
+function applySubagentStatusLocalPatch(sessionId, counts = {}) {
+    if (!sessionId || sessionId !== activeSessionId) {
+        return { applied: false, reason: 'inactive-session' };
+    }
+    const indicator = document.getElementById('subagent-indicator');
+    if (indicator) {
+        const runningCount = typeof counts.runningCount === 'number' ? counts.runningCount : 0;
+        const finalizingCount = typeof counts.finalizingCount === 'number' ? counts.finalizingCount : 0;
+        const doneJustNowCount = typeof counts.doneJustNowCount === 'number' ? counts.doneJustNowCount : 0;
+        const hasIndicator = runningCount > 0 || finalizingCount > 0 || doneJustNowCount > 0;
+        indicator.style.display = hasIndicator ? '' : 'none';
+        if (runningCount > 0 || finalizingCount > 0) {
+            indicator.textContent = `${runningCount} running / ${finalizingCount} finalizing`;
+        } else {
+            indicator.textContent = `Done just now (${doneJustNowCount})`;
+        }
+    }
+
+    const session = getSessionState(sessionId);
+    const currentThinking = session?.thinkingId ? session.messagesById.get(session.thinkingId) : null;
+    if (!currentThinking || !currentThinking.meta?.isThinking) {
+        return { applied: true, reason: indicator ? 'applied' : 'no-active-indicator' };
+    }
+    const chatContainer = document.getElementById('chat');
+    if (!chatContainer) {
+        return { applied: false, reason: 'missing-chat-container' };
+    }
+    const targetId = currentThinking.id || session.thinkingId || '';
+    if (!targetId) {
+        return { applied: false, reason: 'unclear-anchor' };
+    }
+    const targetBubble = chatContainer.querySelector(`.message.bot[data-message-id="${escapeMessageIdForSelector(targetId)}"]`);
+    if (!targetBubble) {
+        return { applied: false, reason: 'missing-target-bubble' };
+    }
+    if (Array.isArray(currentThinking.meta?.subagents) && currentThinking.meta.subagents.length) {
+        return { applied: false, reason: 'unclear-anchor' };
+    }
+    return { applied: true, reason: indicator ? 'applied' : 'no-active-indicator' };
+}
+
+function handleSubagentStatusPatchResult(sessionId, result, source, fields = []) {
+    logRenderStormMetric('subagent-status-local-patch', [
+        `applied=${result?.applied === true ? 'true' : 'false'}`,
+        `reason=${result?.reason || 'unknown'}`,
+        `sessionId=${sessionId || 'null'}`,
+        `source=${source || 'unknown'}`,
+        ...fields
+    ]);
+    if (result?.applied === true) return true;
+    const reason = result?.reason || 'unknown';
+    if (reason === 'missing-target-bubble' || reason === 'unclear-anchor') {
+        countLocalPatchFailed(reason, [`sessionId=${sessionId || 'null'}`, `source=${source || 'unknown'}`, ...fields]);
+        requestThrottledBackgroundFallbackRender(sessionId, `subagentStatus-${reason}`, [`source=${source || 'unknown'}`, ...fields]);
+        return false;
+    }
+    if (reason === 'inactive-session') {
+        suppressFallbackRender(`subagentStatus-${reason}`, [`sessionId=${sessionId || 'null'}`, `source=${source || 'unknown'}`, ...fields]);
+        logBackgroundStateUpdate(sessionId, 'subagentStatus', { extra: [`apply=${reason}`, 'render=false', ...fields] });
+        return false;
+    }
+    countLocalPatchFailed(reason, [`sessionId=${sessionId || 'null'}`, `source=${source || 'unknown'}`, ...fields]);
+    return false;
 }
 
 function getEventMessageId(message) {
@@ -2842,6 +3063,10 @@ function replaceKeyEverywhere(oldId, newId, sessionId = activeSessionId) {
     const session = getSessionState(sessionId);
     if (!session) return;
 
+    const preReplaceCurrentTurnAssistantKey = session.currentTurnAssistantKey;
+    const preReplaceThinkingId = session.thinkingId;
+    const preReplaceCurrentTurnAssistantMsgId = session.currentTurnAssistantMsgId;
+
     if (typeof oldId === 'string' && typeof newId === 'string' && oldId.startsWith('local-') && newId === session.currentTurnAssistantMsgId) {
         vscode.postMessage({
             type: 'ui-debug',
@@ -2957,6 +3182,32 @@ function replaceKeyEverywhere(oldId, newId, sessionId = activeSessionId) {
     }
     if (session.serverIdToClientKey?.get(newId) === oldId) {
         session.serverIdToClientKey.set(newId, newId);
+    }
+
+    const replacedTmpLocalAssistant = typeof oldId === 'string'
+        && typeof newId === 'string'
+        && (oldId.startsWith('tmp:') || oldId.startsWith('local-'))
+        && newId.startsWith('msg_')
+        && (
+            message?.role === 'assistant'
+            || existing?.role === 'assistant'
+            || preReplaceCurrentTurnAssistantKey === oldId
+            || preReplaceThinkingId === oldId
+        );
+    if (replacedTmpLocalAssistant) {
+        const recentAliases = Array.isArray(session.recentAssistantDomTargetAliases)
+            ? session.recentAssistantDomTargetAliases
+            : [];
+        recentAliases.push({
+            oldKey: oldId,
+            newKey: newId,
+            sessionId,
+            source: 'replaceKeyEverywhere',
+            ts: Date.now(),
+            turnAnchor: preReplaceCurrentTurnAssistantKey || preReplaceThinkingId || oldId,
+            assistantMsgId: preReplaceCurrentTurnAssistantMsgId || newId
+        });
+        session.recentAssistantDomTargetAliases = recentAliases.slice(-6);
     }
 
     const timelineSample = session.timeline.slice(0, 5);
@@ -3387,6 +3638,115 @@ function attemptAssistantUpgrade(sessionId, payload, source) {
     let replaced = false;
     let reason = 'no-change';
 
+    const logMapExistsFallbackSkip = (skipReason, extra = []) => {
+        countAssistantUpgradeFallbackResult(`skipped-${skipReason}`, [
+            `sessionId=${payloadSession || 'null'}`,
+            `activeSessionId=${currentSession || 'null'}`,
+            `curKey=${currentKey || 'null'}`,
+            `newKey=${newKey || 'null'}`,
+            `source=${source || 'unknown'}`,
+            ...extra
+        ]);
+    };
+
+    const tryMapExistsMissingNewKeyFallback = () => {
+        const pending = session.pendingAssistantUpgrade || null;
+        const mapExists = session.messageIndexMap instanceof Map;
+        if (!mapExists) return false;
+        if (typeof newKey !== 'string' || !newKey.startsWith('msg_')) {
+            logMapExistsFallbackSkip('bad-new-key');
+            return false;
+        }
+        if (session.messageIndexMap.has(newKey)) return false;
+        if (typeof currentKey !== 'string' || !(currentKey.startsWith('tmp:') || currentKey.startsWith('local-'))) {
+            logMapExistsFallbackSkip('current-not-tmp-local');
+            return false;
+        }
+        if (!pending) {
+            logMapExistsFallbackSkip('missing-pending-metadata');
+            return false;
+        }
+        if (pending.tmpKey !== currentKey || pending.assistantMsgId !== newKey) {
+            logMapExistsFallbackSkip('pending-mismatch', [
+                `pendingTmpKey=${pending.tmpKey || 'null'}`,
+                `pendingAssistantMsgId=${pending.assistantMsgId || 'null'}`
+            ]);
+            return false;
+        }
+
+        const currentMsg = session.messagesById?.get?.(currentKey) || null;
+        const currentInTimeline = Array.isArray(session.timeline) && session.timeline.includes(currentKey);
+        const currentInTurnState = session.currentTurnAssistantKey === currentKey || session.thinkingId === currentKey;
+        if (!currentMsg && !currentInTimeline && !currentInTurnState) {
+            logMapExistsFallbackSkip('current-key-not-present', [
+                `hasMessage=${Boolean(currentMsg)}`,
+                `inTimeline=${currentInTimeline}`,
+                `inTurnState=${currentInTurnState}`
+            ]);
+            return false;
+        }
+        if (currentMsg && currentMsg.role !== 'assistant') {
+            logMapExistsFallbackSkip('current-not-assistant', [`role=${currentMsg.role || 'null'}`]);
+            return false;
+        }
+        if (currentKey.startsWith('local-') && session.currentTurnAssistantMsgId === newKey) {
+            logMapExistsFallbackSkip('replace-rejected-local-current-assistant', [
+                `currentTurnAssistantMsgId=${session.currentTurnAssistantMsgId || 'null'}`
+            ]);
+            return false;
+        }
+
+        const isActiveSession = Boolean(payloadSession && payloadSession === activeSessionId);
+        const currentTurnAnchored = Boolean(
+            session.currentTurnAssistantKey === currentKey ||
+            session.thinkingId === currentKey ||
+            (session.awaitingFinalMapBind && pending.tmpKey === currentKey)
+        );
+        const candidateAnchored = Boolean(
+            session.currentTurnAssistantMsgId === newKey ||
+            pending.assistantMsgId === newKey ||
+            session.earlyFinalAssistantId === newKey ||
+            session.finalAssistantLock?.assistantMsgId === newKey
+        );
+        if (!isActiveSession || !currentTurnAnchored || !candidateAnchored || session.canceledActiveTurn) {
+            logMapExistsFallbackSkip('stale-or-cross-turn', [
+                `isActiveSession=${isActiveSession}`,
+                `currentTurnAnchored=${currentTurnAnchored}`,
+                `candidateAnchored=${candidateAnchored}`,
+                `canceled=${Boolean(session.canceledActiveTurn)}`
+            ]);
+            return false;
+        }
+
+        const fallbackMetadata = {
+            fallbackAssistantKey: newKey,
+            fallbackSourceTmpKey: currentKey,
+            fallbackSessionId: payloadSession,
+            fallbackSource: source || 'unknown',
+            fallbackTurnAnchor: session.currentTurnAssistantKey || session.thinkingId || currentKey,
+            fallbackPendingSource: pending.source || 'unknown',
+            fallbackAppliedAt: Date.now(),
+            fallbackMapSize: session.messageIndexMap.size,
+            fallbackMapHadNewKey: false,
+            fallbackReason: 'map-exists-new-key-missing'
+        };
+        session.pendingAssistantUpgrade = {
+            ...pending,
+            ...fallbackMetadata
+        };
+        session.lastAssistantUpgradeFallback = fallbackMetadata;
+        replaceKeyEverywhere(currentKey, newKey, payloadSession);
+        countAssistantUpgradeFallbackResult('applied-map-exists-new-key-missing', [
+            `sessionId=${payloadSession}`,
+            `curKey=${currentKey}`,
+            `newKey=${newKey}`,
+            `source=${source || 'unknown'}`,
+            `mapSize=${session.messageIndexMap.size}`,
+            `turnAnchor=${fallbackMetadata.fallbackTurnAnchor || 'null'}`
+        ]);
+        return true;
+    };
+
     if (!currentKey) {
         session.currentTurnAssistantKey = newKey;
         session.currentTurnAssistantMsgId = newKey;
@@ -3409,6 +3769,13 @@ function attemptAssistantUpgrade(sessionId, payload, source) {
         replaceKeyEverywhere(currentKey, newKey, payloadSession);
         replaced = true;
         reason = 'tmp-local-index';
+    } else if ((currentKey.startsWith('tmp:') || currentKey.startsWith('local-')) && newIndex === null && session.messageIndexMap instanceof Map && newKey.startsWith('msg_')) {
+        if (tryMapExistsMissingNewKeyFallback()) {
+            replaced = true;
+            reason = 'map-exists-new-key-missing-fallback';
+        } else {
+            reason = 'map-exists-new-key-missing-fallback-skipped';
+        }
     } else if ((currentKey.startsWith('tmp:') || currentKey.startsWith('local-')) && !session.messageIndexMap && newKey.startsWith('msg_')) {
         replaceKeyEverywhere(currentKey, newKey, payloadSession);
         replaced = true;
@@ -3431,9 +3798,92 @@ function attemptAssistantUpgrade(sessionId, payload, source) {
     if (bound) {
         if (session.pendingAssistantUpgrade && session.pendingAssistantUpgrade.assistantMsgId === newKey) {
             session.pendingAssistantUpgrade = null;
+            session.lastAssistantUpgradeFallback = null;
         }
         session.awaitingFinalMapBind = false;
         updateSendGate();
+    }
+}
+
+function reconcileAssistantUpgradeFallbackWithAuthoritativeMap(sessionId, session, source, observedMessageId = null, fallbackSnapshot = null) {
+    if (!session || !(session.messageIndexMap instanceof Map)) return;
+    const fallback = fallbackSnapshot || session.lastAssistantUpgradeFallback || null;
+    if (!fallback) return;
+
+    const fallbackAssistantKey = fallback.fallbackAssistantKey;
+    const fallbackSourceTmpKey = fallback.fallbackSourceTmpKey;
+    if (typeof fallbackAssistantKey !== 'string' || !fallbackAssistantKey.startsWith('msg_') || typeof fallbackSourceTmpKey !== 'string') {
+        countAssistantUpgradeFallbackResult('missing-fallback-metadata', [
+            `sessionId=${sessionId || 'null'}`,
+            `source=${source || 'unknown'}`,
+            `fallbackAssistantKey=${fallbackAssistantKey || 'null'}`,
+            `fallbackSourceTmpKey=${fallbackSourceTmpKey || 'null'}`
+        ]);
+        session.lastAssistantUpgradeFallback = null;
+        return;
+    }
+
+    if (observedMessageId && observedMessageId !== fallbackAssistantKey) return;
+
+    const mapHasFallbackAssistant = session.messageIndexMap.has(fallbackAssistantKey);
+    const tmpStillPresent = Boolean(
+        session.messagesById?.has?.(fallbackSourceTmpKey) ||
+        session.timeline?.includes?.(fallbackSourceTmpKey) ||
+        session.currentTurnAssistantKey === fallbackSourceTmpKey ||
+        session.thinkingId === fallbackSourceTmpKey
+    );
+    const preAttemptCurrentTurnAssistantKey = fallback.authoritativePreAttemptCurrentTurnAssistantKey || null;
+    const preAttemptTmpStillPresent = typeof fallback.authoritativePreAttemptTmpStillPresent === 'boolean'
+        ? fallback.authoritativePreAttemptTmpStillPresent
+        : null;
+    const authoritativeFields = [
+        `sessionId=${sessionId || 'null'}`,
+        `source=${source || 'unknown'}`,
+        `authoritativeMessageId=${observedMessageId || fallbackAssistantKey}`,
+        `fallbackAssistantKey=${fallbackAssistantKey}`,
+        `fallbackSourceTmpKey=${fallbackSourceTmpKey}`,
+        `mapHasFallbackAssistant=${mapHasFallbackAssistant}`,
+        `currentTurnAssistantKey=${session.currentTurnAssistantKey || 'null'}`,
+        `tmpStillPresent=${tmpStillPresent}`,
+        `preAttemptCurrentTurnAssistantKey=${preAttemptCurrentTurnAssistantKey || 'null'}`,
+        `preAttemptTmpStillPresent=${preAttemptTmpStillPresent === null ? 'null' : preAttemptTmpStillPresent}`
+    ];
+
+    if (!mapHasFallbackAssistant) {
+        countAssistantUpgradeFallbackResult('contradiction-detected-authoritative-missing', authoritativeFields);
+        session.awaitingFinalMapBind = true;
+        if (!session.pendingAssistantUpgrade || session.pendingAssistantUpgrade.assistantMsgId !== fallbackAssistantKey) {
+            session.pendingAssistantUpgrade = {
+                tmpKey: fallbackSourceTmpKey,
+                assistantMsgId: fallbackAssistantKey,
+                source: 'authoritative-map-missing-fallback-retry',
+                ts: Date.now(),
+                fallbackAssistantKey,
+                fallbackSourceTmpKey,
+                fallbackSessionId: sessionId,
+                fallbackSource: fallback.fallbackSource || 'unknown',
+                fallbackTurnAnchor: fallback.fallbackTurnAnchor || fallbackSourceTmpKey,
+                fallbackReason: fallback.fallbackReason || 'map-exists-new-key-missing'
+            };
+        }
+        return;
+    }
+
+    const conflictingCurrentKey = Boolean(session.currentTurnAssistantKey && session.currentTurnAssistantKey !== fallbackAssistantKey);
+    const preAttemptConflictingCurrentKey = Boolean(preAttemptCurrentTurnAssistantKey && preAttemptCurrentTurnAssistantKey !== fallbackAssistantKey);
+    if (conflictingCurrentKey || tmpStillPresent || preAttemptConflictingCurrentKey || preAttemptTmpStillPresent === true) {
+        countAssistantUpgradeFallbackResult('contradiction-detected-authoritative-present', authoritativeFields);
+        attemptAssistantUpgrade(sessionId, {
+            sessionId,
+            tmpKey: fallbackSourceTmpKey,
+            assistantMsgId: fallbackAssistantKey
+        }, `${source || 'authoritative'}:fallback-correction`);
+    }
+
+    if (session.currentTurnAssistantKey === fallbackAssistantKey || (!tmpStillPresent && !conflictingCurrentKey)) {
+        session.awaitingFinalMapBind = false;
+        session.lastAssistantUpgradeFallback = null;
+        countAssistantUpgradeFallbackResult('authoritative-correction-applied', authoritativeFields);
     }
 }
 
@@ -5920,6 +6370,685 @@ function renderMessageElement(message, renderedSet) {
         appendMessageToChat(div, message);
     }
 
+    function getMessageKeyFromChatChild(child) {
+        if (!child) return '';
+        const direct = child.dataset?.messageId || child.dataset?.segmentKey || '';
+        if (direct) return direct;
+        const nested = child.querySelector?.('[data-message-id], [data-segment-key]');
+        return nested?.dataset?.messageId || nested?.dataset?.segmentKey || '';
+    }
+
+    function getLastRenderedChatKey() {
+        if (!chatContainer) return '';
+        for (let i = chatContainer.children.length - 1; i >= 0; i -= 1) {
+            const key = getMessageKeyFromChatChild(chatContainer.children[i]);
+            if (key) return key;
+        }
+        return '';
+    }
+
+    function normalizeRenderedTailKey(session, key) {
+        const raw = typeof key === 'string' ? key : '';
+        const aliases = new Set();
+        if (!raw) return { kind: 'empty', primary: '', aliases };
+
+        aliases.add(raw);
+        if (raw.startsWith('seg:')) aliases.add(raw.slice(4));
+
+        const unsegmented = raw.startsWith('seg:') ? raw.slice(4) : raw;
+        if (unsegmented.startsWith('system:undo-seg:')) {
+            const noticeKey = unsegmented.slice('system:undo-seg:'.length);
+            if (noticeKey) {
+                aliases.add(noticeKey);
+                aliases.add(`seg:${noticeKey}`);
+            }
+            return { kind: 'undo-placeholder', primary: noticeKey || unsegmented, aliases };
+        }
+
+        if (session?.segmentsByNoticeKey instanceof Map) {
+            if (session.segmentsByNoticeKey.has(unsegmented)) {
+                aliases.add(`seg:${unsegmented}`);
+                aliases.add(getUndoPlaceholderId(unsegmented));
+                return { kind: 'segment-notice', primary: unsegmented, aliases };
+            }
+            for (const [noticeKey, segment] of session.segmentsByNoticeKey.entries()) {
+                if (!segment) continue;
+                const memberMsgIds = Array.isArray(segment.memberMsgIds) ? segment.memberMsgIds : [];
+                if (segment.noticeKey === unsegmented || segment.anchorMsgId === unsegmented || segment.endMsgId === unsegmented || memberMsgIds.includes(unsegmented)) {
+                    aliases.add(noticeKey);
+                    aliases.add(`seg:${noticeKey}`);
+                    aliases.add(getUndoPlaceholderId(noticeKey));
+                    return { kind: 'segment-member', primary: noticeKey, aliases };
+                }
+            }
+        }
+
+        if (session?.messagesById instanceof Map && session.messagesById.has(unsegmented)) {
+            aliases.add(unsegmented);
+            return { kind: 'message', primary: unsegmented, aliases };
+        }
+        return { kind: 'unknown', primary: unsegmented, aliases };
+    }
+
+    function renderedTailKeysMatch(session, leftKey, rightKey) {
+        const left = normalizeRenderedTailKey(session, leftKey);
+        const right = normalizeRenderedTailKey(session, rightKey);
+        if (!left.primary || !right.primary) return false;
+        if (left.primary === right.primary) return true;
+        for (const alias of left.aliases) {
+            if (right.aliases.has(alias)) return true;
+        }
+        return false;
+    }
+
+    function getComputedPreviousRenderedTailKeyExcludingCandidate(session, candidateMessageId) {
+        const timeline = Array.isArray(session?.timeline) ? session.timeline : [];
+        const appendChildPresentationIndex = buildAppendChildPresentationIndex(session);
+        let previousKey = '';
+        for (const id of timeline) {
+            if (id === candidateMessageId) continue;
+            if (typeof id !== 'string' || !id) continue;
+            const msg = session.messagesById?.get?.(id);
+            if (!msg) continue;
+            if (id.startsWith('system:undo:')) {
+                const segment = session.segmentsByNoticeKey?.get?.(id);
+                if (segment) {
+                    previousKey = id;
+                } else if (!(session.hiddenSet instanceof Set && session.hiddenSet.has(id)) && !shouldHideDcpUiMessage(msg)) {
+                    previousKey = id;
+                }
+                continue;
+            }
+            if (session.hiddenSet instanceof Set && session.hiddenSet.has(id)) continue;
+            if (isAppendChildTopLevelUser(session, msg, id, appendChildPresentationIndex)) continue;
+            if (isAppendChainTopLevelAssistantHidden(session, msg, id, appendChildPresentationIndex)) continue;
+            if (shouldHideDcpUiMessage(msg)) continue;
+            if (msg.role === 'user' && !stripSystemInjections(stripAttachmentManifest(msg.text || '')).trim()) continue;
+            previousKey = id;
+        }
+        return previousKey;
+    }
+
+    function getTailSafetyContext(session, candidateMessageId, domLastRenderedKey, computedPreviousRenderedTailKey) {
+        const hiddenCount = session?.hiddenSet instanceof Set ? session.hiddenSet.size : 0;
+        const segmentCount = session?.segmentsByNoticeKey instanceof Map ? session.segmentsByNoticeKey.size : 0;
+        const domKeyInfo = normalizeRenderedTailKey(session, domLastRenderedKey);
+        const computedKeyInfo = normalizeRenderedTailKey(session, computedPreviousRenderedTailKey);
+        return [
+            `hidden=${hiddenCount}`,
+            `segments=${segmentCount}`,
+            `domLastRendered=${domLastRenderedKey || 'null'}`,
+            `computedPreviousRenderedTail=${computedPreviousRenderedTailKey || 'null'}`,
+            `domLastRenderedNormalized=${domKeyInfo.primary || 'null'}`,
+            `computedPreviousRenderedTailNormalized=${computedKeyInfo.primary || 'null'}`,
+            `domKeyKind=${domKeyInfo.kind || 'unknown'}`,
+            `computedKeyKind=${computedKeyInfo.kind || 'unknown'}`,
+            `candidateKeyKind=${normalizeRenderedTailKey(session, candidateMessageId).kind || 'unknown'}`
+        ];
+    }
+
+    function getTimelineIndexForRenderedTailKey(session, key) {
+        const timeline = Array.isArray(session?.timeline) ? session.timeline : [];
+        const info = normalizeRenderedTailKey(session, key);
+        if (!info.primary) return -1;
+        for (let i = 0; i < timeline.length; i += 1) {
+            if (renderedTailKeysMatch(session, timeline[i], key)) return i;
+        }
+        return -1;
+    }
+
+    function getRenderedDomKeyMatches(session, key) {
+        const matches = [];
+        if (!chatContainer || !key) return matches;
+        for (const child of chatContainer.children) {
+            const domKey = getMessageKeyFromChatChild(child);
+            if (domKey && renderedTailKeysMatch(session, domKey, key)) {
+                matches.push(domKey);
+            }
+        }
+        return matches;
+    }
+
+    function resolveHiddenTailSegmentBoundary(session, hiddenId, targetIndex, computedPreviousRenderedTailKey) {
+        const segmentsByNoticeKey = session?.segmentsByNoticeKey instanceof Map ? session.segmentsByNoticeKey : new Map();
+        const hiddenVariants = getPresentationMessageKeyVariants(session, hiddenId);
+        hiddenVariants.add(hiddenId);
+        const owners = [];
+        for (const [noticeKey, segment] of segmentsByNoticeKey.entries()) {
+            if (!noticeKey || !segment || segment.collapsed === false) continue;
+            const memberMsgIds = Array.isArray(segment.memberMsgIds) ? segment.memberMsgIds : [];
+            let matchedMember = '';
+            for (const memberId of memberMsgIds) {
+                if (typeof memberId !== 'string' || !memberId) continue;
+                const memberVariants = getPresentationMessageKeyVariants(session, memberId);
+                memberVariants.add(memberId);
+                for (const variant of memberVariants) {
+                    if (hiddenVariants.has(variant)) {
+                        matchedMember = memberId;
+                        break;
+                    }
+                }
+                if (matchedMember) break;
+            }
+            if (matchedMember) owners.push({ noticeKey, segment, matchedMember });
+        }
+        if (owners.length !== 1) {
+            return { resolved: false, reason: owners.length === 0 ? 'unresolved-hidden-segment' : 'multiple-hidden-segment-owners', ownerCount: owners.length };
+        }
+
+        const owner = owners[0];
+        const placeholderKey = getUndoPlaceholderId(owner.noticeKey);
+        const noticeIndex = session.timeline.indexOf(owner.noticeKey);
+        const placeholderIndex = session.timeline.indexOf(placeholderKey);
+        const visibleKey = noticeIndex >= 0 ? owner.noticeKey : (placeholderIndex >= 0 ? placeholderKey : '');
+        const visibleIndex = noticeIndex >= 0 ? noticeIndex : placeholderIndex;
+        if (!visibleKey || visibleIndex < 0) {
+            return { resolved: false, reason: 'missing-visible-segment-boundary', noticeKey: owner.noticeKey, placeholderKey };
+        }
+        if (visibleIndex >= targetIndex) {
+            return { resolved: false, reason: 'segment-after-append-target', noticeKey: owner.noticeKey, placeholderKey, visibleKey, visibleIndex };
+        }
+
+        const computedTailIndex = getTimelineIndexForRenderedTailKey(session, computedPreviousRenderedTailKey);
+        if (computedTailIndex < 0 || visibleIndex >= computedTailIndex) {
+            return { resolved: false, reason: 'segment-boundary-unproven', noticeKey: owner.noticeKey, placeholderKey, visibleKey, visibleIndex, computedTailIndex };
+        }
+
+        const domMatches = getRenderedDomKeyMatches(session, visibleKey);
+        if (domMatches.length !== 1) {
+            return { resolved: false, reason: domMatches.length === 0 ? 'missing-segment-boundary-dom' : 'multiple-segment-boundary-dom', noticeKey: owner.noticeKey, placeholderKey, visibleKey, visibleIndex, computedTailIndex, domMatches };
+        }
+
+        return {
+            resolved: true,
+            kind: 'collapsed-segment',
+            relation: 'hidden-member-before-rendered-tail',
+            hiddenId,
+            matchedMember: owner.matchedMember,
+            noticeKey: owner.noticeKey,
+            placeholderKey,
+            visibleKey,
+            visibleBoundaryKey: domMatches[0],
+            visibleIndex,
+            computedTailIndex
+        };
+    }
+
+    function proveHiddenTailSafeForUserAppend(session, candidateMessageId, targetIndex, domLastRenderedKey, computedPreviousRenderedTailKey) {
+        const baseFields = getTailSafetyContext(session, candidateMessageId, domLastRenderedKey, computedPreviousRenderedTailKey);
+        const hiddenSet = session?.hiddenSet instanceof Set ? session.hiddenSet : new Set();
+        const segmentsByNoticeKey = session?.segmentsByNoticeKey instanceof Map ? session.segmentsByNoticeKey : new Map();
+        const segmentAwareResolutions = [];
+
+        if (hiddenSet.has(candidateMessageId)) {
+            return { safe: false, reason: 'hidden-includes-new-message', fields: baseFields };
+        }
+
+        for (const hiddenId of hiddenSet) {
+            const hiddenIndex = session.timeline.indexOf(hiddenId);
+            if (hiddenIndex < 0) {
+                const resolved = resolveHiddenTailSegmentBoundary(session, hiddenId, targetIndex, computedPreviousRenderedTailKey);
+                if (!resolved.resolved) {
+                    return { safe: false, reason: 'hidden-tail-ambiguous', fields: [...baseFields, 'hiddenIndexResolution=segment-aware', `hiddenTailSubreason=${resolved.reason || 'unresolved-hidden-segment'}`, `hiddenId=${hiddenId || 'null'}`, `hiddenIndex=${hiddenIndex}`, `ownerCount=${resolved.ownerCount ?? 'null'}`, `noticeKey=${resolved.noticeKey || 'null'}`, `placeholderKey=${resolved.placeholderKey || 'null'}`, `visibleKey=${resolved.visibleKey || 'null'}`, `visibleIndex=${resolved.visibleIndex ?? 'null'}`, `computedTailIndex=${resolved.computedTailIndex ?? 'null'}`] };
+                }
+                segmentAwareResolutions.push(resolved);
+                continue;
+            }
+            if (hiddenIndex >= targetIndex) {
+                return { safe: false, reason: 'hidden-tail-ambiguous', fields: [...baseFields, `hiddenId=${hiddenId || 'null'}`, `hiddenIndex=${hiddenIndex}`] };
+            }
+        }
+
+        for (const [noticeKey, segment] of segmentsByNoticeKey.entries()) {
+            const memberMsgIds = Array.isArray(segment?.memberMsgIds) ? segment.memberMsgIds : [];
+            if (memberMsgIds.includes(candidateMessageId) || segment?.anchorMsgId === candidateMessageId || segment?.endMsgId === candidateMessageId) {
+                return { safe: false, reason: 'hidden-includes-new-message', fields: [...baseFields, `noticeKey=${noticeKey || 'null'}`] };
+            }
+            const noticeIndex = session.timeline.indexOf(noticeKey);
+            const placeholderIndex = session.timeline.indexOf(getUndoPlaceholderId(noticeKey));
+            const indexes = memberMsgIds.map((id) => session.timeline.indexOf(id)).filter((idx) => idx >= 0);
+            if (noticeIndex >= targetIndex || placeholderIndex >= targetIndex || indexes.some((idx) => idx >= targetIndex)) {
+                return { safe: false, reason: 'hidden-tail-ambiguous', fields: [...baseFields, `noticeKey=${noticeKey || 'null'}`, `noticeIndex=${noticeIndex}`, `placeholderIndex=${placeholderIndex}`] };
+            }
+        }
+
+        if (!domLastRenderedKey || !computedPreviousRenderedTailKey || !renderedTailKeysMatch(session, domLastRenderedKey, computedPreviousRenderedTailKey)) {
+            return { safe: false, reason: 'hidden-last-rendered-key-mismatch', fields: baseFields };
+        }
+
+        const previousTimelineId = session.timeline[targetIndex - 1] || '';
+        if (!previousTimelineId || hiddenSet.has(previousTimelineId) || previousTimelineId.startsWith('system:undo-seg:')) {
+            return { safe: false, reason: 'hidden-segment-boundary-adjacent', fields: [...baseFields, `previousTimelineId=${previousTimelineId || 'null'}`] };
+        }
+        for (const [noticeKey, segment] of segmentsByNoticeKey.entries()) {
+            const memberMsgIds = Array.isArray(segment?.memberMsgIds) ? segment.memberMsgIds : [];
+            if (noticeKey === previousTimelineId || segment?.anchorMsgId === previousTimelineId || segment?.endMsgId === previousTimelineId || memberMsgIds.includes(previousTimelineId)) {
+                return { safe: false, reason: 'hidden-segment-boundary-adjacent', fields: [...baseFields, `noticeKey=${noticeKey || 'null'}`, `previousTimelineId=${previousTimelineId}`] };
+            }
+        }
+
+        const segmentAwareFields = segmentAwareResolutions.length
+            ? [
+                'hiddenIndexResolution=segment-aware',
+                `resolvedHiddenIds=${formatList(segmentAwareResolutions.map((item) => item.hiddenId), 8)}`,
+                `resolvedSegmentKeys=${formatList(segmentAwareResolutions.map((item) => item.noticeKey), 8)}`,
+                `resolvedPlaceholderKeys=${formatList(segmentAwareResolutions.map((item) => item.placeholderKey), 8)}`,
+                `visibleBoundaryKeys=${formatList(segmentAwareResolutions.map((item) => item.visibleBoundaryKey), 8)}`,
+                `orderProof=${formatList(segmentAwareResolutions.map((item) => `${item.visibleIndex}<${item.computedTailIndex}`), 8)}`
+            ]
+            : [];
+        return { safe: true, reason: hiddenSet.size > 0 || segmentsByNoticeKey.size > 0 ? 'hidden-tail-safe' : 'clean-tail-safe', fields: [...baseFields, ...segmentAwareFields] };
+    }
+
+    function getRenderedMessageIdSetFromDom() {
+        const ids = new Set();
+        if (!chatContainer) return ids;
+        for (const el of chatContainer.querySelectorAll('[data-message-id]')) {
+            const id = el?.dataset?.messageId || '';
+            if (id) ids.add(id);
+        }
+        return ids;
+    }
+
+    function findPreviousVisibleTimelineMessageId(session, messageId) {
+        const timeline = Array.isArray(session?.timeline) ? session.timeline : [];
+        const targetIndex = timeline.lastIndexOf(messageId);
+        if (targetIndex <= 0) return '';
+        const appendChildPresentationIndex = buildAppendChildPresentationIndex(session);
+        for (let i = targetIndex - 1; i >= 0; i -= 1) {
+            const id = timeline[i];
+            if (typeof id !== 'string' || !id) continue;
+            const msg = session.messagesById?.get?.(id);
+            if (!msg) continue;
+            if (session.hiddenSet instanceof Set && session.hiddenSet.has(id)) continue;
+            if (isAppendChildTopLevelUser(session, msg, id, appendChildPresentationIndex)) continue;
+            if (isAppendChainTopLevelAssistantHidden(session, msg, id, appendChildPresentationIndex)) continue;
+            if (shouldHideDcpUiMessage(msg)) continue;
+            if (msg.role === 'user' && !stripSystemInjections(stripAttachmentManifest(msg.text || '')).trim()) continue;
+            return id;
+        }
+        return '';
+    }
+
+    function bailUserMessageAppendFastPath(reason, fields = []) {
+        countUserMessageAppendFastPathResult('fallback-full-render', [`reason=${reason || 'unknown'}`, ...fields]);
+        countUserMessageAppendFastPathBail(reason, fields);
+        return { applied: false, reason: reason || 'unknown' };
+    }
+
+    function tryAppendUserMessageFastPath(sessionId, messageId, source = 'unknown') {
+        const fields = [`sessionId=${sessionId || 'null'}`, `messageId=${messageId || 'null'}`, `source=${source || 'unknown'}`];
+        if (!chatContainer) return bailUserMessageAppendFastPath('missing-chat-container', fields);
+        if (!sessionId || sessionId !== activeSessionId) {
+            return bailUserMessageAppendFastPath('inactive-session', [...fields, `activeSessionId=${activeSessionId || 'null'}`]);
+        }
+        const session = getSessionState(sessionId);
+        if (!session || !(session.messagesById instanceof Map) || !Array.isArray(session.timeline)) {
+            return bailUserMessageAppendFastPath('session-mismatch', fields);
+        }
+        if (typeof messageId !== 'string' || !messageId.length) {
+            return bailUserMessageAppendFastPath('missing-message-id', fields);
+        }
+        const message = session.messagesById.get(messageId);
+        if (!message || message.role !== 'user') {
+            return bailUserMessageAppendFastPath('message-not-user', [...fields, `role=${message?.role || 'null'}`]);
+        }
+        if (message.meta?.syntheticUser === true || isHiddenControlUserText(message.text || '')) {
+            return bailUserMessageAppendFastPath('hidden-control-user', fields);
+        }
+        if (sessionSearch.open || String(sessionSearch.query || '').trim() || sessionSearch.smartInFlight || sessionSearch.mode === 'smart' || sessionSearch.matches.length > 0) {
+            return bailUserMessageAppendFastPath('search-state-active', [...fields, `searchMode=${sessionSearch.mode || 'text'}`, `matches=${sessionSearch.matches.length}`]);
+        }
+        if (chatContainer.querySelector(`[data-message-id="${escapeMessageIdForSelector(messageId)}"]`)) {
+            return bailUserMessageAppendFastPath('duplicate-dom-message', fields);
+        }
+        const targetIndex = session.timeline.lastIndexOf(messageId);
+        if (targetIndex < 0) {
+            return bailUserMessageAppendFastPath('message-not-in-timeline', fields);
+        }
+        if (targetIndex !== session.timeline.length - 1) {
+            return bailUserMessageAppendFastPath('message-not-tail', [...fields, `targetIndex=${targetIndex}`, `timelineSize=${session.timeline.length}`]);
+        }
+        if (session.timeline.length <= 1) {
+            return bailUserMessageAppendFastPath('first-message-needs-greeting-clear', fields);
+        }
+        const previousVisibleId = findPreviousVisibleTimelineMessageId(session, messageId);
+        const lastRenderedKey = getLastRenderedChatKey();
+        const computedPreviousRenderedTailKey = getComputedPreviousRenderedTailKeyExcludingCandidate(session, messageId);
+        const tailSafety = proveHiddenTailSafeForUserAppend(session, messageId, targetIndex, lastRenderedKey, computedPreviousRenderedTailKey);
+        if (!tailSafety.safe) {
+            return bailUserMessageAppendFastPath(tailSafety.reason || 'tail-safe-unproven', [...fields, ...(tailSafety.fields || []), `previousVisible=${previousVisibleId || 'null'}`]);
+        }
+        if (!previousVisibleId || !lastRenderedKey || !renderedTailKeysMatch(session, previousVisibleId, lastRenderedKey)) {
+            return bailUserMessageAppendFastPath('insertion-point-ambiguous', [...fields, ...(tailSafety.fields || []), `previousVisible=${previousVisibleId || 'null'}`]);
+        }
+        const wasPinned = autoScrollPinnedToBottom === true && isNearBottom(chatContainer);
+        if (!wasPinned) {
+            return bailUserMessageAppendFastPath('scroll-unpinned', [...fields, ...(tailSafety.fields || [])]);
+        }
+
+        const renderedSet = getRenderedMessageIdSetFromDom();
+        const beforeChildren = chatContainer.childElementCount;
+        try {
+            renderMessageElement(message, renderedSet);
+        } catch (error) {
+            return bailUserMessageAppendFastPath('render-throw', [...fields, `error=${String(error)}`]);
+        }
+        const afterChildren = chatContainer.childElementCount;
+        if (afterChildren <= beforeChildren) {
+            return bailUserMessageAppendFastPath('no-dom-output', fields);
+        }
+        const afterTailKey = getLastRenderedChatKey();
+        const duplicateCount = chatContainer.querySelectorAll(`[data-message-id="${escapeMessageIdForSelector(messageId)}"]`).length;
+        const tailMatchesCandidate = renderedTailKeysMatch(session, afterTailKey, messageId);
+        const domChildDelta = afterChildren - beforeChildren;
+        const postAppendAuditPassed = duplicateCount === 1 && tailMatchesCandidate === true && domChildDelta > 0;
+        logRenderStormMetric('user-message-append-post-audit', [
+            `messageId=${messageId}`,
+            `domChildrenBefore=${beforeChildren}`,
+            `domChildrenAfter=${afterChildren}`,
+            `domChildDelta=${domChildDelta}`,
+            `duplicateCount=${duplicateCount}`,
+            `expectedTail=${messageId}`,
+            `actualTail=${afterTailKey || 'null'}`,
+            `tailMatches=${tailMatchesCandidate ? 'true' : 'false'}`,
+            'postAppendAuditMode=identity-tail',
+            `postAppendAuditPassed=${postAppendAuditPassed ? 'true' : 'false'}`,
+            ...(tailSafety.fields || [])
+        ]);
+        if (!postAppendAuditPassed) {
+            return bailUserMessageAppendFastPath('post-append-audit-failed', [...fields, `duplicateCount=${duplicateCount}`, `afterTailKey=${afterTailKey || 'null'}`, `domChildrenBefore=${beforeChildren}`, `domChildrenAfter=${afterChildren}`, `domChildDelta=${domChildDelta}`, 'postAppendAuditMode=identity-tail', ...(tailSafety.fields || [])]);
+        }
+        session.lastAssistantUpgradeFallback = null;
+        countUserMessageAppendFastPathResult('success', [...fields, `reason=${tailSafety.reason || 'hidden-tail-safe'}`, `domChildren=${afterChildren}`, `domChildDelta=${domChildDelta}`, 'postAppendAuditMode=identity-tail', `postAppendAuditPassed=${postAppendAuditPassed ? 'true' : 'false'}`, ...(tailSafety.fields || [])]);
+        scrollToBottom(true);
+        return { applied: true, reason: tailSafety.reason || 'success' };
+    }
+
+    function bailAssistantStreamingPatch(reason, fields = []) {
+        const key = reason || 'unknown';
+        countAssistantStreamingPatchResult('fallback-full-render', [`reason=${key}`, ...fields]);
+        countAssistantStreamingPatchBail(key, fields);
+        return { applied: false, reason: key };
+    }
+
+    function isAssistantStreamingSearchUnsafe() {
+        return Boolean(
+            sessionSearch.open
+            || String(sessionSearch.query || '').trim()
+            || sessionSearch.smartInFlight
+            || sessionSearch.mode === 'smart'
+            || sessionSearch.matches.length > 0
+            || sessionSearch.smartMessageIds.length > 0
+        );
+    }
+
+    function resolveAssistantStreamingDomTarget(session, targetId, exactMatches, fields = []) {
+        const exactSelector = `[data-message-id="${escapeMessageIdForSelector(targetId)}"]`;
+        if (exactMatches.length === 1) {
+            return {
+                resolved: true,
+                resolution: 'exact',
+                bubble: exactMatches[0],
+                selector: exactSelector,
+                domKey: targetId,
+                fields: ['domTargetResolution=exact']
+            };
+        }
+        if (exactMatches.length > 1) {
+            return {
+                resolved: false,
+                reason: 'identity-order-duplicate-dom-target',
+                fields: [...fields, `targetId=${targetId}`, `domMatches=${exactMatches.length}`, 'domTargetResolution=duplicate-exact']
+            };
+        }
+        if (typeof targetId !== 'string' || !targetId.startsWith('msg_')) {
+            return {
+                resolved: false,
+                reason: 'dom-target-missing',
+                fields: [...fields, `targetId=${targetId || 'null'}`, 'domMatches=0', 'domTargetResolution=missing-no-server-target']
+            };
+        }
+
+        const now = Date.now();
+        const candidates = [];
+        const addCandidate = (aliasKey, source, meta = {}) => {
+            if (typeof aliasKey !== 'string' || !(aliasKey.startsWith('tmp:') || aliasKey.startsWith('local-'))) return;
+            if (meta.sessionId && meta.sessionId !== activeSessionId) return;
+            if (meta.newKey && meta.newKey !== targetId) return;
+            if (meta.assistantMsgId && meta.assistantMsgId !== targetId) return;
+            const ts = typeof meta.ts === 'number' ? meta.ts : null;
+            const ageMs = ts ? now - ts : null;
+            candidates.push({ aliasKey, source: source || 'unknown', ts, ageMs, turnAnchor: meta.turnAnchor || aliasKey });
+        };
+
+        const pending = session.pendingAssistantUpgrade || null;
+        addCandidate(pending?.tmpKey, pending?.source || 'pendingAssistantUpgrade', {
+            sessionId: pending?.fallbackSessionId,
+            newKey: pending?.assistantMsgId || pending?.fallbackAssistantKey,
+            assistantMsgId: pending?.assistantMsgId || pending?.fallbackAssistantKey,
+            ts: pending?.ts || pending?.fallbackAppliedAt,
+            turnAnchor: pending?.fallbackTurnAnchor || pending?.tmpKey
+        });
+        addCandidate(pending?.fallbackSourceTmpKey, pending?.fallbackSource || pending?.source || 'pendingAssistantUpgrade', {
+            sessionId: pending?.fallbackSessionId,
+            newKey: pending?.fallbackAssistantKey || pending?.assistantMsgId,
+            assistantMsgId: pending?.assistantMsgId || pending?.fallbackAssistantKey,
+            ts: pending?.ts || pending?.fallbackAppliedAt,
+            turnAnchor: pending?.fallbackTurnAnchor || pending?.fallbackSourceTmpKey
+        });
+
+        const fallback = session.lastAssistantUpgradeFallback || null;
+        addCandidate(fallback?.fallbackSourceTmpKey, fallback?.fallbackSource || 'lastAssistantUpgradeFallback', {
+            sessionId: fallback?.fallbackSessionId,
+            newKey: fallback?.fallbackAssistantKey,
+            assistantMsgId: fallback?.fallbackAssistantKey,
+            ts: fallback?.fallbackAppliedAt,
+            turnAnchor: fallback?.fallbackTurnAnchor || fallback?.fallbackSourceTmpKey
+        });
+
+        const recentAliases = Array.isArray(session.recentAssistantDomTargetAliases) ? session.recentAssistantDomTargetAliases : [];
+        for (const alias of recentAliases) {
+            addCandidate(alias?.oldKey, alias?.source || 'recentAssistantDomTargetAliases', {
+                sessionId: alias?.sessionId,
+                newKey: alias?.newKey,
+                assistantMsgId: alias?.assistantMsgId || alias?.newKey,
+                ts: alias?.ts,
+                turnAnchor: alias?.turnAnchor || alias?.oldKey
+            });
+        }
+
+        const uniqueCandidates = [];
+        const seenAliases = new Set();
+        for (const candidate of candidates) {
+            if (seenAliases.has(candidate.aliasKey)) continue;
+            seenAliases.add(candidate.aliasKey);
+            uniqueCandidates.push(candidate);
+        }
+        if (uniqueCandidates.length === 0) {
+            return {
+                resolved: false,
+                reason: 'dom-target-missing',
+                fields: [...fields, `targetId=${targetId}`, 'domMatches=0', 'domTargetResolution=missing-no-alias']
+            };
+        }
+
+        const currentTurnAnchored = session.currentTurnAssistantKey === targetId || session.thinkingId === targetId || session.currentTurnAssistantMsgId === targetId;
+        if (!currentTurnAnchored || session.canceledActiveTurn) {
+            return {
+                resolved: false,
+                reason: 'identity-order-alias-stale',
+                fields: [...fields, `targetId=${targetId}`, `currentTurnAnchored=${currentTurnAnchored}`, `canceled=${Boolean(session.canceledActiveTurn)}`, 'domTargetResolution=alias-stale']
+            };
+        }
+
+        const matchedAliases = [];
+        let staleCandidateCount = 0;
+        for (const candidate of uniqueCandidates) {
+            if (candidate.ageMs !== null && candidate.ageMs > 60000) {
+                staleCandidateCount += 1;
+                continue;
+            }
+            const aliasSelector = `[data-message-id="${escapeMessageIdForSelector(candidate.aliasKey)}"]`;
+            const aliasMatches = Array.from(chatContainer.querySelectorAll(aliasSelector))
+                .filter((node) => node?.classList?.contains('message') && node.classList.contains('bot'));
+            if (aliasMatches.length > 0) {
+                matchedAliases.push({ ...candidate, selector: aliasSelector, matches: aliasMatches });
+            }
+        }
+        const nonStaleMatches = matchedAliases.filter((candidate) => candidate.matches.length > 0);
+        if (staleCandidateCount > 0 && staleCandidateCount === uniqueCandidates.length) {
+            return {
+                resolved: false,
+                reason: 'identity-order-alias-stale',
+                fields: [...fields, `targetId=${targetId}`, `aliasCandidates=${uniqueCandidates.length}`, `staleAliasCandidates=${staleCandidateCount}`, 'domMatches=0', 'domTargetResolution=alias-stale']
+            };
+        }
+        if (nonStaleMatches.length === 0) {
+            return {
+                resolved: false,
+                reason: 'dom-target-missing',
+                fields: [...fields, `targetId=${targetId}`, `aliasCandidates=${uniqueCandidates.length}`, 'domMatches=0', 'domTargetResolution=alias-miss']
+            };
+        }
+        if (nonStaleMatches.length !== 1 || nonStaleMatches[0].matches.length !== 1) {
+            const aliasMatchCount = nonStaleMatches.reduce((total, candidate) => total + candidate.matches.length, 0);
+            return {
+                resolved: false,
+                reason: 'identity-order-alias-ambiguous',
+                fields: [...fields, `targetId=${targetId}`, `aliasCandidates=${uniqueCandidates.length}`, `aliasDomMatches=${aliasMatchCount}`, 'domTargetResolution=alias-ambiguous']
+            };
+        }
+
+        const alias = nonStaleMatches[0];
+        return {
+            resolved: true,
+            resolution: 'alias',
+            bubble: alias.matches[0],
+            selector: alias.selector,
+            domKey: alias.aliasKey,
+            aliasKey: alias.aliasKey,
+            aliasSource: alias.source,
+            fields: [
+                'domTargetResolution=alias',
+                'domAliasApplied=true',
+                `domAliasKey=${alias.aliasKey}`,
+                `domAliasSource=${alias.source}`,
+                `domAliasAgeMs=${alias.ageMs ?? 'null'}`
+            ]
+        };
+    }
+
+    function assistantStreamingTailMatchesResolvedTarget(session, tailKey, targetId, targetResolution) {
+        if (!tailKey) return false;
+        if (renderedTailKeysMatch(session, tailKey, targetId)) return true;
+        if (targetResolution?.resolution !== 'alias') return false;
+        const aliasKey = targetResolution.aliasKey || '';
+        if (!aliasKey) return false;
+        return tailKey === aliasKey || renderedTailKeysMatch(session, tailKey, aliasKey);
+    }
+
+    function tryPatchAssistantStreamingBubble(sessionId, source = 'unknown') {
+        const fields = [`sessionId=${sessionId || 'null'}`, `source=${source || 'unknown'}`];
+        if (!chatContainer) return bailAssistantStreamingPatch('dom-target-missing', fields);
+        if (!sessionId || sessionId !== activeSessionId) {
+            return bailAssistantStreamingPatch('identity-order-inactive-session', [...fields, `activeSessionId=${activeSessionId || 'null'}`]);
+        }
+        const session = getSessionState(sessionId);
+        if (!session || !(session.messagesById instanceof Map) || !Array.isArray(session.timeline)) {
+            return bailAssistantStreamingPatch('identity-order-session-mismatch', fields);
+        }
+        if (isAssistantStreamingSearchUnsafe()) {
+            return bailAssistantStreamingPatch('search-highlight-active', [...fields, `searchMode=${sessionSearch.mode || 'text'}`, `matches=${sessionSearch.matches.length}`]);
+        }
+
+        const targetId = session.currentTurnAssistantKey || session.thinkingId || '';
+        if (typeof targetId !== 'string' || !targetId) {
+            return bailAssistantStreamingPatch('identity-order-missing-target', fields);
+        }
+        const message = session.messagesById.get(targetId);
+        if (!message || message.role !== 'assistant') {
+            return bailAssistantStreamingPatch('identity-order-target-not-assistant', [...fields, `targetId=${targetId || 'null'}`, `role=${message?.role || 'null'}`]);
+        }
+        if (message.meta?.isThinking !== true) {
+            return bailAssistantStreamingPatch('identity-order-target-not-streaming', [...fields, `targetId=${targetId}`]);
+        }
+        if (session.hiddenSet instanceof Set && session.hiddenSet.has(targetId)) {
+            return bailAssistantStreamingPatch('identity-order-hidden-target', [...fields, `targetId=${targetId}`]);
+        }
+        if (shouldHideDcpUiMessage(message) || isHiddenControlAssistantText(message.text || '')) {
+            return bailAssistantStreamingPatch('identity-order-hidden-control-assistant', [...fields, `targetId=${targetId}`]);
+        }
+        if (message.meta?.kind || message.meta?.isDiff || Array.isArray(message.meta?.images) || Array.isArray(message.meta?.todos) && message.meta.todos.length > 0 || Array.isArray(message.meta?.subagents) && message.meta.subagents.length > 0) {
+            return bailAssistantStreamingPatch('rich-content-unsafe', [...fields, `targetId=${targetId}`]);
+        }
+
+        const targetIndex = session.timeline.lastIndexOf(targetId);
+        if (targetIndex < 0) {
+            return bailAssistantStreamingPatch('identity-order-not-in-timeline', [...fields, `targetId=${targetId}`]);
+        }
+        if (targetIndex !== session.timeline.length - 1) {
+            return bailAssistantStreamingPatch('identity-order-not-tail', [...fields, `targetId=${targetId}`, `targetIndex=${targetIndex}`, `timelineSize=${session.timeline.length}`]);
+        }
+
+        const selector = `[data-message-id="${escapeMessageIdForSelector(targetId)}"]`;
+        const matches = Array.from(chatContainer.querySelectorAll(selector))
+            .filter((node) => node?.classList?.contains('message') && node.classList.contains('bot'));
+        const targetResolution = resolveAssistantStreamingDomTarget(session, targetId, matches, fields);
+        if (!targetResolution.resolved) {
+            return bailAssistantStreamingPatch(targetResolution.reason, targetResolution.fields);
+        }
+        const bubble = targetResolution.bubble;
+        const content = bubble.querySelector(':scope > .message-content');
+        if (!content) {
+            return bailAssistantStreamingPatch('dom-target-missing-content', [...fields, `targetId=${targetId}`, ...(targetResolution.fields || [])]);
+        }
+        const lastRenderedKey = getLastRenderedChatKey();
+        if (!assistantStreamingTailMatchesResolvedTarget(session, lastRenderedKey, targetId, targetResolution)) {
+            return bailAssistantStreamingPatch('identity-order-dom-tail-mismatch', [...fields, `targetId=${targetId}`, `domLastRendered=${lastRenderedKey || 'null'}`, ...(targetResolution.fields || [])]);
+        }
+
+        const wasPinned = autoScrollPinnedToBottom === true && isNearBottom(chatContainer);
+        if (!wasPinned) {
+            return bailAssistantStreamingPatch('scroll-unpinned', [...fields, `targetId=${targetId}`, ...(targetResolution.fields || [])]);
+        }
+
+        const beforeHtml = content.innerHTML;
+        try {
+            renderAssistantMarkdown(content, message);
+            bubble.classList.toggle('thinking', message.meta?.isThinking === true);
+            bubble.classList.toggle('streaming', message.meta?.isThinking === true);
+            const statusText = typeof message.meta?.statusText === 'string' ? message.meta.statusText : '';
+            let statusEl = bubble.querySelector(':scope > .message-status');
+            if (statusText) {
+                if (!statusEl) {
+                    statusEl = document.createElement('div');
+                    statusEl.className = 'message-status';
+                    bubble.appendChild(statusEl);
+                }
+                statusEl.textContent = statusText;
+            } else if (statusEl) {
+                statusEl.remove();
+            }
+            bubble.querySelectorAll(':scope > .message-copy-btn.assistant-copy').forEach((btn) => btn.remove());
+            attachMessageCopyButton(bubble, message);
+            enhanceCodeBlocksWithCopyButtons(bubble);
+            wrapTables(content);
+        } catch (error) {
+            content.innerHTML = beforeHtml;
+            return bailAssistantStreamingPatch('rich-content-render-throw', [...fields, `targetId=${targetId}`, `error=${String(error)}`, ...(targetResolution.fields || [])]);
+        }
+
+        const duplicateCount = chatContainer.querySelectorAll(targetResolution.selector).length;
+        const afterTailKey = getLastRenderedChatKey();
+        if (duplicateCount !== 1 || !assistantStreamingTailMatchesResolvedTarget(session, afterTailKey, targetId, targetResolution)) {
+            return bailAssistantStreamingPatch('identity-order-post-audit-failed', [...fields, `targetId=${targetId}`, `duplicateCount=${duplicateCount}`, `afterTailKey=${afterTailKey || 'null'}`, ...(targetResolution.fields || [])]);
+        }
+        countAssistantStreamingPatchResult(targetResolution.resolution === 'alias' ? 'post-upgrade-alias-success' : 'success', [...fields, `targetId=${targetId}`, `textLen=${typeof message.text === 'string' ? message.text.length : 0}`, `statusTextLen=${typeof message.meta?.statusText === 'string' ? message.meta.statusText.length : 0}`, `domTail=${afterTailKey || 'null'}`, ...(targetResolution.fields || [])]);
+        scrollToBottom(true);
+        return { applied: true, reason: targetResolution.resolution === 'alias' ? 'post-upgrade-alias-success' : 'success' };
+    }
+
     function stripAttachmentManifest(text) {
         if (!text) return text;
         const marker = '---\nAttachments (workspace files; read from disk; DO NOT use any URL):';
@@ -6221,6 +7350,7 @@ function shouldHideDcpUiMessage(message) {
             return;
         }
         renderScheduled = true;
+        noteFullRenderRequest(reason, ['source=scheduleRenderFromState']);
         vscode.postMessage({ type: 'ui-debug', payload: ['WV: render.scheduled', `reason=${reason}`] });
         requestAnimationFrame(() => {
             renderScheduled = false;
@@ -6418,7 +7548,7 @@ function shouldHideDcpUiMessage(message) {
 
         renderQuestionCardInTimeline();
 
-        applyBackgroundSubagentIndicator(session);
+        countBackgroundIndicatorApplyResult(applyBackgroundSubagentIndicator(session), [`sessionId=${activeSessionId || 'null'}`, 'source=renderFromState-pre-enhance']);
 
         enhanceCodeBlocksWithCopyButtons(chatContainer);
 
@@ -6458,7 +7588,7 @@ function shouldHideDcpUiMessage(message) {
         const domFirst10 = formatList(domKeys.slice(0, 10));
         const domLast10 = formatList(domKeys.slice(-10));
 
-        applyBackgroundSubagentIndicator(session);
+        countBackgroundIndicatorApplyResult(applyBackgroundSubagentIndicator(session), [`sessionId=${activeSessionId || 'null'}`, 'source=renderFromState-post-audit']);
 
         // vscode.postMessage({
         //     type: 'ui-debug',
@@ -7427,6 +8557,7 @@ function applyPromptToSession(sessionId, payload) {
             text: displayText,
             meta: { clientId: payload.clientMessageId, images: payload.images || [] }
         });
+        const userAppendFastPathResult = tryAppendUserMessageFastPath(sessionId, userMessage?.id || payload.clientMessageId, 'applyPromptToSession');
         session.lastTurnUserId = payload.clientMessageId;
         session.appendRootUserKey = payload.clientMessageId;
         if (payload.clientMessageId && payload.clientMessageId.startsWith('local-')) {
@@ -7445,6 +8576,7 @@ function applyPromptToSession(sessionId, payload) {
     session.earlyFinalAssistantId = null;
     session.finalAssistantLock = null;
     session.pendingAssistantUpgrade = null;
+    session.lastAssistantUpgradeFallback = null;
     session.awaitingFinalMapBind = false;
     session.streamMode = null;
     session.backendTurnInFlight = false;
@@ -7472,6 +8604,7 @@ function applyPromptToSession(sessionId, payload) {
         assertInvariants(sessionId, 'sendPrompt');
         updateSendGate();
         // agent timeout notice removed
+        return { userAppendFastPathApplied: userAppendFastPathResult?.applied === true, userAppendFastPathReason: userAppendFastPathResult?.reason || 'unknown' };
     }
 
 function canAppendToMessage(session, message) {
@@ -7661,7 +8794,12 @@ function handleAssistantMeta(sessionId, message, options = {}) {
                 tmpKey: message.tmpKey,
                 assistantMsgId: msgId,
                 source: 'assistantMessageMeta',
-                ts: Date.now()
+                ts: Date.now(),
+                fallbackAssistantKey: msgId,
+                fallbackSourceTmpKey: message.tmpKey,
+                fallbackSessionId: sessionId,
+                fallbackSource: 'assistantMessageMeta',
+                fallbackTurnAnchor: session.currentTurnAssistantKey || session.thinkingId || message.tmpKey
             };
             updateSendGate();
             vscode.postMessage({
@@ -7796,7 +8934,12 @@ function handleChatChunk(sessionId, message) {
                 tmpKey: message.tmpKey,
                 assistantMsgId: msgId,
                 source: 'chatChunk',
-                ts: Date.now()
+                ts: Date.now(),
+                fallbackAssistantKey: msgId,
+                fallbackSourceTmpKey: message.tmpKey,
+                fallbackSessionId: sessionId,
+                fallbackSource: 'chatChunk',
+                fallbackTurnAnchor: session.currentTurnAssistantKey || session.thinkingId || message.tmpKey
             };
             updateSendGate();
             vscode.postMessage({
@@ -7918,12 +9061,18 @@ function handleChatDone(sessionId, message) {
                     tmpKey: session.currentTurnAssistantKey || session.thinkingId || null,
                     assistantMsgId: resolvedFinal,
                     source: 'chatDone',
-                    ts: Date.now()
+                    ts: Date.now(),
+                    fallbackAssistantKey: resolvedFinal,
+                    fallbackSourceTmpKey: session.currentTurnAssistantKey || session.thinkingId || null,
+                    fallbackSessionId: sessionId,
+                    fallbackSource: 'chatDone',
+                    fallbackTurnAnchor: session.currentTurnAssistantKey || session.thinkingId || null
                 };
             }
         } else {
             session.awaitingFinalMapBind = false;
             session.pendingAssistantUpgrade = null;
+            session.lastAssistantUpgradeFallback = null;
             session.currentTurnAssistantMsgId = null;
             session.currentTurnAssistantKey = null;
         }
@@ -8123,7 +9272,7 @@ function appendMessageImages(parentEl, message) {
                 contextItems: contextPayload
             });
         } else {
-            applyPromptToSession(activeSessionId, {
+            const promptRenderResult = applyPromptToSession(activeSessionId, {
                 text: messageText,
                 clientMessageId,
                 opId,
@@ -8134,7 +9283,15 @@ function appendMessageImages(parentEl, message) {
             const session = getSessionState(activeSessionId);
             const tmpKey = session?.thinkingId || null;
             vscode.postMessage({ type: 'registerTmpKey', sessionId: activeSessionId, tmpKey });
-            window.__oc?.renderFromState?.();
+            if (promptRenderResult?.userAppendFastPathApplied === true) {
+                countUserMessageAppendFastPathResult('skip-immediate-full-render', [
+                    `sessionId=${activeSessionId || 'null'}`,
+                    `messageId=${clientMessageId}`,
+                    `reason=${promptRenderResult.userAppendFastPathReason || 'success'}`
+                ]);
+            } else {
+                window.__oc?.renderFromState?.('sendPrompt:user-append-fallback');
+            }
             scrollToBottom();
             logSessionState(activeSessionId, 'UI_SEND_PROMPT');
         }
@@ -8589,17 +9746,12 @@ window.addEventListener('message', (event) => {
                 }
               }
 
-              const indicator = route.shouldRender ? document.getElementById('subagent-indicator') : null;
-              if (indicator) {
-                const hasIndicator = runningCount > 0 || finalizingCount > 0 || doneJustNowCount > 0;
-                indicator.style.display = hasIndicator ? '' : 'none';
-                if (runningCount > 0 || finalizingCount > 0) {
-                  indicator.textContent = `${runningCount} running / ${finalizingCount} finalizing`;
-                } else {
-                  indicator.textContent = `Done just now (${doneJustNowCount})`;
-                }
-              }
-              renderIfActive(sessionId, 'subagentStatus', { extra: [`agentSessionId=${route.agentSessionId || 'null'}`] });
+              handleSubagentStatusPatchResult(
+                sessionId,
+                applySubagentStatusLocalPatch(sessionId, { runningCount, finalizingCount, doneJustNowCount }),
+                'subagentStatus',
+                [`agentSessionId=${route.agentSessionId || 'null'}`]
+              );
               break;
             }
             case 'backgroundActivityPulse': {
@@ -8820,6 +9972,7 @@ window.addEventListener('message', (event) => {
                     }
                     session.thinkingId = null;
                     session.pendingAssistantUpgrade = null;
+                    session.lastAssistantUpgradeFallback = null;
                     session.awaitingFinalMapBind = false;
                     session.backendTurnInFlight = false;
                     session.turnFullyFinalized = true;
@@ -9390,11 +10543,25 @@ window.addEventListener('message', (event) => {
                 if (messageId && Number.isFinite(messageIndex)) {
                     session.messageIndexMap.set(messageId, messageIndex);
                     const tmpKey = session.pendingAssistantUpgrade?.tmpKey || session.thinkingId || null;
+                    const assistantUpgradeFallbackSnapshot = session.lastAssistantUpgradeFallback ? {
+                        ...session.lastAssistantUpgradeFallback,
+                        authoritativePreAttemptCurrentTurnAssistantKey: session.currentTurnAssistantKey || null,
+                        authoritativePreAttemptTmpStillPresent: Boolean(
+                            tmpKey && (
+                                session.messagesById?.has?.(tmpKey) ||
+                                session.timeline?.includes?.(tmpKey) ||
+                                session.currentTurnAssistantKey === tmpKey ||
+                                session.thinkingId === tmpKey
+                            )
+                        )
+                    } : null;
                     attemptAssistantUpgrade(sessionId, { sessionId, tmpKey, assistantMsgId: messageId }, 'messageIndexMapDelta');
+                    reconcileAssistantUpgradeFallbackWithAuthoritativeMap(sessionId, session, 'messageIndexMapDelta', messageId, assistantUpgradeFallbackSnapshot);
                     if (session.currentTurnAssistantKey === messageId) {
                         session.awaitingFinalMapBind = false;
                         if (session.pendingAssistantUpgrade?.assistantMsgId === messageId) {
                             session.pendingAssistantUpgrade = null;
+                            session.lastAssistantUpgradeFallback = null;
                         }
                     }
                 }
@@ -9440,9 +10607,13 @@ window.addEventListener('message', (event) => {
                     const didReplace = session.currentTurnAssistantKey === pending.assistantMsgId;
                     if (didReplace) {
                         session.pendingAssistantUpgrade = null;
+                        session.lastAssistantUpgradeFallback = null;
                         session.awaitingFinalMapBind = false;
                         vscode.postMessage({ type: 'ui-debug', payload: ['[DBG_PENDING_UPGRADE_CLEAR]', 'sessionId', sessionId] });
                     }
+                }
+                if (session) {
+                    reconcileAssistantUpgradeFallbackWithAuthoritativeMap(sessionId, session, 'messageIndexMap');
                 }
                 const sample = map.slice(0, 5).map((entry) => `${entry.messageId}:${entry.messageIndex}`);
                 let hasUser = false;
@@ -9548,7 +10719,9 @@ window.addEventListener('message', (event) => {
                 }
                 handleAssistantMeta(sessionId, message, { render: route.shouldRender });
                 // Removed: reconcilePendingSegments - new system uses applyHydratedSegments
-                renderIfActive(sessionId, 'assistantMessageMeta', { scroll: true });
+                if (!tryPatchAssistantStreamingBubble(sessionId, 'assistantMessageMeta').applied) {
+                    renderIfActive(sessionId, 'assistantMessageMeta', { scroll: true });
+                }
                 logSessionState(sessionId, 'assistantMessageMeta');
                 break;
             }
@@ -9577,7 +10750,7 @@ window.addEventListener('message', (event) => {
                     if (message.phase === 'assistant_final_accepted') {
                         session.earlyFinalAssistantId = msgId;
                         if (sessionHasActiveBackgroundSubagents(session)) {
-                            requestBackgroundPulseRender();
+                            requestBackgroundPulseRender(sessionId);
                         }
                     }
                 }
@@ -9604,7 +10777,9 @@ window.addEventListener('message', (event) => {
                     break;
                 }
                 handleChatChunk(sessionId, message);
-                renderIfActive(sessionId, 'chatChunk', { scroll: true });
+                if (!tryPatchAssistantStreamingBubble(sessionId, 'chatChunk').applied) {
+                    renderIfActive(sessionId, 'chatChunk', { scroll: true });
+                }
                 logSessionState(sessionId, 'chatChunk');
                 break;
             }
@@ -9717,6 +10892,7 @@ window.addEventListener('message', (event) => {
                 const chosenTimeCompleted = message?.chosenTimeCompleted ?? null;
                 const chosenTimeCreated = message?.chosenTimeCreated ?? null;
                 const awaitingAssistantIdFromExport = Boolean(message?.awaitingAssistantIdFromExport);
+                let userKeyReplaced = false;
 
                 let targetKey = null;
                 if (typeof localKey === 'string' && localKey.length) {
@@ -9778,6 +10954,7 @@ window.addEventListener('message', (event) => {
                             vscode.postMessage({ type: 'ui-debug', payload: ['user.upgrade', `user.upgrade: localKey=${localKey || 'null'} msgId=${userMsgId || 'null'} replaced=false reason=collision-nonuser`] });
                         } else {
                             replaceKeyEverywhere(localKey, userMsgId, sessionId);
+                            userKeyReplaced = true;
                             vscode.postMessage({ type: 'ui-debug', payload: ['user.upgrade', `user.upgrade: localKey=${localKey || 'null'} msgId=${userMsgId || 'null'} replaced=true reason=ok`] });
                             logTimelineSnapshot('user.upgrade', session.timeline, 'expectSize=2');
                             const counts = timelineCounts(session.timeline);
@@ -9788,10 +10965,24 @@ window.addEventListener('message', (event) => {
 
                 if (assistantMsgId && session.pendingAssistantUpgrade?.tmpKey) {
                     session.pendingAssistantUpgrade.assistantMsgId = assistantMsgId;
+                    session.pendingAssistantUpgrade.fallbackAssistantKey = assistantMsgId;
+                    session.pendingAssistantUpgrade.fallbackSourceTmpKey = session.pendingAssistantUpgrade.tmpKey;
+                    session.pendingAssistantUpgrade.fallbackSessionId = sessionId;
+                    session.pendingAssistantUpgrade.fallbackSource = 'userMessageUpgrade';
+                    session.pendingAssistantUpgrade.fallbackTurnAnchor = session.currentTurnAssistantKey || session.thinkingId || session.pendingAssistantUpgrade.tmpKey;
                 }
                 
                 // Also upgrade the assistant message if provided
                 attemptAssistantUpgrade(sessionId, message, 'userMessageUpgrade');
+                if (userKeyReplaced) {
+                    countUserMessageAppendFastPathResult('fallback-full-render', [
+                        `reason=user-identity-resync`,
+                        `sessionId=${sessionId || 'null'}`,
+                        `localKey=${localKey || 'null'}`,
+                        `userMsgId=${userMsgId || 'null'}`
+                    ]);
+                    renderIfActive(sessionId, 'userMessageUpgrade:user-identity-resync');
+                }
                 if (!route.shouldRender) {
                     logBackgroundStateUpdate(sessionId, 'userMessageUpgrade');
                 }
