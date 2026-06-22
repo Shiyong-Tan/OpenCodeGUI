@@ -134,7 +134,19 @@ type WebviewLivenessRecord = {
     pending: boolean;
 };
 
-type WebviewAutoRescueAction = 'Cancel' | 'Rescue Now' | 'dismissed-as-cancel' | 'stale-token' | 'diagnostic-only';
+type WebviewAutoRescueAction = 'Cancel' | 'Rescue Now' | 'dismissed-as-cancel' | 'stale-token' | 'diagnostic-only' | 'soft-rescue';
+type WebviewAutoRescueState = 'idle' | 'pending-notification' | 'cancelled' | 'running-soft-rescue' | 'cooldown' | 'failed';
+type WebviewLivenessActiveTurnSnapshot = {
+    streaming: boolean;
+    finalizing: boolean;
+    active: boolean;
+    fresh: boolean;
+    source: string;
+    turnId?: string;
+    updatedAt: number;
+    ageMs: number;
+    freshnessWindowMs: number;
+};
 
 /**
  * Simplified SegmentState interface (V2)
@@ -524,6 +536,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private emitTurnFinalizePhase(webview: vscode.Webview, sessionId: string | undefined, phase: 'stream_done' | 'commit_done' | 'upgrade_done' | 'finalize_done'): void {
+        this.markWebviewActiveTurnUpdated(sessionId, `finalize:${phase}`);
         webview.postMessage({ type: 'turnFinalizePhase', sessionId, phase, ts: Date.now() });
     }
 
@@ -632,6 +645,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private readonly recentSessionLoadLimit = 200;
     private readonly webviewLivenessPingTimeoutMs = 3000;
     private readonly webviewAutoRescueCooldownMs = 60000;
+    private readonly webviewActiveTurnFreshnessWindowMs = 30000;
     private readonly webviewLivenessProbeIntervalMs = 30000;
     private readonly webviewLivenessActiveTurnMissThreshold = 2;
     private webviewLivenessPanelSeq = 0;
@@ -639,6 +653,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private webviewAutoRescueCooldownUntilByEpisode = new Map<string, number>();
     private webviewLivenessProbeTimer?: NodeJS.Timeout;
     private webviewLivenessMissedAckCountByToken = new Map<string, number>();
+    private webviewLivenessSimulatedMissedAckCountByToken = new Map<string, number>();
+    private webviewAutoRescueStateByToken = new Map<string, WebviewAutoRescueState>();
+    private webviewAutoRescueFailureCountByEpisode = new Map<string, number>();
+    private webviewActiveTurnUpdatedAtBySession = new Map<string, number>();
 
     private getWebviewLivenessPanelId(): string {
         if (!this.webviewLivenessCurrent?.panelId) {
@@ -657,14 +675,45 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private describeWebviewLivenessFlags(sessionId: string | undefined): string {
-        const { streaming, finalizing } = this.getWebviewLivenessActiveTurnFlags(sessionId);
-        return `streaming=${String(streaming)} | finalizing=${String(finalizing)}`;
+        const flags = this.getWebviewLivenessActiveTurnFlags(sessionId);
+        return `streaming=${String(flags.streaming)} | finalizing=${String(flags.finalizing)} | activeTurnFresh=${String(flags.fresh)} | activeTurnSource=${flags.source} | activeTurnId=${flags.turnId || 'none'} | activeTurnAgeMs=${flags.ageMs} | activeTurnFreshnessWindowMs=${flags.freshnessWindowMs}`;
     }
 
-    private getWebviewLivenessActiveTurnFlags(sessionId: string | undefined): { streaming: boolean; finalizing: boolean; active: boolean } {
+    private markWebviewActiveTurnUpdated(sessionId: string | undefined, source: string): void {
+        if (!sessionId) return;
+        this.webviewActiveTurnUpdatedAtBySession.set(sessionId, Date.now());
+        this.uiDebugChannel?.appendLine(`EXT: webviewAutoRescue.activeTurn.mark | source=${source} | sessionId=${sessionId} | ${this.describeWebviewLivenessFlags(sessionId)}`);
+    }
+
+    private getWebviewLivenessActiveTurnFlags(sessionId: string | undefined): WebviewLivenessActiveTurnSnapshot {
         const streaming = Boolean(sessionId && this.sendInFlightBySession.has(sessionId));
         const finalizing = Boolean(sessionId && this.pendingAssistantMessageIdBySession.has(sessionId));
-        return { streaming, finalizing, active: streaming || finalizing };
+        const active = streaming || finalizing;
+        const updatedAt = sessionId ? (this.webviewActiveTurnUpdatedAtBySession.get(sessionId) || 0) : 0;
+        const now = Date.now();
+        const ageMs = updatedAt > 0 ? now - updatedAt : Number.POSITIVE_INFINITY;
+        const freshnessWindowMs = this.webviewActiveTurnFreshnessWindowMs;
+        const turnId = sessionId
+            ? (this.pendingAssistantMessageIdBySession.get(sessionId) || this.pendingLocalKeyBySession.get(sessionId))
+            : undefined;
+        const source = streaming && finalizing
+            ? 'sendInFlightBySession+pendingAssistantMessageIdBySession'
+            : streaming
+                ? 'sendInFlightBySession'
+                : finalizing
+                    ? 'pendingAssistantMessageIdBySession'
+                    : 'none';
+        return {
+            streaming,
+            finalizing,
+            active,
+            fresh: active && updatedAt > 0 && ageMs >= 0 && ageMs <= freshnessWindowMs,
+            source,
+            turnId,
+            updatedAt,
+            ageMs: Number.isFinite(ageMs) ? ageMs : -1,
+            freshnessWindowMs
+        };
     }
 
     private resetWebviewLiveness(reason: string): void {
@@ -728,6 +777,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.cooldown.set | action=${action} | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | episodeId=${episodeId} | cooldownMs=${this.webviewAutoRescueCooldownMs} | until=${until}`);
     }
 
+    private setWebviewAutoRescueState(record: WebviewLivenessRecord, state: WebviewAutoRescueState, reason: string): void {
+        this.webviewAutoRescueStateByToken.set(record.token, state);
+        this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.state | state=${state} | reason=${reason} | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | notificationToken=${record.notificationToken || 'none'}`);
+    }
+
     private getWebviewAutoRescueCooldownForSession(sessionId: string): { active: boolean; episodeId?: string; until?: number } {
         const now = Date.now();
         for (const [episodeId, until] of this.webviewAutoRescueCooldownUntilByEpisode.entries()) {
@@ -763,6 +817,162 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.logWebviewAutoRescueDiagnostics(record, 'post', 'diagnostic-only');
     }
 
+    private async repostActiveSessionDataForWebviewSoftRescue(record: WebviewLivenessRecord): Promise<{ ok: boolean; phase?: 'snapshot' | 'recent' | 'full'; messages?: number; reason?: string }> {
+        const liveWebview = this._view?.webview;
+        if (!liveWebview || !this.isCurrentWebviewLivenessRecord(record)) {
+            return { ok: false, reason: 'soft-rescue-aborted-stale-token' };
+        }
+
+        const sessionId = record.sessionId;
+        const selectionEpoch = this.sessionSelectionEpoch;
+        const isStillActive = () => this.isCurrentWebviewLivenessRecord(record) && this.currentSessionId === sessionId && this.sessionSelectionEpoch === selectionEpoch;
+        const postIfStillActive = (payload: any, phase: 'snapshot' | 'recent' | 'full', messageCount: number): 'posted' | 'stale-token' | 'active-turn' => {
+            if (!isStillActive()) {
+                this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.softRescue.abort | action=soft-rescue-aborted-stale-token | reason=stale-before-post | phase=${phase} | panelId=${record.panelId} | sessionId=${sessionId} | token=${record.token} | currentSessionId=${this.currentSessionId || 'null'}`);
+                return 'stale-token';
+            }
+            const activeTurn = this.getWebviewLivenessActiveTurnFlags(sessionId);
+            if (activeTurn.fresh) {
+                this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.softRescue.defer | action=soft-rescue-deferred-active-turn | reason=fresh-active-turn | phase=${phase} | panelId=${record.panelId} | sessionId=${sessionId} | token=${record.token} | activeTurnId=${activeTurn.turnId || 'none'} | activeTurnSource=${activeTurn.source} | activeTurnAgeMs=${activeTurn.ageMs} | activeTurnFreshnessWindowMs=${activeTurn.freshnessWindowMs} | streaming=${String(activeTurn.streaming)} | finalizing=${String(activeTurn.finalizing)} | postedSessionData=false | reload=false | recreate=false | sessionMutation=false`);
+                return 'active-turn';
+            }
+            liveWebview.postMessage({ ...payload, phase, rescueSource: 'webviewAutoRescue' });
+            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.softRescue.repost | action=soft-rescue-ran | phase=${phase} | panelId=${record.panelId} | sessionId=${sessionId} | token=${record.token} | messages=${messageCount} | activeTurnSource=${activeTurn.source} | activeTurnAgeMs=${activeTurn.ageMs} | activeTurnFreshnessWindowMs=${activeTurn.freshnessWindowMs} | reload=false | recreate=false | sessionMutation=false`);
+            return 'posted';
+        };
+
+        const segMap = this.undoSegmentsBySession.get(sessionId);
+        const segments = segMap ? Array.from(segMap.values()) : [];
+        let baseTitle = 'Session';
+        let baseMessages: SessionMessage[] = [];
+        let snapshotTimelineIds: string[] = [];
+
+        try {
+            const snap = await this.readSnapshot(sessionId);
+            if (!isStillActive()) return { ok: false, reason: 'soft-rescue-aborted-stale-token' };
+            if (snap?.obj?.sessionData) {
+                const snapshotFormatted = await this.injectChangeLists(sessionId, {
+                    title: snap.obj.sessionData?.title || baseTitle,
+                    messages: Array.isArray(snap.obj.sessionData?.messages) ? snap.obj.sessionData.messages : []
+                });
+                if (!isStillActive()) return { ok: false, reason: 'soft-rescue-aborted-stale-token' };
+                baseTitle = snapshotFormatted.title || baseTitle;
+                baseMessages = snapshotFormatted.messages;
+                snapshotTimelineIds = Array.isArray(snap.obj.sessionData?.meta?.timelineMessageIds)
+                    ? (snap.obj.sessionData.meta.timelineMessageIds as string[]).filter((id): id is string => typeof id === 'string' && Boolean(id))
+                    : this.collectVisibleSnapshotMessages(baseMessages).map((message) => (typeof message?.id === 'string' ? message.id : '')).filter((id): id is string => Boolean(id));
+                const snapshotPayload = {
+                    type: 'sessionData',
+                    sessionId,
+                    title: baseTitle,
+                    messages: baseMessages,
+                    segments,
+                    meta: {
+                        ...(snap.obj.sessionData?.meta || {}),
+                        source: 'snapshot',
+                        timelineMessageIds: snapshotTimelineIds
+                    }
+                };
+                const postResult = postIfStillActive(snapshotPayload, 'snapshot', baseMessages.length);
+                if (postResult === 'posted') {
+                    return { ok: true, phase: 'snapshot', messages: baseMessages.length };
+                }
+                return { ok: false, reason: postResult === 'active-turn' ? 'soft-rescue-deferred-active-turn' : 'soft-rescue-aborted-stale-token' };
+            }
+        } catch (error) {
+            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.softRescue.snapshot.skip | panelId=${record.panelId} | sessionId=${sessionId} | token=${record.token} | err=${String(error)}`);
+        }
+
+        try {
+            const recentExport = await this.client.exportSessionRecent(sessionId, this.recentSessionLoadLimit);
+            if (!isStillActive()) return { ok: false, reason: 'soft-rescue-aborted-stale-token' };
+            const formattedRaw = this.formatSession(recentExport);
+            const formatted = await this.injectChangeLists(sessionId, formattedRaw);
+            if (!isStillActive()) return { ok: false, reason: 'soft-rescue-aborted-stale-token' };
+            const snapshotIdSet = new Set<string>(snapshotTimelineIds);
+            const snapshotMaxMessageIndex = this.getMaxMessageIndex(baseMessages);
+            const appendCandidates = this.computeRecentAppendCandidates(snapshotIdSet, snapshotMaxMessageIndex, formatted.messages);
+            const appendMessages = this.enforceUserAssistantPairs(appendCandidates);
+            const mergedMessages = this.mergeSessionMessagesById(baseMessages, appendMessages);
+            const newIds = appendMessages.map((message) => (typeof message?.id === 'string' ? message.id : '')).filter((id): id is string => Boolean(id));
+            const recentPayload = {
+                type: 'sessionData',
+                sessionId,
+                title: formatted.title || baseTitle,
+                messages: mergedMessages,
+                segments,
+                meta: {
+                    timelineMessageIds: [...snapshotTimelineIds, ...newIds]
+                }
+            };
+            const postResult = postIfStillActive(recentPayload, 'recent', mergedMessages.length);
+            if (postResult === 'posted') {
+                return { ok: true, phase: 'recent', messages: mergedMessages.length };
+            }
+            return { ok: false, reason: postResult === 'active-turn' ? 'soft-rescue-deferred-active-turn' : 'soft-rescue-aborted-stale-token' };
+        } catch (error) {
+            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.softRescue.recent.fail | panelId=${record.panelId} | sessionId=${sessionId} | token=${record.token} | err=${String(error)}`);
+        }
+
+        try {
+            const exportResult = await this.client.exportSession(sessionId);
+            if (!isStillActive()) return { ok: false, reason: 'soft-rescue-aborted-stale-token' };
+            const formattedRaw = this.formatSession(exportResult);
+            const formatted = await this.injectChangeLists(sessionId, formattedRaw);
+            if (!isStillActive()) return { ok: false, reason: 'soft-rescue-aborted-stale-token' };
+            const fullPayload = {
+                type: 'sessionData',
+                sessionId,
+                title: formatted.title,
+                messages: formatted.messages,
+                segments,
+                meta: {
+                    timelineMessageIds: this.collectVisibleSnapshotMessages(formatted.messages).map((message) => (typeof message?.id === 'string' ? message.id : '')).filter((id): id is string => Boolean(id))
+                }
+            };
+            const postResult = postIfStillActive(fullPayload, 'full', formatted.messages.length);
+            if (postResult === 'posted') {
+                return { ok: true, phase: 'full', messages: formatted.messages.length };
+            }
+            return { ok: false, reason: postResult === 'active-turn' ? 'soft-rescue-deferred-active-turn' : 'soft-rescue-aborted-stale-token' };
+        } catch (error) {
+            return { ok: false, reason: `full-export-failed:${String(error)}` };
+        }
+    }
+
+    private async executeWebviewAutoRescueSoftRescue(record: WebviewLivenessRecord, action: WebviewAutoRescueAction): Promise<void> {
+        this.logWebviewAutoRescueDiagnostics(record, 'pre', action);
+        if (!this.isCurrentWebviewLivenessRecord(record)) {
+            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.softRescue.abort | action=soft-rescue-aborted-stale-token | reason=stale-token | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | currentSessionId=${this.currentSessionId || 'null'} | reload=false | recreate=false | sessionMutation=false`);
+            this.setWebviewAutoRescueState(record, 'failed', 'stale-token');
+            this.logWebviewAutoRescueDiagnostics(record, 'post', 'stale-token');
+            return;
+        }
+
+        this.setWebviewAutoRescueState(record, 'running-soft-rescue', 'rescue-now');
+        this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.action | action=running-soft-rescue | requestedBy=${action} | method=active-session-sessionData-repost | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | reload=false | recreate=false | sessionMutation=false`);
+        const result = await this.repostActiveSessionDataForWebviewSoftRescue(record);
+        if (result.ok) {
+            this.webviewAutoRescueFailureCountByEpisode.delete(record.suspicionEpisodeId || this.getWebviewLivenessEpisodeId(record));
+            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.action | action=soft-rescue-ran | requestedBy=${action} | method=active-session-sessionData-repost | phase=${result.phase || 'unknown'} | messages=${result.messages ?? -1} | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | reload=false | recreate=false | sessionMutation=false`);
+            this.setWebviewAutoRescueState(record, 'cooldown', 'soft-rescue-success');
+        } else if (result.reason === 'soft-rescue-deferred-active-turn') {
+            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.action | action=soft-rescue-deferred-active-turn | requestedBy=${action} | method=active-session-sessionData-repost | reason=${result.reason} | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | reload=false | recreate=false | sessionMutation=false`);
+            this.setWebviewAutoRescueState(record, 'cooldown', 'soft-rescue-deferred-active-turn');
+        } else {
+            const episodeId = record.suspicionEpisodeId || this.getWebviewLivenessEpisodeId(record);
+            const failureCount = (this.webviewAutoRescueFailureCountByEpisode.get(episodeId) || 0) + 1;
+            this.webviewAutoRescueFailureCountByEpisode.set(episodeId, failureCount);
+            const staleTokenAction = result.reason === 'soft-rescue-aborted-stale-token' ? 'soft-rescue-aborted-stale-token' : 'soft-rescue-failed';
+            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.action | action=${staleTokenAction} | requestedBy=${action} | method=active-session-sessionData-repost | reason=${result.reason || 'unknown'} | failureCount=${failureCount} | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | reload=false | recreate=false | sessionMutation=false`);
+            if (failureCount >= 2) {
+                this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.action | action=hard-rescue-needed | reason=repeated-soft-rescue-failure | failureCount=${failureCount} | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | reload=false | recreate=false | sessionMutation=false`);
+            }
+            this.setWebviewAutoRescueState(record, 'failed', 'soft-rescue-failed');
+        }
+        this.logWebviewAutoRescueDiagnostics(record, 'post', 'soft-rescue');
+    }
+
     private async showWebviewAutoRescueNotification(record: WebviewLivenessRecord): Promise<void> {
         if (!this.isCurrentWebviewLivenessRecord(record)) {
             this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.disarm | reason=stale-before-notification | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token}`);
@@ -770,9 +980,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
         const notificationToken = `webviewAutoRescue-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         record.notificationToken = notificationToken;
+        this.setWebviewAutoRescueState(record, 'pending-notification', 'notification-show');
         this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.notification.show | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | notificationToken=${notificationToken} | userChoiceOnly=true`);
         const selected = await vscode.window.showWarningMessage(
-            'OpenCode WebView appears unresponsive. Choose whether to run rescue diagnostics.',
+            'OpenCode WebView appears unresponsive. Choose whether to run a guarded soft rescue.',
             'Cancel',
             'Rescue Now'
         ).then((action) => action || 'dismissed-as-cancel');
@@ -788,8 +999,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.notification.action | action=${action} | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | notificationToken=${notificationToken}`);
         this.applyWebviewAutoRescueCooldown(record, action as WebviewAutoRescueAction);
         if (action === 'Rescue Now') {
-            this.executeWebviewAutoRescueDiagnosticOnly(record, action as WebviewAutoRescueAction);
+            await this.executeWebviewAutoRescueSoftRescue(record, action as WebviewAutoRescueAction);
         } else {
+            this.setWebviewAutoRescueState(record, 'cancelled', action);
             this.logWebviewAutoRescueDiagnostics(record, 'pre', action as WebviewAutoRescueAction);
             this.logWebviewAutoRescueDiagnostics(record, 'post', action as WebviewAutoRescueAction);
         }
@@ -797,6 +1009,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         if (this.webviewLivenessCurrent === record) {
             this.webviewLivenessCurrent = undefined;
         }
+        this.setWebviewAutoRescueState(record, 'idle', 'notification-complete');
     }
 
     private async triggerWebviewLivenessProbe(reason: string, options: { simulateMissedAck?: boolean } = {}): Promise<void> {
@@ -823,9 +1036,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 return;
             }
             const activeTurnFlags = this.getWebviewLivenessActiveTurnFlags(record.sessionId);
-            const missedCount = (this.webviewLivenessMissedAckCountByToken.get(record.token) || 0) + 1;
-            this.webviewLivenessMissedAckCountByToken.set(record.token, missedCount);
-            this.uiDebugChannel.appendLine(`EXT: webviewLiveness.missedAck | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | pingId=${pingId} | timeoutMs=${this.webviewLivenessPingTimeoutMs} | missedCount=${missedCount} | threshold=${activeTurnFlags.active ? this.webviewLivenessActiveTurnMissThreshold : 1} | ${this.describeWebviewLivenessFlags(record.sessionId)}`);
+            const simulateMissedAck = Boolean(options.simulateMissedAck);
+            const useSimulatedActiveTurnCount = simulateMissedAck && activeTurnFlags.active;
+            const missedCountByToken = useSimulatedActiveTurnCount
+                ? this.webviewLivenessSimulatedMissedAckCountByToken
+                : this.webviewLivenessMissedAckCountByToken;
+            const missedCount = (missedCountByToken.get(record.token) || 0) + 1;
+            missedCountByToken.set(record.token, missedCount);
+            const simulatedMissedCount = this.webviewLivenessSimulatedMissedAckCountByToken.get(record.token) || 0;
+            this.uiDebugChannel.appendLine(`EXT: webviewLiveness.missedAck | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | pingId=${pingId} | timeoutMs=${this.webviewLivenessPingTimeoutMs} | missedCount=${missedCount} | simulatedMissedCount=${simulatedMissedCount} | simulateMissedAck=${String(simulateMissedAck)} | threshold=${activeTurnFlags.active ? this.webviewLivenessActiveTurnMissThreshold : 1} | ${this.describeWebviewLivenessFlags(record.sessionId)}`);
             if (activeTurnFlags.active && missedCount < this.webviewLivenessActiveTurnMissThreshold) {
                 this.uiDebugChannel.appendLine(`EXT: webviewLiveness.guard.defer | reason=active-streaming-or-finalizing | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | pingId=${pingId} | missedCount=${missedCount} | requiredMisses=${this.webviewLivenessActiveTurnMissThreshold} | retryMs=${this.webviewLivenessPingTimeoutMs} | streaming=${String(activeTurnFlags.streaming)} | finalizing=${String(activeTurnFlags.finalizing)}`);
                 record.pending = false;
@@ -839,6 +1058,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 this.uiDebugChannel.appendLine(`EXT: webviewLiveness.guard.satisfied | reason=repeated-missed-ack | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | pingId=${pingId} | missedCount=${missedCount} | requiredMisses=${this.webviewLivenessActiveTurnMissThreshold} | streaming=${String(activeTurnFlags.streaming)} | finalizing=${String(activeTurnFlags.finalizing)}`);
             }
             void this.showWebviewAutoRescueNotification(record);
+            this.webviewLivenessSimulatedMissedAckCountByToken.delete(record.token);
         }, this.webviewLivenessPingTimeoutMs);
     }
 
@@ -853,6 +1073,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         record.ackAt = Date.now();
         record.pending = false;
         this.webviewLivenessMissedAckCountByToken.delete(record.token);
+        if (!this.getWebviewLivenessActiveTurnFlags(record.sessionId).active) {
+            this.webviewLivenessSimulatedMissedAckCountByToken.delete(record.token);
+        }
         this.uiDebugChannel.appendLine(`EXT: webviewLiveness.ack | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | pingId=${pingId} | rttMs=${record.pingSentAt ? record.ackAt - record.pingSentAt : -1}`);
         if (this.webviewLivenessCurrent === record) {
             this.webviewLivenessCurrent = undefined;
@@ -3008,6 +3231,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         if (targetSessionId) {
                             activeSendSessionId = targetSessionId;
                             this.sendInFlightBySession.add(targetSessionId);
+                            this.markWebviewActiveTurnUpdated(targetSessionId, 'send:start');
                             this.pendingLocalKeyBySession.set(targetSessionId, clientMessageId);
                             this.pendingAssistantTmpKeyBySession.delete(targetSessionId);
                             const liveWebview = this._view?.webview || activeWebview;
@@ -3049,6 +3273,7 @@ ${attachmentLines.join('\n')}`
                         const assistantMessageId = this.client.createInternalMessageId('assistant', targetSessionId);
                         const assistantMessageIndex = this.client.registerMessage(assistantMessageId, targetSessionId);
                         this.pendingAssistantMessageIdBySession.set(targetSessionId, assistantMessageId);
+                        this.markWebviewActiveTurnUpdated(targetSessionId, 'send:assistant-message-bound');
                         liveWebview.postMessage({
                             type: 'messageAppend',
                             message: pendingUserMessage,
@@ -6453,8 +6678,10 @@ ${attachmentLines.join('\n')}`
             const liveWebview = this._view?.webview || webview;
             if (event.inFlight === true) {
                 this.sendInFlightBySession.add(event.sessionId);
+                this.markWebviewActiveTurnUpdated(event.sessionId, 'event:turnInFlight:true');
             } else {
                 this.sendInFlightBySession.delete(event.sessionId);
+                this.markWebviewActiveTurnUpdated(event.sessionId, 'event:turnInFlight:false');
             }
             liveWebview.postMessage({
                 type: 'turnInFlight',
@@ -6495,6 +6722,9 @@ ${attachmentLines.join('\n')}`
             if (event.assistantMsgId && sessionId) {
                 this.uiDebugChannel.appendLine(`[DBG_ASSIST_ID] session=${sessionId} assistantMsgId=${event.assistantMsgId} tmpKey=${tmpKey || 'null'}`);
             }
+            if (sessionId) {
+                this.markWebviewActiveTurnUpdated(sessionId, 'event:assistantMessageMeta');
+            }
             const isSyntheticTurn = this.isCurrentTurnSynthetic(sessionId);
             liveWebview.postMessage({
                 type: 'assistantMessageMeta',
@@ -6528,6 +6758,7 @@ ${attachmentLines.join('\n')}`
         if (event.type === 'text' && event.text) {
             const sessionId = event.sessionId || this.currentSessionId;
             if (sessionId) {
+                this.markWebviewActiveTurnUpdated(sessionId, 'event:text');
                 this.appendAssistantBuffer(sessionId, event.text);
                 // Push latest chunk to webview (no cumulative text)
                 const liveWebview = this._view?.webview || webview;
@@ -6736,6 +6967,7 @@ ${attachmentLines.join('\n')}`
     }
 
     private appendAssistantBuffer(sessionId: string, chunk: string): void {
+        this.markWebviewActiveTurnUpdated(sessionId, 'appendAssistantBuffer');
         const next = (this.assistantTextBufferBySession.get(sessionId) || '') + chunk;
         this.assistantTextBufferBySession.set(sessionId, next);
     }
