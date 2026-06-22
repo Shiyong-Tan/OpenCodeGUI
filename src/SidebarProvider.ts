@@ -121,6 +121,21 @@ type LocalQuestionRequest = {
     resolve: (result: { selectedId?: string; selectedLabel?: string }) => void;
 };
 
+type WebviewLivenessRecord = {
+    token: string;
+    panelId: string;
+    sessionId: string;
+    webviewInstanceId?: string;
+    pingId?: string;
+    pingSentAt?: number;
+    ackAt?: number;
+    suspicionEpisodeId?: string;
+    notificationToken?: string;
+    pending: boolean;
+};
+
+type WebviewAutoRescueAction = 'Cancel' | 'Rescue Now' | 'dismissed-as-cancel' | 'stale-token' | 'diagnostic-only';
+
 /**
  * Simplified SegmentState interface (V2)
  * Only tracks essential data, no state/anchor/resolved complexity
@@ -615,6 +630,256 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private initPosted = false;
     private sessionSelectionEpoch = 0;
     private readonly recentSessionLoadLimit = 200;
+    private readonly webviewLivenessPingTimeoutMs = 3000;
+    private readonly webviewAutoRescueCooldownMs = 60000;
+    private readonly webviewLivenessProbeIntervalMs = 30000;
+    private readonly webviewLivenessActiveTurnMissThreshold = 2;
+    private webviewLivenessPanelSeq = 0;
+    private webviewLivenessCurrent?: WebviewLivenessRecord;
+    private webviewAutoRescueCooldownUntilByEpisode = new Map<string, number>();
+    private webviewLivenessProbeTimer?: NodeJS.Timeout;
+    private webviewLivenessMissedAckCountByToken = new Map<string, number>();
+
+    private getWebviewLivenessPanelId(): string {
+        if (!this.webviewLivenessCurrent?.panelId) {
+            return `panel-${this.webviewLivenessPanelSeq || 0}`;
+        }
+        return this.webviewLivenessCurrent.panelId;
+    }
+
+    private buildWebviewLivenessToken(panelId: string, sessionId: string): string {
+        const wvId = this._webviewInstanceId || 'unknown-wv';
+        return `${panelId}:${wvId}:${sessionId}:${this.sessionSelectionEpoch}`;
+    }
+
+    private getWebviewLivenessEpisodeId(record: WebviewLivenessRecord): string {
+        return `${record.panelId}:${record.sessionId}:${record.token}`;
+    }
+
+    private describeWebviewLivenessFlags(sessionId: string | undefined): string {
+        const { streaming, finalizing } = this.getWebviewLivenessActiveTurnFlags(sessionId);
+        return `streaming=${String(streaming)} | finalizing=${String(finalizing)}`;
+    }
+
+    private getWebviewLivenessActiveTurnFlags(sessionId: string | undefined): { streaming: boolean; finalizing: boolean; active: boolean } {
+        const streaming = Boolean(sessionId && this.sendInFlightBySession.has(sessionId));
+        const finalizing = Boolean(sessionId && this.pendingAssistantMessageIdBySession.has(sessionId));
+        return { streaming, finalizing, active: streaming || finalizing };
+    }
+
+    private resetWebviewLiveness(reason: string): void {
+        const record = this.webviewLivenessCurrent;
+        if (record) {
+            record.pending = false;
+            this.uiDebugChannel.appendLine(`EXT: webviewLiveness.disarm | reason=${reason} | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | notificationToken=${record.notificationToken || 'none'}`);
+        }
+        this.webviewLivenessCurrent = undefined;
+    }
+
+    private beginWebviewLivenessEpisode(reason: string): WebviewLivenessRecord | undefined {
+        const liveWebview = this._view?.webview;
+        const sessionId = this.currentSessionId;
+        if (!liveWebview || !this._view?.visible || !sessionId) {
+            this.uiDebugChannel.appendLine(`EXT: webviewLiveness.skip | reason=${reason}:inactive-or-missing-session | visible=${String(Boolean(this._view?.visible))} | sessionId=${sessionId || 'null'} | panelId=${this.getWebviewLivenessPanelId()}`);
+            return undefined;
+        }
+
+        const panelId = this.getWebviewLivenessPanelId();
+        const token = this.buildWebviewLivenessToken(panelId, sessionId);
+        const episodeKey = `${panelId}:${sessionId}:${token}`;
+        const now = Date.now();
+        const cooldownUntil = this.webviewAutoRescueCooldownUntilByEpisode.get(episodeKey) || 0;
+        if (now < cooldownUntil) {
+            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.cooldown | reason=${reason} | panelId=${panelId} | sessionId=${sessionId} | token=${token} | until=${cooldownUntil} | remainingMs=${cooldownUntil - now}`);
+            return undefined;
+        }
+        if (this.webviewLivenessCurrent?.pending && this.webviewLivenessCurrent.token === token) {
+            this.uiDebugChannel.appendLine(`EXT: webviewLiveness.dedupe | reason=${reason} | panelId=${panelId} | sessionId=${sessionId} | token=${token} | notificationToken=${this.webviewLivenessCurrent.notificationToken || 'none'}`);
+            return undefined;
+        }
+
+        const record: WebviewLivenessRecord = {
+            panelId,
+            sessionId,
+            token,
+            webviewInstanceId: this._webviewInstanceId,
+            pending: true
+        };
+        record.suspicionEpisodeId = this.getWebviewLivenessEpisodeId(record);
+        this.webviewLivenessCurrent = record;
+        this.uiDebugChannel.appendLine(`EXT: webviewLiveness.begin | reason=${reason} | panelId=${panelId} | sessionId=${sessionId} | token=${token} | webviewInstanceId=${record.webviewInstanceId || 'null'} | ${this.describeWebviewLivenessFlags(sessionId)}`);
+        return record;
+    }
+
+    private isCurrentWebviewLivenessRecord(record: WebviewLivenessRecord): boolean {
+        return Boolean(
+            this.webviewLivenessCurrent === record &&
+            record.pending &&
+            this._view?.visible &&
+            this.currentSessionId === record.sessionId &&
+            this.buildWebviewLivenessToken(record.panelId, record.sessionId) === record.token
+        );
+    }
+
+    private applyWebviewAutoRescueCooldown(record: WebviewLivenessRecord, action: WebviewAutoRescueAction): void {
+        const until = Date.now() + this.webviewAutoRescueCooldownMs;
+        const episodeId = record.suspicionEpisodeId || this.getWebviewLivenessEpisodeId(record);
+        this.webviewAutoRescueCooldownUntilByEpisode.set(episodeId, until);
+        this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.cooldown.set | action=${action} | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | episodeId=${episodeId} | cooldownMs=${this.webviewAutoRescueCooldownMs} | until=${until}`);
+    }
+
+    private getWebviewAutoRescueCooldownForSession(sessionId: string): { active: boolean; episodeId?: string; until?: number } {
+        const now = Date.now();
+        for (const [episodeId, until] of this.webviewAutoRescueCooldownUntilByEpisode.entries()) {
+            if (until <= now) continue;
+            if (episodeId.includes(`:${sessionId}:`)) {
+                return { active: true, episodeId, until };
+            }
+        }
+        return { active: false };
+    }
+
+    private shouldSuppressWebviewStuckCardForAutoRescue(sessionId: string, source: string): boolean {
+        if (this.webviewLivenessCurrent?.pending && this.webviewLivenessCurrent.sessionId === sessionId) {
+            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.dedupe | source=${source} | decision=suppress-webview-card | sessionId=${sessionId} | token=${this.webviewLivenessCurrent.token} | notificationToken=${this.webviewLivenessCurrent.notificationToken || 'none'} | reason=pending-ide-notification`);
+            return true;
+        }
+        const cooldown = this.getWebviewAutoRescueCooldownForSession(sessionId);
+        if (cooldown.active) {
+            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.dedupe | source=${source} | decision=suppress-webview-card | sessionId=${sessionId} | episodeId=${cooldown.episodeId || 'none'} | cooldownUntil=${cooldown.until || 0} | reason=cooldown`);
+            return true;
+        }
+        return false;
+    }
+
+    private logWebviewAutoRescueDiagnostics(record: WebviewLivenessRecord, phase: 'pre' | 'post', action: WebviewAutoRescueAction): void {
+        const cooldownUntil = this.webviewAutoRescueCooldownUntilByEpisode.get(record.suspicionEpisodeId || this.getWebviewLivenessEpisodeId(record)) || 0;
+        this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.diagnostics.${phase} | action=${action} | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | pingId=${record.pingId || 'none'} | pingSentAt=${record.pingSentAt || 0} | ackAt=${record.ackAt || 0} | timeoutMs=${this.webviewLivenessPingTimeoutMs} | notificationToken=${record.notificationToken || 'none'} | cooldownUntil=${cooldownUntil} | visible=${String(Boolean(this._view?.visible))} | currentSessionId=${this.currentSessionId || 'null'} | webviewInstanceId=${record.webviewInstanceId || 'null'} | ${this.describeWebviewLivenessFlags(record.sessionId)}`);
+    }
+
+    private executeWebviewAutoRescueDiagnosticOnly(record: WebviewLivenessRecord, action: WebviewAutoRescueAction): void {
+        this.logWebviewAutoRescueDiagnostics(record, 'pre', action);
+        this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.action | action=diagnostic-only | requestedBy=${action} | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | reload=false | recreate=false | sessionMutation=false`);
+        this.logWebviewAutoRescueDiagnostics(record, 'post', 'diagnostic-only');
+    }
+
+    private async showWebviewAutoRescueNotification(record: WebviewLivenessRecord): Promise<void> {
+        if (!this.isCurrentWebviewLivenessRecord(record)) {
+            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.disarm | reason=stale-before-notification | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token}`);
+            return;
+        }
+        const notificationToken = `webviewAutoRescue-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        record.notificationToken = notificationToken;
+        this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.notification.show | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | notificationToken=${notificationToken} | userChoiceOnly=true`);
+        const selected = await vscode.window.showWarningMessage(
+            'OpenCode WebView appears unresponsive. Choose whether to run rescue diagnostics.',
+            'Cancel',
+            'Rescue Now'
+        ).then((action) => action || 'dismissed-as-cancel');
+        if (!this.isCurrentWebviewLivenessRecord(record) || record.notificationToken !== notificationToken) {
+            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.disarm | reason=stale-after-user-choice | selected=${selected} | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | notificationToken=${notificationToken}`);
+            return;
+        }
+        const action = selected === 'Rescue Now'
+            ? 'Rescue Now'
+            : selected === 'dismissed-as-cancel'
+                ? 'dismissed-as-cancel'
+                : 'Cancel';
+        this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.notification.action | action=${action} | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | notificationToken=${notificationToken}`);
+        this.applyWebviewAutoRescueCooldown(record, action as WebviewAutoRescueAction);
+        if (action === 'Rescue Now') {
+            this.executeWebviewAutoRescueDiagnosticOnly(record, action as WebviewAutoRescueAction);
+        } else {
+            this.logWebviewAutoRescueDiagnostics(record, 'pre', action as WebviewAutoRescueAction);
+            this.logWebviewAutoRescueDiagnostics(record, 'post', action as WebviewAutoRescueAction);
+        }
+        record.pending = false;
+        if (this.webviewLivenessCurrent === record) {
+            this.webviewLivenessCurrent = undefined;
+        }
+    }
+
+    private async triggerWebviewLivenessProbe(reason: string, options: { simulateMissedAck?: boolean } = {}): Promise<void> {
+        const record = this.beginWebviewLivenessEpisode(reason);
+        const liveWebview = this._view?.webview;
+        if (!record || !liveWebview) return;
+        const pingId = `webviewLiveness-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        record.pingId = pingId;
+        record.pingSentAt = Date.now();
+        this.uiDebugChannel.appendLine(`EXT: webviewLiveness.ping.sent | reason=${reason} | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | pingId=${pingId} | timeoutMs=${this.webviewLivenessPingTimeoutMs} | simulateMissedAck=${String(Boolean(options.simulateMissedAck))}`);
+        if (!options.simulateMissedAck) {
+            liveWebview.postMessage({ type: 'webviewLivenessPing', pingId, token: record.token, sessionId: record.sessionId, panelId: record.panelId, webviewInstanceId: record.webviewInstanceId });
+        }
+        setTimeout(() => {
+            if (!this.isCurrentWebviewLivenessRecord(record)) {
+                this.uiDebugChannel.appendLine(`EXT: webviewLiveness.timeout.disarm | reason=stale-token | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | pingId=${pingId}`);
+                return;
+            }
+            if (record.ackAt) {
+                this.uiDebugChannel.appendLine(`EXT: webviewLiveness.timeout.skip | reason=ack-received | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | pingId=${pingId} | ackAt=${record.ackAt}`);
+                this.webviewLivenessMissedAckCountByToken.delete(record.token);
+                record.pending = false;
+                if (this.webviewLivenessCurrent === record) this.webviewLivenessCurrent = undefined;
+                return;
+            }
+            const activeTurnFlags = this.getWebviewLivenessActiveTurnFlags(record.sessionId);
+            const missedCount = (this.webviewLivenessMissedAckCountByToken.get(record.token) || 0) + 1;
+            this.webviewLivenessMissedAckCountByToken.set(record.token, missedCount);
+            this.uiDebugChannel.appendLine(`EXT: webviewLiveness.missedAck | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | pingId=${pingId} | timeoutMs=${this.webviewLivenessPingTimeoutMs} | missedCount=${missedCount} | threshold=${activeTurnFlags.active ? this.webviewLivenessActiveTurnMissThreshold : 1} | ${this.describeWebviewLivenessFlags(record.sessionId)}`);
+            if (activeTurnFlags.active && missedCount < this.webviewLivenessActiveTurnMissThreshold) {
+                this.uiDebugChannel.appendLine(`EXT: webviewLiveness.guard.defer | reason=active-streaming-or-finalizing | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | pingId=${pingId} | missedCount=${missedCount} | requiredMisses=${this.webviewLivenessActiveTurnMissThreshold} | retryMs=${this.webviewLivenessPingTimeoutMs} | streaming=${String(activeTurnFlags.streaming)} | finalizing=${String(activeTurnFlags.finalizing)}`);
+                record.pending = false;
+                if (this.webviewLivenessCurrent === record) this.webviewLivenessCurrent = undefined;
+                setTimeout(() => {
+                    void this.triggerWebviewLivenessProbe('active-turn-guard-retry');
+                }, this.webviewLivenessPingTimeoutMs);
+                return;
+            }
+            if (activeTurnFlags.active) {
+                this.uiDebugChannel.appendLine(`EXT: webviewLiveness.guard.satisfied | reason=repeated-missed-ack | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | pingId=${pingId} | missedCount=${missedCount} | requiredMisses=${this.webviewLivenessActiveTurnMissThreshold} | streaming=${String(activeTurnFlags.streaming)} | finalizing=${String(activeTurnFlags.finalizing)}`);
+            }
+            void this.showWebviewAutoRescueNotification(record);
+        }, this.webviewLivenessPingTimeoutMs);
+    }
+
+    private handleWebviewLivenessAck(data: any): void {
+        const record = this.webviewLivenessCurrent;
+        const pingId = typeof data?.pingId === 'string' ? data.pingId : '';
+        const token = typeof data?.token === 'string' ? data.token : '';
+        if (!record || record.pingId !== pingId || record.token !== token || !this.isCurrentWebviewLivenessRecord(record)) {
+            this.uiDebugChannel.appendLine(`EXT: webviewLiveness.ack.drop | reason=stale-or-mismatch | pingId=${pingId || 'null'} | token=${token || 'null'} | currentToken=${record?.token || 'none'} | currentPingId=${record?.pingId || 'none'} | sessionId=${data?.sessionId || 'null'}`);
+            return;
+        }
+        record.ackAt = Date.now();
+        record.pending = false;
+        this.webviewLivenessMissedAckCountByToken.delete(record.token);
+        this.uiDebugChannel.appendLine(`EXT: webviewLiveness.ack | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | pingId=${pingId} | rttMs=${record.pingSentAt ? record.ackAt - record.pingSentAt : -1}`);
+        if (this.webviewLivenessCurrent === record) {
+            this.webviewLivenessCurrent = undefined;
+        }
+    }
+
+    public async debugTriggerWebviewLivenessMissedAck(): Promise<void> {
+        await this.triggerWebviewLivenessProbe('debug-command', { simulateMissedAck: true });
+    }
+
+    private startWebviewLivenessProbes(): void {
+        if (this.webviewLivenessProbeTimer) return;
+        this.webviewLivenessProbeTimer = setInterval(() => {
+            void this.triggerWebviewLivenessProbe('interval');
+        }, this.webviewLivenessProbeIntervalMs);
+        this.webviewLivenessProbeTimer.unref?.();
+        this.uiDebugChannel.appendLine(`EXT: webviewLiveness.timer.start | intervalMs=${this.webviewLivenessProbeIntervalMs}`);
+    }
+
+    private stopWebviewLivenessProbes(reason: string): void {
+        if (this.webviewLivenessProbeTimer) {
+            clearInterval(this.webviewLivenessProbeTimer);
+            this.webviewLivenessProbeTimer = undefined;
+            this.uiDebugChannel.appendLine(`EXT: webviewLiveness.timer.stop | reason=${reason}`);
+        }
+        this.resetWebviewLiveness(reason);
+    }
 
     private async ensureDir(dir: string): Promise<void> {
         await fs.promises.mkdir(dir, { recursive: true });
@@ -2569,6 +2834,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         _token: vscode.CancellationToken
     ) {
         this._view = webviewView;
+        const panelId = `panel-${++this.webviewLivenessPanelSeq}`;
+        this.resetWebviewLiveness('webview-recreate');
+        this.uiDebugChannel.appendLine(`EXT: webviewLiveness.panel | phase=resolve | panelId=${panelId}`);
 
         webviewView.webview.options = {
             enableScripts: true,
@@ -2596,6 +2864,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     // 更新 this._view 为最新实例
                     this._view = webviewView;
                     this._webviewInstanceId = data.webviewInstanceId;
+                    this.webviewLivenessCurrent = undefined;
                     this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_1_RX] webviewReady | wvId=${this._webviewInstanceId}`);
                     
                 const liveWebview = this._view?.webview;
@@ -2622,7 +2891,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             liveWebview.postMessage({ type: 'webviewReadyAck', timestamp: Date.now(), webviewInstanceId: this._webviewInstanceId });
                         }
                         this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_4_ACK] ack sent`);
+                        this.startWebviewLivenessProbes();
+                        void this.triggerWebviewLivenessProbe('webviewReadyAck');
                     }
+                    break;
+                }
+                case "webviewLivenessAck": {
+                    this.handleWebviewLivenessAck(data);
                     break;
                 }
                 case "sendMessage": {
@@ -3441,6 +3716,7 @@ ${attachmentLines.join('\n')}`
                 case "selectSession": {
                     if (!data.sessionId) return;
                     const targetSessionId = data.sessionId;
+                    this.resetWebviewLiveness('session-switch');
                     const selectionEpoch = ++this.sessionSelectionEpoch;
                     try {
                         this.resetUiState();
@@ -4655,6 +4931,10 @@ ${attachmentLines.join('\n')}`
             if (webviewView.visible && this.initPosted) {
                 this.initPosted = false;
                 this.uiDebugChannel.appendLine('[EXT][INIT_RESET] Webview visible after hidden, resetting initPosted');
+                this.startWebviewLivenessProbes();
+                void this.triggerWebviewLivenessProbe('visibility-visible');
+            } else if (!webviewView.visible) {
+                this.stopWebviewLivenessProbes('visibility-hidden');
             }
         });
     }
@@ -6128,6 +6408,9 @@ ${attachmentLines.join('\n')}`
         }
 
         if (event.type === 'autoResumeStallWarn' && event.sessionId) {
+            if (this.shouldSuppressWebviewStuckCardForAutoRescue(event.sessionId, 'autoResumeStallWarn')) {
+                return;
+            }
             const liveWebview = this._view?.webview || webview;
             liveWebview.postMessage({
                 type: 'systemNotice',
@@ -6148,6 +6431,9 @@ ${attachmentLines.join('\n')}`
         }
 
         if (event.type === 'autoResumeHardStop' && event.sessionId) {
+            if (this.shouldSuppressWebviewStuckCardForAutoRescue(event.sessionId, 'autoResumeHardStop')) {
+                return;
+            }
             const liveWebview = this._view?.webview || webview;
             this.uiDebugChannel.appendLine(`EXT: autoresume.hardstop | sessionId=${event.sessionId} | action=show-stall-card`);
             this.sendInFlightBySession.delete(event.sessionId);

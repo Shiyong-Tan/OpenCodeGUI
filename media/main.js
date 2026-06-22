@@ -9915,6 +9915,22 @@ window.addEventListener('message', (event) => {
                 });
                 break;
             }
+            case 'webviewLivenessPing': {
+                vscode.postMessage({
+                    type: 'ui-debug',
+                    payload: ['WV', 'webviewLiveness.ack', 'pingId', message.pingId || 'null', 'sessionId', message.sessionId || activeSessionId || 'null', 'token', message.token || 'null']
+                });
+                vscode.postMessage({
+                    type: 'webviewLivenessAck',
+                    pingId: message.pingId,
+                    token: message.token,
+                    sessionId: message.sessionId || activeSessionId || '',
+                    panelId: message.panelId,
+                    webviewInstanceId: message.webviewInstanceId,
+                    ts: Date.now()
+                });
+                break;
+            }
             case 'sessionData': {
                 const route = resolveEventSessionId(message, 'sessionData');
                 const sessionId = route?.sessionId || null;
@@ -12192,7 +12208,7 @@ window.addEventListener('message', (event) => {
             }
             default: {
                 // Log unknown message types for debugging
-                if (message.type && !['pong', 'webviewReadyAck'].includes(message.type)) {
+                if (message.type && !['pong', 'webviewReadyAck', 'webviewLivenessPing'].includes(message.type)) {
                     vscode.postMessage({
                         type: 'ui-debug',
                         payload: ['[WV][UNKNOWN_MSG]', `type=${message.type}`, `sessionId=${message.sessionId || message.sessionID || 'null'}`, `keys=${Object.keys(message).join(',')}`]

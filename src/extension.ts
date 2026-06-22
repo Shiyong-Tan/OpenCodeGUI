@@ -101,6 +101,12 @@ export function activate(context: vscode.ExtensionContext) {
 	);
 
 	context.subscriptions.push(
+		vscode.commands.registerCommand('opencode.debugWebviewLivenessMissedAck', async () => {
+			await sidebarProvider.debugTriggerWebviewLivenessMissedAck();
+		})
+	);
+
+	context.subscriptions.push(
 		new vscode.Disposable(() => {
 			void sidebarProvider.shutdownServer();
 		})

@@ -76,6 +76,10 @@
       {
         "command": "opencode.debugTuiControlSchema",
         "title": "OpenCode: Debug TUI Control Schema"
+      },
+      {
+        "command": "opencode.debugWebviewLivenessMissedAck",
+        "title": "OpenCode: Debug Webview Liveness Missed Ack"
       }
     ],
     "menus": {
