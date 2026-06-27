@@ -179,6 +179,8 @@ let subagentIntervals = new Map();
 let subagentCardsContainer = null;
 let autoScrollPinnedToBottom = true;
 const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 80;
+let debugWebviewLivenessAckDrop = false;
+let currentWebviewLivenessPanelId = '';
 
 const SEND_BLOCK_NOTICE = 'Please wait while the previous response finishes.';
 const BASELINE_PREPARING_NOTICE = 'Preparing git for this session...';
@@ -1013,18 +1015,20 @@ function restoreVolatileHydrationState(session, preserved) {
         if (!hasCanonicalizedVolatileDuplicate) return false;
         const staleInFlightFields = new Set([
             'pendingAssistantUpgrade',
+            'thinkingId',
             'currentTurnAssistantKey',
             'currentTurnAssistantMsgId',
             'lastTurnUserId',
             'lastTurnAssistantId',
             'activeTurnOpId',
             'backendTurnInFlight',
+            'awaitingFinalMapBind',
             'streamMode',
             'appendRootUserKey'
         ]);
         if (!staleInFlightFields.has(name)) return false;
         if (fieldReferencesCanonicalHydratedVolatile(preserved[name])) return true;
-        return ['activeTurnOpId', 'backendTurnInFlight', 'streamMode'].includes(name)
+        return ['activeTurnOpId', 'backendTurnInFlight', 'awaitingFinalMapBind', 'streamMode'].includes(name)
             && session.turnFullyFinalized !== false
             && session.backendTurnInFlight !== true;
     };
@@ -1093,6 +1097,23 @@ function restoreVolatileHydrationState(session, preserved) {
     }
 
     return { missingIds, fieldNames: Array.from(new Set(fieldNames)), skippedArtifacts, skippedCanonicalizedVolatile };
+}
+
+function postLiveTurnResumeReconcileDiagnostic(marker, sessionId, reason, extra = []) {
+    vscode.postMessage({
+        type: 'ui-debug',
+        payload: [
+            marker,
+            `reason=${reason || 'unknown'}`,
+            `sessionId=${sessionId || 'null'}`,
+            `activeSessionId=${activeSessionId || 'null'}`,
+            'postedSessionData=false',
+            'reload=false',
+            'recreate=false',
+            'sessionMutation=false',
+            ...extra
+        ]
+    });
 }
 
 function sessionHasActiveBackgroundSubagents(session) {
@@ -3753,6 +3774,20 @@ function attemptAssistantUpgrade(sessionId, payload, source) {
         reason = 'set-current-only';
     } else if (currentKey === newKey) {
         reason = 'already-current';
+    } else if (source === 'chatDone'
+        && newKey.startsWith('msg_')
+        && session.messagesById.get(currentKey)?.meta?.liveTurnResume === true
+        && (
+            session.backendTurnInFlight === true
+            || session.turnFullyFinalized === false
+            || session.thinkingId === currentKey
+            || session.currentTurnAssistantKey === currentKey
+            || session.pendingAssistantUpgrade?.tmpKey === currentKey
+            || session.pendingAssistantUpgrade?.fallbackSourceTmpKey === currentKey
+        )) {
+        replaceKeyEverywhere(currentKey, newKey, payloadSession);
+        replaced = true;
+        reason = 'live-resume-final-id-bridge';
     } else if (typeof newIndex === 'number' && typeof curIndex !== 'number') {
         replaceKeyEverywhere(currentKey, newKey, payloadSession);
         replaced = true;
@@ -8985,6 +9020,20 @@ function handleChatChunk(sessionId, message) {
             target.text = target.meta.currentSegment || '';
             if (!target.text) target.text = 'Thinking...';
             target.meta = { ...target.meta, isThinking: true };
+            if (target.meta.liveTurnResume === true && session.liveTurnResumeStreamAppendLogged !== targetId) {
+                session.liveTurnResumeStreamAppendLogged = targetId;
+                postLiveTurnResumeReconcileDiagnostic(
+                    'EXT: webviewAutoRescue.liveTurnResume.streamAppend',
+                    sessionId,
+                    'bound-resumed-assistant',
+                    [
+                        `targetId=${targetId}`,
+                        `assistantMsgId=${msgId || 'null'}`,
+                        `thinkingId=${session.thinkingId || 'null'}`,
+                        `currentTurnAssistantKey=${session.currentTurnAssistantKey || 'null'}`
+                    ]
+                );
+            }
             vscode.postMessage({ type: 'ui-debug', payload: ['handleChatChunk', 'appended', targetId] });
         }
 
@@ -8995,6 +9044,9 @@ function handleChatDone(sessionId, message) {
         const session = getSessionState(sessionId);
         if (!session) return;
         const skipSnapshot = message?.skipSnapshot === true;
+        const preDoneAssistantKey = session.currentTurnAssistantKey || session.thinkingId || null;
+        const preDoneAssistant = preDoneAssistantKey ? session.messagesById.get(preDoneAssistantKey) : null;
+        const wasLiveTurnResumeAssistant = preDoneAssistant?.meta?.liveTurnResume === true;
         // agent timeout notice removed
     if (session.thinkingId && session.messagesById.has(session.thinkingId)) {
         const msg = session.messagesById.get(session.thinkingId);
@@ -9037,7 +9089,7 @@ function handleChatDone(sessionId, message) {
     let replaced = false;
     if (resolvedFinal && typeof resolvedFinal === 'string') {
         const beforeKey = session.currentTurnAssistantKey;
-        attemptAssistantUpgrade(sessionId, { assistantMsgId: resolvedFinal }, 'chatDone');
+        attemptAssistantUpgrade(sessionId, { assistantMsgId: resolvedFinal, tmpKey: preDoneAssistantKey }, 'chatDone');
         replaced = beforeKey !== session.currentTurnAssistantKey && session.currentTurnAssistantKey === resolvedFinal;
         if (session.currentTurnAssistantKey === resolvedFinal) {
             session.assistantUpgradeSeen?.add?.(resolvedFinal);
@@ -9058,15 +9110,15 @@ function handleChatDone(sessionId, message) {
             session.awaitingFinalMapBind = true;
             if (!session.pendingAssistantUpgrade || session.pendingAssistantUpgrade.assistantMsgId !== resolvedFinal) {
                 session.pendingAssistantUpgrade = {
-                    tmpKey: session.currentTurnAssistantKey || session.thinkingId || null,
+                    tmpKey: preDoneAssistantKey || session.currentTurnAssistantKey || session.thinkingId || null,
                     assistantMsgId: resolvedFinal,
                     source: 'chatDone',
                     ts: Date.now(),
                     fallbackAssistantKey: resolvedFinal,
-                    fallbackSourceTmpKey: session.currentTurnAssistantKey || session.thinkingId || null,
+                    fallbackSourceTmpKey: preDoneAssistantKey || session.currentTurnAssistantKey || session.thinkingId || null,
                     fallbackSessionId: sessionId,
                     fallbackSource: 'chatDone',
-                    fallbackTurnAnchor: session.currentTurnAssistantKey || session.thinkingId || null
+                    fallbackTurnAnchor: preDoneAssistantKey || session.currentTurnAssistantKey || session.thinkingId || null
                 };
             }
         } else {
@@ -9085,10 +9137,29 @@ function handleChatDone(sessionId, message) {
             ts: Date.now()
         };
         stabilizeTimelineAfterFinal(session, resolvedFinal, 'chatDone');
+        const finalizedAssistant = session.messagesById.get(resolvedFinal) || null;
+        if (finalizedAssistant?.meta?.liveTurnResume === true) {
+            finalizedAssistant.meta = { ...finalizedAssistant.meta };
+            delete finalizedAssistant.meta.liveTurnResume;
+        }
         vscode.postMessage({
             type: 'ui-debug',
             payload: ['[WV][FINAL_LOCK_SET]', `sessionId=${sessionId}`, `assistantMsgId=${resolvedFinal}`]
         });
+        if (wasLiveTurnResumeAssistant) {
+            postLiveTurnResumeReconcileDiagnostic(
+                'EXT: webviewAutoRescue.liveTurnResume.finalizeReconcile',
+                sessionId,
+                match ? 'final-bound' : 'awaiting-final-map-bind',
+                [
+                    `preDoneAssistantKey=${preDoneAssistantKey || 'null'}`,
+                    `resolvedFinal=${resolvedFinal}`,
+                    `match=${match}`,
+                    `replaced=${replaced}`,
+                    `awaitingFinalMapBind=${session.awaitingFinalMapBind === true ? 'true' : 'false'}`
+                ]
+            );
+        }
     }
     const appendItemsChanged = normalizeSessionAppendItemsForFinalize(session);
     if (appendItemsChanged) {
@@ -9560,6 +9631,510 @@ function appendMessageImages(parentEl, message) {
     closeSessionsBtn.addEventListener('click', closeSessionPanel);
     panelBackdrop.addEventListener('click', closeSessionPanel);
 
+    function getLiveTurnResumeField(message, name) {
+        const value = message?.[name];
+        return typeof value === 'string' && value.length > 0 ? value : '';
+    }
+
+    function isLiveTurnResumeMessageId(value, prefixes) {
+        if (typeof value !== 'string' || !value.length) return false;
+        return prefixes.some((prefix) => value.startsWith(prefix));
+    }
+
+    function postLiveTurnResumeDiagnostic(marker, message, reason, extra = []) {
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: [
+                marker,
+                `reason=${reason || 'unknown'}`,
+                `sessionId=${message?.sessionId || 'null'}`,
+                `panelId=${message?.panelId || 'null'}`,
+                `expectedPanelId=${currentWebviewLivenessPanelId || 'null'}`,
+                `webviewInstanceId=${message?.webviewInstanceId || 'null'}`,
+                `expectedWebviewInstanceId=${webviewInstanceId || 'null'}`,
+                `activeTurnId=${message?.activeTurnId || 'null'}`,
+                `activeSessionId=${activeSessionId || 'null'}`,
+                ...extra
+            ]
+        });
+    }
+
+    function getLiveTurnResumeUserKey(message) {
+        const mappedUserId = getLiveTurnResumeField(message, 'userMessageId');
+        const localUserId = getLiveTurnResumeField(message, 'userLocalId');
+        if (isLiveTurnResumeMessageId(mappedUserId, ['msg_'])) return mappedUserId;
+        if (isLiveTurnResumeMessageId(localUserId, ['local-'])) return localUserId;
+        return '';
+    }
+
+    function getLiveTurnResumeAssistantKey(message) {
+        const assistantMessageId = getLiveTurnResumeField(message, 'assistantMessageId');
+        const tmpAssistantKey = getLiveTurnResumeField(message, 'tmpAssistantKey');
+        if (isLiveTurnResumeMessageId(assistantMessageId, ['msg_'])) return assistantMessageId;
+        if (isLiveTurnResumeMessageId(tmpAssistantKey, ['tmp:', 'local-'])) return tmpAssistantKey;
+        return '';
+    }
+
+    function liveTurnResumeTurnIdentityMatchesSession(session, message, userKey, assistantKey) {
+        const activeTurnId = getLiveTurnResumeField(message, 'activeTurnId');
+        if (!activeTurnId) return { ok: false, reason: 'missing-activeTurnId' };
+        const payloadTurnIds = [
+            getLiveTurnResumeField(message, 'userLocalId'),
+            getLiveTurnResumeField(message, 'userMessageId'),
+            getLiveTurnResumeField(message, 'tmpAssistantKey'),
+            getLiveTurnResumeField(message, 'assistantMessageId')
+        ].filter(Boolean);
+        if (!payloadTurnIds.includes(activeTurnId)) {
+            return { ok: false, reason: 'activeTurnId-not-in-payload' };
+        }
+        if (!session) return { ok: true, reason: 'bootstrap-self-consistent' };
+
+        const knownTurnIds = [
+            session.lastTurnUserId,
+            session.currentTurnAssistantKey,
+            session.currentTurnAssistantMsgId,
+            session.thinkingId,
+            session.pendingAssistantUpgrade?.tmpKey,
+            session.pendingAssistantUpgrade?.assistantMsgId,
+            userKey,
+            assistantKey,
+            ...payloadTurnIds
+        ].filter(Boolean);
+        const hasLocalTurnState = Boolean(
+            session.lastTurnUserId ||
+            session.currentTurnAssistantKey ||
+            session.currentTurnAssistantMsgId ||
+            session.thinkingId ||
+            session.pendingAssistantUpgrade
+        );
+        if (hasLocalTurnState && !knownTurnIds.includes(activeTurnId)) {
+            return { ok: false, reason: 'activeTurnId-session-mismatch' };
+        }
+        return { ok: true, reason: hasLocalTurnState ? 'session-match' : 'session-self-consistent' };
+    }
+
+    function ensureTimelineContainsOnce(session, messageId) {
+        if (!session || typeof messageId !== 'string' || !messageId.length) return;
+        const next = [];
+        let seen = false;
+        for (const id of Array.isArray(session.timeline) ? session.timeline : []) {
+            if (id === messageId) {
+                if (seen) continue;
+                seen = true;
+            }
+            next.push(id);
+        }
+        if (!seen) next.push(messageId);
+        session.timeline = next;
+    }
+
+    function removeLiveTurnResumeAlias(session, aliasKey, canonicalKey, expectedRole) {
+        if (!session || typeof aliasKey !== 'string' || typeof canonicalKey !== 'string') return false;
+        if (!aliasKey || !canonicalKey || aliasKey === canonicalKey) return false;
+        const canonicalMessage = session.messagesById?.get?.(canonicalKey) || null;
+        const aliasMessage = session.messagesById?.get?.(aliasKey) || null;
+        if (!canonicalMessage || canonicalMessage.role !== expectedRole) return false;
+        if (aliasMessage && aliasMessage.role !== expectedRole) return false;
+
+        const pending = session.pendingAssistantUpgrade || null;
+        const aliasReferencedByActiveTurn = Boolean(
+            session.thinkingId === aliasKey ||
+            session.currentTurnAssistantKey === aliasKey ||
+            session.currentTurnAssistantMsgId === aliasKey ||
+            session.lastTurnAssistantId === aliasKey ||
+            session.lastTurnUserId === aliasKey ||
+            session.appendRootUserKey === aliasKey ||
+            session.appendComposerFor === aliasKey ||
+            pending?.tmpKey === aliasKey ||
+            pending?.assistantMsgId === aliasKey ||
+            pending?.fallbackAssistantKey === aliasKey ||
+            pending?.fallbackSourceTmpKey === aliasKey ||
+            pending?.fallbackTurnAnchor === aliasKey
+        );
+        const aliasIsLivePlaceholder = Boolean(
+            aliasMessage?.meta?.liveTurnResume === true ||
+            aliasMessage?.meta?.isThinking === true
+        );
+        if (!aliasReferencedByActiveTurn && !aliasIsLivePlaceholder) return false;
+
+        if (aliasMessage) {
+            const aliasText = typeof aliasMessage.text === 'string' ? aliasMessage.text : '';
+            const canonicalText = typeof canonicalMessage.text === 'string' ? canonicalMessage.text : '';
+            const canonicalIsLivePlaceholder = Boolean(
+                canonicalMessage.meta?.liveTurnResume === true ||
+                canonicalMessage.meta?.isThinking === true
+            );
+            if (aliasText && (!canonicalText || canonicalIsLivePlaceholder)) {
+                canonicalMessage.text = aliasText;
+            }
+            canonicalMessage.meta = { ...(aliasMessage.meta || {}), ...(canonicalMessage.meta || {}) };
+            session.messagesById.delete(aliasKey);
+        }
+
+        session.timeline = (Array.isArray(session.timeline) ? session.timeline : []).filter((id) => id !== aliasKey);
+        if (session.thinkingId === aliasKey) session.thinkingId = canonicalKey;
+        if (session.currentTurnAssistantKey === aliasKey) session.currentTurnAssistantKey = canonicalKey;
+        if (session.currentTurnAssistantMsgId === aliasKey) session.currentTurnAssistantMsgId = canonicalKey;
+        if (session.lastTurnAssistantId === aliasKey) session.lastTurnAssistantId = canonicalKey;
+        if (session.lastTurnUserId === aliasKey) session.lastTurnUserId = canonicalKey;
+        if (session.appendRootUserKey === aliasKey) session.appendRootUserKey = canonicalKey;
+        if (session.appendComposerFor === aliasKey) session.appendComposerFor = canonicalKey;
+        if (pending?.tmpKey === aliasKey) pending.tmpKey = canonicalKey;
+        if (pending?.assistantMsgId === aliasKey) pending.assistantMsgId = canonicalKey;
+        if (pending?.fallbackAssistantKey === aliasKey) pending.fallbackAssistantKey = canonicalKey;
+        if (pending?.fallbackSourceTmpKey === aliasKey) pending.fallbackSourceTmpKey = canonicalKey;
+        if (pending?.fallbackTurnAnchor === aliasKey) pending.fallbackTurnAnchor = canonicalKey;
+        if (session.appendComposerDrafts?.has?.(aliasKey)) {
+            const draft = session.appendComposerDrafts.get(aliasKey);
+            session.appendComposerDrafts.delete(aliasKey);
+            if (!session.appendComposerDrafts.has(canonicalKey)) session.appendComposerDrafts.set(canonicalKey, draft);
+        }
+        ensureTimelineContainsOnce(session, canonicalKey);
+        return true;
+    }
+
+    function resolveLiveTurnResumeUserKey(session, message, fallbackUserKey) {
+        const userMessageId = getLiveTurnResumeField(message, 'userMessageId');
+        const userLocalId = getLiveTurnResumeField(message, 'userLocalId');
+        if (userLocalId && userMessageId) {
+            registerMessageIdMapping(session, userLocalId, userMessageId, 'liveTurnResume');
+        }
+        if (userMessageId && session.messagesById?.get?.(userMessageId)?.role === 'user') {
+            return { key: userMessageId, reason: 'canonical-user-reuse' };
+        }
+        const mappedUserId = userLocalId ? session.clientKeyToServerId?.get?.(userLocalId) : '';
+        if (mappedUserId && session.messagesById?.get?.(mappedUserId)?.role === 'user') {
+            return { key: mappedUserId, reason: 'mapped-canonical-user-reuse' };
+        }
+        if (fallbackUserKey && session.messagesById?.get?.(fallbackUserKey)?.role === 'user') {
+            return { key: fallbackUserKey, reason: fallbackUserKey.startsWith('msg_') ? 'canonical-user-existing' : 'local-user-existing' };
+        }
+        return { key: fallbackUserKey || userMessageId || userLocalId, reason: 'user-fallback' };
+    }
+
+    function resolveLiveTurnResumeAssistantKey(session, message, fallbackAssistantKey) {
+        const assistantMessageId = getLiveTurnResumeField(message, 'assistantMessageId');
+        const tmpAssistantKey = getLiveTurnResumeField(message, 'tmpAssistantKey');
+        if (assistantMessageId && session.messagesById?.get?.(assistantMessageId)?.role === 'assistant') {
+            return { key: assistantMessageId, reason: 'canonical-assistant-reuse' };
+        }
+        const pending = session.pendingAssistantUpgrade || null;
+        if (tmpAssistantKey && pending?.tmpKey === tmpAssistantKey) {
+            const pendingAssistantId = pending.assistantMsgId || pending.fallbackAssistantKey || '';
+            if (pendingAssistantId && session.messagesById?.get?.(pendingAssistantId)?.role === 'assistant') {
+                return { key: pendingAssistantId, reason: 'mapped-canonical-assistant-reuse' };
+            }
+        }
+        if (assistantMessageId && session.currentTurnAssistantMsgId === assistantMessageId && session.messagesById?.get?.(assistantMessageId)?.role === 'assistant') {
+            return { key: assistantMessageId, reason: 'current-canonical-assistant-reuse' };
+        }
+        if (fallbackAssistantKey && session.messagesById?.get?.(fallbackAssistantKey)?.role === 'assistant') {
+            return { key: fallbackAssistantKey, reason: fallbackAssistantKey.startsWith('msg_') ? 'canonical-assistant-existing' : 'tmp-assistant-existing' };
+        }
+        if (tmpAssistantKey) return { key: tmpAssistantKey, reason: 'tmp-assistant-fallback' };
+        return { key: fallbackAssistantKey || assistantMessageId, reason: 'assistant-fallback' };
+    }
+
+    function postLiveTurnHistoryDiagnostic(marker, message, reason, extra = []) {
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: [
+                marker,
+                `reason=${reason || 'unknown'}`,
+                `sessionId=${message?.sessionId || 'null'}`,
+                `panelId=${message?.panelId || 'null'}`,
+                `expectedPanelId=${currentWebviewLivenessPanelId || 'null'}`,
+                `webviewInstanceId=${message?.webviewInstanceId || 'null'}`,
+                `expectedWebviewInstanceId=${webviewInstanceId || 'null'}`,
+                `selectionEpoch=${message?.selectionEpoch ?? 'null'}`,
+                `messageCount=${message?.messageCount ?? (Array.isArray(message?.messages) ? message.messages.length : 0)}`,
+                'postedSessionData=false',
+                'reload=false',
+                'recreate=false',
+                'sessionMutation=false',
+                ...extra
+            ]
+        });
+    }
+
+    function getLiveTurnHistoryExistingKey(session, item) {
+        const id = typeof item?.id === 'string' ? item.id : '';
+        if (!session || !id) return '';
+        if (session.messagesById?.has?.(id)) return id;
+        if (id.startsWith('msg_')) {
+            const mappedClientKey = session.serverIdToClientKey?.get?.(id) || session.serverIdToKey?.get?.(id) || '';
+            if (mappedClientKey && session.messagesById?.has?.(mappedClientKey)) return mappedClientKey;
+        }
+        if (id.startsWith('local-') || id.startsWith('tmp:')) {
+            const canonicalId = resolvePreservedHydrationCanonicalId(session, session, id, item);
+            if (canonicalId && session.messagesById?.has?.(canonicalId)) return canonicalId;
+        }
+        return '';
+    }
+
+    function normalizeLiveTurnHistoryMessage(item, order) {
+        if (!item || typeof item.id !== 'string' || !item.id.length) return null;
+        let role = item.role;
+        if (!role) {
+            if (item.id.startsWith('msg_')) role = 'assistant';
+            else if (item.id.startsWith('system:')) role = 'system';
+            else role = 'user';
+        }
+        const rawText = typeof item.text === 'string' ? item.text : '';
+        const cleanedText = role === 'user'
+            ? stripSystemInjections(rawText.replace(/^(\r?\n)+/, ''))
+            : rawText;
+        return {
+            id: item.id,
+            role,
+            text: cleanedText,
+            meta: { ...(item.meta || {}) },
+            order
+        };
+    }
+
+    function handleLiveTurnHistory(message) {
+        const sessionId = getLiveTurnResumeField(message, 'sessionId');
+        const panelId = getLiveTurnResumeField(message, 'panelId');
+        const incomingWebviewInstanceId = getLiveTurnResumeField(message, 'webviewInstanceId');
+        const skip = (reason, extra = []) => postLiveTurnHistoryDiagnostic('EXT: webviewAutoRescue.liveTurnResume.historySkipped', message, reason, extra);
+
+        if (!panelId) return skip('missing-panelId');
+        if (!incomingWebviewInstanceId) return skip('missing-webviewInstanceId');
+        if (!webviewInstanceId || incomingWebviewInstanceId !== webviewInstanceId) return skip('webview-instance-mismatch');
+        if (!currentWebviewLivenessPanelId) {
+            if (!activeSessionId) {
+                currentWebviewLivenessPanelId = panelId;
+                postLiveTurnHistoryDiagnostic('EXT: webviewAutoRescue.liveTurnResume.historyPanelExpectationBootstrap', message, 'panel-expectation-bootstrap');
+            } else {
+                return skip('missing-panel-expectation');
+            }
+        }
+        if (panelId !== currentWebviewLivenessPanelId) return skip('panel-mismatch');
+        if (!sessionId) return skip('missing-sessionId');
+        if (activeSessionId && activeSessionId !== sessionId) return skip('session-mismatch', [`activeSessionId=${activeSessionId || 'null'}`]);
+
+        const session = getSessionState(sessionId, true);
+        if (!activeSessionId) {
+            activeSessionId = sessionId;
+            clearAppendInputForSessionChange(sessionId);
+            renderHeaderUsage();
+            updateUndoStatusDisplay(sessionId);
+        }
+        if (message.title && !baseSessionTitle) {
+            baseSessionTitle = message.title;
+            renderHeaderTitle();
+        }
+
+        const rawMessages = Array.isArray(message.messages) ? message.messages : [];
+        const explicitTimelineIds = Array.isArray(message?.meta?.timelineMessageIds)
+            ? message.meta.timelineMessageIds.filter((id) => typeof id === 'string' && id.length > 0)
+            : rawMessages.map((item) => (typeof item?.id === 'string' ? item.id : '')).filter(Boolean);
+        const mergedIds = new Set();
+        let skippedExisting = 0;
+        let skippedCanonical = 0;
+        let skippedInvalid = 0;
+
+        for (const item of rawMessages) {
+            const id = typeof item?.id === 'string' ? item.id : '';
+            if (!id) {
+                skippedInvalid++;
+                continue;
+            }
+            const existingKey = getLiveTurnHistoryExistingKey(session, item);
+            if (existingKey) {
+                if (existingKey === id) skippedExisting++;
+                else skippedCanonical++;
+                continue;
+            }
+            const normalized = normalizeLiveTurnHistoryMessage(item, session.nextOrder++);
+            if (!normalized) {
+                skippedInvalid++;
+                continue;
+            }
+            session.messagesById.set(id, normalized);
+            mergedIds.add(id);
+        }
+
+        const currentTimeline = Array.isArray(session.timeline) ? session.timeline.slice() : [];
+        const nextTimeline = [];
+        const seen = new Set();
+        const appendTimelineId = (id) => {
+            if (typeof id !== 'string' || !id.length || seen.has(id)) return;
+            if (!session.messagesById.has(id)) return;
+            seen.add(id);
+            nextTimeline.push(id);
+        };
+        for (const id of explicitTimelineIds) appendTimelineId(id);
+        for (const id of currentTimeline) appendTimelineId(id);
+        session.timeline = nextTimeline;
+
+        materializeInjectedChangeLists(session, rawMessages, 'liveTurnHistory');
+        rebuildHiddenSetFromTimeline(session);
+        hydratedSessions.add(sessionId);
+        postLiveTurnHistoryDiagnostic(
+            'EXT: webviewAutoRescue.liveTurnResume.historyMerged',
+            message,
+            'merge-only',
+            [
+                `historyCount=${rawMessages.length}`,
+                `merged=${mergedIds.size}`,
+                `skippedExisting=${skippedExisting}`,
+                `skippedCanonical=${skippedCanonical}`,
+                `skippedInvalid=${skippedInvalid}`,
+                `timelineSize=${session.timeline.length}`,
+                `thinkingId=${session.thinkingId || 'null'}`,
+                `currentTurnAssistantKey=${session.currentTurnAssistantKey || 'null'}`,
+                `backendTurnInFlight=${session.backendTurnInFlight === true ? 'true' : 'false'}`
+            ]
+        );
+        renderIfActive(sessionId, 'liveTurnHistory', { extra: ['phase=merge-only'] });
+        updateSendGate();
+    }
+
+    function handleLiveTurnResume(message) {
+        const sessionId = getLiveTurnResumeField(message, 'sessionId');
+        const panelId = getLiveTurnResumeField(message, 'panelId');
+        const incomingWebviewInstanceId = getLiveTurnResumeField(message, 'webviewInstanceId');
+        const activeTurnId = getLiveTurnResumeField(message, 'activeTurnId');
+        const rawUserKey = getLiveTurnResumeUserKey(message);
+        const rawAssistantKey = getLiveTurnResumeAssistantKey(message);
+        const tmpAssistantKey = getLiveTurnResumeField(message, 'tmpAssistantKey');
+        const assistantMessageId = getLiveTurnResumeField(message, 'assistantMessageId');
+
+        const skip = (reason, extra = []) => {
+            postLiveTurnResumeDiagnostic('EXT: webviewAutoRescue.liveTurnResume.skipped', message, reason, extra);
+        };
+        const deduped = (reason, extra = []) => {
+            postLiveTurnResumeDiagnostic('EXT: webviewAutoRescue.liveTurnResume.deduped', message, reason, extra);
+        };
+
+        if (!panelId) return skip('missing-panelId');
+        if (!incomingWebviewInstanceId) return skip('missing-webviewInstanceId');
+        if (!webviewInstanceId || incomingWebviewInstanceId !== webviewInstanceId) return skip('webview-instance-mismatch');
+        if (!currentWebviewLivenessPanelId) {
+            if (!activeSessionId) {
+                currentWebviewLivenessPanelId = panelId;
+                postLiveTurnResumeDiagnostic('EXT: webviewAutoRescue.liveTurnResume.panelExpectationBootstrap', message, 'panel-expectation-bootstrap');
+            } else {
+                return skip('missing-panel-expectation');
+            }
+        }
+        if (panelId !== currentWebviewLivenessPanelId) return skip('panel-mismatch');
+        if (!sessionId) return skip('missing-sessionId');
+        if (!activeTurnId) return skip('missing-activeTurnId');
+        if (!rawUserKey) return skip('missing-user-message-id');
+        if (!rawAssistantKey) return skip('missing-assistant-message-id');
+
+        const existingSession = getSessionState(sessionId, false);
+        const wasActiveSession = Boolean(activeSessionId && activeSessionId === sessionId);
+        const isFirstBootstrap = !activeSessionId;
+        const shouldActivateSession = wasActiveSession || isFirstBootstrap;
+        const identity = liveTurnResumeTurnIdentityMatchesSession(existingSession, message, rawUserKey, rawAssistantKey);
+        if (!identity.ok) return skip(identity.reason);
+
+        const session = getSessionState(sessionId, true);
+        const resolvedUser = resolveLiveTurnResumeUserKey(session, message, rawUserKey);
+        const resolvedAssistant = resolveLiveTurnResumeAssistantKey(session, message, rawAssistantKey);
+        const userKey = resolvedUser.key;
+        const assistantKey = resolvedAssistant.key;
+        if (!userKey) return skip('missing-resolved-user-message-id');
+        if (!assistantKey) return skip('missing-resolved-assistant-message-id');
+
+        const userAliasRemoved = removeLiveTurnResumeAlias(session, getLiveTurnResumeField(message, 'userLocalId'), userKey, 'user');
+        const assistantAliasRemoved = removeLiveTurnResumeAlias(session, tmpAssistantKey, assistantKey, 'assistant');
+        const existingUser = session.messagesById.get(userKey) || null;
+        const existingAssistant = session.messagesById.get(assistantKey) || null;
+        const alreadyFinalized = Boolean(
+            existingAssistant &&
+            existingAssistant.role === 'assistant' &&
+            existingAssistant.meta?.isThinking !== true &&
+            session.backendTurnInFlight !== true &&
+            session.turnFullyFinalized !== false
+        );
+        if (alreadyFinalized) {
+            ensureTimelineContainsOnce(session, userKey);
+            ensureTimelineContainsOnce(session, assistantKey);
+            deduped('already-finalized', [`userKey=${userKey}`, `assistantKey=${assistantKey}`]);
+            renderIfActive(sessionId, 'liveTurnResume:finalized-dedupe', { scroll: true, forceScroll: true });
+            return;
+        }
+
+        if (shouldActivateSession) {
+            activeSessionId = sessionId;
+            clearAppendInputForSessionChange(sessionId);
+            renderHeaderUsage();
+            updateUndoStatusDisplay(sessionId);
+        }
+
+        const displayUserText = typeof message.displayUserText === 'string'
+            ? message.displayUserText
+            : (typeof message.rawUserText === 'string' ? stripSystemInjections(message.rawUserText) : '');
+        upsertMessage(session, {
+            id: userKey,
+            role: 'user',
+            text: displayUserText,
+            meta: { clientId: message.userLocalId || userKey }
+        });
+
+        const assistantText = typeof message.assistantText === 'string' && message.assistantText.length > 0
+            ? message.assistantText
+            : 'Thinking...';
+        upsertMessage(session, {
+            id: assistantKey,
+            role: 'assistant',
+            text: assistantText,
+            meta: { isThinking: true, statusText: '', liveTurnResume: true, liveTurnResumeAssistantKey: assistantKey }
+        });
+        placeMessageAfterAnchor(session, assistantKey, userKey, 'liveTurnResume');
+        ensureTimelineContainsOnce(session, userKey);
+        ensureTimelineContainsOnce(session, assistantKey);
+
+        session.lastTurnUserId = userKey;
+        session.appendRootUserKey = userKey;
+        session.thinkingId = assistantKey;
+        session.currentTurnAssistantKey = assistantKey;
+        session.currentTurnAssistantMsgId = assistantMessageId || assistantKey;
+        session.canceledActiveTurn = false;
+        session.backendTurnInFlight = true;
+        session.turnFullyFinalized = false;
+        if (tmpAssistantKey && assistantMessageId && tmpAssistantKey !== assistantMessageId) {
+            session.pendingAssistantUpgrade = {
+                tmpKey: tmpAssistantKey,
+                assistantMsgId: assistantMessageId,
+                source: 'liveTurnResume',
+                ts: Date.now(),
+                fallbackAssistantKey: assistantKey,
+                fallbackSourceTmpKey: tmpAssistantKey,
+                fallbackSessionId: sessionId,
+                fallbackSource: 'liveTurnResume',
+                fallbackTurnAnchor: userKey
+            };
+        } else {
+            session.pendingAssistantUpgrade = null;
+        }
+
+        const duplicate = Boolean(existingUser && existingAssistant);
+        postLiveTurnResumeDiagnostic(
+            duplicate ? 'EXT: webviewAutoRescue.liveTurnResume.deduped' : 'EXT: webviewAutoRescue.liveTurnResume.accepted',
+            message,
+            duplicate ? `duplicate-payload:${resolvedUser.reason}:${resolvedAssistant.reason}` : `${identity.reason}:${resolvedUser.reason}:${resolvedAssistant.reason}`,
+            [
+                `userKey=${userKey}`,
+                `assistantKey=${assistantKey}`,
+                `rawUserKey=${rawUserKey}`,
+                `rawAssistantKey=${rawAssistantKey}`,
+                `userAliasRemoved=${userAliasRemoved ? 'true' : 'false'}`,
+                `assistantAliasRemoved=${assistantAliasRemoved ? 'true' : 'false'}`,
+                `appendRootUserKey=${session.appendRootUserKey || 'null'}`,
+                `activate=${shouldActivateSession ? 'true' : 'false'}`,
+                `bootstrap=${isFirstBootstrap ? 'true' : 'false'}`
+            ]
+        );
+        renderIfActive(sessionId, 'liveTurnResume', { scroll: true, forceScroll: true });
+        updateSendGate();
+    }
+
 window.addEventListener('message', (event) => {
         const message = event.data || {};
         vscode.postMessage({
@@ -9628,8 +10203,19 @@ window.addEventListener('message', (event) => {
                 const hydrated = Boolean(activeSessionId && incomingSessionId && activeSessionId === incomingSessionId && hydratedSessions.has(activeSessionId));
                 vscode.postMessage({
                     type: 'ui-debug',
-                    payload: ['[WV][INIT_RX]', `sessionId=${incomingSessionId || 'null'}`, `currentSessionId=${activeSessionId || 'null'}`, `hydrated=${hydrated}`, `willReset=${!hydrated}`]
+                    payload: ['[WV][INIT_RX]', `sessionId=${incomingSessionId || 'null'}`, `currentSessionId=${activeSessionId || 'null'}`, `hydrated=${hydrated}`, `willReset=${!hydrated}`, `metadataOnly=${String(Boolean(message.metadataOnly))}`, `postedSessionData=${String(Boolean(message.postedSessionData))}`]
                 });
+                if (
+                    typeof message.panelId === 'string' && message.panelId.length > 0 &&
+                    typeof message.webviewInstanceId === 'string' && message.webviewInstanceId.length > 0 &&
+                    webviewInstanceId && message.webviewInstanceId === webviewInstanceId
+                ) {
+                    currentWebviewLivenessPanelId = message.panelId;
+                    vscode.postMessage({
+                        type: 'ui-debug',
+                        payload: ['[WV][INIT_PANEL_EXPECTATION]', 'reason=init-authenticated-panel-seed', `panelId=${message.panelId}`, `webviewInstanceId=${message.webviewInstanceId}`]
+                    });
+                }
                 logSegmentState(activeSessionId, 'before-init');
                 models = Array.isArray(message.models) ? message.models : [];
                 refreshFreeModelIds();
@@ -9915,7 +10501,25 @@ window.addEventListener('message', (event) => {
                 });
                 break;
             }
+            case 'debugWebviewLivenessAckDrop': {
+                debugWebviewLivenessAckDrop = Boolean(message.enabled);
+                vscode.postMessage({
+                    type: 'ui-debug',
+                    payload: ['WV', 'webviewLiveness.ackDrop', 'enabled', String(debugWebviewLivenessAckDrop)]
+                });
+                break;
+            }
             case 'webviewLivenessPing': {
+                if (typeof message.panelId === 'string' && message.panelId.length > 0) {
+                    currentWebviewLivenessPanelId = message.panelId;
+                }
+                if (debugWebviewLivenessAckDrop) {
+                    vscode.postMessage({
+                        type: 'ui-debug',
+                        payload: ['WV', 'webviewLiveness.ackDrop.drop', 'pingId', message.pingId || 'null', 'sessionId', message.sessionId || activeSessionId || 'null', 'token', message.token || 'null']
+                    });
+                    break;
+                }
                 vscode.postMessage({
                     type: 'ui-debug',
                     payload: ['WV', 'webviewLiveness.ack', 'pingId', message.pingId || 'null', 'sessionId', message.sessionId || activeSessionId || 'null', 'token', message.token || 'null']
@@ -9929,6 +10533,14 @@ window.addEventListener('message', (event) => {
                     webviewInstanceId: message.webviewInstanceId,
                     ts: Date.now()
                 });
+                break;
+            }
+            case 'liveTurnResume': {
+                handleLiveTurnResume(message);
+                break;
+            }
+            case 'liveTurnHistory': {
+                handleLiveTurnHistory(message);
                 break;
             }
             case 'sessionData': {
@@ -10256,6 +10868,25 @@ window.addEventListener('message', (event) => {
                     const skippedCanonicalTimeline = preservedLive.skippedCanonicalizedVolatile?.timeline || 0;
                     const skippedCanonicalBacking = preservedLive.skippedCanonicalizedVolatile?.backing || 0;
                     const skippedCanonicalFields = preservedLive.skippedCanonicalizedVolatile?.fields || 0;
+                    const preservedLiveTurnResumeState = Boolean(
+                        preservedHydrationState?.pendingAssistantUpgrade?.source === 'liveTurnResume' ||
+                        Array.from(preservedHydrationState?.messagesById?.values?.() || []).some((item) => item?.meta?.liveTurnResume === true)
+                    );
+                    if (preservedLiveTurnResumeState && (skippedCanonicalTimeline || skippedCanonicalBacking || skippedCanonicalFields)) {
+                        postLiveTurnResumeReconcileDiagnostic(
+                            'EXT: webviewAutoRescue.liveTurnResume.finalizeReconcile',
+                            sessionId,
+                            'sessionData-canonicalized-live-pair',
+                            [
+                                `skippedCanonicalizedTimeline=${skippedCanonicalTimeline}`,
+                                `skippedCanonicalizedBacking=${skippedCanonicalBacking}`,
+                                `skippedCanonicalizedFields=${skippedCanonicalFields}`,
+                                `thinkingId=${session.thinkingId || 'null'}`,
+                                `currentTurnAssistantKey=${session.currentTurnAssistantKey || 'null'}`,
+                                `backendTurnInFlight=${session.backendTurnInFlight === true ? 'true' : 'false'}`
+                            ]
+                        );
+                    }
                     if (preservedLive.missingIds.length || preservedLive.fieldNames.length || skippedTimelineArtifacts || skippedBackingArtifacts || skippedCanonicalTimeline || skippedCanonicalBacking || skippedCanonicalFields) {
                         vscode.postMessage({
                             type: 'ui-debug',

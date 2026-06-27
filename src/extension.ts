@@ -107,6 +107,18 @@ export function activate(context: vscode.ExtensionContext) {
 	);
 
 	context.subscriptions.push(
+		vscode.commands.registerCommand('opencode.debugWebviewLivenessAckDropOn', async () => {
+			await sidebarProvider.setDebugWebviewLivenessAckDrop(true);
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('opencode.debugWebviewLivenessAckDropOff', async () => {
+			await sidebarProvider.setDebugWebviewLivenessAckDrop(false);
+		})
+	);
+
+	context.subscriptions.push(
 		new vscode.Disposable(() => {
 			void sidebarProvider.shutdownServer();
 		})

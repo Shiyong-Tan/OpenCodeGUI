@@ -80,6 +80,14 @@
       {
         "command": "opencode.debugWebviewLivenessMissedAck",
         "title": "OpenCode: Debug Webview Liveness Missed Ack"
+      },
+      {
+        "command": "opencode.debugWebviewLivenessAckDropOn",
+        "title": "OpenCode: Debug Webview Liveness Ack Drop On"
+      },
+      {
+        "command": "opencode.debugWebviewLivenessAckDropOff",
+        "title": "OpenCode: Debug Webview Liveness Ack Drop Off"
       }
     ],
     "menus": {
