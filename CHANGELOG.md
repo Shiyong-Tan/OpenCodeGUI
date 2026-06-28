@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.1
+
+- Fixed WebView reload recovery during active turns by restoring metadata, history, live user/assistant bubbles, streaming/final reconciliation, and append controls without reposting destructive session data while the turn is fresh.
+- Added guarded WebView liveness diagnostics and debug ack-drop commands to validate reload/rescue behavior.
+
 ## 3.0.0
 
 - Hardened multi-session isolation so active/background session switches no longer steal selection, render ownership, or in-flight turn state from the intended session.
