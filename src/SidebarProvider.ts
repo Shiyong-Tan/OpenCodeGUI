@@ -685,7 +685,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private initPosted = false;
     private sessionSelectionEpoch = 0;
     private readonly recentSessionLoadLimit = 200;
-    private readonly webviewLivenessPingTimeoutMs = 3000;
+    private readonly webviewLivenessPingTimeoutMs = 10000;
     private readonly webviewAutoRescueCooldownMs = 60000;
     private readonly webviewAutoRescueNotificationTtlMs = 60000;
     private readonly webviewAutoRescueRepromptCooldownMs = 60000;
