@@ -692,7 +692,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private readonly webviewAutoRescueMaxReprompts = 2;
     private readonly webviewActiveTurnFreshnessWindowMs = 30000;
     private readonly webviewLivenessProbeIntervalMs = 30000;
-    private readonly webviewLivenessActiveTurnMissThreshold = 2;
+    private readonly webviewLivenessActiveTurnMissThreshold = 1;
+    private readonly webviewLivenessNonActiveMissThreshold = 2;
     private webviewLivenessPanelSeq = 0;
     private webviewLivenessCurrent?: WebviewLivenessRecord;
     private webviewAutoRescueCooldownUntilByEpisode = new Map<string, number>();
@@ -1777,18 +1778,22 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const missedCount = (missedCountByToken.get(record.token) || 0) + 1;
             missedCountByToken.set(record.token, missedCount);
             const simulatedMissedCount = this.webviewLivenessSimulatedMissedAckCountByToken.get(record.token) || 0;
-            this.uiDebugChannel.appendLine(`EXT: webviewLiveness.missedAck | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | pingId=${pingId} | timeoutMs=${this.webviewLivenessPingTimeoutMs} | missedCount=${missedCount} | simulatedMissedCount=${simulatedMissedCount} | simulateMissedAck=${String(simulateMissedAck)} | threshold=${activeTurnFlags.active ? this.webviewLivenessActiveTurnMissThreshold : 1} | ${this.describeWebviewLivenessFlags(record.sessionId)}`);
-            if (activeTurnFlags.active && missedCount < this.webviewLivenessActiveTurnMissThreshold) {
-                this.uiDebugChannel.appendLine(`EXT: webviewLiveness.guard.defer | reason=active-streaming-or-finalizing | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | pingId=${pingId} | missedCount=${missedCount} | requiredMisses=${this.webviewLivenessActiveTurnMissThreshold} | retryMs=${this.webviewLivenessPingTimeoutMs} | streaming=${String(activeTurnFlags.streaming)} | finalizing=${String(activeTurnFlags.finalizing)}`);
+            const missedAckThreshold = activeTurnFlags.active
+                ? this.webviewLivenessActiveTurnMissThreshold
+                : this.webviewLivenessNonActiveMissThreshold;
+            this.uiDebugChannel.appendLine(`EXT: webviewLiveness.missedAck | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | pingId=${pingId} | timeoutMs=${this.webviewLivenessPingTimeoutMs} | missedCount=${missedCount} | simulatedMissedCount=${simulatedMissedCount} | simulateMissedAck=${String(simulateMissedAck)} | threshold=${missedAckThreshold} | ${this.describeWebviewLivenessFlags(record.sessionId)}`);
+            if (missedCount < missedAckThreshold) {
+                const deferReason = activeTurnFlags.active ? 'active-streaming-or-finalizing' : 'missed-ack-threshold';
+                this.uiDebugChannel.appendLine(`EXT: webviewLiveness.guard.defer | reason=${deferReason} | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | pingId=${pingId} | missedCount=${missedCount} | requiredMisses=${missedAckThreshold} | retryMs=${this.webviewLivenessPingTimeoutMs} | streaming=${String(activeTurnFlags.streaming)} | finalizing=${String(activeTurnFlags.finalizing)}`);
                 record.pending = false;
                 if (this.webviewLivenessCurrent === record) this.webviewLivenessCurrent = undefined;
                 setTimeout(() => {
-                    void this.triggerWebviewLivenessProbe('active-turn-guard-retry');
+                    void this.triggerWebviewLivenessProbe(activeTurnFlags.active ? 'active-turn-guard-retry' : 'missed-ack-threshold-retry');
                 }, this.webviewLivenessPingTimeoutMs);
                 return;
             }
             if (activeTurnFlags.active) {
-                this.uiDebugChannel.appendLine(`EXT: webviewLiveness.guard.satisfied | reason=repeated-missed-ack | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | pingId=${pingId} | missedCount=${missedCount} | requiredMisses=${this.webviewLivenessActiveTurnMissThreshold} | streaming=${String(activeTurnFlags.streaming)} | finalizing=${String(activeTurnFlags.finalizing)}`);
+                this.uiDebugChannel.appendLine(`EXT: webviewLiveness.guard.satisfied | reason=repeated-missed-ack | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | pingId=${pingId} | missedCount=${missedCount} | requiredMisses=${missedAckThreshold} | streaming=${String(activeTurnFlags.streaming)} | finalizing=${String(activeTurnFlags.finalizing)}`);
             }
             if (this.isWebviewAutoRescueTerminalStopped(record)) {
                 this.logWebviewAutoRescueTerminalStopProbeCycle(record, 'missed-ack-terminal-stop');
