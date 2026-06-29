@@ -4,6 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## 3.0.2
 
+- Fixed assistant text streaming/delta tracking by keying lengths per message part, avoiding dropped or incorrect chunks when multiple parts share a message.
 - Fixed WebView reload recovery during active turns by restoring metadata, history, live user/assistant bubbles, streaming/final reconciliation, and append controls without reposting destructive session data while the turn is fresh.
 - Added guarded WebView liveness diagnostics and debug ack-drop commands to validate reload/rescue behavior.
 

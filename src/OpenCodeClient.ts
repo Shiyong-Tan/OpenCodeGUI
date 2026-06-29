@@ -513,6 +513,7 @@ export class OpenCodeClient {
     private gitUndoAvailable = false;
     private sessionUndoEnabled = new Map<string, boolean>();
     private assistantTextLengths = new Map<string, number>();
+    private assistantTextLengthsByPart = new Map<string, number>();
     private assistantTextById = new Map<string, string>();
     private assistantHasDelta = new Set<string>();
     private assistantStatusCleared = new Set<string>();
@@ -697,6 +698,7 @@ export class OpenCodeClient {
         this.turnWriteStateBySession.clear();
         this.sessionUndoEnabled.clear();
         this.assistantTextLengths.clear();
+        this.assistantTextLengthsByPart.clear();
         this.assistantTextById.clear();
         this.assistantHasDelta.clear();
         this.assistantStatusCleared.clear();
@@ -5288,10 +5290,22 @@ export class OpenCodeClient {
             indexMap.clear();
             order.forEach((id, index) => indexMap.set(id, index));
         }
+        this.assistantTextLengths.delete(messageId);
+        this.assistantTextLengthsByPart.delete(messageId);
+        for (const key of Array.from(this.assistantTextLengthsByPart.keys())) {
+            if (key.startsWith(`${messageId}:`)) {
+                this.assistantTextLengthsByPart.delete(key);
+            }
+        }
         this.assistantTextById.delete(messageId);
         for (const set of this.ignoredSummaryMessageIdsBySession.values()) {
             set.delete(messageId);
         }
+    }
+
+    private getAssistantTextLengthPartKey(msgId: string, part: any): string {
+        const partId = typeof part?.id === 'string' && part.id.length > 0 ? part.id : '';
+        return partId ? `${msgId}:${partId}` : msgId;
     }
 
     private appendAssistantText(msgId: string, chunk: string): void {
@@ -7406,12 +7420,15 @@ export class OpenCodeClient {
                     const partText = this.extractTextPayload(part?.text);
                     // Even if we've seen deltas, if there's new full text beyond what we've shown, emit it
                     const nextLen = partText.length;
-                    const prevLen = msgId ? (this.assistantTextLengths.get(msgId) || 0) : 0;
-                    
+                    const partLengthKey = msgId ? this.getAssistantTextLengthPartKey(msgId, part) : '';
+                    const prevLen = partLengthKey ? (this.assistantTextLengthsByPart.get(partLengthKey) || 0) : 0;
+
                     if (nextLen > prevLen) {
                         chunk = partText.slice(prevLen);
                         if (msgId) {
-                            this.assistantTextLengths.set(msgId, nextLen);
+                            this.assistantTextLengthsByPart.set(partLengthKey, nextLen);
+                            const aggregateLen = this.assistantTextLengths.get(msgId) || 0;
+                            this.assistantTextLengths.set(msgId, Math.max(aggregateLen, nextLen));
                         }
                     } else {
                         chunk = '';
