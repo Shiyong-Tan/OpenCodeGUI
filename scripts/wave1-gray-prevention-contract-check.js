@@ -1,0 +1,56 @@
+/* eslint-disable no-console */
+const fs = require('fs');
+const path = require('path');
+
+function read(rel) {
+  return fs.readFileSync(path.join(process.cwd(), rel), 'utf8');
+}
+
+function assertContains(haystack, needle, label) {
+  const ok = typeof needle === 'string' ? haystack.includes(needle) : needle.test(haystack);
+  if (!ok) {
+    throw new Error(`Wave1 gray prevention contract check failed: ${label}`);
+  }
+}
+
+function assertNotContains(haystack, needle, label) {
+  if (haystack.includes(needle)) {
+    throw new Error(`Wave1 gray prevention contract check failed: ${label}`);
+  }
+}
+
+function run() {
+  const webview = read('media/main.js');
+  const self = read('scripts/wave1-gray-prevention-contract-check.js');
+
+  assertContains(webview, 'window.__oc.isRenderPending = () => renderScheduled', 'render scheduler exposes narrow pending accessor');
+  assertContains(webview, "typeof window.__oc?.isRenderPending !== 'function' || !window.__oc.isRenderPending()", 'coalescing is gated by render pending accessor');
+  assertContains(webview, 'pendingStatusOnlyCoalescedByKey', 'pending status-only coalescing state exists');
+  assertContains(webview, 'STATUS_ONLY_PENDING_RECONCILE_RENDER_REASON', 'post-pending reconcile render reason constant exists');
+
+  assertContains(webview, 'status-coalesce-state-only', 'state-only coalescing marker exists');
+  assertContains(webview, 'status-local-patch-suppressed-unclear-anchor', 'local patch suppressed marker exists');
+  assertContains(webview, 'status-reconcile-deferred-render-pending', 'deferred reconcile marker exists');
+  assertContains(webview, 'status-post-pending-reconcile-scheduled', 'post-pending reconcile scheduled marker exists');
+  assertContains(webview, 'shouldLogPendingStatusOnlyCoalesce', 'coalescing logging is rate-limited/summarized');
+  assertContains(webview, 'count <= 3 || count % 25 === 0', 'coalescing marker avoids per-event storms');
+
+  assertContains(webview, "reason !== 'unclear-anchor' || (source !== 'subagentStatus' && source !== 'backgroundActivityPulse')", 'coalescing limited to unclear-anchor status sources');
+  assertContains(webview, "source !== 'subagentStatus' && source !== 'backgroundActivityPulse'", 'source gating includes both status sources');
+  assertContains(webview, 'getSubagentStatusNoClearAnchorReason(sessionId)', 'subagent status uses no-clear-anchor prediction');
+  assertContains(webview, 'getBackgroundSubagentIndicatorNoClearAnchorReason(session)', 'background pulse uses no-clear-anchor prediction');
+  assertContains(webview, 'isTerminalSubagentStatusUpdate(incomingAgents, doneJustNowCount)', 'terminal subagent status transitions bypass coalescing');
+  assertContains(webview, "terminalStatusUpdate ? '' : getSubagentStatusNoClearAnchorReason(sessionId)", 'terminal status is not treated as unclear-anchor coalescing candidate');
+
+  assertContains(webview, 'isUnclearAnchorCircuitBreakerCurrentlyOpen(sessionId, source, reason)', 'coalescing checks existing Wave2 breaker without scheduling it');
+  assertContains(webview, "isUnclearAnchorCircuitBreakerOpen(sessionId, 'subagentStatus', 'unclear-anchor', subagentStatusFields)", 'existing subagent breaker path remains in use');
+  assertContains(webview, "isUnclearAnchorCircuitBreakerOpen(sessionId, source, 'unclear-anchor', ['phase=arm-show'])", 'existing background breaker path remains in use');
+  assertContains(webview, "handleBackgroundIndicatorPatchResult(sessionId, applyBackgroundSubagentIndicator(latest), source, ['phase=timer-expiry-hide'])", 'background timer expiry hide semantics are unchanged');
+
+  assertNotContains(webview, "window.__oc?.renderFromState?.('unclear-anchor-circuit-breaker')\n            window.__oc?.renderFromState?.(STATUS_ONLY_PENDING_RECONCILE_RENDER_REASON)", 'Wave1 does not directly double-schedule beside Wave2 breaker');
+  assertNotContains(self, 'const sidebar' + ' = read', 'contract check does not require extension-side files');
+
+  console.log('Wave1 gray prevention contract check passed.');
+}
+
+run();

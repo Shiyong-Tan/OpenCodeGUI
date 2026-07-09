@@ -1139,6 +1139,16 @@ function sessionHasVisibleThinkingAssistant(session) {
 const BACKGROUND_RENDER_FALLBACK_THROTTLE_LIMIT = 2;
 const BACKGROUND_RENDER_FALLBACK_THROTTLE_WINDOW_MS = 1000;
 const backgroundRenderFallbackWindows = new Map();
+const STATUS_ONLY_PENDING_RECONCILE_RENDER_REASON = 'status-post-pending-reconcile';
+const UNCLEAR_ANCHOR_CIRCUIT_BREAKER_SHORT_WINDOW_MS = 5000;
+const UNCLEAR_ANCHOR_CIRCUIT_BREAKER_SHORT_LIMIT = 20;
+const UNCLEAR_ANCHOR_CIRCUIT_BREAKER_LONG_WINDOW_MS = 30000;
+const UNCLEAR_ANCHOR_CIRCUIT_BREAKER_LONG_LIMIT = 100;
+const UNCLEAR_ANCHOR_CIRCUIT_BREAKER_IDLE_RESET_MS = 10000;
+const UNCLEAR_ANCHOR_CIRCUIT_BREAKER_RENDER_RESET_COOLDOWN_MS = 1200;
+const UNCLEAR_ANCHOR_CIRCUIT_BREAKER_OPEN_COOLDOWN_MS = 5000;
+const unclearAnchorCircuitBreakers = new Map();
+const pendingStatusOnlyCoalescedByKey = new Map();
 const renderStormCounters = {
     fullRenderRequestsByReason: Object.create(null),
     suppressedFallbackRenderRequestsByReason: Object.create(null),
@@ -1148,8 +1158,10 @@ const renderStormCounters = {
     userAppendFastPathResults: Object.create(null),
     userAppendFastPathBailReasons: Object.create(null),
     assistantStreamingPatchResults: Object.create(null),
-    assistantStreamingPatchBailReasons: Object.create(null)
+    assistantStreamingPatchBailReasons: Object.create(null),
+    statusOnlyCoalescedByKey: Object.create(null)
 };
+const webviewAutoRescueProcessedAttemptIds = new Set();
 
 function incrementRenderStormCounter(bucketName, key) {
     const bucket = renderStormCounters[bucketName];
@@ -1164,6 +1176,341 @@ function logRenderStormMetric(eventName, fields = []) {
         type: 'ui-debug',
         payload: ['[WV][RENDER_STORM]', eventName || 'metric', ...fields]
     });
+}
+
+function getUnclearAnchorCircuitBreakerKey(sessionId, source, reason) {
+    return `${sessionId || 'null'}|${source || 'unknown'}|${reason || 'unknown'}`;
+}
+
+function getUnclearAnchorCircuitBreakerState(sessionId, source, reason) {
+    const key = getUnclearAnchorCircuitBreakerKey(sessionId, source, reason);
+    let state = unclearAnchorCircuitBreakers.get(key);
+    if (!state) {
+        state = {
+            key,
+            sessionId: sessionId || '',
+            source: source || 'unknown',
+            reason: reason || 'unknown',
+            failures: [],
+            open: false,
+            openUntil: 0,
+            coalescedRenderScheduled: false,
+            lastCoalescedRenderAt: 0,
+            resetTimer: null
+        };
+        unclearAnchorCircuitBreakers.set(key, state);
+    }
+    return state;
+}
+
+function isUnclearAnchorCircuitBreakerCurrentlyOpen(sessionId, source, reason) {
+    if (reason !== 'unclear-anchor' || (source !== 'subagentStatus' && source !== 'backgroundActivityPulse')) {
+        return false;
+    }
+    const key = getUnclearAnchorCircuitBreakerKey(sessionId, source, reason);
+    const state = unclearAnchorCircuitBreakers.get(key);
+    return Boolean(state?.open && Date.now() < state.openUntil);
+}
+
+function getPendingStatusOnlyCoalesceKey(sessionId, source, reason) {
+    return `${sessionId || 'null'}|${source || 'unknown'}|${reason || 'unknown'}`;
+}
+
+function shouldLogPendingStatusOnlyCoalesce(state) {
+    const count = state?.count || 0;
+    return count <= 3 || count % 25 === 0;
+}
+
+function logPendingStatusOnlyCoalesce(marker, state, fields = []) {
+    const key = state?.key || getPendingStatusOnlyCoalesceKey(state?.sessionId, state?.source, state?.reason);
+    const total = incrementRenderStormCounter('statusOnlyCoalescedByKey', key);
+    logRenderStormMetric(marker, [
+        `sessionId=${state?.sessionId || 'null'}`,
+        `activeSessionId=${activeSessionId || 'null'}`,
+        `source=${state?.source || 'unknown'}`,
+        `reason=${state?.reason || 'unknown'}`,
+        `count=${state?.count || 0}`,
+        `total=${total}`,
+        ...fields
+    ]);
+}
+
+function notePendingStatusOnlyCoalesced(sessionId, source, reason, fields = []) {
+    if (reason !== 'unclear-anchor' || (source !== 'subagentStatus' && source !== 'backgroundActivityPulse')) {
+        return false;
+    }
+    const key = getPendingStatusOnlyCoalesceKey(sessionId, source, reason);
+    let state = pendingStatusOnlyCoalescedByKey.get(key);
+    if (!state) {
+        state = {
+            key,
+            sessionId: sessionId || '',
+            source: source || 'unknown',
+            reason: reason || 'unknown',
+            count: 0,
+            postPendingRenderScheduled: false
+        };
+        pendingStatusOnlyCoalescedByKey.set(key, state);
+    }
+    state.count += 1;
+    if (shouldLogPendingStatusOnlyCoalesce(state)) {
+        logPendingStatusOnlyCoalesce('status-coalesce-state-only', state, fields);
+        logPendingStatusOnlyCoalesce('status-local-patch-suppressed-unclear-anchor', state, fields);
+    }
+    if (isUnclearAnchorCircuitBreakerCurrentlyOpen(sessionId, source, reason)) {
+        return true;
+    }
+    if (!state.postPendingRenderScheduled) {
+        state.postPendingRenderScheduled = true;
+        logPendingStatusOnlyCoalesce('status-reconcile-deferred-render-pending', state, fields);
+    }
+    return true;
+}
+
+function flushPendingStatusOnlyCoalescedAfterRender() {
+    if (!pendingStatusOnlyCoalescedByKey.size) return false;
+    let scheduled = false;
+    for (const state of Array.from(pendingStatusOnlyCoalescedByKey.values())) {
+        if (!state.postPendingRenderScheduled) {
+            pendingStatusOnlyCoalescedByKey.delete(state.key);
+            continue;
+        }
+        if (state.sessionId && state.sessionId !== activeSessionId) {
+            pendingStatusOnlyCoalescedByKey.delete(state.key);
+            continue;
+        }
+        if (isUnclearAnchorCircuitBreakerCurrentlyOpen(state.sessionId, state.source, state.reason)) {
+            pendingStatusOnlyCoalescedByKey.delete(state.key);
+            continue;
+        }
+        if (!scheduled) {
+            logPendingStatusOnlyCoalesce('status-post-pending-reconcile-scheduled', state, [
+                `renderReason=${STATUS_ONLY_PENDING_RECONCILE_RENDER_REASON}`
+            ]);
+            window.__oc?.renderFromState?.(STATUS_ONLY_PENDING_RECONCILE_RENDER_REASON);
+            scheduled = true;
+        }
+        pendingStatusOnlyCoalescedByKey.delete(state.key);
+    }
+    return scheduled;
+}
+
+function logUnclearAnchorCircuitBreaker(marker, state, fields = []) {
+    logRenderStormMetric(marker, [
+        `sessionId=${state?.sessionId || 'null'}`,
+        `activeSessionId=${activeSessionId || 'null'}`,
+        `source=${state?.source || 'unknown'}`,
+        `reason=${state?.reason || 'unknown'}`,
+        ...fields
+    ]);
+}
+
+function resetUnclearAnchorCircuitBreakerState(state, resetReason) {
+    if (!state) return;
+    if (state.resetTimer) {
+        clearTimeout(state.resetTimer);
+        state.resetTimer = null;
+    }
+    const failureCount = Array.isArray(state.failures) ? state.failures.length : 0;
+    logUnclearAnchorCircuitBreaker('unclear-anchor-circuit-breaker-reset', state, [
+        `resetReason=${resetReason || 'unknown'}`,
+        `failureCount=${failureCount}`,
+        `windowMs=${UNCLEAR_ANCHOR_CIRCUIT_BREAKER_IDLE_RESET_MS}`,
+        `open=${state.open ? 'true' : 'false'}`
+    ]);
+    unclearAnchorCircuitBreakers.delete(state.key);
+}
+
+function armUnclearAnchorIdleReset(state) {
+    if (!state) return;
+    if (state.resetTimer) {
+        clearTimeout(state.resetTimer);
+    }
+    state.resetTimer = setTimeout(() => {
+        const latest = unclearAnchorCircuitBreakers.get(state.key);
+        if (!latest) return;
+        const now = Date.now();
+        const lastFailureAt = latest.failures.length ? latest.failures[latest.failures.length - 1] : 0;
+        if (!lastFailureAt || now - lastFailureAt >= UNCLEAR_ANCHOR_CIRCUIT_BREAKER_IDLE_RESET_MS) {
+            resetUnclearAnchorCircuitBreakerState(latest, 'idle-no-failures');
+        } else {
+            armUnclearAnchorIdleReset(latest);
+        }
+    }, UNCLEAR_ANCHOR_CIRCUIT_BREAKER_IDLE_RESET_MS + 25);
+}
+
+function scheduleUnclearAnchorCoalescedRender(state, fields = []) {
+    if (!state) return false;
+    const now = Date.now();
+    const activeMatches = Boolean(state.sessionId && state.sessionId === activeSessionId);
+    if (!activeMatches) {
+        logUnclearAnchorCircuitBreaker('unclear-anchor-coalesced-render-scheduled', state, [
+            'scheduled=false',
+            'skipReason=inactive-session',
+            `failureCount=${state.failures.length}`,
+            `windowMs=${UNCLEAR_ANCHOR_CIRCUIT_BREAKER_LONG_WINDOW_MS}`,
+            ...fields
+        ]);
+        return false;
+    }
+    if (state.coalescedRenderScheduled) {
+        logUnclearAnchorCircuitBreaker('unclear-anchor-coalesced-render-scheduled', state, [
+            'scheduled=false',
+            'skipReason=already-scheduled',
+            `failureCount=${state.failures.length}`,
+            `windowMs=${UNCLEAR_ANCHOR_CIRCUIT_BREAKER_LONG_WINDOW_MS}`,
+            ...fields
+        ]);
+        return false;
+    }
+    if (state.lastCoalescedRenderAt && now - state.lastCoalescedRenderAt < UNCLEAR_ANCHOR_CIRCUIT_BREAKER_RENDER_RESET_COOLDOWN_MS) {
+        logUnclearAnchorCircuitBreaker('unclear-anchor-coalesced-render-scheduled', state, [
+            'scheduled=false',
+            'skipReason=cooldown',
+            `cooldownMs=${UNCLEAR_ANCHOR_CIRCUIT_BREAKER_RENDER_RESET_COOLDOWN_MS}`,
+            `failureCount=${state.failures.length}`,
+            `windowMs=${UNCLEAR_ANCHOR_CIRCUIT_BREAKER_LONG_WINDOW_MS}`,
+            ...fields
+        ]);
+        return false;
+    }
+    state.coalescedRenderScheduled = true;
+    state.lastCoalescedRenderAt = now;
+    logUnclearAnchorCircuitBreaker('unclear-anchor-coalesced-render-scheduled', state, [
+        'scheduled=true',
+        'renderReason=unclear-anchor-circuit-breaker',
+        `failureCount=${state.failures.length}`,
+        `windowMs=${UNCLEAR_ANCHOR_CIRCUIT_BREAKER_LONG_WINDOW_MS}`,
+        ...fields
+    ]);
+    window.__oc?.renderFromState?.('unclear-anchor-circuit-breaker');
+    return true;
+}
+
+function noteUnclearAnchorCoalescedRenderComplete(sessionId) {
+    if (!sessionId) return;
+    for (const state of Array.from(unclearAnchorCircuitBreakers.values())) {
+        if (state.sessionId !== sessionId || !state.coalescedRenderScheduled) continue;
+        state.coalescedRenderScheduled = false;
+        setTimeout(() => {
+            const latest = unclearAnchorCircuitBreakers.get(state.key);
+            if (!latest) return;
+            resetUnclearAnchorCircuitBreakerState(latest, 'coalesced-render-complete');
+        }, UNCLEAR_ANCHOR_CIRCUIT_BREAKER_RENDER_RESET_COOLDOWN_MS);
+    }
+}
+
+function isUnclearAnchorCircuitBreakerOpen(sessionId, source, reason, fields = []) {
+    if (reason !== 'unclear-anchor' || (source !== 'subagentStatus' && source !== 'backgroundActivityPulse')) {
+        return false;
+    }
+    const state = getUnclearAnchorCircuitBreakerState(sessionId, source, reason);
+    const now = Date.now();
+    if (!state.open || now >= state.openUntil) {
+        return false;
+    }
+    logUnclearAnchorCircuitBreaker('unclear-anchor-circuit-breaker-open', state, [
+        'skipReason=open-window',
+        `failureCount=${state.failures.length}`,
+        `windowMs=${UNCLEAR_ANCHOR_CIRCUIT_BREAKER_OPEN_COOLDOWN_MS}`,
+        `openUntilMs=${Math.max(0, state.openUntil - now)}`,
+        ...fields
+    ]);
+    scheduleUnclearAnchorCoalescedRender(state, fields);
+    return true;
+}
+
+function recordUnclearAnchorLocalPatchFailure(sessionId, source, reason, fields = []) {
+    if (reason !== 'unclear-anchor' || (source !== 'subagentStatus' && source !== 'backgroundActivityPulse')) {
+        return false;
+    }
+    const state = getUnclearAnchorCircuitBreakerState(sessionId, source, reason);
+    const now = Date.now();
+    state.failures.push(now);
+    state.failures = state.failures.filter((ts) => now - ts <= UNCLEAR_ANCHOR_CIRCUIT_BREAKER_LONG_WINDOW_MS);
+    armUnclearAnchorIdleReset(state);
+    const shortCount = state.failures.filter((ts) => now - ts <= UNCLEAR_ANCHOR_CIRCUIT_BREAKER_SHORT_WINDOW_MS).length;
+    const longCount = state.failures.length;
+    const thresholdHit = shortCount >= UNCLEAR_ANCHOR_CIRCUIT_BREAKER_SHORT_LIMIT || longCount >= UNCLEAR_ANCHOR_CIRCUIT_BREAKER_LONG_LIMIT;
+    if (!thresholdHit) {
+        return false;
+    }
+    if (!state.open || now >= state.openUntil) {
+        state.open = true;
+        state.openUntil = now + UNCLEAR_ANCHOR_CIRCUIT_BREAKER_OPEN_COOLDOWN_MS;
+        logUnclearAnchorCircuitBreaker('unclear-anchor-circuit-breaker-open', state, [
+            `failureCount=${longCount}`,
+            `shortWindowCount=${shortCount}`,
+            `shortWindowMs=${UNCLEAR_ANCHOR_CIRCUIT_BREAKER_SHORT_WINDOW_MS}`,
+            `shortLimit=${UNCLEAR_ANCHOR_CIRCUIT_BREAKER_SHORT_LIMIT}`,
+            `longWindowCount=${longCount}`,
+            `longWindowMs=${UNCLEAR_ANCHOR_CIRCUIT_BREAKER_LONG_WINDOW_MS}`,
+            `longLimit=${UNCLEAR_ANCHOR_CIRCUIT_BREAKER_LONG_LIMIT}`,
+            ...fields
+        ]);
+    }
+    scheduleUnclearAnchorCoalescedRender(state, fields);
+    return true;
+}
+
+function getWebviewAutoRescueAttemptKey(message) {
+    const attemptId = typeof message?.rescueAttemptId === 'string' && message.rescueAttemptId.length > 0
+        ? message.rescueAttemptId
+        : '';
+    if (!attemptId) return '';
+    return `${message?.rescueSource || 'unknown'}:${attemptId}`;
+}
+
+function logWebviewAutoRescueMarker(marker, fields = []) {
+    logRenderStormMetric(marker, ['source=webviewAutoRescue', ...fields]);
+}
+
+function postWebviewAutoRescueAck(message, phase, result, reason, extra = {}) {
+    const sessionId = typeof message?.sessionId === 'string' ? message.sessionId : '';
+    const branch = message?.branch || (message?.type === 'sessionData' ? 'not-fresh-sessionData' : 'fresh-active-turn-command');
+    const activeSessionMatches = Boolean(sessionId && activeSessionId === sessionId);
+    const payload = {
+        type: 'webviewAutoRescueAck',
+        event: 'webviewAutoRescue.ack',
+        phase,
+        result,
+        reason,
+        rescueAttemptId: message?.rescueAttemptId || '',
+        sessionId,
+        activeSessionId: activeSessionId || '',
+        branch,
+        rescueRenderMode: message?.rescueRenderMode || '',
+        activeSessionMatches,
+        currentSessionMatches: activeSessionMatches,
+        ...extra
+    };
+    vscode.postMessage(payload);
+    logWebviewAutoRescueMarker('webviewAutoRescue.ack', [
+        `phase=${phase}`,
+        `result=${result}`,
+        `reason=${reason || 'none'}`,
+        `rescueAttemptId=${payload.rescueAttemptId || 'null'}`,
+        `sessionId=${sessionId || 'null'}`,
+        `activeSessionId=${activeSessionId || 'null'}`,
+        `branch=${branch}`,
+        `rescueRenderMode=${payload.rescueRenderMode || 'null'}`,
+        `activeSessionMatches=${String(activeSessionMatches)}`,
+        `currentSessionMatches=${String(activeSessionMatches)}`
+    ]);
+}
+
+function markWebviewAutoRescueAttemptIfNew(message, fields = []) {
+    const attemptKey = getWebviewAutoRescueAttemptKey(message);
+    if (!attemptKey) {
+        logWebviewAutoRescueMarker('rescue-force-render-skip', ['reason=missing-attempt-id', ...fields]);
+        return { ok: false, attemptKey: '', reason: 'missing-attempt-id' };
+    }
+    if (webviewAutoRescueProcessedAttemptIds.has(attemptKey)) {
+        logWebviewAutoRescueMarker('rescue-force-render-skip', ['reason=duplicate-attempt', `rescueAttemptId=${message.rescueAttemptId}`, ...fields]);
+        return { ok: false, attemptKey, reason: 'already-rendered-current-session' };
+    }
+    webviewAutoRescueProcessedAttemptIds.add(attemptKey);
+    return { ok: true, attemptKey, reason: 'accepted' };
 }
 
 function countBackgroundIndicatorApplyResult(result, fields = []) {
@@ -1359,21 +1706,59 @@ function applyBackgroundSubagentIndicator(session) {
     return { applied: true, reason: 'applied' };
 }
 
-function handleBackgroundIndicatorPatchResult(sessionId, result, source) {
-    countBackgroundIndicatorApplyResult(result, [`sessionId=${sessionId || 'null'}`, `source=${source || 'unknown'}`]);
+function getBackgroundSubagentIndicatorNoClearAnchorReason(session) {
+    if (session && session !== getSessionState(activeSessionId)) {
+        return '';
+    }
+    if (!sessionHasActiveBackgroundSubagents(session) || sessionHasVisibleThinkingAssistant(session)) {
+        return '';
+    }
+    const anchoredAssistantId = typeof session?.backgroundSubagentIndicatorAnchorId === 'string'
+        ? session.backgroundSubagentIndicatorAnchorId
+        : null;
+    const finalAssistantId = typeof session?.finalAssistantLock?.assistantMsgId === 'string'
+        ? session.finalAssistantLock.assistantMsgId
+        : null;
+    const earlyFinalAssistantId = typeof session?.earlyFinalAssistantId === 'string'
+        ? session.earlyFinalAssistantId
+        : null;
+    const fallbackAssistantId = finalAssistantId || earlyFinalAssistantId || null;
+    const targetId = anchoredAssistantId || fallbackAssistantId;
+    if (anchoredAssistantId && fallbackAssistantId && anchoredAssistantId !== fallbackAssistantId) {
+        return 'unclear-anchor';
+    }
+    if (!targetId) {
+        return 'unclear-anchor';
+    }
+    return '';
+}
+
+function shouldCoalescePendingStatusOnlyUnclearAnchor(sessionId, source, reason, fields = []) {
+    if (reason !== 'unclear-anchor' || (source !== 'subagentStatus' && source !== 'backgroundActivityPulse')) {
+        return false;
+    }
+    if (typeof window.__oc?.isRenderPending !== 'function' || !window.__oc.isRenderPending()) {
+        return false;
+    }
+    return notePendingStatusOnlyCoalesced(sessionId, source, reason, fields);
+}
+
+function handleBackgroundIndicatorPatchResult(sessionId, result, source, fields = []) {
+    countBackgroundIndicatorApplyResult(result, [`sessionId=${sessionId || 'null'}`, `source=${source || 'unknown'}`, ...fields]);
     if (result?.applied === true) return true;
     const reason = result?.reason || 'unknown';
     if (reason === 'missing-target-bubble' || reason === 'unclear-anchor') {
-        countLocalPatchFailed(reason, [`sessionId=${sessionId || 'null'}`, `source=${source || 'unknown'}`]);
-        requestThrottledBackgroundFallbackRender(sessionId, `background-pulse-${reason}`, [`source=${source || 'unknown'}`]);
+        countLocalPatchFailed(reason, [`sessionId=${sessionId || 'null'}`, `source=${source || 'unknown'}`, ...fields]);
+        recordUnclearAnchorLocalPatchFailure(sessionId, source, reason, fields);
+        requestThrottledBackgroundFallbackRender(sessionId, `background-pulse-${reason}`, [`source=${source || 'unknown'}`, ...fields]);
         return false;
     }
     if (reason === 'inactive-session') {
-        suppressFallbackRender(`background-pulse-${reason}`, [`sessionId=${sessionId || 'null'}`, `source=${source || 'unknown'}`]);
-        logBackgroundStateUpdate(sessionId, 'background-pulse', { extra: [`apply=${reason}`, `source=${source || 'unknown'}`, 'render=false'] });
+        suppressFallbackRender(`background-pulse-${reason}`, [`sessionId=${sessionId || 'null'}`, `source=${source || 'unknown'}`, ...fields]);
+        logBackgroundStateUpdate(sessionId, 'background-pulse', { extra: [`apply=${reason}`, `source=${source || 'unknown'}`, 'render=false', ...fields] });
         return false;
     }
-    countLocalPatchFailed(reason, [`sessionId=${sessionId || 'null'}`, `source=${source || 'unknown'}`]);
+    countLocalPatchFailed(reason, [`sessionId=${sessionId || 'null'}`, `source=${source || 'unknown'}`, ...fields]);
     return false;
 }
 
@@ -1395,7 +1780,7 @@ function removeMessageFromSession(session, messageId) {
     }
 }
 
-function armBackgroundSubagentIndicator(sessionId, anchorAssistantId) {
+function armBackgroundSubagentIndicator(sessionId, anchorAssistantId, source = 'backgroundActivityPulse') {
     const session = getSessionState(sessionId, true);
     if (!session) return;
     if (session.backgroundSubagentIndicatorVisible) {
@@ -1418,9 +1803,19 @@ function armBackgroundSubagentIndicator(sessionId, anchorAssistantId) {
         latest.backgroundSubagentIndicatorUntil = 0;
         latest.backgroundSubagentIndicatorTimer = null;
         latest.backgroundSubagentIndicatorAnchorId = null;
-        handleBackgroundIndicatorPatchResult(sessionId, applyBackgroundSubagentIndicator(latest), 'timer-expiry-hide');
+        if (isUnclearAnchorCircuitBreakerOpen(sessionId, source, 'unclear-anchor', ['phase=timer-expiry-hide'])) {
+            return;
+        }
+        handleBackgroundIndicatorPatchResult(sessionId, applyBackgroundSubagentIndicator(latest), source, ['phase=timer-expiry-hide']);
     }, 3000);
-    handleBackgroundIndicatorPatchResult(sessionId, applyBackgroundSubagentIndicator(session), 'arm-show');
+    if (isUnclearAnchorCircuitBreakerOpen(sessionId, source, 'unclear-anchor', ['phase=arm-show'])) {
+        return;
+    }
+    const noClearAnchorReason = getBackgroundSubagentIndicatorNoClearAnchorReason(session);
+    if (shouldCoalescePendingStatusOnlyUnclearAnchor(sessionId, source, noClearAnchorReason, ['phase=arm-show'])) {
+        return;
+    }
+    handleBackgroundIndicatorPatchResult(sessionId, applyBackgroundSubagentIndicator(session), source, ['phase=arm-show']);
 }
 
 function clearBackgroundSubagentIndicator(session) {
@@ -1705,6 +2100,38 @@ function applySubagentStatusLocalPatch(sessionId, counts = {}) {
     return { applied: true, reason: indicator ? 'applied' : 'no-active-indicator' };
 }
 
+function getSubagentStatusNoClearAnchorReason(sessionId) {
+    if (!sessionId || sessionId !== activeSessionId) {
+        return '';
+    }
+    const session = getSessionState(sessionId);
+    const currentThinking = session?.thinkingId ? session.messagesById.get(session.thinkingId) : null;
+    if (!currentThinking || !currentThinking.meta?.isThinking) {
+        return '';
+    }
+    const targetId = currentThinking.id || session.thinkingId || '';
+    if (!targetId) {
+        return 'unclear-anchor';
+    }
+    if (Array.isArray(currentThinking.meta?.subagents) && currentThinking.meta.subagents.length) {
+        return 'unclear-anchor';
+    }
+    return '';
+}
+
+function isTerminalSubagentStatusUpdate(agents, doneJustNowCount) {
+    if (typeof doneJustNowCount === 'number' && doneJustNowCount > 0) {
+        return true;
+    }
+    if (!Array.isArray(agents) || !agents.length) {
+        return false;
+    }
+    return agents.some((agent) => {
+        const state = typeof agent?.state === 'string' ? agent.state : '';
+        return state === 'done' || state === 'failed' || state === 'cancelled' || agent?.isDone === true;
+    });
+}
+
 function handleSubagentStatusPatchResult(sessionId, result, source, fields = []) {
     logRenderStormMetric('subagent-status-local-patch', [
         `applied=${result?.applied === true ? 'true' : 'false'}`,
@@ -1715,8 +2142,19 @@ function handleSubagentStatusPatchResult(sessionId, result, source, fields = [])
     ]);
     if (result?.applied === true) return true;
     const reason = result?.reason || 'unknown';
+    if (reason === 'unclear-anchor-circuit-breaker-open') {
+        logRenderStormMetric('subagent-status-local-patch-skipped', [
+            'skipReason=unclear-anchor-circuit-breaker-open',
+            `sessionId=${sessionId || 'null'}`,
+            `activeSessionId=${activeSessionId || 'null'}`,
+            `source=${source || 'unknown'}`,
+            ...fields
+        ]);
+        return false;
+    }
     if (reason === 'missing-target-bubble' || reason === 'unclear-anchor') {
         countLocalPatchFailed(reason, [`sessionId=${sessionId || 'null'}`, `source=${source || 'unknown'}`, ...fields]);
+        recordUnclearAnchorLocalPatchFailure(sessionId, source, reason, fields);
         requestThrottledBackgroundFallbackRender(sessionId, `subagentStatus-${reason}`, [`source=${source || 'unknown'}`, ...fields]);
         return false;
     }
@@ -7395,6 +7833,8 @@ function shouldHideDcpUiMessage(message) {
                 renderNeedsAnother = false;
                 queuedRenderReason = '';
                 scheduleRenderFromState(nextReason);
+            } else {
+                flushPendingStatusOnlyCoalescedAfterRender();
             }
         });
     }
@@ -7424,6 +7864,7 @@ function shouldHideDcpUiMessage(message) {
             } else if (sessionSearch.open || sessionSearch.query) {
                 refreshSessionSearchHighlights({ jumpToFirst: false });
             }
+            noteUnclearAnchorCoalescedRenderComplete(activeSessionId);
             return;
         }
 
@@ -7675,10 +8116,12 @@ function shouldHideDcpUiMessage(message) {
                 payload: ['[WV][SNAPSHOT_ROUTE]', `sessionId=${activeSessionId}`, `reason=drop-switch-readonly`, `rendered=${renderKeys.length}`]
             });
         }
+        noteUnclearAnchorCoalescedRenderComplete(activeSessionId);
     }
 
     window.__oc = window.__oc || {};
     window.__oc.renderFromState = scheduleRenderFromState;
+    window.__oc.isRenderPending = () => renderScheduled;
 
     function renderModelSelect() {
         vscode.postMessage({
@@ -10332,11 +10775,19 @@ window.addEventListener('message', (event) => {
                 }
               }
 
+              const subagentStatusFields = [`agentSessionId=${route.agentSessionId || 'null'}`];
+              const terminalStatusUpdate = isTerminalSubagentStatusUpdate(incomingAgents, doneJustNowCount);
+              const noClearAnchorReason = terminalStatusUpdate ? '' : getSubagentStatusNoClearAnchorReason(sessionId);
+              if (shouldCoalescePendingStatusOnlyUnclearAnchor(sessionId, 'subagentStatus', noClearAnchorReason, subagentStatusFields)) {
+                break;
+              }
               handleSubagentStatusPatchResult(
                 sessionId,
-                applySubagentStatusLocalPatch(sessionId, { runningCount, finalizingCount, doneJustNowCount }),
+                isUnclearAnchorCircuitBreakerOpen(sessionId, 'subagentStatus', 'unclear-anchor', subagentStatusFields)
+                  ? { applied: false, reason: 'unclear-anchor-circuit-breaker-open' }
+                  : applySubagentStatusLocalPatch(sessionId, { runningCount, finalizingCount, doneJustNowCount }),
                 'subagentStatus',
-                [`agentSessionId=${route.agentSessionId || 'null'}`]
+                subagentStatusFields
               );
               break;
             }
@@ -10345,7 +10796,7 @@ window.addEventListener('message', (event) => {
               if (!route) break;
               const sessionId = route.parentSessionId;
               const anchorAssistantId = typeof message.assistantMsgId === 'string' ? message.assistantMsgId : null;
-              armBackgroundSubagentIndicator(sessionId, anchorAssistantId);
+              armBackgroundSubagentIndicator(sessionId, anchorAssistantId, 'backgroundActivityPulse');
               break;
             }
             case 'subagentStateDelta': {
@@ -10543,6 +10994,56 @@ window.addEventListener('message', (event) => {
                 handleLiveTurnHistory(message);
                 break;
             }
+            case 'webviewAutoRescueRenderCurrentState': {
+                const sessionId = typeof message.sessionId === 'string' ? message.sessionId : '';
+                const branch = message.branch || 'fresh-active-turn-command';
+                const fields = [
+                    `sessionId=${sessionId || 'null'}`,
+                    `activeSessionId=${activeSessionId || 'null'}`,
+                    `panelId=${message.panelId || 'null'}`,
+                    `token=${message.token || 'null'}`,
+                    `notificationToken=${message.notificationToken || 'null'}`,
+                    `rescueAttemptId=${message.rescueAttemptId || 'null'}`,
+                    `branch=${branch}`,
+                    `rescueRenderMode=${message.rescueRenderMode || 'null'}`
+                ];
+                logWebviewAutoRescueMarker('rescue-command-received', fields);
+                postWebviewAutoRescueAck(message, 'received', 'received', '', {
+                    activeSessionMatches: Boolean(sessionId && sessionId === activeSessionId),
+                    currentSessionMatches: Boolean(sessionId && sessionId === activeSessionId)
+                });
+                const validFreshCommand = branch === 'fresh-active-turn-command' && message.rescueRenderMode === 'render-current-state-once';
+                const validNotFreshCommand = branch === 'not-fresh-sessionData' && message.rescueRenderMode === 'force-full-render-once';
+                if (message.rescueSource !== 'webviewAutoRescue' || (!validFreshCommand && !validNotFreshCommand)) {
+                    logWebviewAutoRescueMarker('rescue-force-render-skip', ['reason=invalid-command', ...fields]);
+                    postWebviewAutoRescueAck(message, 'render-skip', 'skipped', 'invalid-command');
+                    break;
+                }
+                if (!sessionId || sessionId !== activeSessionId) {
+                    logWebviewAutoRescueMarker('rescue-force-render-skip', ['reason=session-mismatch', ...fields]);
+                    postWebviewAutoRescueAck(message, 'render-skip', 'skipped', 'session-mismatch');
+                    break;
+                }
+                const attempt = markWebviewAutoRescueAttemptIfNew(message, fields);
+                if (!attempt.ok) {
+                    postWebviewAutoRescueAck(message, 'render-skip', 'skipped', attempt.reason);
+                    break;
+                }
+                const session = getSessionState(sessionId, false);
+                const timelineCount = Array.isArray(session?.timeline) ? session.timeline.length : 0;
+                const messageCount = session?.messagesById?.size || 0;
+                logWebviewAutoRescueMarker('rescue-force-render-start', [`messages=${messageCount}`, `timeline=${timelineCount}`, ...fields]);
+                const renderReason = validNotFreshCommand ? 'webviewAutoRescue-force-full-render-once-command' : 'webviewAutoRescue-render-current-state-once';
+                const didRender = renderIfActive(sessionId, renderReason, { extra: [`branch=${branch}`, `rescueAttemptId=${message.rescueAttemptId || 'null'}`] });
+                if (didRender) {
+                    logWebviewAutoRescueMarker('rescue-force-render-done', [`messages=${messageCount}`, `timeline=${timelineCount}`, ...fields]);
+                    postWebviewAutoRescueAck(message, 'render-complete', 'rendered', '', { messages: messageCount, timeline: timelineCount, rendered: timelineCount });
+                } else {
+                    logWebviewAutoRescueMarker('rescue-force-render-skip', ['reason=inactive-session', `messages=${messageCount}`, `timeline=${timelineCount}`, ...fields]);
+                    postWebviewAutoRescueAck(message, 'render-skip', 'skipped', 'inactive-session', { messages: messageCount, timeline: timelineCount, rendered: 0 });
+                }
+                break;
+            }
             case 'sessionData': {
                 const route = resolveEventSessionId(message, 'sessionData');
                 const sessionId = route?.sessionId || null;
@@ -10552,6 +11053,41 @@ window.addEventListener('message', (event) => {
                         payload: ['[WV][SESSIONDATA_DROP]', 'missing-sessionId']
                     });
                     break;
+                }
+                const isWebviewAutoRescueSessionData = message.rescueSource === 'webviewAutoRescue';
+                const rescueBranch = message.branch || 'not-fresh-sessionData';
+                const rescueFields = [
+                    `sessionId=${sessionId}`,
+                    `activeSessionId=${activeSessionId || 'null'}`,
+                    `rescueAttemptId=${message.rescueAttemptId || 'null'}`,
+                    `branch=${rescueBranch}`,
+                    `rescueRenderMode=${message.rescueRenderMode || 'null'}`,
+                    `phase=${message.phase || 'unknown'}`,
+                    `messages=${message.messages?.length ?? 0}`
+                ];
+                let rescueSessionDataRenderDone = false;
+                if (isWebviewAutoRescueSessionData) {
+                    logWebviewAutoRescueMarker('rescue-sessionData-received', rescueFields);
+                    postWebviewAutoRescueAck(message, 'received', 'received', '', {
+                        messages: message.messages?.length ?? 0,
+                        activeSessionMatches: Boolean(activeSessionId && activeSessionId === sessionId),
+                        currentSessionMatches: Boolean(activeSessionId && activeSessionId === sessionId)
+                    });
+                    if (message.rescueRenderMode !== 'force-full-render-once') {
+                        logWebviewAutoRescueMarker('rescue-force-render-skip', ['reason=invalid-sessionData-mode', ...rescueFields]);
+                        postWebviewAutoRescueAck(message, 'render-skip', 'skipped', 'invalid-sessionData-mode', { messages: message.messages?.length ?? 0 });
+                        break;
+                    }
+                    if (!activeSessionId || activeSessionId !== sessionId) {
+                        logWebviewAutoRescueMarker('rescue-force-render-skip', ['reason=session-mismatch', ...rescueFields]);
+                        postWebviewAutoRescueAck(message, 'render-skip', 'skipped', 'session-mismatch', { messages: message.messages?.length ?? 0 });
+                        break;
+                    }
+                    const attempt = markWebviewAutoRescueAttemptIfNew(message, rescueFields);
+                    if (!attempt.ok) {
+                        postWebviewAutoRescueAck(message, 'render-skip', 'skipped', attempt.reason, { messages: message.messages?.length ?? 0 });
+                        break;
+                    }
                 }
                 const wasActiveSession = Boolean(activeSessionId && activeSessionId === sessionId);
                 const isExplicitSelectionTarget = Boolean(pendingExplicitSessionSelectionId && pendingExplicitSessionSelectionId === sessionId);
@@ -10906,7 +11442,21 @@ window.addEventListener('message', (event) => {
                         });
                     }
 
-                    renderIfActive(sessionId, 'sessionData', { extra: ['phase=hydrated'] });
+                    if (isWebviewAutoRescueSessionData) {
+                        const timelineCount = Array.isArray(session.timeline) ? session.timeline.length : 0;
+                        const messageCount = session.messagesById?.size || 0;
+                        logWebviewAutoRescueMarker('rescue-force-render-start', [`timeline=${timelineCount}`, `messages=${messageCount}`, ...rescueFields]);
+                        rescueSessionDataRenderDone = renderIfActive(sessionId, 'webviewAutoRescue-force-full-render-once', { extra: ['phase=hydrated', `branch=${rescueBranch}`, `rescueAttemptId=${message.rescueAttemptId || 'null'}`] });
+                        if (rescueSessionDataRenderDone) {
+                            logWebviewAutoRescueMarker('rescue-force-render-done', [`timeline=${timelineCount}`, `messages=${messageCount}`, ...rescueFields]);
+                            postWebviewAutoRescueAck(message, 'render-complete', 'rendered', '', { timeline: timelineCount, messages: messageCount, rendered: timelineCount });
+                        } else {
+                            logWebviewAutoRescueMarker('rescue-force-render-skip', ['reason=inactive-session', `timeline=${timelineCount}`, `messages=${messageCount}`, ...rescueFields]);
+                            postWebviewAutoRescueAck(message, 'render-skip', 'skipped', 'inactive-session', { timeline: timelineCount, messages: messageCount, rendered: 0 });
+                        }
+                    } else {
+                        renderIfActive(sessionId, 'sessionData', { extra: ['phase=hydrated'] });
+                    }
                     
                     vscode.postMessage({
                         type: 'ui-debug',
@@ -10930,8 +11480,13 @@ window.addEventListener('message', (event) => {
                         type: 'ui-debug',
                         payload: ['[WV][SESSIONDATA_ERROR]', `sessionId=${sessionId}`, `err=${String(err)}`]
                     });
+                    if (isWebviewAutoRescueSessionData) {
+                        postWebviewAutoRescueAck(message, 'render-fail', 'failed', String(err));
+                    }
                 } finally {
-                    const didRender = renderIfActive(sessionId, 'sessionData-finally', { extra: ['phase=finally'] });
+                    const didRender = isWebviewAutoRescueSessionData
+                        ? rescueSessionDataRenderDone
+                        : renderIfActive(sessionId, 'sessionData-finally', { extra: ['phase=finally'] });
                     if (didRender) {
                         requestAnimationFrame(() => {
                             refreshSendButtonState();

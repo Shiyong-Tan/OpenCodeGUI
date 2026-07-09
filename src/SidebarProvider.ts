@@ -146,6 +146,36 @@ type WebviewAutoRescuePromptMeta = {
 
 type WebviewAutoRescueAction = 'Cancel' | 'Rescue Now' | 'dismissed-as-cancel' | 'stale-token' | 'diagnostic-only' | 'soft-rescue';
 type WebviewAutoRescueState = 'idle' | 'pending-notification' | 'cancelled' | 'running-soft-rescue' | 'cooldown' | 'failed';
+type WebviewAutoRescueSoftRescueResult = {
+    ok: boolean;
+    phase?: 'snapshot' | 'recent' | 'full' | 'command';
+    messages?: number;
+    reason?: string;
+    branch?: 'fresh-active-turn-command' | 'not-fresh-sessionData';
+    rescueAttemptId?: string;
+};
+type WebviewAutoRescueAckPhase = 'received' | 'render-complete' | 'render-skip' | 'render-fail';
+type WebviewAutoRescuePendingAttempt = {
+    rescueAttemptId: string;
+    sessionId: string;
+    panelId: string;
+    token?: string;
+    webviewInstanceId?: string;
+    notificationToken?: string;
+    episodeId: string;
+    branch: 'fresh-active-turn-command' | 'not-fresh-sessionData';
+    startedAt: number;
+    timeoutAt: number;
+    postedSessionData: boolean;
+    postedCommand: boolean;
+    receivedAckSeen: boolean;
+    renderAckSeen: boolean;
+    acceptedSuccess: boolean;
+    lastAck?: any;
+    lastLivenessAckAt?: number;
+    timeout?: NodeJS.Timeout;
+    resolve?: (accepted: boolean) => void;
+};
 type WebviewLivenessActiveTurnSnapshot = {
     streaming: boolean;
     finalizing: boolean;
@@ -687,6 +717,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private readonly recentSessionLoadLimit = 200;
     private readonly webviewLivenessPingTimeoutMs = 10000;
     private readonly webviewAutoRescueCooldownMs = 60000;
+    private readonly webviewAutoRescueAckTimeoutMs = 5000;
+    private readonly webviewAutoRescueFailureCooldownMs = 15000;
     private readonly webviewAutoRescueNotificationTtlMs = 60000;
     private readonly webviewAutoRescueRepromptCooldownMs = 60000;
     private readonly webviewAutoRescueMaxReprompts = 2;
@@ -707,6 +739,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private webviewAutoRescueRepromptCountByEpisode = new Map<string, number>();
     private webviewAutoRescueRepromptDueAtByEpisode = new Map<string, number>();
     private webviewAutoRescueTerminalStopByEpisode = new Set<string>();
+    private webviewAutoRescuePendingAttemptById = new Map<string, WebviewAutoRescuePendingAttempt>();
     private webviewActiveTurnUpdatedAtBySession = new Map<string, number>();
     private sendInitGuardCompensationByKey = new Map<string, SendInitGuardCompensationEntry>();
     private sendInitGuardSpentCompensationByKey = new Map<string, SendInitGuardCompensationEntry>();
@@ -726,6 +759,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     private getWebviewLivenessEpisodeId(record: WebviewLivenessRecord): string {
         return `${record.panelId}:${record.sessionId}:${record.token}`;
+    }
+
+    private buildWebviewAutoRescueAttemptId(record: WebviewLivenessRecord): string {
+        return `webviewAutoRescue:${record.panelId}:${record.sessionId}:${record.token}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
     }
 
     private describeWebviewLivenessFlags(sessionId: string | undefined): string {
@@ -1481,7 +1518,168 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.logWebviewAutoRescueDiagnostics(record, 'post', 'diagnostic-only');
     }
 
-    private async repostActiveSessionDataForWebviewSoftRescue(record: WebviewLivenessRecord): Promise<{ ok: boolean; phase?: 'snapshot' | 'recent' | 'full'; messages?: number; reason?: string }> {
+    private beginWebviewAutoRescuePendingAttempt(record: WebviewLivenessRecord, rescueAttemptId: string, branch: 'fresh-active-turn-command' | 'not-fresh-sessionData'): WebviewAutoRescuePendingAttempt {
+        const startedAt = Date.now();
+        const attempt: WebviewAutoRescuePendingAttempt = {
+            rescueAttemptId,
+            sessionId: record.sessionId,
+            panelId: record.panelId,
+            token: record.token,
+            webviewInstanceId: record.webviewInstanceId || this._webviewInstanceId,
+            notificationToken: record.notificationToken,
+            episodeId: record.suspicionEpisodeId || this.getWebviewLivenessEpisodeId(record),
+            branch,
+            startedAt,
+            timeoutAt: startedAt + this.webviewAutoRescueAckTimeoutMs,
+            postedSessionData: false,
+            postedCommand: false,
+            receivedAckSeen: false,
+            renderAckSeen: false,
+            acceptedSuccess: false,
+            lastLivenessAckAt: record.ackAt
+        };
+        this.webviewAutoRescuePendingAttemptById.set(rescueAttemptId, attempt);
+        attempt.timeout = setTimeout(() => this.finishWebviewAutoRescuePendingAttemptTimeout(rescueAttemptId, 'ack-timeout'), this.webviewAutoRescueAckTimeoutMs);
+        attempt.timeout.unref?.();
+        return attempt;
+    }
+
+    private markWebviewAutoRescueAttemptPosted(rescueAttemptId: string, posted: { sessionData?: boolean; command?: boolean }): void {
+        const attempt = this.webviewAutoRescuePendingAttemptById.get(rescueAttemptId);
+        if (!attempt) return;
+        if (posted.sessionData) attempt.postedSessionData = true;
+        if (posted.command) attempt.postedCommand = true;
+    }
+
+    private formatWebviewAutoRescueAckFields(attempt: WebviewAutoRescuePendingAttempt, extra: string[] = []): string {
+        const lastAck = attempt.lastAck || {};
+        const record = this.webviewLivenessCurrent;
+        return [
+            `sessionId=${attempt.sessionId}`,
+            `panelId=${attempt.panelId}`,
+            `webviewInstanceId=${attempt.webviewInstanceId || 'null'}`,
+            `rescueAttemptId=${attempt.rescueAttemptId}`,
+            `branch=${attempt.branch}`,
+            `postedSessionData=${String(attempt.postedSessionData)}`,
+            `postedCommand=${String(attempt.postedCommand)}`,
+            `receivedAckSeen=${String(attempt.receivedAckSeen)}`,
+            `renderAckSeen=${String(attempt.renderAckSeen)}`,
+            `acceptedSuccess=${String(attempt.acceptedSuccess)}`,
+            `lastAckPhase=${lastAck.phase || 'none'}`,
+            `lastAckResult=${lastAck.result || 'none'}`,
+            `lastAckReason=${lastAck.reason || 'none'}`,
+            `lastLivenessAckAt=${record?.ackAt || attempt.lastLivenessAckAt || 0}`,
+            ...extra
+        ].join(' | ');
+    }
+
+    private finishWebviewAutoRescuePendingAttemptTimeout(rescueAttemptId: string, reason: string): void {
+        const attempt = this.webviewAutoRescuePendingAttemptById.get(rescueAttemptId);
+        if (!attempt || attempt.acceptedSuccess) return;
+        if (attempt.timeout) {
+            clearTimeout(attempt.timeout);
+            attempt.timeout = undefined;
+        }
+        const timeoutMs = Math.max(0, Date.now() - attempt.startedAt);
+        this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.ack.timeout | ${this.formatWebviewAutoRescueAckFields(attempt, [`reason=${reason}`, `timeoutMs=${timeoutMs}`, `expectedTimeoutMs=${this.webviewAutoRescueAckTimeoutMs}`])}`);
+        if (!attempt.receivedAckSeen) {
+            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.ack.undelivered | ${this.formatWebviewAutoRescueAckFields(attempt, [`reason=${reason}`, `timeoutMs=${timeoutMs}`, `expectedTimeoutMs=${this.webviewAutoRescueAckTimeoutMs}`, 'classification=undelivered-no-receipt', 'nextAction=escalation-needed'])}`);
+        }
+        const episodeId = attempt.episodeId;
+        const failureCount = (this.webviewAutoRescueFailureCountByEpisode.get(episodeId) || 0) + 1;
+        this.webviewAutoRescueFailureCountByEpisode.set(episodeId, failureCount);
+        this.webviewAutoRescueRepromptDueAtByEpisode.set(episodeId, Date.now() + this.webviewAutoRescueFailureCooldownMs);
+        if (failureCount >= 1) {
+            this.webviewAutoRescueTerminalStopByEpisode.add(episodeId);
+            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.ack.escalation-needed | ${this.formatWebviewAutoRescueAckFields(attempt, [`reason=${reason}`, `failureCount=${failureCount}`, `failureCooldownMs=${this.webviewAutoRescueFailureCooldownMs}`, 'automaticFollowUpPromptsRemaining=0'])}`);
+        }
+        const record = this.webviewLivenessCurrent;
+        if (record && record.sessionId === attempt.sessionId && record.panelId === attempt.panelId) {
+            this.setWebviewAutoRescueState(record, 'failed', 'soft-rescue-ack-timeout');
+        }
+        this.webviewAutoRescuePendingAttemptById.delete(rescueAttemptId);
+        attempt.resolve?.(false);
+    }
+
+    private handleWebviewAutoRescueAck(data: any): void {
+        const rescueAttemptId = typeof data?.rescueAttemptId === 'string' ? data.rescueAttemptId : '';
+        const phase = typeof data?.phase === 'string' ? data.phase as WebviewAutoRescueAckPhase : undefined;
+        const attempt = rescueAttemptId ? this.webviewAutoRescuePendingAttemptById.get(rescueAttemptId) : undefined;
+        if (!attempt) {
+            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.ack.result | accepted=false | reason=unknown-attempt | phase=${phase || 'unknown'} | rescueAttemptId=${rescueAttemptId || 'null'} | sessionId=${data?.sessionId || 'null'} | branch=${data?.branch || 'unknown'}`);
+            return;
+        }
+        const sessionMatches = data?.sessionId === attempt.sessionId;
+        const branchMatches = data?.branch === attempt.branch;
+        attempt.lastAck = data;
+        if (phase === 'received') {
+            attempt.receivedAckSeen = true;
+        } else if (phase === 'render-complete' || phase === 'render-skip' || phase === 'render-fail') {
+            attempt.renderAckSeen = true;
+        }
+        const benignSkip = phase === 'render-skip' && data?.reason === 'already-rendered-current-session';
+        const acceptedSuccess = sessionMatches && branchMatches && (phase === 'render-complete' || benignSkip);
+        attempt.acceptedSuccess = acceptedSuccess;
+        this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.ack.result | phase=${phase || 'unknown'} | result=${data?.result || 'unknown'} | reason=${data?.reason || 'none'} | accepted=${String(acceptedSuccess)} | sessionMatches=${String(sessionMatches)} | branchMatches=${String(branchMatches)} | ${this.formatWebviewAutoRescueAckFields(attempt, [`activeSessionMatches=${String(data?.activeSessionMatches === true)}`, `currentSessionMatches=${String(data?.currentSessionMatches === true)}`, `messages=${data?.messages ?? -1}`, `timeline=${data?.timeline ?? -1}`, `rendered=${data?.rendered ?? -1}`])}`);
+        if (!acceptedSuccess) {
+            if (phase === 'render-skip' || phase === 'render-fail') {
+                this.finishWebviewAutoRescuePendingAttemptTimeout(rescueAttemptId, phase === 'render-fail' ? 'render-fail' : 'render-skip');
+            }
+            return;
+        }
+        if (attempt.timeout) {
+            clearTimeout(attempt.timeout);
+            attempt.timeout = undefined;
+        }
+        this.webviewAutoRescuePendingAttemptById.delete(rescueAttemptId);
+        attempt.resolve?.(true);
+    }
+
+    private waitForWebviewAutoRescueRenderAck(rescueAttemptId: string): Promise<boolean> {
+        const attempt = this.webviewAutoRescuePendingAttemptById.get(rescueAttemptId);
+        if (!attempt) return Promise.resolve(false);
+        if (attempt.acceptedSuccess) return Promise.resolve(true);
+        return new Promise<boolean>((resolve) => {
+            attempt.resolve = resolve;
+        });
+    }
+
+    private cancelWebviewAutoRescuePendingAttempt(rescueAttemptId: string, reason: string): void {
+        const attempt = this.webviewAutoRescuePendingAttemptById.get(rescueAttemptId);
+        if (!attempt) return;
+        if (attempt.timeout) clearTimeout(attempt.timeout);
+        this.webviewAutoRescuePendingAttemptById.delete(rescueAttemptId);
+        this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.ack.result | accepted=false | reason=${reason} | ${this.formatWebviewAutoRescueAckFields(attempt)}`);
+        attempt.resolve?.(false);
+    }
+
+    private async postWebviewAutoRescueFreshActiveTurnCommand(record: WebviewLivenessRecord, activeTurn: WebviewLivenessActiveTurnSnapshot, selectionEpoch: number, rescueAttemptId: string): Promise<WebviewAutoRescueSoftRescueResult> {
+        const liveWebview = this._view?.webview;
+        if (!liveWebview || !this.isCurrentWebviewLivenessRecord(record) || this.currentSessionId !== record.sessionId || this.sessionSelectionEpoch !== selectionEpoch) {
+            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.branch | action=rescue-force-render-skip | branch=fresh-active-turn-command | reason=inactive-session | panelId=${record.panelId} | sessionId=${record.sessionId} | currentSessionId=${this.currentSessionId || 'null'} | token=${record.token} | notificationToken=${record.notificationToken || 'none'} | rescueAttemptId=${rescueAttemptId} | postedSessionData=false | reload=false | recreate=false | sessionMutation=false`);
+            return { ok: false, reason: 'soft-rescue-aborted-stale-token', branch: 'fresh-active-turn-command', rescueAttemptId };
+        }
+        if (!activeTurn.fresh) {
+            return { ok: false, reason: 'active-turn-no-longer-fresh', branch: 'fresh-active-turn-command', rescueAttemptId };
+        }
+        this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.branch | action=rescue-branch-decision | branch=fresh-active-turn-command | reason=fresh-active-turn | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | notificationToken=${record.notificationToken || 'none'} | rescueAttemptId=${rescueAttemptId} | activeTurnId=${activeTurn.turnId || 'none'} | activeTurnSource=${activeTurn.source} | activeTurnAgeMs=${activeTurn.ageMs} | activeTurnFreshnessWindowMs=${activeTurn.freshnessWindowMs} | postedSessionData=false | reload=false | recreate=false | sessionMutation=false`);
+        liveWebview.postMessage({
+            type: 'webviewAutoRescueRenderCurrentState',
+            sessionId: record.sessionId,
+            panelId: record.panelId,
+            token: record.token,
+            notificationToken: record.notificationToken,
+            rescueAttemptId,
+            rescueSource: 'webviewAutoRescue',
+            rescueRenderMode: 'render-current-state-once',
+            branch: 'fresh-active-turn-command'
+        });
+        this.markWebviewAutoRescueAttemptPosted(rescueAttemptId, { command: true });
+        this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.command.post | action=rescue-command-posted | branch=fresh-active-turn-command | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | notificationToken=${record.notificationToken || 'none'} | rescueAttemptId=${rescueAttemptId} | postedSessionData=false | reload=false | recreate=false | sessionMutation=false`);
+        return { ok: true, phase: 'command', messages: 0, branch: 'fresh-active-turn-command', rescueAttemptId };
+    }
+
+    private async repostActiveSessionDataForWebviewSoftRescue(record: WebviewLivenessRecord, rescueAttemptId: string): Promise<WebviewAutoRescueSoftRescueResult> {
         const liveWebview = this._view?.webview;
         if (!liveWebview || !this.isCurrentWebviewLivenessRecord(record)) {
             return { ok: false, reason: 'soft-rescue-aborted-stale-token' };
@@ -1500,8 +1698,24 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.softRescue.defer | action=soft-rescue-deferred-active-turn | reason=fresh-active-turn | phase=${phase} | panelId=${record.panelId} | sessionId=${sessionId} | token=${record.token} | activeTurnId=${activeTurn.turnId || 'none'} | activeTurnSource=${activeTurn.source} | activeTurnAgeMs=${activeTurn.ageMs} | activeTurnFreshnessWindowMs=${activeTurn.freshnessWindowMs} | streaming=${String(activeTurn.streaming)} | finalizing=${String(activeTurn.finalizing)} | postedSessionData=false | reload=false | recreate=false | sessionMutation=false`);
                 return 'active-turn';
             }
-            liveWebview.postMessage({ ...payload, phase, rescueSource: 'webviewAutoRescue' });
-            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.softRescue.repost | action=soft-rescue-ran | phase=${phase} | panelId=${record.panelId} | sessionId=${sessionId} | token=${record.token} | messages=${messageCount} | activeTurnSource=${activeTurn.source} | activeTurnAgeMs=${activeTurn.ageMs} | activeTurnFreshnessWindowMs=${activeTurn.freshnessWindowMs} | reload=false | recreate=false | sessionMutation=false`);
+            liveWebview.postMessage({ ...payload, phase, rescueSource: 'webviewAutoRescue', rescueRenderMode: 'force-full-render-once', rescueAttemptId, branch: 'not-fresh-sessionData' });
+            this.markWebviewAutoRescueAttemptPosted(rescueAttemptId, { sessionData: true });
+            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.branch | action=rescue-branch-decision | branch=not-fresh-sessionData | reason=not-fresh-active-turn | phase=${phase} | panelId=${record.panelId} | sessionId=${sessionId} | token=${record.token} | notificationToken=${record.notificationToken || 'none'} | rescueAttemptId=${rescueAttemptId} | messages=${messageCount} | activeTurnSource=${activeTurn.source} | activeTurnAgeMs=${activeTurn.ageMs} | activeTurnFreshnessWindowMs=${activeTurn.freshnessWindowMs} | postedSessionData=true | rescueRenderMode=force-full-render-once | reload=false | recreate=false | sessionMutation=false`);
+            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.sessionData.post | action=rescue-sessionData-posted | branch=not-fresh-sessionData | phase=${phase} | panelId=${record.panelId} | sessionId=${sessionId} | token=${record.token} | notificationToken=${record.notificationToken || 'none'} | rescueAttemptId=${rescueAttemptId} | messages=${messageCount} | rescueRenderMode=force-full-render-once | postedSessionData=true | reload=false | recreate=false | sessionMutation=false`);
+            liveWebview.postMessage({
+                type: 'webviewAutoRescueRenderCurrentState',
+                sessionId,
+                panelId: record.panelId,
+                token: record.token,
+                notificationToken: record.notificationToken,
+                rescueAttemptId,
+                rescueSource: 'webviewAutoRescue',
+                rescueRenderMode: 'force-full-render-once',
+                branch: 'not-fresh-sessionData'
+            });
+            this.markWebviewAutoRescueAttemptPosted(rescueAttemptId, { command: true });
+            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.command.post | action=rescue-command-posted | branch=not-fresh-sessionData | mode=force-full-render-once | phase=${phase} | panelId=${record.panelId} | sessionId=${sessionId} | token=${record.token} | notificationToken=${record.notificationToken || 'none'} | webviewInstanceId=${record.webviewInstanceId || this._webviewInstanceId || 'null'} | rescueAttemptId=${rescueAttemptId} | messages=${messageCount} | rescueRenderMode=force-full-render-once | postedSessionData=true | postedCommand=true | reload=false | recreate=false | sessionMutation=false`);
+            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.softRescue.repost | action=soft-rescue-ran | branch=not-fresh-sessionData | phase=${phase} | panelId=${record.panelId} | sessionId=${sessionId} | token=${record.token} | notificationToken=${record.notificationToken || 'none'} | rescueAttemptId=${rescueAttemptId} | messages=${messageCount} | activeTurnSource=${activeTurn.source} | activeTurnAgeMs=${activeTurn.ageMs} | activeTurnFreshnessWindowMs=${activeTurn.freshnessWindowMs} | rescueRenderMode=force-full-render-once | reload=false | recreate=false | sessionMutation=false`);
             return 'posted';
         };
 
@@ -1539,7 +1753,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 };
                 const postResult = postIfStillActive(snapshotPayload, 'snapshot', baseMessages.length);
                 if (postResult === 'posted') {
-                    return { ok: true, phase: 'snapshot', messages: baseMessages.length };
+                    return { ok: true, phase: 'snapshot', messages: baseMessages.length, branch: 'not-fresh-sessionData', rescueAttemptId };
                 }
                 return { ok: false, reason: postResult === 'active-turn' ? 'soft-rescue-deferred-active-turn' : 'soft-rescue-aborted-stale-token' };
             }
@@ -1571,7 +1785,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             };
             const postResult = postIfStillActive(recentPayload, 'recent', mergedMessages.length);
             if (postResult === 'posted') {
-                return { ok: true, phase: 'recent', messages: mergedMessages.length };
+                return { ok: true, phase: 'recent', messages: mergedMessages.length, branch: 'not-fresh-sessionData', rescueAttemptId };
             }
             return { ok: false, reason: postResult === 'active-turn' ? 'soft-rescue-deferred-active-turn' : 'soft-rescue-aborted-stale-token' };
         } catch (error) {
@@ -1596,7 +1810,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             };
             const postResult = postIfStillActive(fullPayload, 'full', formatted.messages.length);
             if (postResult === 'posted') {
-                return { ok: true, phase: 'full', messages: formatted.messages.length };
+                return { ok: true, phase: 'full', messages: formatted.messages.length, branch: 'not-fresh-sessionData', rescueAttemptId };
             }
             return { ok: false, reason: postResult === 'active-turn' ? 'soft-rescue-deferred-active-turn' : 'soft-rescue-aborted-stale-token' };
         } catch (error) {
@@ -1613,17 +1827,32 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             return;
         }
 
+        const selectionEpoch = this.sessionSelectionEpoch;
+        const rescueAttemptId = this.buildWebviewAutoRescueAttemptId(record);
+        const activeTurn = this.getWebviewLivenessActiveTurnFlags(record.sessionId);
+        const branch = activeTurn.fresh ? 'fresh-active-turn-command' : 'not-fresh-sessionData';
+        this.beginWebviewAutoRescuePendingAttempt(record, rescueAttemptId, branch);
         this.setWebviewAutoRescueState(record, 'running-soft-rescue', 'rescue-now');
-        this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.action | action=running-soft-rescue | requestedBy=${action} | method=active-session-sessionData-repost | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | reload=false | recreate=false | sessionMutation=false`);
-        const result = await this.repostActiveSessionDataForWebviewSoftRescue(record);
+        this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.action | action=running-soft-rescue | requestedBy=${action} | method=${activeTurn.fresh ? 'active-session-current-state-command' : 'active-session-sessionData-repost'} | branch=${branch} | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | notificationToken=${record.notificationToken || 'none'} | rescueAttemptId=${rescueAttemptId} | activeTurnFresh=${String(activeTurn.fresh)} | ackTimeoutMs=${this.webviewAutoRescueAckTimeoutMs} | reload=false | recreate=false | sessionMutation=false`);
+        const result = activeTurn.fresh
+            ? await this.postWebviewAutoRescueFreshActiveTurnCommand(record, activeTurn, selectionEpoch, rescueAttemptId)
+            : await this.repostActiveSessionDataForWebviewSoftRescue(record, rescueAttemptId);
         if (result.ok) {
-            this.webviewAutoRescueFailureCountByEpisode.delete(record.suspicionEpisodeId || this.getWebviewLivenessEpisodeId(record));
-            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.action | action=soft-rescue-ran | requestedBy=${action} | method=active-session-sessionData-repost | phase=${result.phase || 'unknown'} | messages=${result.messages ?? -1} | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | reload=false | recreate=false | sessionMutation=false`);
-            this.setWebviewAutoRescueState(record, 'cooldown', 'soft-rescue-success');
+            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.action | action=soft-rescue-posted-awaiting-ack | requestedBy=${action} | method=${result.branch === 'fresh-active-turn-command' ? 'active-session-current-state-command' : 'active-session-sessionData-repost'} | branch=${result.branch || 'unknown'} | phase=${result.phase || 'unknown'} | messages=${result.messages ?? -1} | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | notificationToken=${record.notificationToken || 'none'} | rescueAttemptId=${result.rescueAttemptId || rescueAttemptId} | ackTimeoutMs=${this.webviewAutoRescueAckTimeoutMs} | reload=false | recreate=false | sessionMutation=false`);
+            const accepted = await this.waitForWebviewAutoRescueRenderAck(result.rescueAttemptId || rescueAttemptId);
+            if (accepted) {
+                this.webviewAutoRescueFailureCountByEpisode.delete(record.suspicionEpisodeId || this.getWebviewLivenessEpisodeId(record));
+                this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.action | action=soft-rescue-ran | requestedBy=${action} | method=${result.branch === 'fresh-active-turn-command' ? 'active-session-current-state-command' : 'active-session-sessionData-repost'} | branch=${result.branch || 'unknown'} | phase=${result.phase || 'unknown'} | messages=${result.messages ?? -1} | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | notificationToken=${record.notificationToken || 'none'} | rescueAttemptId=${result.rescueAttemptId || rescueAttemptId} | successSource=webview-render-ack | reload=false | recreate=false | sessionMutation=false`);
+                this.setWebviewAutoRescueState(record, 'cooldown', 'soft-rescue-success');
+            } else {
+                this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.action | action=soft-rescue-not-confirmed | requestedBy=${action} | method=${result.branch === 'fresh-active-turn-command' ? 'active-session-current-state-command' : 'active-session-sessionData-repost'} | branch=${result.branch || 'unknown'} | phase=${result.phase || 'unknown'} | messages=${result.messages ?? -1} | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | notificationToken=${record.notificationToken || 'none'} | rescueAttemptId=${result.rescueAttemptId || rescueAttemptId} | successSource=none | reload=false | recreate=false | sessionMutation=false`);
+            }
         } else if (result.reason === 'soft-rescue-deferred-active-turn') {
+            this.cancelWebviewAutoRescuePendingAttempt(rescueAttemptId, result.reason);
             this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.action | action=soft-rescue-deferred-active-turn | requestedBy=${action} | method=active-session-sessionData-repost | reason=${result.reason} | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | reload=false | recreate=false | sessionMutation=false`);
             this.setWebviewAutoRescueState(record, 'cooldown', 'soft-rescue-deferred-active-turn');
         } else {
+            this.cancelWebviewAutoRescuePendingAttempt(rescueAttemptId, result.reason || 'soft-rescue-failed-before-post');
             const episodeId = record.suspicionEpisodeId || this.getWebviewLivenessEpisodeId(record);
             const failureCount = (this.webviewAutoRescueFailureCountByEpisode.get(episodeId) || 0) + 1;
             this.webviewAutoRescueFailureCountByEpisode.set(episodeId, failureCount);
@@ -1690,7 +1919,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             await this.handleExpiredWebviewAutoRescueLateAction(record, meta, action as WebviewAutoRescueAction);
             return;
         }
-        this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.notification.action | action=${action} | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | notificationToken=${notificationToken}`);
+        this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.notification.action | selectedAction=${selected} | action=${action} | currentToken=${String(currentSameToken)} | tokenStatus=${currentSameToken ? 'current' : 'stale'} | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | notificationToken=${notificationToken} | currentSessionId=${this.currentSessionId || 'null'}`);
         this.applyWebviewAutoRescueCooldown(record, action as WebviewAutoRescueAction);
         if (action === 'Rescue Now') {
             await this.executeWebviewAutoRescueSoftRescue(record, action as WebviewAutoRescueAction);
@@ -1831,6 +2060,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
         record.ackAt = Date.now();
         record.pending = false;
+        for (const attempt of this.webviewAutoRescuePendingAttemptById.values()) {
+            if (attempt.sessionId === record.sessionId && attempt.panelId === record.panelId && attempt.token === record.token) {
+                attempt.lastLivenessAckAt = record.ackAt;
+            }
+        }
         this.webviewLivenessMissedAckCountByToken.delete(record.token);
         if (!this.getWebviewLivenessActiveTurnFlags(record.sessionId).active) {
             this.webviewLivenessSimulatedMissedAckCountByToken.delete(record.token);
@@ -3833,6 +4067,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const panelId = `panel-${++this.webviewLivenessPanelSeq}`;
         this.resetWebviewLiveness('webview-recreate');
         this.uiDebugChannel.appendLine(`EXT: webviewLiveness.panel | phase=resolve | panelId=${panelId}`);
+        this.uiDebugChannel.appendLine(`EXT: webviewReload.external-unobservable | reason=vscode-developer-reload-webviews-command-not-interceptable | observablePoints=resolve,handshake,dispose | panelId=${panelId} | previousWebviewInstanceId=${this._webviewInstanceId || 'null'} | reload=false | recreate=false | sessionMutation=false`);
+        this.uiDebugChannel.appendLine(`EXT: webviewReload.expected-new-webview | phase=resolve | panelId=${panelId} | previousWebviewInstanceId=${this._webviewInstanceId || 'null'} | reload=false | recreate=false | sessionMutation=false`);
 
         webviewView.webview.options = {
             enableScripts: true,
@@ -3862,6 +4098,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     this._webviewInstanceId = data.webviewInstanceId;
                     this.webviewLivenessCurrent = undefined;
                     this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_1_RX] webviewReady | wvId=${this._webviewInstanceId}`);
+                    this.uiDebugChannel.appendLine(`EXT: webviewReload.handshake.observed | phase=webviewReady | panelId=${panelId} | webviewInstanceId=${this._webviewInstanceId || 'null'} | previousWebviewInstanceId=${data?.previousWebviewInstanceId || 'unknown'} | reload=false | recreate=false | sessionMutation=false`);
                     
                 const liveWebview = this._view?.webview;
                     if (liveWebview) {
@@ -3894,6 +4131,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 case "webviewLivenessAck": {
                     this.handleWebviewLivenessAck(data);
+                    break;
+                }
+                case "webviewAutoRescueAck": {
+                    this.handleWebviewAutoRescueAck(data);
                     break;
                 }
                 case "sendMessage": {
@@ -5940,6 +6181,11 @@ ${attachmentLines.join('\n')}`
             } else if (!webviewView.visible) {
                 this.stopWebviewLivenessProbes('visibility-hidden');
             }
+        });
+        webviewView.onDidDispose(() => {
+            this.uiDebugChannel.appendLine(`EXT: webviewReload.dispose.begin | panelId=${panelId} | webviewInstanceId=${this._webviewInstanceId || 'null'} | reload=false | recreate=false | sessionMutation=false`);
+            this.stopWebviewLivenessProbes('webview-dispose');
+            this.uiDebugChannel.appendLine(`EXT: webviewReload.dispose.done | panelId=${panelId} | webviewInstanceId=${this._webviewInstanceId || 'null'} | reload=false | recreate=false | sessionMutation=false`);
         });
     }
 
