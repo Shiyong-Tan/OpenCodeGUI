@@ -35,10 +35,14 @@ function run() {
   assertContains(sidebar, 'webviewAutoRescue.command.post', 'command post marker exists');
   assertContains(sidebar, 'branch=not-fresh-sessionData', 'not-fresh branch is logged');
   assertContains(sidebar, "rescueRenderMode: 'force-full-render-once'", 'not-fresh command uses force-full-render-once mode');
-  assertContains(sidebar, 'postedSessionData=true | postedCommand=true', 'not-fresh command marker records both post paths');
+  assertContains(sidebar, 'postedSessionData=false | postedCommand=true', 'not-fresh command marker records command-first post state');
+  assertContains(sidebar, 'postedSessionData=true | postedCommand=true', 'not-fresh sessionData marker records both post paths after dual post');
   assertContains(sidebar, 'this.markWebviewAutoRescueAttemptPosted(rescueAttemptId, { sessionData: true });', 'pending attempt records sessionData post');
   assertContains(sidebar, 'this.markWebviewAutoRescueAttemptPosted(rescueAttemptId, { command: true });', 'pending attempt records command post');
-  assertOrder(sidebar, "webviewAutoRescue.sessionData.post | action=rescue-sessionData-posted | branch=not-fresh-sessionData", "webviewAutoRescue.command.post | action=rescue-command-posted | branch=not-fresh-sessionData", 'not-fresh sessionData marker precedes command marker');
+  assertOrder(sidebar, "webviewAutoRescue.command.post | action=rescue-command-posted | branch=not-fresh-sessionData", "webviewAutoRescue.sessionData.post | action=rescue-sessionData-posted | branch=not-fresh-sessionData", 'not-fresh command marker precedes sessionData marker');
+  assertOrder(sidebar, "this.markWebviewAutoRescueAttemptPosted(rescueAttemptId, { command: true });", "this.markWebviewAutoRescueAttemptPosted(rescueAttemptId, { sessionData: true });", 'not-fresh command pending mark precedes sessionData pending mark');
+  assertContains(sidebar, "rescueAttemptId,\n                rescueSource: 'webviewAutoRescue',\n                rescueRenderMode: 'force-full-render-once',\n                branch: 'not-fresh-sessionData'", 'not-fresh command carries shared rescueAttemptId');
+  assertContains(sidebar, "rescueRenderMode: 'force-full-render-once', rescueAttemptId, branch: 'not-fresh-sessionData'", 'not-fresh sessionData carries shared rescueAttemptId');
 
   assertContains(sidebar, "branch: 'fresh-active-turn-command'", 'fresh branch remains command-only branch');
   assertContains(sidebar, "rescueRenderMode: 'render-current-state-once'", 'fresh branch keeps current-state command mode');
@@ -66,7 +70,7 @@ function run() {
   assertContains(sidebar, 'webviewReload.handshake.observed', 'handshake observed marker exists');
   assertContains(sidebar, 'webviewReload.dispose.begin', 'dispose begin marker exists');
   assertContains(sidebar, 'webviewReload.dispose.done', 'dispose done marker exists');
-  assertNotContains(sidebar, 'workbench.action.webview.reloadWebviewAction', 'no hard Developer Reload Webviews command invocation added');
+  assertContains(sidebar, "vscode.commands.getCommands(true)", 'Reload Webviews command is feature detected before invocation');
 
   console.log('Wave1c dual-post rescue contract check passed.');
 }

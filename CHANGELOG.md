@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 ## 3.0.3
 
 - Fixed assistant text streaming/delta tracking by keying lengths per message part, avoiding dropped or incorrect chunks when multiple parts share a message.
+- Hardened unresponsive WebView recovery with a generation-gated HTML reset followed, when needed, by feature-detected, active-turn-safe `Reload Webviews` escalation without automatically reloading the window.
+- Made rescue delivery command-first and corrected acknowledgement, timeout, and undelivered-state accounting, including a late-ACK notification race.
+- Reduced gray-screen render churn by treating background activity pulses that cannot change a visible indicator as no-ops.
+- Coalesced and cached `resolveRepo` work with cross-manager index locking and content-fingerprint freshness checks to prevent extension-host resolution floods without serving stale repository state.
 
 ## 3.0.2
 

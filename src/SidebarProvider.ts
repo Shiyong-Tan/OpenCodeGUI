@@ -163,6 +163,8 @@ type WebviewAutoRescuePendingAttempt = {
     webviewInstanceId?: string;
     notificationToken?: string;
     episodeId: string;
+    selectionEpoch: number;
+    activeTurnId?: string;
     branch: 'fresh-active-turn-command' | 'not-fresh-sessionData';
     startedAt: number;
     timeoutAt: number;
@@ -175,6 +177,57 @@ type WebviewAutoRescuePendingAttempt = {
     lastLivenessAckAt?: number;
     timeout?: NodeJS.Timeout;
     resolve?: (accepted: boolean) => void;
+};
+type WebviewHardRescuePending = {
+    generationToken: string;
+    rescueAttemptId: string;
+    sessionId: string;
+    panelId: string;
+    livenessToken: string;
+    episodeId: string;
+    webview: vscode.Webview;
+    oldWebviewInstanceId: string;
+    selectionEpoch: number;
+    activeTurn: WebviewLivenessActiveTurnSnapshot;
+    startedAt: number;
+    timeoutAt: number;
+    handshakeLifecycle: number;
+    previousInitPosted: boolean;
+    newWebviewInstanceId?: string;
+    handshakeAccepted: boolean;
+    timeout?: NodeJS.Timeout;
+};
+type WebviewCommandReloadPending = {
+    commandReloadGeneration: number;
+    episodeId: string;
+    hardRescueGenerationToken: string;
+    terminalReason: string;
+    sessionId: string;
+    panelId: string;
+    webview: vscode.Webview;
+    oldWebviewInstanceId: string;
+    selectionEpoch: number;
+    activeTurn: WebviewLivenessActiveTurnSnapshot;
+    startedAt: number;
+    deadlineAt: number;
+    timeoutMs: number;
+    invoked: boolean;
+    handshakeAccepted: boolean;
+    initSucceeded: boolean;
+    readyAckPosted: boolean;
+    newWebviewInstanceId?: string;
+    timeout?: NodeJS.Timeout;
+};
+type SendInitOptions = {
+    isStillCurrent?: () => boolean;
+    hardRescue?: {
+        sessionId: string;
+        activeTurn: WebviewLivenessActiveTurnSnapshot;
+    };
+    commandReload?: {
+        sessionId: string;
+        activeTurn: WebviewLivenessActiveTurnSnapshot;
+    };
 };
 type WebviewLivenessActiveTurnSnapshot = {
     streaming: boolean;
@@ -719,6 +772,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private readonly webviewAutoRescueCooldownMs = 60000;
     private readonly webviewAutoRescueAckTimeoutMs = 5000;
     private readonly webviewAutoRescueFailureCooldownMs = 15000;
+    private readonly webviewHardRescueTimeoutMs = 15000;
+    private readonly webviewCommandReloadTimeoutMs = 15000;
     private readonly webviewAutoRescueNotificationTtlMs = 60000;
     private readonly webviewAutoRescueRepromptCooldownMs = 60000;
     private readonly webviewAutoRescueMaxReprompts = 2;
@@ -740,6 +795,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private webviewAutoRescueRepromptDueAtByEpisode = new Map<string, number>();
     private webviewAutoRescueTerminalStopByEpisode = new Set<string>();
     private webviewAutoRescuePendingAttemptById = new Map<string, WebviewAutoRescuePendingAttempt>();
+    private webviewHardRescuePending?: WebviewHardRescuePending;
+    private webviewHardRescueEpisodeIds = new Set<string>();
+    private webviewCommandReloadPending?: WebviewCommandReloadPending;
+    private webviewCommandReloadEpisodeIds = new Set<string>();
+    private webviewCommandReloadGeneration = 0;
+    private webviewHandshakeLifecycle = 0;
     private webviewActiveTurnUpdatedAtBySession = new Map<string, number>();
     private sendInitGuardCompensationByKey = new Map<string, SendInitGuardCompensationEntry>();
     private sendInitGuardSpentCompensationByKey = new Map<string, SendInitGuardCompensationEntry>();
@@ -1340,6 +1401,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private resetWebviewLiveness(reason: string): void {
+        const commandReload = this.webviewCommandReloadPending;
+        if (commandReload) {
+            this.finishWebviewCommandReload(commandReload, 'failed', `liveness-reset:${reason}`);
+        }
         const record = this.webviewLivenessCurrent;
         if (record) {
             record.pending = false;
@@ -1528,6 +1593,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             webviewInstanceId: record.webviewInstanceId || this._webviewInstanceId,
             notificationToken: record.notificationToken,
             episodeId: record.suspicionEpisodeId || this.getWebviewLivenessEpisodeId(record),
+            selectionEpoch: this.sessionSelectionEpoch,
+            activeTurnId: this.getWebviewLivenessActiveTurnFlags(record.sessionId).turnId,
             branch,
             startedAt,
             timeoutAt: startedAt + this.webviewAutoRescueAckTimeoutMs,
@@ -1597,8 +1664,295 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         if (record && record.sessionId === attempt.sessionId && record.panelId === attempt.panelId) {
             this.setWebviewAutoRescueState(record, 'failed', 'soft-rescue-ack-timeout');
         }
+        if (!attempt.receivedAckSeen) {
+            this.beginWebviewHardRescue(attempt);
+        }
         this.webviewAutoRescuePendingAttemptById.delete(rescueAttemptId);
         attempt.resolve?.(false);
+    }
+
+    private isWebviewHardRescueCurrent(pending: WebviewHardRescuePending): boolean {
+        return this.webviewHardRescuePending === pending
+            && Date.now() <= pending.timeoutAt
+            && this._view?.webview === pending.webview
+            && this.currentSessionId === pending.sessionId
+            && this.sessionSelectionEpoch === pending.selectionEpoch
+            && this.getWebviewLivenessPanelId() === pending.panelId
+            && this.webviewHandshakeLifecycle === pending.handshakeLifecycle
+            && this._webviewInstanceId === pending.newWebviewInstanceId;
+    }
+
+    private finishWebviewHardRescueFailure(pending: WebviewHardRescuePending, marker: 'timeout' | 'failed', reason: string): void {
+        if (this.webviewHardRescuePending !== pending) return;
+        if (pending.timeout) clearTimeout(pending.timeout);
+        pending.timeout = undefined;
+        this.initPosted = pending.previousInitPosted;
+        this.webviewHardRescuePending = undefined;
+        const elapsedMs = Math.max(0, Date.now() - pending.startedAt);
+        const markerName = marker === 'timeout' ? 'webviewHardRescue.timeout' : 'webviewHardRescue.failed';
+        this.uiDebugChannel.appendLine(
+            `EXT: ${markerName} | generationToken=${pending.generationToken} | sessionId=${pending.sessionId} | ` +
+            `panelId=${pending.panelId} | rescueAttemptId=${pending.rescueAttemptId} | oldWebviewInstanceId=${pending.oldWebviewInstanceId} | ` +
+            `newWebviewInstanceId=${pending.newWebviewInstanceId || 'null'} | elapsedMs=${elapsedMs} | reason=${reason} | ` +
+            `initPostedRestored=${String(pending.previousInitPosted)} | nextAction=Reload Window | automaticRetry=false | reload=false | recreate=false | sessionMutation=false`
+        );
+        // Command reload is a terminal escalation only after the HTML rescue has released ownership.
+        void this.beginWebviewCommandReload(pending, reason);
+    }
+
+    private isWebviewCommandReloadCurrent(pending: WebviewCommandReloadPending): boolean {
+        const expectedWebviewInstanceId = pending.newWebviewInstanceId || pending.oldWebviewInstanceId;
+        const activeTurn = this.getWebviewLivenessActiveTurnFlags(pending.sessionId);
+        return this.webviewCommandReloadPending === pending
+            && Date.now() <= pending.deadlineAt
+            && this._view?.webview === pending.webview
+            && this.currentSessionId === pending.sessionId
+            && this.sessionSelectionEpoch === pending.selectionEpoch
+            && this.getWebviewLivenessPanelId() === pending.panelId
+            && this.webviewHandshakeLifecycle === pending.commandReloadGeneration
+            && this._webviewInstanceId === expectedWebviewInstanceId
+            && (activeTurn.turnId || '') === (pending.activeTurn.turnId || '');
+    }
+
+    private finishWebviewCommandReload(
+        pending: WebviewCommandReloadPending,
+        marker: 'timeout' | 'failed',
+        reason: string
+    ): void {
+        if (this.webviewCommandReloadPending !== pending) return;
+        if (pending.timeout) clearTimeout(pending.timeout);
+        pending.timeout = undefined;
+        this.webviewCommandReloadPending = undefined;
+        const elapsedMs = Math.max(0, Date.now() - pending.startedAt);
+        this.uiDebugChannel.appendLine(
+            `EXT: webviewCommandReload.${marker} | commandReloadGeneration=${pending.commandReloadGeneration} | ` +
+            `episodeId=${pending.episodeId} | sessionId=${pending.sessionId} | panelId=${pending.panelId} | ` +
+            `oldWebviewInstanceId=${pending.oldWebviewInstanceId || 'null'} | newWebviewInstanceId=${pending.newWebviewInstanceId || 'null'} | ` +
+            `elapsedMs=${elapsedMs} | reason=${reason} | nextAction=manually-run-Reload-Webviews | automaticRetry=false | reloadWindow=false`
+        );
+    }
+
+    private async beginWebviewCommandReload(hardRescue: WebviewHardRescuePending, terminalReason: string): Promise<void> {
+        const episodeId = hardRescue.episodeId;
+        // Consume before the first await: duplicate terminal callbacks cannot issue a second global command.
+        if (this.webviewCommandReloadPending || this.webviewCommandReloadEpisodeIds.has(episodeId)) return;
+        const currentActiveTurn = this.getWebviewLivenessActiveTurnFlags(hardRescue.sessionId);
+        const currentIdentityMatches = this.currentSessionId === hardRescue.sessionId
+            && this.sessionSelectionEpoch === hardRescue.selectionEpoch
+            && this.getWebviewLivenessPanelId() === hardRescue.panelId
+            && this._view?.webview === hardRescue.webview
+            && this._webviewInstanceId === hardRescue.oldWebviewInstanceId
+            && (currentActiveTurn.turnId || '') === (hardRescue.activeTurn.turnId || '');
+        if (!currentIdentityMatches) {
+            this.uiDebugChannel.appendLine(`EXT: webviewCommandReload.failed | episodeId=${episodeId} | reason=terminal-hard-rescue-context-stale | automaticRetry=false | reloadWindow=false`);
+            return;
+        }
+        this.webviewCommandReloadEpisodeIds.add(episodeId);
+        const startedAt = Date.now();
+        const pending: WebviewCommandReloadPending = {
+            commandReloadGeneration: ++this.webviewHandshakeLifecycle,
+            episodeId,
+            hardRescueGenerationToken: hardRescue.generationToken,
+            terminalReason,
+            sessionId: hardRescue.sessionId,
+            panelId: hardRescue.panelId,
+            webview: hardRescue.webview,
+            oldWebviewInstanceId: hardRescue.oldWebviewInstanceId,
+            selectionEpoch: hardRescue.selectionEpoch,
+            activeTurn: currentActiveTurn,
+            startedAt,
+            deadlineAt: startedAt + this.webviewCommandReloadTimeoutMs,
+            timeoutMs: this.webviewCommandReloadTimeoutMs,
+            invoked: false,
+            handshakeAccepted: false,
+            initSucceeded: false,
+            readyAckPosted: false
+        };
+        this.webviewCommandReloadPending = pending;
+        pending.timeout = setTimeout(
+            () => this.finishWebviewCommandReload(pending, 'timeout', 'handshake-init-or-readyAck-timeout'),
+            pending.timeoutMs
+        );
+        pending.timeout.unref?.();
+        this.uiDebugChannel.appendLine(`EXT: webviewCommandReload.begin | commandReloadGeneration=${pending.commandReloadGeneration} | episodeId=${episodeId} | sessionId=${pending.sessionId} | panelId=${pending.panelId} | oldWebviewInstanceId=${pending.oldWebviewInstanceId || 'null'} | activeTurnId=${pending.activeTurn.turnId || 'none'} | activeTurnFresh=${String(pending.activeTurn.fresh)} | terminalReason=${terminalReason} | timeoutMs=${pending.timeoutMs}`);
+
+        let commands: readonly string[];
+        try {
+            commands = await vscode.commands.getCommands(true);
+        } catch (error) {
+            this.finishWebviewCommandReload(pending, 'failed', `getCommands:${String(error)}`);
+            return;
+        }
+        if (!this.isWebviewCommandReloadCurrent(pending)) return;
+        const commandId = 'workbench.action.webview.reloadWebviewAction';
+        if (!commands.includes(commandId)) {
+            this.uiDebugChannel.appendLine(`EXT: webviewCommandReload.unavailable | commandReloadGeneration=${pending.commandReloadGeneration} | episodeId=${episodeId} | commandId=${commandId} | nextAction=manually-run-Reload-Webviews | reloadWindow=false`);
+            this.finishWebviewCommandReload(pending, 'failed', 'command-unavailable');
+            return;
+        }
+        this.uiDebugChannel.appendLine(`EXT: webviewCommandReload.available | commandReloadGeneration=${pending.commandReloadGeneration} | episodeId=${episodeId} | commandId=${commandId}`);
+        if (!this.isWebviewCommandReloadCurrent(pending)) return;
+        pending.invoked = true;
+        this.uiDebugChannel.appendLine(`EXT: webviewCommandReload.invoked | commandReloadGeneration=${pending.commandReloadGeneration} | episodeId=${episodeId} | commandId=${commandId}`);
+        try {
+            await vscode.commands.executeCommand(commandId);
+            if (!this.isWebviewCommandReloadCurrent(pending)) return;
+            this.uiDebugChannel.appendLine(`EXT: webviewCommandReload.request.resolved | commandReloadGeneration=${pending.commandReloadGeneration} | episodeId=${episodeId} | resultIsNotSuccess=true`);
+        } catch (error) {
+            this.uiDebugChannel.appendLine(`EXT: webviewCommandReload.executeFailed | commandReloadGeneration=${pending.commandReloadGeneration} | episodeId=${episodeId} | error=${String(error)}`);
+            this.finishWebviewCommandReload(pending, 'failed', `executeCommand:${String(error)}`);
+        }
+    }
+
+    private async handleWebviewCommandReloadReady(data: any, webviewView: vscode.WebviewView, panelId: string): Promise<boolean> {
+        const pending = this.webviewCommandReloadPending;
+        if (!pending) return false;
+        const newWebviewInstanceId = typeof data?.webviewInstanceId === 'string' ? data.webviewInstanceId.trim() : '';
+        const currentActiveTurn = this.getWebviewLivenessActiveTurnFlags(pending.sessionId);
+        let rejectionReason = '';
+        if (!newWebviewInstanceId) rejectionReason = 'missing-webview-instance-id';
+        else if (newWebviewInstanceId === pending.oldWebviewInstanceId) rejectionReason = 'same-webview-instance-id';
+        else if (Date.now() > pending.deadlineAt) rejectionReason = 'late-handshake';
+        else if (this.webviewHardRescuePending) rejectionReason = 'conflicting-live-html-hard-rescue';
+        else if (this._view?.webview !== pending.webview || webviewView.webview !== pending.webview) rejectionReason = 'webview-object-mismatch';
+        else if (panelId !== pending.panelId) rejectionReason = 'panel-mismatch';
+        else if (this.currentSessionId !== pending.sessionId) rejectionReason = 'session-mismatch';
+        else if (this.sessionSelectionEpoch !== pending.selectionEpoch) rejectionReason = 'selection-epoch-changed';
+        else if ((currentActiveTurn.turnId || '') !== (pending.activeTurn.turnId || '')) rejectionReason = 'active-turn-changed';
+        else if (this.webviewHandshakeLifecycle !== pending.commandReloadGeneration) rejectionReason = 'lifecycle-superseded';
+        else if (pending.handshakeAccepted) rejectionReason = 'duplicate-handshake';
+        if (rejectionReason) {
+            this.uiDebugChannel.appendLine(`EXT: webviewCommandReload.handshake.rejected | commandReloadGeneration=${pending.commandReloadGeneration} | episodeId=${pending.episodeId} | reason=${rejectionReason} | oldWebviewInstanceId=${pending.oldWebviewInstanceId || 'null'} | newWebviewInstanceId=${newWebviewInstanceId || 'null'} | observedHardRescueGenerationToken=${data?.hardRescueGenerationToken || 'none'}`);
+            return true;
+        }
+        // The command lifecycle, not the carried HTML token, owns this adoption. No await before it.
+        pending.newWebviewInstanceId = newWebviewInstanceId;
+        this._webviewInstanceId = pending.newWebviewInstanceId;
+        this._view = webviewView;
+        pending.handshakeAccepted = true;
+        const commandReloadGuard = () => this.isWebviewCommandReloadCurrent(pending);
+        this.uiDebugChannel.appendLine(`EXT: webviewCommandReload.handshake.accepted | commandReloadGeneration=${pending.commandReloadGeneration} | episodeId=${pending.episodeId} | sessionId=${pending.sessionId} | panelId=${pending.panelId} | oldWebviewInstanceId=${pending.oldWebviewInstanceId || 'null'} | newWebviewInstanceId=${newWebviewInstanceId} | selectionEpoch=${pending.selectionEpoch} | activeTurnId=${pending.activeTurn.turnId || 'none'} | observedHardRescueGenerationToken=${data?.hardRescueGenerationToken || 'none'} | tokenAuthoritative=false | elapsedMs=${Date.now() - pending.startedAt}`);
+        const liveWebview = this._view.webview;
+        const hydrationMode = pending.activeTurn.fresh ? 'fresh-active-turn-metadata-live-resume' : 'idle-normal-hydration';
+        this.uiDebugChannel.appendLine(`EXT: webviewCommandReload.hydration.mode | commandReloadGeneration=${pending.commandReloadGeneration} | episodeId=${pending.episodeId} | sessionId=${pending.sessionId} | activeTurnId=${pending.activeTurn.turnId || 'none'} | activeTurnFresh=${String(pending.activeTurn.fresh)} | mode=${hydrationMode} | postedSessionData=${String(!pending.activeTurn.fresh)}`);
+        try {
+            await this.sendInit(liveWebview, {
+                isStillCurrent: commandReloadGuard,
+                commandReload: { sessionId: pending.sessionId, activeTurn: pending.activeTurn }
+            });
+            pending.initSucceeded = true;
+        } catch (error) {
+            this.finishWebviewCommandReload(pending, 'failed', `sendInit:${String(error)}`);
+            return true;
+        }
+        if (!commandReloadGuard()) return true;
+        const readyAckPosted = await liveWebview.postMessage({
+            type: 'webviewReadyAck',
+            timestamp: Date.now(),
+            webviewInstanceId: pending.newWebviewInstanceId
+        });
+        if (!readyAckPosted || !commandReloadGuard()) {
+            this.finishWebviewCommandReload(pending, 'failed', 'webviewReadyAck-post-failed-or-stale');
+            return true;
+        }
+        pending.readyAckPosted = true;
+        if (pending.timeout) clearTimeout(pending.timeout);
+        pending.timeout = undefined;
+        this.webviewCommandReloadPending = undefined;
+        this.uiDebugChannel.appendLine(`EXT: webviewCommandReload.complete | commandReloadGeneration=${pending.commandReloadGeneration} | episodeId=${pending.episodeId} | sessionId=${pending.sessionId} | panelId=${pending.panelId} | oldWebviewInstanceId=${pending.oldWebviewInstanceId || 'null'} | newWebviewInstanceId=${pending.newWebviewInstanceId || 'null'} | initSucceeded=true | webviewReadyAckPosted=true | elapsedMs=${Date.now() - pending.startedAt}`);
+        this.startWebviewLivenessProbes();
+        void this.triggerWebviewLivenessProbe('webviewCommandReloadReadyAck');
+        return true;
+    }
+
+    private beginWebviewHardRescue(attempt: WebviewAutoRescuePendingAttempt): void {
+        const record = this.webviewLivenessCurrent;
+        const liveWebview = this._view?.webview;
+        const activeTurn = this.getWebviewLivenessActiveTurnFlags(attempt.sessionId);
+        const episodeId = attempt.episodeId;
+        const missedCount = record
+            ? Math.max(
+                this.webviewLivenessMissedAckCountByToken.get(record.token) || 0,
+                this.webviewLivenessSimulatedMissedAckCountByToken.get(record.token) || 0
+            )
+            : 0;
+        const triggerMatches = Boolean(
+            !attempt.receivedAckSeen
+            && record
+            && !record.ackAt
+            && liveWebview
+            && this.isCurrentWebviewLivenessRecord(record)
+            && record.sessionId === attempt.sessionId
+            && record.panelId === attempt.panelId
+            && record.token === attempt.token
+            && (record.webviewInstanceId || '') === (attempt.webviewInstanceId || '')
+            && this.sessionSelectionEpoch === attempt.selectionEpoch
+            && (activeTurn.turnId || '') === (attempt.activeTurnId || '')
+        );
+        if (!triggerMatches || !record || !liveWebview) {
+            this.uiDebugChannel.appendLine(`EXT: webviewHardRescue.failed | reason=trigger-gate-mismatch | sessionId=${attempt.sessionId} | panelId=${attempt.panelId} | rescueAttemptId=${attempt.rescueAttemptId} | receivedAckSeen=${String(attempt.receivedAckSeen)} | ackAt=${record?.ackAt || 0} | currentRecord=${String(this.webviewLivenessCurrent === record)} | nextAction=Reload Window | automaticRetry=false`);
+            return;
+        }
+        if (this.webviewHardRescuePending || this.webviewHardRescueEpisodeIds.has(episodeId)) {
+            this.uiDebugChannel.appendLine(`EXT: webviewHardRescue.failed | reason=one-per-episode-suppressed | sessionId=${attempt.sessionId} | panelId=${attempt.panelId} | rescueAttemptId=${attempt.rescueAttemptId} | episodeId=${episodeId} | nextAction=Reload Window | automaticRetry=false`);
+            return;
+        }
+
+        const generationToken = `hard-rescue-${Date.now()}-${crypto.randomBytes(12).toString('hex')}`;
+        const startedAt = Date.now();
+        const oldWebviewInstanceId = this._webviewInstanceId || attempt.webviewInstanceId || '';
+        const previousInitPosted = this.initPosted;
+        const pending: WebviewHardRescuePending = {
+            generationToken,
+            rescueAttemptId: attempt.rescueAttemptId,
+            sessionId: attempt.sessionId,
+            panelId: attempt.panelId,
+            livenessToken: record.token,
+            episodeId,
+            webview: liveWebview,
+            oldWebviewInstanceId,
+            selectionEpoch: this.sessionSelectionEpoch,
+            activeTurn,
+            startedAt,
+            timeoutAt: startedAt + this.webviewHardRescueTimeoutMs,
+            handshakeLifecycle: ++this.webviewHandshakeLifecycle,
+            previousInitPosted,
+            handshakeAccepted: false
+        };
+        this.webviewHardRescuePending = pending;
+        this.webviewHardRescueEpisodeIds.add(episodeId);
+        this.uiDebugChannel.appendLine(
+            `EXT: webviewHardRescue.begin | generationToken=${generationToken} | sessionId=${pending.sessionId} | panelId=${pending.panelId} | ` +
+            `oldWebviewInstanceId=${oldWebviewInstanceId || 'null'} | rescueAttemptId=${pending.rescueAttemptId} | selectionEpoch=${pending.selectionEpoch} | ` +
+            `activeTurnId=${activeTurn.turnId || 'none'} | activeTurnFresh=${String(activeTurn.fresh)} | missedCount=${missedCount} | ` +
+            `lastLivenessAckAt=${record.ackAt || 0} | episodeId=${episodeId} | timeoutMs=${this.webviewHardRescueTimeoutMs}`
+        );
+
+        this.stopWebviewLivenessProbes('hard-rescue-document-reset');
+        if (attempt.timeout) clearTimeout(attempt.timeout);
+        attempt.timeout = undefined;
+        this.webviewAutoRescuePendingAttemptById.delete(attempt.rescueAttemptId);
+        if (record.notificationToken) {
+            this.clearWebviewAutoRescueNotificationTimer(record.notificationToken);
+            this.webviewAutoRescuePromptMetaByNotificationToken.delete(record.notificationToken);
+        }
+        this.webviewAutoRescueStateByToken.delete(record.token);
+        for (const [key, entry] of this.sendInitGuardCompensationByKey.entries()) {
+            if (entry.panelId === pending.panelId && entry.webviewInstanceId === oldWebviewInstanceId) this.sendInitGuardCompensationByKey.delete(key);
+        }
+        for (const key of this.liveTurnResumePostedByKey) {
+            if (key.includes(`:${pending.panelId}:${oldWebviewInstanceId}:`)) this.liveTurnResumePostedByKey.delete(key);
+        }
+        this.initPosted = activeTurn.fresh;
+        pending.timeout = setTimeout(() => this.finishWebviewHardRescueFailure(pending, 'timeout', 'handshake-or-init-timeout'), this.webviewHardRescueTimeoutMs);
+        pending.timeout.unref?.();
+        try {
+            liveWebview.html = this._getHtmlForWebview(liveWebview, generationToken);
+            this.uiDebugChannel.appendLine(`EXT: webviewHardRescue.html.assigned | generationToken=${generationToken} | sessionId=${pending.sessionId} | panelId=${pending.panelId} | rescueAttemptId=${pending.rescueAttemptId} | oldWebviewInstanceId=${oldWebviewInstanceId || 'null'} | assigned=true`);
+        } catch (error) {
+            this.uiDebugChannel.appendLine(`EXT: webviewHardRescue.html.assigned | generationToken=${generationToken} | sessionId=${pending.sessionId} | panelId=${pending.panelId} | rescueAttemptId=${pending.rescueAttemptId} | oldWebviewInstanceId=${oldWebviewInstanceId || 'null'} | assigned=false | error=${String(error)}`);
+            this.finishWebviewHardRescueFailure(pending, 'failed', `html-assignment:${String(error)}`);
+        }
     }
 
     private handleWebviewAutoRescueAck(data: any): void {
@@ -1698,10 +2052,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.softRescue.defer | action=soft-rescue-deferred-active-turn | reason=fresh-active-turn | phase=${phase} | panelId=${record.panelId} | sessionId=${sessionId} | token=${record.token} | activeTurnId=${activeTurn.turnId || 'none'} | activeTurnSource=${activeTurn.source} | activeTurnAgeMs=${activeTurn.ageMs} | activeTurnFreshnessWindowMs=${activeTurn.freshnessWindowMs} | streaming=${String(activeTurn.streaming)} | finalizing=${String(activeTurn.finalizing)} | postedSessionData=false | reload=false | recreate=false | sessionMutation=false`);
                 return 'active-turn';
             }
-            liveWebview.postMessage({ ...payload, phase, rescueSource: 'webviewAutoRescue', rescueRenderMode: 'force-full-render-once', rescueAttemptId, branch: 'not-fresh-sessionData' });
-            this.markWebviewAutoRescueAttemptPosted(rescueAttemptId, { sessionData: true });
-            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.branch | action=rescue-branch-decision | branch=not-fresh-sessionData | reason=not-fresh-active-turn | phase=${phase} | panelId=${record.panelId} | sessionId=${sessionId} | token=${record.token} | notificationToken=${record.notificationToken || 'none'} | rescueAttemptId=${rescueAttemptId} | messages=${messageCount} | activeTurnSource=${activeTurn.source} | activeTurnAgeMs=${activeTurn.ageMs} | activeTurnFreshnessWindowMs=${activeTurn.freshnessWindowMs} | postedSessionData=true | rescueRenderMode=force-full-render-once | reload=false | recreate=false | sessionMutation=false`);
-            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.sessionData.post | action=rescue-sessionData-posted | branch=not-fresh-sessionData | phase=${phase} | panelId=${record.panelId} | sessionId=${sessionId} | token=${record.token} | notificationToken=${record.notificationToken || 'none'} | rescueAttemptId=${rescueAttemptId} | messages=${messageCount} | rescueRenderMode=force-full-render-once | postedSessionData=true | reload=false | recreate=false | sessionMutation=false`);
             liveWebview.postMessage({
                 type: 'webviewAutoRescueRenderCurrentState',
                 sessionId,
@@ -1714,7 +2064,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 branch: 'not-fresh-sessionData'
             });
             this.markWebviewAutoRescueAttemptPosted(rescueAttemptId, { command: true });
-            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.command.post | action=rescue-command-posted | branch=not-fresh-sessionData | mode=force-full-render-once | phase=${phase} | panelId=${record.panelId} | sessionId=${sessionId} | token=${record.token} | notificationToken=${record.notificationToken || 'none'} | webviewInstanceId=${record.webviewInstanceId || this._webviewInstanceId || 'null'} | rescueAttemptId=${rescueAttemptId} | messages=${messageCount} | rescueRenderMode=force-full-render-once | postedSessionData=true | postedCommand=true | reload=false | recreate=false | sessionMutation=false`);
+            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.command.post | action=rescue-command-posted | branch=not-fresh-sessionData | mode=force-full-render-once | phase=${phase} | panelId=${record.panelId} | sessionId=${sessionId} | token=${record.token} | notificationToken=${record.notificationToken || 'none'} | webviewInstanceId=${record.webviewInstanceId || this._webviewInstanceId || 'null'} | rescueAttemptId=${rescueAttemptId} | messages=${messageCount} | rescueRenderMode=force-full-render-once | postedSessionData=false | postedCommand=true | reload=false | recreate=false | sessionMutation=false`);
+            liveWebview.postMessage({ ...payload, phase, rescueSource: 'webviewAutoRescue', rescueRenderMode: 'force-full-render-once', rescueAttemptId, branch: 'not-fresh-sessionData' });
+            this.markWebviewAutoRescueAttemptPosted(rescueAttemptId, { sessionData: true });
+            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.branch | action=rescue-branch-decision | branch=not-fresh-sessionData | reason=not-fresh-active-turn | phase=${phase} | panelId=${record.panelId} | sessionId=${sessionId} | token=${record.token} | notificationToken=${record.notificationToken || 'none'} | rescueAttemptId=${rescueAttemptId} | messages=${messageCount} | activeTurnSource=${activeTurn.source} | activeTurnAgeMs=${activeTurn.ageMs} | activeTurnFreshnessWindowMs=${activeTurn.freshnessWindowMs} | postedSessionData=true | postedCommand=true | rescueRenderMode=force-full-render-once | reload=false | recreate=false | sessionMutation=false`);
+            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.sessionData.post | action=rescue-sessionData-posted | branch=not-fresh-sessionData | phase=${phase} | panelId=${record.panelId} | sessionId=${sessionId} | token=${record.token} | notificationToken=${record.notificationToken || 'none'} | rescueAttemptId=${rescueAttemptId} | messages=${messageCount} | rescueRenderMode=force-full-render-once | postedSessionData=true | postedCommand=true | reload=false | recreate=false | sessionMutation=false`);
             this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.softRescue.repost | action=soft-rescue-ran | branch=not-fresh-sessionData | phase=${phase} | panelId=${record.panelId} | sessionId=${sessionId} | token=${record.token} | notificationToken=${record.notificationToken || 'none'} | rescueAttemptId=${rescueAttemptId} | messages=${messageCount} | activeTurnSource=${activeTurn.source} | activeTurnAgeMs=${activeTurn.ageMs} | activeTurnFreshnessWindowMs=${activeTurn.freshnessWindowMs} | rescueRenderMode=force-full-render-once | reload=false | recreate=false | sessionMutation=false`);
             return 'posted';
         };
@@ -1916,29 +2270,32 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         meta.handled = true;
         const currentSameToken = this.isCurrentWebviewLivenessRecord(record) && record.notificationToken === notificationToken && !meta.expired;
         if (!currentSameToken) {
-            await this.handleExpiredWebviewAutoRescueLateAction(record, meta, action as WebviewAutoRescueAction);
+            await this.handleExpiredWebviewAutoRescueLateAction(record, meta, action as WebviewAutoRescueAction, selected);
             return;
         }
-        this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.notification.action | selectedAction=${selected} | action=${action} | currentToken=${String(currentSameToken)} | tokenStatus=${currentSameToken ? 'current' : 'stale'} | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | notificationToken=${notificationToken} | currentSessionId=${this.currentSessionId || 'null'}`);
-        this.applyWebviewAutoRescueCooldown(record, action as WebviewAutoRescueAction);
-        if (action === 'Rescue Now') {
-            await this.executeWebviewAutoRescueSoftRescue(record, action as WebviewAutoRescueAction);
-        } else {
-            this.setWebviewAutoRescueState(record, 'cancelled', action);
-            this.logWebviewAutoRescueDiagnostics(record, 'pre', action as WebviewAutoRescueAction);
-            this.logWebviewAutoRescueDiagnostics(record, 'post', action as WebviewAutoRescueAction);
+        try {
+            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.notification.action | selectedAction=${selected} | action=${action} | currentToken=${String(currentSameToken)} | tokenStatus=${currentSameToken ? 'current' : 'stale'} | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | notificationToken=${notificationToken} | currentSessionId=${this.currentSessionId || 'null'}`);
+            this.applyWebviewAutoRescueCooldown(record, action as WebviewAutoRescueAction);
+            if (action === 'Rescue Now') {
+                await this.executeWebviewAutoRescueSoftRescue(record, action as WebviewAutoRescueAction);
+            } else {
+                this.setWebviewAutoRescueState(record, 'cancelled', action);
+                this.logWebviewAutoRescueDiagnostics(record, 'pre', action as WebviewAutoRescueAction);
+                this.logWebviewAutoRescueDiagnostics(record, 'post', action as WebviewAutoRescueAction);
+            }
+        } finally {
+            record.pending = false;
+            if (this.webviewLivenessCurrent === record) {
+                this.webviewLivenessCurrent = undefined;
+            }
+            this.setWebviewAutoRescueState(record, 'idle', 'notification-complete');
         }
-        record.pending = false;
-        if (this.webviewLivenessCurrent === record) {
-            this.webviewLivenessCurrent = undefined;
-        }
-        this.setWebviewAutoRescueState(record, 'idle', 'notification-complete');
     }
 
-    private async handleExpiredWebviewAutoRescueLateAction(record: WebviewLivenessRecord, meta: WebviewAutoRescuePromptMeta, action: WebviewAutoRescueAction): Promise<void> {
+    private async handleExpiredWebviewAutoRescueLateAction(record: WebviewLivenessRecord, meta: WebviewAutoRescuePromptMeta, action: WebviewAutoRescueAction, selectedAction: string): Promise<void> {
         const pendingAgeMs = Math.max(0, Date.now() - meta.shownAt);
         if (action !== 'Rescue Now') {
-            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.liveness.lateCancelIgnored | action=${action} | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | episodeId=${meta.episodeId} | notificationToken=${meta.notificationToken} | pendingAgeMs=${pendingAgeMs} | notificationTtlMs=${this.webviewAutoRescueNotificationTtlMs} | userChoiceOnly=true | reload=false | recreate=false | sessionMutation=false`);
+            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.liveness.lateCancelIgnored | selectedAction=${selectedAction} | action=${action} | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | episodeId=${meta.episodeId} | notificationToken=${meta.notificationToken} | pendingAgeMs=${pendingAgeMs} | notificationTtlMs=${this.webviewAutoRescueNotificationTtlMs} | userChoiceOnly=true | reload=false | recreate=false | sessionMutation=false`);
             return;
         }
 
@@ -1958,7 +2315,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             !newerHandledToken
         );
         if (!valid) {
-            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.liveness.lateActionIgnored | action=${action} | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | episodeId=${meta.episodeId} | notificationToken=${meta.notificationToken} | pendingAgeMs=${pendingAgeMs} | notificationTtlMs=${this.webviewAutoRescueNotificationTtlMs} | newerHandledToken=${String(newerHandledToken)} | stillUnresponsive=${String(this.isWebviewAutoRescueStillUnresponsive(record))} | userChoiceOnly=true | reload=false | recreate=false | sessionMutation=false`);
+            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.liveness.lateActionIgnored | selectedAction=${selectedAction} | action=${action} | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | episodeId=${meta.episodeId} | notificationToken=${meta.notificationToken} | pendingAgeMs=${pendingAgeMs} | notificationTtlMs=${this.webviewAutoRescueNotificationTtlMs} | newerHandledToken=${String(newerHandledToken)} | stillUnresponsive=${String(this.isWebviewAutoRescueStillUnresponsive(record))} | userChoiceOnly=true | reload=false | recreate=false | sessionMutation=false`);
             return;
         }
 
@@ -2059,7 +2416,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             return;
         }
         record.ackAt = Date.now();
-        record.pending = false;
         for (const attempt of this.webviewAutoRescuePendingAttemptById.values()) {
             if (attempt.sessionId === record.sessionId && attempt.panelId === record.panelId && attempt.token === record.token) {
                 attempt.lastLivenessAckAt = record.ackAt;
@@ -2070,6 +2426,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             this.webviewLivenessSimulatedMissedAckCountByToken.delete(record.token);
         }
         this.uiDebugChannel.appendLine(`EXT: webviewLiveness.ack | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | pingId=${pingId} | rttMs=${record.pingSentAt ? record.ackAt - record.pingSentAt : -1}`);
+        const promptMeta = record.notificationToken
+            ? this.webviewAutoRescuePromptMetaByNotificationToken.get(record.notificationToken)
+            : undefined;
+        if (promptMeta && !promptMeta.handled && !promptMeta.expired) {
+            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.notification.ackDeferredCleanup | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | pingId=${pingId} | notificationToken=${promptMeta.notificationToken} | ackAt=${record.ackAt}`);
+            return;
+        }
+        record.pending = false;
         if (this.webviewLivenessCurrent === record) {
             this.webviewLivenessCurrent = undefined;
         }
@@ -4093,9 +4457,49 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
             switch (data.type) {
                 case "webviewReady": {
-                    // 更新 this._view 为最新实例
-                    this._view = webviewView;
-                    this._webviewInstanceId = data.webviewInstanceId;
+                    if (await this.handleWebviewCommandReloadReady(data, webviewView, panelId)) {
+                        break;
+                    }
+                    const pending = this.webviewHardRescuePending;
+                    const newWebviewInstanceId = typeof data?.webviewInstanceId === 'string' ? data.webviewInstanceId.trim() : '';
+                    let hardRescueGuard: (() => boolean) | undefined;
+                    if (pending) {
+                        const currentActiveTurn = this.getWebviewLivenessActiveTurnFlags(pending.sessionId);
+                        let rejectionReason = '';
+                        if (data.hardRescueGenerationToken !== pending.generationToken) rejectionReason = 'generation-token-mismatch';
+                        else if (!newWebviewInstanceId) rejectionReason = 'missing-webview-instance-id';
+                        else if (newWebviewInstanceId === pending.oldWebviewInstanceId) rejectionReason = 'same-webview-instance-id';
+                        else if (Date.now() > pending.timeoutAt) rejectionReason = 'late-handshake';
+                        else if (this._view?.webview !== pending.webview || webviewView.webview !== pending.webview) rejectionReason = 'webview-object-mismatch';
+                        else if (panelId !== pending.panelId) rejectionReason = 'panel-mismatch';
+                        else if (this.currentSessionId !== pending.sessionId) rejectionReason = 'session-mismatch';
+                        else if (this.sessionSelectionEpoch !== pending.selectionEpoch) rejectionReason = 'selection-epoch-changed';
+                        else if ((currentActiveTurn.turnId || '') !== (pending.activeTurn.turnId || '')) rejectionReason = 'active-turn-changed';
+                        else if (this.webviewHandshakeLifecycle !== pending.handshakeLifecycle) rejectionReason = 'lifecycle-superseded';
+                        if (rejectionReason) {
+                            this.uiDebugChannel.appendLine(`EXT: webviewHardRescue.handshake.rejected | reason=${rejectionReason} | generationToken=${data?.hardRescueGenerationToken || 'null'} | expectedGenerationToken=${pending.generationToken} | sessionId=${pending.sessionId} | panelId=${pending.panelId} | oldWebviewInstanceId=${pending.oldWebviewInstanceId || 'null'} | newWebviewInstanceId=${newWebviewInstanceId || 'null'} | selectionEpoch=${this.sessionSelectionEpoch}`);
+                            break;
+                        }
+                        // No await may occur between the final validation above and identity adoption.
+                        this._webviewInstanceId = newWebviewInstanceId;
+                        pending.newWebviewInstanceId = newWebviewInstanceId;
+                        pending.handshakeAccepted = true;
+                        this._view = webviewView;
+                        hardRescueGuard = () => this.isWebviewHardRescueCurrent(pending);
+                        this.uiDebugChannel.appendLine(`EXT: webviewHardRescue.handshake.accepted | generationToken=${pending.generationToken} | sessionId=${pending.sessionId} | panelId=${pending.panelId} | rescueAttemptId=${pending.rescueAttemptId} | oldWebviewInstanceId=${pending.oldWebviewInstanceId || 'null'} | newWebviewInstanceId=${newWebviewInstanceId} | selectionEpoch=${pending.selectionEpoch} | elapsedMs=${Date.now() - pending.startedAt} | ownershipChecks=passed`);
+                    } else {
+                        if (data?.hardRescueGenerationToken) {
+                            this.uiDebugChannel.appendLine(`EXT: webviewHardRescue.handshake.rejected | reason=unexpected-generation-token | generationToken=${data.hardRescueGenerationToken} | panelId=${panelId} | newWebviewInstanceId=${newWebviewInstanceId || 'null'}`);
+                            break;
+                        }
+                        if (!newWebviewInstanceId) {
+                            this.uiDebugChannel.appendLine(`EXT: webviewReload.handshake.rejected | reason=missing-webview-instance-id | panelId=${panelId}`);
+                            break;
+                        }
+                        this._view = webviewView;
+                        this._webviewInstanceId = newWebviewInstanceId;
+                        ++this.webviewHandshakeLifecycle;
+                    }
                     this.webviewLivenessCurrent = undefined;
                     this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_1_RX] webviewReady | wvId=${this._webviewInstanceId}`);
                     this.uiDebugChannel.appendLine(`EXT: webviewReload.handshake.observed | phase=webviewReady | panelId=${panelId} | webviewInstanceId=${this._webviewInstanceId || 'null'} | previousWebviewInstanceId=${data?.previousWebviewInstanceId || 'unknown'} | reload=false | recreate=false | sessionMutation=false`);
@@ -4105,25 +4509,61 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_2_START] calling sendInit() | initPosted=${this.initPosted}`);
                         let sendInitError: Error | undefined;
                         try {
-                            await this.sendInit(liveWebview);
+                            if (pending) {
+                                const hydrationMode = pending.activeTurn.fresh ? 'fresh-active-turn-metadata-live-resume' : 'idle-normal-hydration';
+                                this.uiDebugChannel.appendLine(`EXT: webviewHardRescue.hydration.mode | generationToken=${pending.generationToken} | sessionId=${pending.sessionId} | panelId=${pending.panelId} | activeTurnId=${pending.activeTurn.turnId || 'none'} | activeTurnFresh=${String(pending.activeTurn.fresh)} | mode=${hydrationMode} | postedSessionData=${String(!pending.activeTurn.fresh)}`);
+                            }
+                            if (pending && hardRescueGuard) {
+                                await this.sendInit(liveWebview, {
+                                    isStillCurrent: hardRescueGuard,
+                                    hardRescue: { sessionId: pending.sessionId, activeTurn: pending.activeTurn }
+                                });
+                            } else {
+                                await this.sendInit(liveWebview);
+                            }
                             this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_3_DONE] sendInit() complete, sending ack`);
                         } catch (err) {
                             sendInitError = err instanceof Error ? err : new Error(String(err));
                             this.uiDebugChannel.appendLine(`[EXT][SENDINIT_ERROR] sendInit threw: ${sendInitError.message}`);
                         }
                         
-                        if (sendInitError) {
-                            liveWebview.postMessage({ 
-                                type: 'webviewReadyAck', 
-                                timestamp: Date.now(), 
+                        if (pending && (!hardRescueGuard || !hardRescueGuard())) {
+                            this.uiDebugChannel.appendLine(`EXT: webviewHardRescue.failed | reason=stale-sendInit-completion | panelId=${panelId} | newWebviewInstanceId=${newWebviewInstanceId || 'null'} | nextAction=Reload Window | automaticRetry=false`);
+                            break;
+                        }
+                        if (pending) {
+                            const readyAckPosted = sendInitError
+                                ? await liveWebview.postMessage({
+                                    type: 'webviewReadyAck',
+                                    timestamp: Date.now(),
+                                    webviewInstanceId: this._webviewInstanceId,
+                                    error: true,
+                                    message: sendInitError.message,
+                                    hardRescueGenerationToken: pending.generationToken
+                                })
+                                : await liveWebview.postMessage({ type: 'webviewReadyAck', timestamp: Date.now(), webviewInstanceId: this._webviewInstanceId, hardRescueGenerationToken: pending.generationToken });
+                            this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_4_ACK] ack sent`);
+                            if (sendInitError || !readyAckPosted || !hardRescueGuard || !hardRescueGuard()) {
+                                this.finishWebviewHardRescueFailure(pending, 'failed', sendInitError ? `sendInit:${sendInitError.message}` : 'webviewReadyAck-post-failed');
+                                break;
+                            }
+                            if (pending.timeout) clearTimeout(pending.timeout);
+                            pending.timeout = undefined;
+                            this.webviewHardRescuePending = undefined;
+                            this.uiDebugChannel.appendLine(`EXT: webviewHardRescue.complete | generationToken=${pending.generationToken} | sessionId=${pending.sessionId} | panelId=${pending.panelId} | rescueAttemptId=${pending.rescueAttemptId} | oldWebviewInstanceId=${pending.oldWebviewInstanceId || 'null'} | newWebviewInstanceId=${pending.newWebviewInstanceId || 'null'} | elapsedMs=${Date.now() - pending.startedAt} | initSucceeded=true | webviewReadyAckPosted=true`);
+                        } else if (sendInitError) {
+                            liveWebview.postMessage({
+                                type: 'webviewReadyAck',
+                                timestamp: Date.now(),
                                 webviewInstanceId: this._webviewInstanceId,
                                 error: true,
                                 message: sendInitError.message
                             });
+                            this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_4_ACK] ack sent`);
                         } else {
                             liveWebview.postMessage({ type: 'webviewReadyAck', timestamp: Date.now(), webviewInstanceId: this._webviewInstanceId });
+                            this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_4_ACK] ack sent`);
                         }
-                        this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_4_ACK] ack sent`);
                         this.startWebviewLivenessProbes();
                         void this.triggerWebviewLivenessProbe('webviewReadyAck');
                     }
@@ -6189,7 +6629,34 @@ ${attachmentLines.join('\n')}`
         });
     }
 
-    private async sendInit(webview: vscode.Webview): Promise<void> {
+    private async sendInit(webview: vscode.Webview, options: SendInitOptions = {}): Promise<void> {
+        const isStillCurrent = options.isStillCurrent || (() => true);
+        if (!isStillCurrent()) throw new Error('stale-handshake-before-sendInit');
+        const isHardRescueSendInit = Boolean(options.hardRescue && options.isStillCurrent);
+        const rescueHydration = options.hardRescue || options.commandReload;
+        const isCommandReloadSendInit = Boolean(options.commandReload && options.isStillCurrent);
+        let isGuardedRescueSendInit = false;
+        if (isHardRescueSendInit) {
+            isGuardedRescueSendInit = true;
+        }
+        if (isCommandReloadSendInit) {
+            isGuardedRescueSendInit = true;
+        }
+        if (isGuardedRescueSendInit) {
+            const sourceWebview = webview;
+            webview = new Proxy(sourceWebview, {
+                get(target, property) {
+                    if (property === 'postMessage') {
+                        return (message: any) => {
+                            if (!isStillCurrent()) return Promise.resolve(false);
+                            return target.postMessage(message);
+                        };
+                    }
+                    const value = Reflect.get(target, property, target);
+                    return typeof value === 'function' ? value.bind(target) : value;
+                }
+            });
+        }
         this.uiDebugChannel.appendLine(`[EXT][SENDINIT_START] initPosted=${this.initPosted}`);
         let models: ModelInfo[] = [];
         let agents: AgentInfo[] = [];
@@ -6200,7 +6667,7 @@ ${attachmentLines.join('\n')}`
                 this.lastKnownModels = models;
             }
         } catch (error) {
-            this.postAddResponse(webview, `Failed to load models: ${error}`);
+            if (isStillCurrent()) this.postAddResponse(webview, `Failed to load models: ${error}`);
         }
 
         try {
@@ -6212,7 +6679,7 @@ ${attachmentLines.join('\n')}`
         try {
             sessions = await this.client.listSessions();
         } catch (error) {
-            this.postAddResponse(webview, `Failed to load sessions: ${error}`);
+            if (isStillCurrent()) this.postAddResponse(webview, `Failed to load sessions: ${error}`);
         }
         const initWorkspaceRoot = this.client.getWorkspaceRoot() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         sessions = await this.filterSessionsForWorkspace(sessions, initWorkspaceRoot, 'init');
@@ -6303,6 +6770,9 @@ ${attachmentLines.join('\n')}`
                 );
             }
         }
+        if (rescueHydration) {
+            recentSessionId = rescueHydration.sessionId;
+        }
 
         let initSessionCandidate = recentSessionId;
         if (!initSessionCandidate && workspaceFolder) {
@@ -6310,13 +6780,13 @@ ${attachmentLines.join('\n')}`
             initSessionCandidate = workspaceRecent?.id;
         }
 
-        if (!this.initPosted) {
+        if (!this.initPosted && !rescueHydration?.activeTurn.fresh) {
             this.currentSessionId = this.currentSessionId || initSessionCandidate || undefined;
             if (this.currentSessionId) {
                 this.client.setSessionId(this.currentSessionId);
             }
-            const initSessionId = initSessionCandidate || this.currentSessionId || '';
-            const liveWebview = this._view?.webview || webview;
+            const initSessionId = rescueHydration?.sessionId || initSessionCandidate || this.currentSessionId || '';
+            const liveWebview = webview;
             this.uiDebugChannel.appendLine(
                 `[EXT][INIT_SEND] models=${models.length} sessions=${sessions.length} ` +
                 `currentSessionId=${initSessionId || 'null'} selectedModel=${this.selectedModel || 'NULL'} selectedMode=${resolvedMode || 'null'} modeCount=${this.availableModes.length}`
@@ -6351,12 +6821,12 @@ ${attachmentLines.join('\n')}`
                 reason: this.gitUndoReason
             });
 
-            this.sendServerStatus(this.serverStatus, 'init');
+            liveWebview.postMessage({ type: 'serverStatus', status: this.serverStatus, reason: 'init' });
 
             this.initPosted = true;
         } else {
-            const initSessionId = this.currentSessionId || initSessionCandidate || '';
-            const liveWebview = this._view?.webview || webview;
+            const initSessionId = rescueHydration?.sessionId || this.currentSessionId || initSessionCandidate || '';
+            const liveWebview = webview;
             this.uiDebugChannel.appendLine(
                 `[EXT][INIT_METADATA_RESEND] models=${models.length} sessions=${sessions.length} ` +
                 `currentSessionId=${initSessionId || 'null'} selectedModel=${this.selectedModel || 'NULL'} selectedMode=${resolvedMode || 'null'} ` +
@@ -6386,6 +6856,27 @@ ${attachmentLines.join('\n')}`
             }
         }
 
+        if (options.hardRescue?.activeTurn.fresh) {
+            const hardRescueSessionId = options.hardRescue.sessionId;
+            if (!isStillCurrent()) throw new Error('stale-hard-rescue-before-live-hydration');
+            await this.postLiveTurnHistoryForSendInitGuardDefer(webview, hardRescueSessionId, options.hardRescue.activeTurn);
+            if (!isStillCurrent()) throw new Error('stale-hard-rescue-after-live-history');
+            this.postLiveTurnResumeForSendInitGuardDefer(webview, hardRescueSessionId, options.hardRescue.activeTurn);
+            this.queueSendInitGuardCompensation(hardRescueSessionId, 'sendInitGuard.defer', options.hardRescue.activeTurn);
+            this.uiDebugChannel.appendLine(`[EXT][SENDINIT_END] sendInit completed successfully | hardRescue=true | postedSessionData=false`);
+            return;
+        }
+        if (options.commandReload?.activeTurn.fresh) {
+            const commandReloadSessionId = options.commandReload.sessionId;
+            if (!isStillCurrent()) throw new Error('stale-command-reload-before-live-hydration');
+            await this.postLiveTurnHistoryForSendInitGuardDefer(webview, commandReloadSessionId, options.commandReload.activeTurn);
+            if (!isStillCurrent()) throw new Error('stale-command-reload-after-live-history');
+            this.postLiveTurnResumeForSendInitGuardDefer(webview, commandReloadSessionId, options.commandReload.activeTurn);
+            this.queueSendInitGuardCompensation(commandReloadSessionId, 'sendInitGuard.defer', options.commandReload.activeTurn);
+            this.uiDebugChannel.appendLine(`[EXT][SENDINIT_END] sendInit completed successfully | commandReload=true | postedSessionData=false`);
+            return;
+        }
+
         let snapshotLoaded = false;
         let sessionDataSent = false;
                 if (recentSessionId) {
@@ -6393,7 +6884,7 @@ ${attachmentLines.join('\n')}`
                         this.currentSessionId = recentSessionId;
                         this.trackUserOwnedSession(this.currentSessionId);
                         this.client.setSessionId(this.currentSessionId);
-                        const liveWebview = this._view?.webview || webview;
+                        const liveWebview = webview;
                         const activeTurn = this.getWebviewLivenessActiveTurnFlags(recentSessionId);
                         if (activeTurn.fresh) {
                             this.uiDebugChannel.appendLine(
@@ -6536,7 +7027,7 @@ ${attachmentLines.join('\n')}`
                             this.uiDebugChannel.appendLine(`[EXT][SESSION_RECENT_FAIL] sessionId=${recentSessionId} limit=${this.recentSessionLoadLimit} err=${recentErr || 'null'}`);
 
                             if (!snapshotLoaded) {
-                                const liveWebview = this._view?.webview || webview;
+                                const liveWebview = webview;
                                 liveWebview.postMessage({
                                     type: 'sessionLoadFailed',
                                     payload: {
@@ -6591,7 +7082,7 @@ ${attachmentLines.join('\n')}`
                         const formattedRaw = this.formatSession(exportResult);
                         const formatted = await this.injectChangeLists(this.currentSessionId, formattedRaw);
 
-                        const liveWebview = this._view?.webview || webview;
+                        const liveWebview = webview;
                         liveWebview.postMessage({
                             type: 'sessionData',
                             sessionId: this.currentSessionId,
@@ -6619,7 +7110,7 @@ ${attachmentLines.join('\n')}`
                                         ? snap.obj.sessionData.messages
                                         : []
                                 });
-                                const liveWebview = this._view?.webview || webview;
+                                const liveWebview = webview;
                                 liveWebview.postMessage({
                                     ...snap.obj.sessionData,
                                     title: snapshotFormatted.title,
@@ -6652,7 +7143,7 @@ ${attachmentLines.join('\n')}`
                         await this._context.globalState.update(`recentSession.${workspaceKey}`, this.currentSessionId);
                     }
                     
-                    const liveWebview = this._view?.webview || webview;
+                    const liveWebview = webview;
                     liveWebview.postMessage({
                         type: 'sessionData',
                         sessionId: this.currentSessionId,
@@ -6668,7 +7159,7 @@ ${attachmentLines.join('\n')}`
             }
         }
 
-        const liveWebview = this._view?.webview || webview;
+        const liveWebview = webview;
 
         const shouldInitBaseline = Boolean(
             this.gitUndoEnabled &&
@@ -9279,7 +9770,7 @@ ${attachmentLines.join('\n')}`
         });
     }
 
-    private _getHtmlForWebview(webview: vscode.Webview) {
+    private _getHtmlForWebview(webview: vscode.Webview, hardRescueGenerationToken = '') {
         const styleResetUri = webview.asWebviewUri(
             vscode.Uri.joinPath(this._extensionUri, "media", "reset.css")
         );
@@ -9315,11 +9806,17 @@ ${attachmentLines.join('\n')}`
         const texmathScriptUri = webview.asWebviewUri(
             vscode.Uri.joinPath(this._extensionUri, "media", "texmath.min.js")
         );
+        const escapedHardRescueGenerationToken = hardRescueGenerationToken
+            .replace(/&/g, '&amp;')
+            .replace(/"/g, '&quot;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
 
         return `<!DOCTYPE html>
             <html lang="en">
             <head>
                 <meta charset="UTF-8">
+                <meta name="opencode-hard-rescue-generation" content="${escapedHardRescueGenerationToken}">
                 <meta name="viewport" content="width=device-width, initial-scale=1.0">
                 <link href="${styleMainUri}" rel="stylesheet">
                 <link href="${highlightStyleUri}" rel="stylesheet">

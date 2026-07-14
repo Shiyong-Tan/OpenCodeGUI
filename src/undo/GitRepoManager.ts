@@ -6,6 +6,16 @@ import { GitCapabilities, GitRepoRef, IndexMap, MIN_GIT_VERSION } from './types'
 
 type Logger = (message: string) => void;
 
+type ResolvedRepoCacheEntry = {
+    ref: GitRepoRef;
+    fingerprint: string;
+};
+
+type InFlightResolution = {
+    promise: Promise<GitRepoRef>;
+    coalescedLogged: boolean;
+};
+
 const compareVersions = (a: string, b: string): number => {
     const toParts = (v: string) => v.split('.').map((n) => parseInt(n, 10));
     const pa = toParts(a);
@@ -43,6 +53,10 @@ export class GitRepoManager {
     private readonly reposDir: string;
     private readonly indexPath: string;
     private readonly logger: Logger;
+    private readonly resolvedRepos = new Map<string, ResolvedRepoCacheEntry>();
+    private readonly inFlightResolutions = new Map<string, InFlightResolution>();
+    private static readonly indexMutationTails = new Map<string, Promise<void>>();
+    private static readonly MAX_RESOLVED_REPOS = 256;
     private static readonly WORKSPACE_IGNORE_BLOCK_START = '# >>> opencode:workspace-gitignore >>>';
     private static readonly WORKSPACE_IGNORE_BLOCK_END = '# <<< opencode:workspace-gitignore <<<';
 
@@ -142,20 +156,21 @@ export class GitRepoManager {
                 () => resolve()
             );
         });
-        await this.syncWorkspaceGitignoreToInternalRepo(gitDir);
         return repoRef;
     }
 
-    private async syncWorkspaceGitignoreToInternalRepo(gitDir: string): Promise<void> {
+    private async syncWorkspaceGitignoreToInternalRepo(gitDir: string): Promise<boolean> {
         const workspaceGitignorePath = path.join(this.workspaceRoot, '.gitignore');
         const excludePath = path.join(gitDir, 'info', 'exclude');
         let workspaceIgnore = '';
+        let readsAccepted = true;
         try {
             if (fs.existsSync(workspaceGitignorePath)) {
                 workspaceIgnore = await fs.promises.readFile(workspaceGitignorePath, 'utf-8');
             }
         } catch {
             workspaceIgnore = '';
+            readsAccepted = false;
         }
 
         let existingExclude = '';
@@ -165,6 +180,7 @@ export class GitRepoManager {
             }
         } catch {
             existingExclude = '';
+            readsAccepted = false;
         }
 
         const blockRegex = new RegExp(
@@ -179,17 +195,104 @@ export class GitRepoManager {
         const next = block
             ? `${cleaned ? `${cleaned}\n\n` : ''}${block}\n`
             : (cleaned ? `${cleaned}\n` : '');
-        if (next === existingExclude) return;
+        if (next === existingExclude) return readsAccepted;
         try {
             await fs.promises.mkdir(path.dirname(excludePath), { recursive: true });
             await fs.promises.writeFile(excludePath, next, 'utf-8');
             this.logger(`repo.ignore.sync | gitDir=${gitDir} copied=${normalizedIgnore ? 'true' : 'false'}`);
+            return readsAccepted;
         } catch (error) {
             this.logger(`repo.ignore.sync.fail | gitDir=${gitDir} err=${String(error)}`);
+            return false;
         }
     }
 
-    public async resolveRepo(sessionId?: string, turnKey?: string): Promise<GitRepoRef> {
+    private static async withIndexMutationLock<T>(
+        indexPath: string,
+        action: () => Promise<T>
+    ): Promise<T> {
+        const lockKey = path.normalize(path.resolve(indexPath)).toLowerCase();
+        const previous = GitRepoManager.indexMutationTails.get(lockKey) ?? Promise.resolve();
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        const tail = previous.catch(() => undefined).then(() => gate);
+        GitRepoManager.indexMutationTails.set(lockKey, tail);
+        await previous.catch(() => undefined);
+        try {
+            return await action();
+        } finally {
+            release();
+            if (GitRepoManager.indexMutationTails.get(lockKey) === tail) {
+                GitRepoManager.indexMutationTails.delete(lockKey);
+            }
+        }
+    }
+
+    private stableResolutionKey(sessionId?: string, turnKey?: string): string | undefined {
+        if (sessionId) return `session:${sessionId}`;
+        if (turnKey) return `turn:${turnKey}`;
+        return undefined;
+    }
+
+    private async contentSignature(filePath: string): Promise<string> {
+        try {
+            const content = await fs.promises.readFile(filePath);
+            return crypto.createHash('sha256').update(content).digest('hex');
+        } catch (error) {
+            const code = (error as NodeJS.ErrnoException).code;
+            return code === 'ENOENT' ? 'missing' : `unreadable:${code || 'unknown'}`;
+        }
+    }
+
+    private async resolutionFingerprint(ref: GitRepoRef): Promise<string> {
+        const parts = await Promise.all([
+            this.contentSignature(this.indexPath),
+            this.contentSignature(path.join(this.workspaceRoot, '.gitignore')),
+            this.contentSignature(path.join(ref.gitDir, 'info', 'exclude')),
+            this.contentSignature(path.join(ref.gitDir, 'config'))
+        ]);
+        let repoDirectory = 'missing';
+        try {
+            repoDirectory = (await fs.promises.stat(ref.gitDir)).isDirectory() ? 'directory' : 'not-directory';
+        } catch (error) {
+            const code = (error as NodeJS.ErrnoException).code;
+            repoDirectory = code === 'ENOENT' ? 'missing' : `unreadable:${code || 'unknown'}`;
+        }
+        return crypto.createHash('sha256').update([...parts, repoDirectory].join('|')).digest('hex');
+    }
+
+    private publishResolved(key: string, entry: ResolvedRepoCacheEntry): void {
+        this.resolvedRepos.delete(key);
+        this.resolvedRepos.set(key, entry);
+        while (this.resolvedRepos.size > GitRepoManager.MAX_RESOLVED_REPOS) {
+            const oldest = this.resolvedRepos.keys().next().value as string | undefined;
+            if (!oldest) break;
+            this.resolvedRepos.delete(oldest);
+        }
+    }
+
+    private async resolveUnderLock(
+        stableKey: string | undefined,
+        sessionId?: string,
+        turnKey?: string
+    ): Promise<GitRepoRef> {
+        if (stableKey) {
+            const cached = this.resolvedRepos.get(stableKey);
+            if (cached) {
+                const currentFingerprint = await this.resolutionFingerprint(cached.ref);
+                if (currentFingerprint === cached.fingerprint) {
+                    this.resolvedRepos.delete(stableKey);
+                    this.resolvedRepos.set(stableKey, cached);
+                    return cached.ref;
+                }
+                this.resolvedRepos.delete(stableKey);
+                this.logger(`resolveRepo.cache.invalidate | key=${stableKey} repoId=${cached.ref.repoId}`);
+            }
+        }
+
+        this.logger(`resolveRepo.cache.miss | key=${stableKey || 'none'} sessionId=${sessionId || 'null'} turnKey=${turnKey || 'null'}`);
         await fs.promises.mkdir(this.reposDir, { recursive: true });
         const index = await this.loadIndexJson();
         let repoId: string | undefined;
@@ -220,9 +323,46 @@ export class GitRepoManager {
                 indexFile: path.join(gitDir, 'index'),
                 workTree: this.workspaceRoot
             };
-            await this.syncWorkspaceGitignoreToInternalRepo(gitDir);
         }
-        this.logger(`resolveRepo | sessionId=${sessionId || 'null'} turnKey=${turnKey || 'null'} repoId=${repoId}`);
+        const ignoreSyncAccepted = await this.syncWorkspaceGitignoreToInternalRepo(gitDir);
+        if (stableKey && ignoreSyncAccepted) {
+            const fingerprint = await this.resolutionFingerprint(repoRef);
+            this.publishResolved(stableKey, { ref: repoRef, fingerprint });
+        }
+        this.logger(`resolveRepo.cache.resolved | key=${stableKey || 'none'} sessionId=${sessionId || 'null'} turnKey=${turnKey || 'null'} repoId=${repoId} cached=${stableKey && ignoreSyncAccepted ? 'true' : 'false'}`);
         return repoRef;
+    }
+
+    public async resolveRepo(sessionId?: string, turnKey?: string): Promise<GitRepoRef> {
+        const stableKey = this.stableResolutionKey(sessionId, turnKey);
+        if (!stableKey) {
+            return GitRepoManager.withIndexMutationLock(
+                this.indexPath,
+                () => this.resolveUnderLock(undefined, sessionId, turnKey)
+            );
+        }
+
+        const existing = this.inFlightResolutions.get(stableKey);
+        if (existing) {
+            if (!existing.coalescedLogged) {
+                existing.coalescedLogged = true;
+                this.logger(`resolveRepo.cache.coalesced | key=${stableKey} sessionId=${sessionId || 'null'} turnKey=${turnKey || 'null'}`);
+            }
+            return existing.promise;
+        }
+
+        const promise = GitRepoManager.withIndexMutationLock(
+            this.indexPath,
+            () => this.resolveUnderLock(stableKey, sessionId, turnKey)
+        );
+        const inFlight: InFlightResolution = { promise, coalescedLogged: false };
+        this.inFlightResolutions.set(stableKey, inFlight);
+        try {
+            return await promise;
+        } finally {
+            if (this.inFlightResolutions.get(stableKey) === inFlight) {
+                this.inFlightResolutions.delete(stableKey);
+            }
+        }
     }
 }

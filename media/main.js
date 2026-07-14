@@ -1159,7 +1159,9 @@ const renderStormCounters = {
     userAppendFastPathBailReasons: Object.create(null),
     assistantStreamingPatchResults: Object.create(null),
     assistantStreamingPatchBailReasons: Object.create(null),
-    statusOnlyCoalescedByKey: Object.create(null)
+    statusOnlyCoalescedByKey: Object.create(null),
+    backgroundPulseNoopByKey: Object.create(null),
+    backgroundPulseRenderAvoidedByKey: Object.create(null)
 };
 const webviewAutoRescueProcessedAttemptIds = new Set();
 
@@ -1561,6 +1563,69 @@ function countAssistantStreamingPatchBail(reason, fields = []) {
     logRenderStormMetric('assistant-streaming-patch-bail', [`reason=${key}`, `count=${total}`, ...fields]);
 }
 
+function getBackgroundPulseNoActiveIndicatorNoopState(sessionId, session, source) {
+    if (source !== 'backgroundActivityPulse' || !sessionId || sessionId !== activeSessionId || session !== getSessionState(activeSessionId)) {
+        return null;
+    }
+    if (!sessionHasVisibleThinkingAssistant(session)) {
+        return null;
+    }
+    const chatContainer = document.getElementById('chat');
+    if (!chatContainer) {
+        return null;
+    }
+    const hasIndicatorDom = Boolean(chatContainer.querySelector('.message-background-subagent-indicator, .message.bot.has-background-subagent-indicator'));
+    if (hasIndicatorDom) {
+        return null;
+    }
+    const anchoredAssistantId = typeof session.backgroundSubagentIndicatorAnchorId === 'string'
+        ? session.backgroundSubagentIndicatorAnchorId
+        : null;
+    const fallbackAssistantId =
+        (typeof session.finalAssistantLock?.assistantMsgId === 'string' && session.finalAssistantLock.assistantMsgId)
+        || (typeof session.earlyFinalAssistantId === 'string' && session.earlyFinalAssistantId)
+        || null;
+    const targetId = anchoredAssistantId || fallbackAssistantId;
+    const targetBubble = targetId
+        ? chatContainer.querySelector(`.message.bot[data-message-id="${escapeMessageIdForSelector(targetId)}"]`)
+        : null;
+    const visibleTargetRequiresChange = Boolean(targetBubble?.classList.contains('has-background-subagent-indicator') || targetBubble?.querySelector('.message-background-subagent-indicator'));
+    if (visibleTargetRequiresChange) {
+        return null;
+    }
+    const timelineCount = Array.isArray(session.timeline) ? session.timeline.length : 0;
+    const domChildren = chatContainer.childElementCount;
+    return {
+        reason: 'no-active-indicator',
+        timelineCount,
+        domChildren,
+        pressure: timelineCount >= 1200 || domChildren >= 1600
+    };
+}
+
+function noteBackgroundPulseNoActiveIndicatorNoop(sessionId, state) {
+    const key = `${sessionId || 'null'}|${state?.reason || 'unknown'}`;
+    const count = incrementRenderStormCounter('backgroundPulseNoopByKey', key);
+    const avoided = incrementRenderStormCounter('backgroundPulseRenderAvoidedByKey', key);
+    if (count > 3 && count % 25 !== 0) {
+        return;
+    }
+    const fields = [
+        `reason=${state?.reason || 'unknown'}`,
+        `sessionMatch=${sessionId === activeSessionId ? 'true' : 'false'}`,
+        'desiredVisible=false',
+        'domVisible=false',
+        `pressure=${state?.pressure ? 'true' : 'false'}`,
+        `timelineCount=${state?.timelineCount || 0}`,
+        `domChildren=${state?.domChildren || 0}`,
+        `count=${count}`,
+        `renderAvoided=${avoided}`
+    ];
+    logRenderStormMetric('background-pulse-noop-no-active-indicator', fields);
+    logRenderStormMetric('background-indicator-noop', fields);
+    logRenderStormMetric('background-pulse-render-avoided', fields);
+}
+
 function noteFullRenderRequest(reason, fields = []) {
     const total = incrementRenderStormCounter('fullRenderRequestsByReason', reason);
     logRenderStormMetric('full-render-request', [`reason=${reason || 'unknown'}`, `count=${total}`, ...fields]);
@@ -1784,6 +1849,10 @@ function armBackgroundSubagentIndicator(sessionId, anchorAssistantId, source = '
     const session = getSessionState(sessionId, true);
     if (!session) return;
     if (session.backgroundSubagentIndicatorVisible) {
+        const existingBackgroundPulseNoopState = getBackgroundPulseNoActiveIndicatorNoopState(sessionId, session, source);
+        if (existingBackgroundPulseNoopState) {
+            noteBackgroundPulseNoActiveIndicatorNoop(sessionId, existingBackgroundPulseNoopState);
+        }
         return;
     }
     const now = Date.now();
@@ -1808,6 +1877,11 @@ function armBackgroundSubagentIndicator(sessionId, anchorAssistantId, source = '
         }
         handleBackgroundIndicatorPatchResult(sessionId, applyBackgroundSubagentIndicator(latest), source, ['phase=timer-expiry-hide']);
     }, 3000);
+    const backgroundPulseNoopState = getBackgroundPulseNoActiveIndicatorNoopState(sessionId, session, source);
+    if (backgroundPulseNoopState) {
+        noteBackgroundPulseNoActiveIndicatorNoop(sessionId, backgroundPulseNoopState);
+        return;
+    }
     if (isUnclearAnchorCircuitBreakerOpen(sessionId, source, 'unclear-anchor', ['phase=arm-show'])) {
         return;
     }
@@ -5428,8 +5502,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     const webviewInstanceId = `wv-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    vscode.postMessage({ type: 'ui-debug', payload: ['WV', 'webviewReady', 'id', webviewInstanceId] });
-    vscode.postMessage({ type: 'webviewReady', webviewInstanceId });
+    const hardRescueGenerationToken = document.querySelector('meta[name="opencode-hard-rescue-generation"]')?.getAttribute('content') || '';
+    vscode.postMessage({ type: 'ui-debug', payload: ['WV', 'webviewReady', 'id', webviewInstanceId, 'hardRescueGenerationToken', hardRescueGenerationToken || 'none'] });
+    vscode.postMessage({ type: 'webviewReady', webviewInstanceId, hardRescueGenerationToken });
     sendBtn.innerHTML = sendIcon;
     inputDefaultPlaceholder = input?.placeholder || inputDefaultPlaceholder;
 
