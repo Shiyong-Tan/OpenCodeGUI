@@ -11,7 +11,9 @@ hello_world
 # source files (not needed in extension package)
 src/**
 scripts/**
+webview-src/**
 tsconfig.json
+tsconfig.webview.json
 
 # development configs
 .vscode/**

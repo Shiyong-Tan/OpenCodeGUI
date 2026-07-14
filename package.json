@@ -105,17 +105,27 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
+    "compile": "npm run compile:extension && npm run build:webview",
+    "compile:extension": "tsc -p ./",
     "watch": "tsc -watch -p ./",
+    "watch:all": "node scripts/watch-all.js",
+    "build:webview": "node scripts/build-rendering.js",
+    "watch:webview": "node scripts/build-rendering.js --watch",
+    "check:webview": "npm run build:webview && node scripts/check-rendering-bundle.js",
+    "check:webview:determinism": "node scripts/check-rendering-determinism.js",
+    "check:webview:package": "npm run build:webview && node scripts/check-rendering-package.js",
+    "check:webview:sourcemap": "node scripts/check-rendering-source-map.js",
     "test": "jest",
     "test:watch": "jest --watch"
   },
   "devDependencies": {
+    "@tanstack/virtual-core": "3.17.4",
     "@types/diff-match-patch": "^1.0.34",
     "@types/dompurify": "^3.0.4",
     "@types/jest": "^30.0.0",
     "@types/node": "^18.0.0",
     "@types/vscode": "^1.80.0",
+    "esbuild": "0.28.1",
     "jest": "^30.3.0",
     "ts-jest": "^29.4.6",
     "typescript": "^5.0.0"
