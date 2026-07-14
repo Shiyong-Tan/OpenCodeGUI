@@ -1,7 +1,7 @@
 import { deriveRenderUnits } from './render-units';
 import { presentationFingerprint } from './presentation-fingerprint';
 import { planReconciliation } from './reconcile-planner';
-import { restoreScrollAnchor } from './scroll-anchor-model';
+import { restoreKeyedScrollAnchor, restoreScrollAnchor } from './scroll-anchor-model';
 import { createTanStackVirtualAdapter } from './tanstack-virtual-adapter';
 
 export const RENDERING_FACADE_VERSION = 1 as const;
@@ -16,6 +16,7 @@ const facade = Object.freeze({
   presentationFingerprint,
   planReconciliation,
   restoreScrollAnchor,
+  restoreKeyedScrollAnchor,
   createTanStackVirtualAdapter,
   throwSourceMapTestError,
 });

@@ -522,6 +522,27 @@ body {
     background: linear-gradient(180deg, rgba(0,0,0,0.04) 0%, rgba(0,0,0,0) 35%);
 }
 
+.chat-window-spacer {
+    flex: 0 0 auto;
+    width: 1px;
+    min-height: 0;
+    margin: 0;
+    padding: 0;
+    pointer-events: none;
+}
+
+.chat-area.chat-window-active {
+    gap: 0;
+}
+
+.chat-area.chat-window-active > [data-render-unit-key] {
+    margin-bottom: 8px;
+}
+
+.chat-area.chat-window-active > .chat-window-spacer-bottom {
+    margin-top: -8px;
+}
+
 .message-row {
     width: 100%;
     display: flex;

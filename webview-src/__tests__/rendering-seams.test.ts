@@ -61,6 +61,9 @@ describe('Wave 1 pure rendering seams', () => {
       FakeVirtualizer as unknown as VirtualizerConstructor,
     );
     expect(constructions).toBe(1);
-    expect(adapter.getRange()).toEqual({ items: FakeVirtualizer.prototype.getVirtualItems(), totalSize: 10 });
+    expect(adapter.getRange()).toEqual({
+      items: [{ index: 0, start: 0, end: 10, size: 10, key: 'a' }],
+      totalSize: 10,
+    });
   });
 });

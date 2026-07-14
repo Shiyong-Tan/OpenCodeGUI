@@ -130,7 +130,10 @@ let sessionSearch = {
     activeIndex: -1,
     smartMessageIds: [],
     smartRequestId: '',
-    smartInFlight: false
+    smartInFlight: false,
+    fullMatchKeys: [],
+    activeKeyIndex: -1,
+    windowTargetKey: ''
 };
 const shownQuestionCallIds = new Set();
 const sentQuestionCallIds = new Set();
@@ -5424,6 +5427,43 @@ function updateActiveSessionSearchHit({ scroll = false } = {}) {
     active?.scrollIntoView?.({ block: 'center', inline: 'nearest', behavior: 'smooth' });
 }
 
+function collectLoadedTextSearchKeys(query) {
+    const session = getSessionOrNull(activeSessionId);
+    const queryLower = String(query || '').trim().toLowerCase();
+    if (!session || !queryLower || !Array.isArray(session.timeline)) return [];
+    const projectedRows = window.__oc?.getLoadedChatSearchRows?.();
+    if (Array.isArray(projectedRows) && projectedRows.length) {
+        return projectedRows.filter((row) => String(row.text || '').toLowerCase().includes(queryLower)).map((row) => row.id);
+    }
+    const keys = [];
+    for (const id of session.timeline) {
+        const message = session.messagesById?.get?.(id);
+        if (!message || session.hiddenSet?.has?.(id)) continue;
+        const text = getLoadedSessionSearchText(message).toLowerCase();
+        if (text.includes(queryLower)) keys.push(id);
+    }
+    return keys;
+}
+
+function getLoadedSessionSearchText(message) {
+    const meta = message?.meta || {};
+    const files = Array.isArray(meta.files) ? meta.files.map((file) => typeof file === 'string' ? file : file?.path || file?.name || '') : [];
+    const todos = Array.isArray(meta.todos) ? meta.todos.map((todo) => todo?.content || todo?.text || '') : [];
+    return [message?.text || '', meta.diffText || '', ...files, ...todos].filter(Boolean).join(' ');
+}
+
+function ensureChatWindowKeyMounted(targetKey, reason = 'search') {
+    if (!targetKey) return false;
+    return window.__oc?.ensureChatWindowKeyMounted?.(targetKey, reason) === true;
+}
+
+function keyedRootForSearchKey(key) {
+    const escaped = typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
+        ? CSS.escape(key)
+        : String(key).replace(/["\\]/g, '\\$&');
+    return document.querySelector(`[data-render-unit-key="${escaped}"], [data-message-id="${escaped}"], [data-segment-key="${escaped}"]`);
+}
+
 function isSessionSearchTextNode(node, queryLower) {
     const text = node?.nodeValue || '';
     if (!text || !text.toLowerCase().includes(queryLower)) return false;
@@ -5470,7 +5510,17 @@ function refreshSessionSearchHighlights({ jumpToFirst = false } = {}) {
     const query = String(sessionSearch.query || '').trim();
     if (!query) {
         sessionSearch.activeIndex = -1;
+        sessionSearch.fullMatchKeys = [];
+        sessionSearch.activeKeyIndex = -1;
         updateSessionSearchControls();
+        return;
+    }
+
+    sessionSearch.fullMatchKeys = collectLoadedTextSearchKeys(query);
+    if (jumpToFirst) sessionSearch.activeKeyIndex = sessionSearch.fullMatchKeys.length ? 0 : -1;
+    const targetKey = sessionSearch.activeKeyIndex >= 0 ? sessionSearch.fullMatchKeys[sessionSearch.activeKeyIndex] : '';
+    if (targetKey && !keyedRootForSearchKey(targetKey) && ensureChatWindowKeyMounted(targetKey, 'search')) {
+        sessionSearch.windowTargetKey = targetKey;
         return;
     }
 
@@ -5528,6 +5578,13 @@ function scheduleSessionSearchRefresh({ jumpToFirst = false } = {}) {
 }
 
 function goToSessionSearchMatch(delta) {
+    if (sessionSearch.mode === 'text' && sessionSearch.fullMatchKeys.length) {
+        const totalKeys = sessionSearch.fullMatchKeys.length;
+        sessionSearch.activeKeyIndex = (sessionSearch.activeKeyIndex + delta + totalKeys) % totalKeys;
+        const targetKey = sessionSearch.fullMatchKeys[sessionSearch.activeKeyIndex];
+        sessionSearch.windowTargetKey = targetKey;
+        if (ensureChatWindowKeyMounted(targetKey, 'search')) return;
+    }
     const total = sessionSearch.matches.length;
     if (!total) return;
     sessionSearch.activeIndex = (sessionSearch.activeIndex + delta + total) % total;
@@ -5555,6 +5612,9 @@ function closeSessionSearch() {
     sessionSearch.smartMessageIds = [];
     sessionSearch.smartRequestId = '';
     sessionSearch.smartInFlight = false;
+    sessionSearch.fullMatchKeys = [];
+    sessionSearch.activeKeyIndex = -1;
+    sessionSearch.windowTargetKey = '';
     if (sessionSearchDebounceTimer) {
         clearTimeout(sessionSearchDebounceTimer);
         sessionSearchDebounceTimer = null;
@@ -5566,22 +5626,22 @@ function closeSessionSearch() {
 }
 
 function collectSmartSearchMessages() {
-    const chat = document.getElementById('chat');
-    if (!chat) return [];
+    const session = getSessionOrNull(activeSessionId);
+    if (!session || !Array.isArray(session.timeline)) return [];
+    const projectedRows = window.__oc?.getLoadedChatSearchRows?.();
+    if (Array.isArray(projectedRows) && projectedRows.length) return projectedRows;
     const seen = new Set();
     const rows = [];
-    const nodes = Array.from(chat.querySelectorAll('[data-message-id], [data-segment-key]'));
-    for (const node of nodes) {
-        if (!(node instanceof HTMLElement)) continue;
-        const id = node.dataset.messageId || node.dataset.segmentKey || '';
+    for (const id of session.timeline) {
         if (!id || seen.has(id)) continue;
         seen.add(id);
-        const content = node.querySelector('.message-content, .conflict-card-list') || node;
-        const text = String(content.textContent || '').replace(/\s+/g, ' ').trim();
+        const message = session.messagesById?.get?.(id);
+        if (!message || session.hiddenSet?.has?.(id)) continue;
+        const text = getLoadedSessionSearchText(message).replace(/\s+/g, ' ').trim();
         if (!text) continue;
         rows.push({
             id,
-            role: node.classList.contains('user') ? 'user' : node.classList.contains('bot') ? 'assistant' : 'system',
+            role: message.role || 'system',
             text: text.slice(0, 2200)
         });
     }
@@ -5593,6 +5653,11 @@ function applySmartSessionSearchResults(messageIds, { scroll = true } = {}) {
     clearSessionSearchHighlights();
     sessionSearch.mode = 'smart';
     sessionSearch.smartMessageIds = Array.isArray(messageIds) ? messageIds.filter((id) => typeof id === 'string' && id) : [];
+    const requestedKey = sessionSearch.smartMessageIds[Math.max(previousIndex, 0)] || sessionSearch.smartMessageIds[0] || '';
+    if (requestedKey && !keyedRootForSearchKey(requestedKey) && ensureChatWindowKeyMounted(requestedKey, 'search')) {
+        sessionSearch.windowTargetKey = requestedKey;
+        return;
+    }
     sessionSearch.matches = [];
     const seen = new Set();
     for (const id of sessionSearch.smartMessageIds) {
@@ -5705,7 +5770,10 @@ document.addEventListener('DOMContentLoaded', () => {
         if (typeof installChatRenderMetrics === 'function') installChatRenderMetrics(chatContainer);
         autoScrollPinnedToBottom = isNearBottom(chatContainer);
         chatContainer.addEventListener('scroll', () => {
-            autoScrollPinnedToBottom = isNearBottom(chatContainer);
+            if (!chatWindowState.programmaticScroll) {
+                autoScrollPinnedToBottom = isNearBottom(chatContainer);
+                if (!autoScrollPinnedToBottom) captureChatWindowAnchor();
+            }
             hideQuoteSelectionButton();
         }, { passive: true });
         chatContainer.addEventListener('mouseup', () => {
@@ -7559,6 +7627,7 @@ function renderMessageElement(message, renderedSet) {
         session.lastAssistantUpgradeFallback = null;
         if (typeof finishChatRenderPhase === 'function') finishChatRenderPhase('appendFastPath', appendFastPathStartedAt);
         countUserMessageAppendFastPathResult('success', [...fields, `reason=${tailSafety.reason || 'hidden-tail-safe'}`, `domChildren=${afterChildren}`, `domChildDelta=${domChildDelta}`, 'postAppendAuditMode=identity-tail', `postAppendAuditPassed=${postAppendAuditPassed ? 'true' : 'false'}`, ...(tailSafety.fields || [])]);
+        if (isChatWindowAvailable()) scheduleRenderFromState('window-append-fast-path');
         scrollToBottom(true);
         return { applied: true, reason: tailSafety.reason || 'success' };
     }
@@ -7844,6 +7913,11 @@ function renderMessageElement(message, renderedSet) {
             return bailAssistantStreamingPatch('identity-order-post-audit-failed', [...fields, `targetId=${targetId}`, `duplicateCount=${duplicateCount}`, `afterTailKey=${afterTailKey || 'null'}`, ...(targetResolution.fields || [])]);
         }
         const keyedFingerprintAcknowledged = acknowledgeKeyedStreamPatch(session, targetId);
+        if (keyedFingerprintAcknowledged && chatWindowState.adapter) {
+            const streamPresentation = getKeyedUnitPresentation(session, { key: targetId, kind: 'message', value: { message } });
+            chatWindowState.adapter.setPresentationRevision(targetId, window.__ocRendering.presentationFingerprint(streamPresentation));
+        }
+        chatWindowState.adapter?.invalidateMeasurement?.(targetId);
         if (typeof finishChatRenderPhase === 'function') finishChatRenderPhase('streamPatch', streamPatchStartedAt);
         countAssistantStreamingPatchResult(targetResolution.resolution === 'alias' ? 'post-upgrade-alias-success' : 'success', [...fields, `targetId=${targetId}`, `textLen=${typeof message.text === 'string' ? message.text.length : 0}`, `statusTextLen=${typeof message.meta?.statusText === 'string' ? message.meta.statusText.length : 0}`, `domTail=${afterTailKey || 'null'}`, `keyedFingerprintAcknowledged=${keyedFingerprintAcknowledged}`, ...(targetResolution.fields || [])]);
         scrollToBottom(true);
@@ -8141,15 +8215,33 @@ function shouldHideDcpUiMessage(message) {
     }
 
     const KEYED_CHAT_RECONCILE_ENABLED = window.__ocKeyedChatReconcileEnabled !== false;
+    const TANSTACK_CHAT_WINDOW_ENABLED = window.__ocTanStackChatWindowEnabled !== false;
+    const CHAT_WINDOW_INITIAL_TAIL = 80;
+    const CHAT_WINDOW_OVERSCAN = 20;
+    const CHAT_WINDOW_MOUNT_LIMIT = 140;
+    const CHAT_WINDOW_DIRECT_CHILD_LIMIT = 146;
     const CHAT_STRUCTURAL_SURFACE_LIMIT = 6;
     const INIT_NO_MODELS_STRUCTURAL_KEY = 'surface:error:no-model';
     let keyedChatRenderCapture = null;
     let keyedFollowingTurnDividerOverride = null;
     let keyedChatFailedSessionId = '';
     let keyedChatReconcileState = { sessionId: '', items: [], roots: new Map() };
+    let chatWindowGeneration = 0;
+    const chatWindowState = {
+        sessionId: '', adapter: null, snapshot: null, allUnits: [], mountedKeys: new Set(),
+        topSpacer: null, bottomSpacer: null, anchorKey: '', visualOffset: 0,
+        programmaticScroll: false, activityBelow: false, rendering: false,
+        pendingRangeRender: false, failedSessionId: ''
+    };
 
     function appendChatRenderRoot(root) {
-        (keyedChatRenderCapture || chatContainer).appendChild(root);
+        if (keyedChatRenderCapture) {
+            keyedChatRenderCapture.appendChild(root);
+        } else if (chatWindowState.bottomSpacer?.parentElement === chatContainer) {
+            chatContainer.insertBefore(root, chatWindowState.bottomSpacer);
+        } else {
+            chatContainer.appendChild(root);
+        }
     }
 
     function classifyChatStructuralSurface(root, key, owner) {
@@ -8333,6 +8425,223 @@ function shouldHideDcpUiMessage(message) {
         return matches.length === 1 ? matches[0] : null;
     }
 
+    function getChatWindowUnitKind(unit) {
+        if (unit.kind === 'segment' || unit.kind === 'change-list') return unit.kind;
+        if (unit.kind !== 'message') return 'system';
+        const role = unit.value?.message?.role;
+        return role === 'user' || role === 'assistant' ? role : 'system';
+    }
+
+    function isChatWindowAvailable() {
+        return TANSTACK_CHAT_WINDOW_ENABLED
+            && typeof window.__ocRendering?.createTanStackVirtualAdapter === 'function'
+            && chatWindowState.failedSessionId !== (activeSessionId || '__no_session__');
+    }
+
+    function destroyChatWindowAdapter(reason = 'unknown') {
+        chatWindowGeneration += 1;
+        chatWindowState.adapter?.destroy?.();
+        chatWindowState.adapter = null;
+        chatWindowState.snapshot = null;
+        chatWindowState.mountedKeys = new Set();
+        chatWindowState.sessionId = '';
+        chatWindowState.pendingRangeRender = false;
+        chatWindowState.topSpacer?.remove?.();
+        chatWindowState.bottomSpacer?.remove?.();
+        chatWindowState.topSpacer = null;
+        chatWindowState.bottomSpacer = null;
+        chatContainer?.classList?.remove?.('chat-window-active');
+        vscode.postMessage({ type: 'ui-debug', payload: ['[WV][CHAT_WINDOW_DESTROY]', `reason=${reason}`] });
+    }
+
+    function disableChatWindowForSession(reason, error) {
+        destroyChatWindowAdapter(reason);
+        chatWindowState.failedSessionId = activeSessionId || '__no_session__';
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: ['[WV][CHAT_WINDOW_FAIL_CLOSED_TO_WAVE2]', `reason=${reason}`, `error=${String(error)}`]
+        });
+    }
+
+    function ensureChatWindowSpacers() {
+        chatContainer.classList.add('chat-window-active');
+        if (!chatWindowState.topSpacer) {
+            const topSpacer = document.createElement('div');
+            topSpacer.className = 'chat-window-spacer chat-window-spacer-top';
+            classifyChatStructuralSurface(topSpacer, 'window:top-spacer', 'tanstack-window');
+            chatWindowState.topSpacer = topSpacer;
+        }
+        if (!chatWindowState.bottomSpacer) {
+            const bottomSpacer = document.createElement('div');
+            bottomSpacer.className = 'chat-window-spacer chat-window-spacer-bottom';
+            classifyChatStructuralSurface(bottomSpacer, 'window:bottom-spacer', 'tanstack-window');
+            chatWindowState.bottomSpacer = bottomSpacer;
+        }
+    }
+
+    function captureChatWindowAnchor() {
+        if (!chatWindowState.adapter || autoScrollPinnedToBottom || chatWindowState.programmaticScroll) return;
+        const roots = keyedRoots();
+        const anchor = roots.find((root) => root.offsetTop + root.offsetHeight > chatContainer.scrollTop) || roots[0];
+        if (!anchor?.dataset?.renderUnitKey) return;
+        chatWindowState.anchorKey = anchor.dataset.renderUnitKey;
+        chatWindowState.visualOffset = anchor.offsetTop - chatContainer.scrollTop;
+    }
+
+    function restoreChatWindowAnchor() {
+        if (!chatWindowState.anchorKey || autoScrollPinnedToBottom || !chatWindowState.snapshot) return;
+        const item = chatWindowState.snapshot.items.find((entry) => entry.key === chatWindowState.anchorKey);
+        if (!item) return;
+        const rendering = window.__ocRendering;
+        const anchorRoot = keyedRootForKey(chatWindowState.anchorKey);
+        const plan = rendering.restoreKeyedScrollAnchor({
+            anchorKey: chatWindowState.anchorKey,
+            visualOffset: chatWindowState.visualOffset,
+            anchorStartAfter: anchorRoot?.offsetTop ?? item.start,
+            currentScrollTop: chatContainer.scrollTop
+        });
+        chatWindowState.programmaticScroll = true;
+        chatContainer.scrollTop = plan.scrollTop;
+        requestAnimationFrame(() => { chatWindowState.programmaticScroll = false; });
+    }
+
+    function getChatWindowKeepMountedKeys(session, units) {
+        const unitKeys = new Set(units.map((unit) => unit.key));
+        const keys = [session?.currentTurnAssistantKey, session?.thinkingId, chatWindowState.anchorKey, sessionSearch.windowTargetKey]
+            .filter((key) => typeof key === 'string' && unitKeys.has(key));
+        return [...new Set(keys)];
+    }
+
+    function ensureChatWindowAdapter(session, units) {
+        const sessionId = activeSessionId || '__no_session__';
+        const rendering = window.__ocRendering;
+        const keys = units.map((unit) => unit.key);
+        const kinds = units.map(getChatWindowUnitKind);
+        const presentationRevisions = units.map((unit) => rendering.presentationFingerprint(getKeyedUnitPresentation(session, unit)));
+        const keepMountedKeys = getChatWindowKeepMountedKeys(session, units);
+        if (chatWindowState.adapter && chatWindowState.sessionId !== sessionId) destroyChatWindowAdapter('session-switch');
+        if (!chatWindowState.adapter) {
+            const generation = ++chatWindowGeneration;
+            chatWindowState.sessionId = sessionId;
+            chatWindowState.adapter = rendering.createTanStackVirtualAdapter({
+                keys, kinds, presentationRevisions, keepMountedKeys, scrollElement: chatContainer,
+                overscan: CHAT_WINDOW_OVERSCAN, initialTailCount: CHAT_WINDOW_INITIAL_TAIL,
+                maxMounted: CHAT_WINDOW_MOUNT_LIMIT, gap: 8,
+                onRangeChange(snapshot) {
+                    if (generation !== chatWindowGeneration || chatWindowState.sessionId !== sessionId) return;
+                    chatWindowState.snapshot = snapshot;
+                    const sameMountedRange = snapshot.items.length === chatWindowState.mountedKeys.size
+                        && snapshot.items.every((item) => chatWindowState.mountedKeys.has(item.key));
+                    if (sameMountedRange && chatWindowState.topSpacer && chatWindowState.bottomSpacer) {
+                        updateChatWindowSpacers(snapshot);
+                        return;
+                    }
+                    if (!chatWindowState.rendering && !chatWindowState.pendingRangeRender) {
+                        chatWindowState.pendingRangeRender = true;
+                        scheduleRenderFromState('window-range-change');
+                    }
+                },
+                onMeasurements(batch) {
+                    if (generation !== chatWindowGeneration || chatWindowState.sessionId !== sessionId) return;
+                    vscode.postMessage({ type: 'ui-debug', payload: ['[WV][CHAT_WINDOW_MEASURE]', `changed=${batch.changedKeys.length}`, `totalSize=${batch.totalSize}`] });
+                    if (autoScrollPinnedToBottom) scrollToBottom(true);
+                    else {
+                        chatWindowState.activityBelow = true;
+                        restoreChatWindowAnchor();
+                    }
+                }
+            });
+        } else {
+            chatWindowState.adapter.update({ keys, kinds, presentationRevisions, keepMountedKeys });
+        }
+        return chatWindowState.adapter;
+    }
+
+    function updateChatWindowSpacers(snapshot) {
+        ensureChatWindowSpacers();
+        const first = snapshot.items[0];
+        const last = snapshot.items[snapshot.items.length - 1];
+        chatWindowState.topSpacer.style.height = `${Math.max(0, first?.start || 0)}px`;
+        chatWindowState.bottomSpacer.style.height = `${Math.max(0, snapshot.totalSize - (last?.end || 0))}px`;
+        chatContainer.insertBefore(chatWindowState.topSpacer, keyedRoots()[0] || chatWindowState.bottomSpacer || null);
+        chatContainer.appendChild(chatWindowState.bottomSpacer);
+    }
+
+    function assertChatWindowDomBudget(budget) {
+        if (budget.mountedUnits > CHAT_WINDOW_MOUNT_LIMIT) {
+            throw new Error(`Mounted unit cap exceeded: ${budget.mountedUnits}`);
+        }
+        if (budget.directChildren > CHAT_WINDOW_DIRECT_CHILD_LIMIT) {
+            throw new Error(`Direct chat child cap exceeded: ${budget.directChildren}`);
+        }
+        if (budget.descendants > 4000) {
+            window.__ocChatWindowDescendantAcceptanceBlocker = {
+                sessionId: activeSessionId || '', descendants: budget.descendants
+            };
+            console.warn('[Render] chat window descendant acceptance blocker', budget.descendants, 4000);
+            const error = new Error(`Chat window descendant acceptance blocker: ${budget.descendants}`);
+            error.code = 'CHAT_WINDOW_DESCENDANT_ACCEPTANCE_BLOCKER';
+            throw error;
+        }
+        return budget;
+    }
+
+    function applyWindowedKeyedChatReconciliation(session, units) {
+        captureChatWindowAnchor();
+        chatWindowState.rendering = true;
+        chatWindowState.pendingRangeRender = false;
+        chatWindowState.allUnits = units;
+        try {
+            const adapter = ensureChatWindowAdapter(session, units);
+            const snapshot = adapter.getRange();
+            chatWindowState.snapshot = snapshot;
+            const unitByKey = new Map(units.map((unit) => [unit.key, unit]));
+            const windowUnits = snapshot.items.map((item) => unitByKey.get(item.key)).filter(Boolean);
+            applyKeyedChatReconciliation(session, windowUnits);
+            updateChatWindowSpacers(snapshot);
+            const nextMounted = new Set(windowUnits.map((unit) => unit.key));
+            for (const key of chatWindowState.mountedKeys) if (!nextMounted.has(key)) adapter.unobserveElement(key);
+            for (const unit of windowUnits) {
+                const root = keyedRootForKey(unit.key);
+                if (root) adapter.observeElement(unit.key, root);
+            }
+            chatWindowState.mountedKeys = nextMounted;
+            const directChildren = chatContainer.childElementCount;
+            const descendants = chatContainer.querySelectorAll('*').length;
+            const budget = assertChatWindowDomBudget({ mountedUnits: windowUnits.length, directChildren, descendants });
+            if (autoScrollPinnedToBottom) scrollToBottom(true);
+            else restoreChatWindowAnchor();
+            window.__ocChatWindowLastBudget = Object.freeze(budget);
+            return windowUnits;
+        } finally {
+            chatWindowState.rendering = false;
+        }
+    }
+
+    window.__oc = window.__oc || {};
+    window.__oc.getLoadedChatSearchRows = () => {
+        const session = getSessionOrNull(activeSessionId);
+        return chatWindowState.allUnits.map((unit) => {
+            const message = unit.value?.message;
+            const segmentIds = unit.kind === 'segment'
+                ? (unit.value?.segment?.memberMsgIds || Array.from(unit.value?.segment?.memberIds || []))
+                : [];
+            const segmentText = segmentIds.map((id) => getLoadedSessionSearchText(session?.messagesById?.get?.(id))).join(' ');
+            const appendText = message ? getAppendItems(message).map((item) => getLoadedSessionSearchText(item)).join(' ') : '';
+            const text = [getLoadedSessionSearchText(message), segmentText, appendText].filter(Boolean).join(' ').slice(0, 2200);
+            return { id: unit.key, role: message?.role || 'system', text };
+        }).filter((row) => row.text);
+    };
+    function mountChatWindowSearchKey(targetKey, reason = 'search') {
+        if (!isChatWindowAvailable() || !chatWindowState.adapter) return false;
+        sessionSearch.windowTargetKey = targetKey;
+        chatWindowState.activityBelow = !autoScrollPinnedToBottom;
+        const scrolled = chatWindowState.adapter.scrollToKey(targetKey, { align: 'center' });
+        if (scrolled) scheduleRenderFromState(`window-${reason}`);
+        return scrolled;
+    }
+    window.__oc.ensureChatWindowKeyMounted = mountChatWindowSearchKey;
+
     function applyKeyedChatReconciliation(session, units) {
         const rendering = window.__ocRendering;
         const nextItems = units.map((unit) => {
@@ -8403,6 +8712,10 @@ function shouldHideDcpUiMessage(message) {
             if (item.key !== oldKey) return item;
             return { ...item, key: newKey };
         });
+        chatWindowState.adapter?.migrateKey?.(oldKey, newKey);
+        if (chatWindowState.anchorKey === oldKey) chatWindowState.anchorKey = newKey;
+        if (sessionSearch.windowTargetKey === oldKey) sessionSearch.windowTargetKey = newKey;
+        sessionSearch.fullMatchKeys = sessionSearch.fullMatchKeys.map((key) => key === oldKey ? newKey : key);
         return true;
     };
 
@@ -8439,6 +8752,21 @@ function shouldHideDcpUiMessage(message) {
         });
     }
 
+    function applyChatWindowOrWave2(session, units) {
+        if (!isChatWindowAvailable()) {
+            applyKeyedChatReconciliation(session, units);
+            return 'wave2-disabled';
+        }
+        try {
+            applyWindowedKeyedChatReconciliation(session, units);
+            return 'window';
+        } catch (windowError) {
+            disableChatWindowForSession('adapter-fail-closed', windowError);
+            applyKeyedChatReconciliation(session, units);
+            return 'wave2-fail-closed';
+        }
+    }
+
     function renderFromState() {
         if (!KEYED_CHAT_RECONCILE_ENABLED || !window.__ocRendering || keyedChatFailedSessionId === activeSessionId) {
             renderFromStateLegacy();
@@ -8450,7 +8778,7 @@ function shouldHideDcpUiMessage(message) {
         const session = getSessionOrNull(activeSessionId);
         try {
             const units = window.__ocRendering.deriveRenderUnits(buildKeyedRenderCandidates(session));
-            applyKeyedChatReconciliation(session, units);
+            applyChatWindowOrWave2(session, units);
             if (session) {
                 countBackgroundIndicatorApplyResult(applyBackgroundSubagentIndicator(session), [`sessionId=${activeSessionId || 'null'}`, 'source=renderFromState-keyed']);
             }
@@ -8466,6 +8794,7 @@ function shouldHideDcpUiMessage(message) {
             }
             noteUnclearAnchorCoalescedRenderComplete(activeSessionId);
         } catch (error) {
+            destroyChatWindowAdapter('keyed-reconcile-failure');
             keyedChatReconcileState = { sessionId: '', items: [], roots: new Map() };
             keyedChatFailedSessionId = activeSessionId || '__no_session__';
             vscode.postMessage({ type: 'ui-debug', payload: ['[WV][KEYED_RECONCILE_FAIL_CLOSED]', `error=${String(error)}`] });
@@ -9188,8 +9517,11 @@ function shouldHideDcpUiMessage(message) {
         if (!chatContainer) return;
         if (!force && !autoScrollPinnedToBottom) return;
         requestAnimationFrame(() => {
+            chatWindowState.programmaticScroll = true;
             chatContainer.scrollTop = chatContainer.scrollHeight;
             autoScrollPinnedToBottom = true;
+            chatWindowState.activityBelow = false;
+            requestAnimationFrame(() => { chatWindowState.programmaticScroll = false; });
         });
     }
     window.__oc = window.__oc || {};
@@ -12167,6 +12499,7 @@ window.addEventListener('message', (event) => {
                 clearAppendInputForSessionChange(sessionId);
                 renderHeaderUsage();
                 if (prevSessionId && prevSessionId !== sessionId) {
+                    destroyChatWindowAdapter('session-switch');
                     clearQuestionOverlay('session-change');
                     clearPermissionOverlay('session-change');
                     closeStallCard();

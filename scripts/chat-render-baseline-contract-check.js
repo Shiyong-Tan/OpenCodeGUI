@@ -57,7 +57,7 @@ function run() {
     ['chatContainer.appendChild(row);', 0],
     ['chatContainer.appendChild(container);', 1],
     ['chatContainer.appendChild(divider);', 1],
-    ['chatContainer.appendChild(root);', 1],
+    ['chatContainer.appendChild(root);', 2],
     ['content.innerHTML = beforeHtml;', 1]
   ];
   for (const [operation, expected] of directWriterContracts) {
@@ -67,6 +67,7 @@ function run() {
   assertContains(source, 'renderAssistantMarkdown(content, message);', 'stream patch still uses the existing markdown renderer');
   assertContains(source, 'appendChatRenderRoot(messageElement);', 'message factories route structural insertion through the keyed capture seam');
   assertContains(source, 'chatContainer.insertBefore(root, currentAtIndex);', 'keyed reconciler owns root ordering');
+  assertContains(source, 'chatContainer.insertBefore(root, chatWindowState.bottomSpacer);', 'window append ownership stays before the bottom spacer');
   assertContains(source, 'renderFromStateLegacy();', 'kill-switch fallback retains accepted legacy full rendering');
   assertContains(source, "INIT_NO_MODELS_STRUCTURAL_KEY = 'surface:error:no-model'", 'init no-model writer has stable structural ownership');
   assertContains(source, "CHAT_STRUCTURAL_SURFACE_LIMIT = 6", 'structural root count remains bounded');

@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 
-const source = fs.readFileSync(path.join(process.cwd(), 'media', 'main.js'), 'utf8');
+const source = fs.readFileSync(path.join(process.cwd(), 'media', 'main.js'), 'utf8').replace(/\r\n/g, '\n');
 
 function extractFunction(marker: string): string {
   const start = source.indexOf(marker);
