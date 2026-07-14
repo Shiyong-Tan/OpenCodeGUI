@@ -1165,6 +1165,211 @@ const renderStormCounters = {
 };
 const webviewAutoRescueProcessedAttemptIds = new Set();
 
+const CHAT_RENDER_METRICS_SCHEMA_VERSION = 1;
+const CHAT_RENDER_METRICS_SUMMARY_INTERVAL_MS = 30000;
+const CHAT_RENDER_WARNING_INTERVAL_MS = 30000;
+const CHAT_RENDER_DIRECT_CHILD_WARNING_THRESHOLD = 160;
+const CHAT_RENDER_DESCENDANT_WARNING_THRESHOLD = 4000;
+let chatRenderMetricsEnabled = null;
+let chatRenderMetricsDirty = false;
+let chatRenderMetricsSummaryTimer = null;
+let chatRenderLongTaskObserver = null;
+let chatRenderDomObserver = null;
+let chatRenderPendingFullRenderStartedAt = null;
+let chatRenderPendingProjectionStartedAt = null;
+const chatRenderWarningState = {
+    directChildren: { lastAt: 0, suppressed: 0 },
+    descendants: { lastAt: 0, suppressed: 0 }
+};
+const chatRenderMetrics = {
+    schemaVersion: CHAT_RENDER_METRICS_SCHEMA_VERSION,
+    phases: {
+        projection: { count: 0, totalMs: 0, maxMs: 0 },
+        fullRender: { count: 0, totalMs: 0, maxMs: 0 },
+        richEnhancement: { count: 0, totalMs: 0, maxMs: 0 },
+        appendFastPath: { count: 0, totalMs: 0, maxMs: 0 },
+        streamPatch: { count: 0, totalMs: 0, maxMs: 0 }
+    },
+    directChildren: { samples: 0, total: 0, max: 0, last: 0 },
+    descendants: { samples: 0, total: 0, max: 0, last: 0 },
+    renderReasons: Object.create(null),
+    pinnedState: { true: 0, false: 0 },
+    timelineCount: { samples: 0, total: 0, max: 0, last: 0 },
+    renderedCount: { samples: 0, total: 0, max: 0, last: 0 },
+    scenarioBands: Object.fromEntries(['50', '200', '1000+'].map((key) => [key, 0])),
+    longTasks: { count: 0, totalMs: 0, maxMs: 0 },
+    warnings: { directChildren: 0, descendants: 0 }
+};
+
+function isChatRenderMetricsEnabled() {
+    if (chatRenderMetricsEnabled !== null) return chatRenderMetricsEnabled;
+    try {
+        chatRenderMetricsEnabled = window.__ocChatRenderMetricsEnabled === true
+            || localStorage.getItem('oc_chat_render_metrics') === '1';
+    } catch {
+        chatRenderMetricsEnabled = false;
+    }
+    return chatRenderMetricsEnabled;
+}
+
+function getChatRenderMetricTime() {
+    return typeof performance !== 'undefined' && typeof performance.now === 'function'
+        ? performance.now()
+        : Date.now();
+}
+
+function startChatRenderPhase() {
+    return isChatRenderMetricsEnabled() ? getChatRenderMetricTime() : null;
+}
+
+function finishChatRenderPhase(phase, startedAt) {
+    if (startedAt === null || !isChatRenderMetricsEnabled()) return;
+    const bucket = chatRenderMetrics.phases[phase];
+    if (!bucket) return;
+    const duration = Math.max(0, getChatRenderMetricTime() - startedAt);
+    bucket.count += 1;
+    bucket.totalMs += duration;
+    bucket.maxMs = Math.max(bucket.maxMs, duration);
+    chatRenderMetricsDirty = true;
+}
+
+function recordChatRenderReason(reason) {
+    if (!isChatRenderMetricsEnabled()) return;
+    const key = typeof reason === 'string' && reason ? reason : 'unknown';
+    chatRenderMetrics.renderReasons[key] = (chatRenderMetrics.renderReasons[key] || 0) + 1;
+    chatRenderPendingFullRenderStartedAt = getChatRenderMetricTime();
+    chatRenderPendingProjectionStartedAt = chatRenderPendingFullRenderStartedAt;
+    chatRenderMetricsDirty = true;
+}
+
+function recordChatRenderScalar(bucket, value) {
+    const safeValue = Number.isFinite(value) ? Math.max(0, value) : 0;
+    bucket.samples += 1;
+    bucket.total += safeValue;
+    bucket.max = Math.max(bucket.max, safeValue);
+    bucket.last = safeValue;
+}
+
+function getChatRenderScenarioBand(timelineCount) {
+    if (timelineCount <= 50) return '50';
+    if (timelineCount <= 200) return '200';
+    return '1000+';
+}
+
+function emitChatRenderPressureWarning(kind, value, threshold) {
+    const now = Date.now();
+    const state = chatRenderWarningState[kind];
+    if (!state) return;
+    if (now - state.lastAt < CHAT_RENDER_WARNING_INTERVAL_MS) {
+        state.suppressed += 1;
+        return;
+    }
+    const suppressed = state.suppressed;
+    state.lastAt = now;
+    state.suppressed = 0;
+    chatRenderMetrics.warnings[kind] += 1;
+    console.warn(`[OpenCode chat render pressure] ${kind}=${value} exceeds ${threshold}; suppressed=${suppressed}`);
+    vscode.postMessage({
+        type: 'ui-debug',
+        payload: ['[WV][CHAT_RENDER_PRESSURE]', `metric=${kind}`, `value=${value}`, `threshold=${threshold}`, `suppressed=${suppressed}`]
+    });
+}
+
+function sampleChatRenderDom(chatContainer) {
+    if (!isChatRenderMetricsEnabled() || !chatContainer) return;
+    const session = getSessionState(activeSessionId, false);
+    const timelineCount = Array.isArray(session?.timeline) ? session.timeline.length : 0;
+    const renderedCount = chatContainer.querySelectorAll('[data-message-id], [data-segment-key]').length;
+    const directChildren = chatContainer.childElementCount;
+    const descendants = chatContainer.querySelectorAll('*').length;
+    recordChatRenderScalar(chatRenderMetrics.timelineCount, timelineCount);
+    recordChatRenderScalar(chatRenderMetrics.renderedCount, renderedCount);
+    recordChatRenderScalar(chatRenderMetrics.directChildren, directChildren);
+    recordChatRenderScalar(chatRenderMetrics.descendants, descendants);
+    chatRenderMetrics.pinnedState[String(autoScrollPinnedToBottom === true)] += 1;
+    chatRenderMetrics.scenarioBands[getChatRenderScenarioBand(timelineCount)] += 1;
+    if (chatRenderPendingFullRenderStartedAt !== null) {
+        finishChatRenderPhase('fullRender', chatRenderPendingFullRenderStartedAt);
+        chatRenderPendingFullRenderStartedAt = null;
+    }
+    if (chatRenderPendingProjectionStartedAt !== null) {
+        finishChatRenderPhase('projection', chatRenderPendingProjectionStartedAt);
+        chatRenderPendingProjectionStartedAt = null;
+    }
+    if (directChildren > CHAT_RENDER_DIRECT_CHILD_WARNING_THRESHOLD) {
+        emitChatRenderPressureWarning('directChildren', directChildren, CHAT_RENDER_DIRECT_CHILD_WARNING_THRESHOLD);
+    }
+    if (descendants > CHAT_RENDER_DESCENDANT_WARNING_THRESHOLD) {
+        emitChatRenderPressureWarning('descendants', descendants, CHAT_RENDER_DESCENDANT_WARNING_THRESHOLD);
+    }
+    chatRenderMetricsDirty = true;
+}
+
+function emitChatRenderMetricsSummary() {
+    if (!isChatRenderMetricsEnabled() || !chatRenderMetricsDirty) return;
+    chatRenderMetricsDirty = false;
+    vscode.postMessage({
+        type: 'ui-debug',
+        payload: ['[WV][CHAT_RENDER_METRICS]', JSON.stringify(chatRenderMetrics)]
+    });
+}
+
+function installChatRenderMetrics(chatContainer) {
+    if (!isChatRenderMetricsEnabled()) return;
+    try {
+        if (typeof MutationObserver === 'function' && chatContainer) {
+            chatRenderDomObserver = new MutationObserver(() => sampleChatRenderDom(chatContainer));
+            chatRenderDomObserver.observe(chatContainer, { childList: true, subtree: true });
+        }
+    } catch {
+        chatRenderDomObserver = null;
+    }
+    try {
+        const supportedEntryTypes = typeof PerformanceObserver === 'function' && Array.isArray(PerformanceObserver.supportedEntryTypes)
+            ? PerformanceObserver.supportedEntryTypes
+            : [];
+        if (supportedEntryTypes.includes('longtask')) {
+            const observer = new PerformanceObserver((list) => {
+                for (const entry of list.getEntries()) {
+                    const duration = Number.isFinite(entry.duration) ? Math.max(0, entry.duration) : 0;
+                    chatRenderMetrics.longTasks.count += 1;
+                    chatRenderMetrics.longTasks.totalMs += duration;
+                    chatRenderMetrics.longTasks.maxMs = Math.max(chatRenderMetrics.longTasks.maxMs, duration);
+                    chatRenderMetricsDirty = true;
+                }
+            });
+            observer.observe({ type: 'longtask', buffered: true });
+            chatRenderLongTaskObserver = observer;
+        }
+    } catch {
+        chatRenderLongTaskObserver = null;
+    }
+    chatRenderMetricsSummaryTimer = setInterval(emitChatRenderMetricsSummary, CHAT_RENDER_METRICS_SUMMARY_INTERVAL_MS);
+}
+
+function disposeChatRenderMetrics() {
+    try {
+        chatRenderDomObserver?.disconnect();
+        chatRenderLongTaskObserver?.disconnect();
+    } catch {
+        // Diagnostics disposal must never affect webview teardown.
+    }
+    chatRenderDomObserver = null;
+    chatRenderLongTaskObserver = null;
+    if (chatRenderMetricsSummaryTimer !== null) {
+        clearInterval(chatRenderMetricsSummaryTimer);
+        chatRenderMetricsSummaryTimer = null;
+    }
+}
+
+window.__ocChatRenderMetrics = Object.freeze({
+    snapshot: () => JSON.parse(JSON.stringify(chatRenderMetrics)),
+    dispose: disposeChatRenderMetrics
+});
+if (typeof window.addEventListener === 'function') {
+    window.addEventListener('pagehide', disposeChatRenderMetrics, { once: true });
+}
+
 function incrementRenderStormCounter(bucketName, key) {
     const bucket = renderStormCounters[bucketName];
     if (!bucket) return 0;
@@ -1627,6 +1832,7 @@ function noteBackgroundPulseNoActiveIndicatorNoop(sessionId, state) {
 }
 
 function noteFullRenderRequest(reason, fields = []) {
+    if (typeof recordChatRenderReason === 'function') recordChatRenderReason(reason);
     const total = incrementRenderStormCounter('fullRenderRequestsByReason', reason);
     logRenderStormMetric('full-render-request', [`reason=${reason || 'unknown'}`, `count=${total}`, ...fields]);
 }
@@ -4863,6 +5069,7 @@ function renderUserMarkdown(content, text) {
 }
 
 function renderMarkdownInto(element, text, options = {}) {
+    const richEnhancementStartedAt = typeof startChatRenderPhase === 'function' ? startChatRenderPhase() : null;
     delete element.dataset.linkified;
     const unwrapped = escapeSystemReminderTags(text || '');
     const normalized = normalizeLists(normalizeInlineMath(normalizeBlockMath(unwrapped)));
@@ -4892,6 +5099,7 @@ function renderMarkdownInto(element, text, options = {}) {
         linkifyFileRefs(element);
         element.dataset.linkified = '1';
     }
+    if (typeof finishChatRenderPhase === 'function') finishChatRenderPhase('richEnhancement', richEnhancementStartedAt);
 }
 
 async function writeTextToClipboard(text) {
@@ -4930,6 +5138,7 @@ async function writeTextToClipboard(text) {
 function enhanceCodeBlocksWithCopyButtons(root) {
     if (!root || typeof root.querySelectorAll !== 'function') return;
     if (root.closest && root.closest('.conflict-card')) return;
+    const richEnhancementStartedAt = typeof startChatRenderPhase === 'function' ? startChatRenderPhase() : null;
 
     const assistantRoot = root.closest ? root.closest('.message.bot') : null;
     const containers = assistantRoot
@@ -4980,6 +5189,7 @@ function enhanceCodeBlocksWithCopyButtons(root) {
             wrapper.appendChild(btn);
         }
     }
+    if (typeof finishChatRenderPhase === 'function') finishChatRenderPhase('richEnhancement', richEnhancementStartedAt);
 }
 
 function escapeSystemReminderTags(text) {
@@ -5465,6 +5675,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (chatContainer) {
+        if (typeof installChatRenderMetrics === 'function') installChatRenderMetrics(chatContainer);
         autoScrollPinnedToBottom = isNearBottom(chatContainer);
         chatContainer.addEventListener('scroll', () => {
             autoScrollPinnedToBottom = isNearBottom(chatContainer);
@@ -7277,6 +7488,7 @@ function renderMessageElement(message, renderedSet) {
 
         const renderedSet = getRenderedMessageIdSetFromDom();
         const beforeChildren = chatContainer.childElementCount;
+        const appendFastPathStartedAt = typeof startChatRenderPhase === 'function' ? startChatRenderPhase() : null;
         try {
             renderMessageElement(message, renderedSet);
         } catch (error) {
@@ -7308,6 +7520,7 @@ function renderMessageElement(message, renderedSet) {
             return bailUserMessageAppendFastPath('post-append-audit-failed', [...fields, `duplicateCount=${duplicateCount}`, `afterTailKey=${afterTailKey || 'null'}`, `domChildrenBefore=${beforeChildren}`, `domChildrenAfter=${afterChildren}`, `domChildDelta=${domChildDelta}`, 'postAppendAuditMode=identity-tail', ...(tailSafety.fields || [])]);
         }
         session.lastAssistantUpgradeFallback = null;
+        if (typeof finishChatRenderPhase === 'function') finishChatRenderPhase('appendFastPath', appendFastPathStartedAt);
         countUserMessageAppendFastPathResult('success', [...fields, `reason=${tailSafety.reason || 'hidden-tail-safe'}`, `domChildren=${afterChildren}`, `domChildDelta=${domChildDelta}`, 'postAppendAuditMode=identity-tail', `postAppendAuditPassed=${postAppendAuditPassed ? 'true' : 'false'}`, ...(tailSafety.fields || [])]);
         scrollToBottom(true);
         return { applied: true, reason: tailSafety.reason || 'success' };
@@ -7562,6 +7775,7 @@ function renderMessageElement(message, renderedSet) {
         }
 
         const beforeHtml = content.innerHTML;
+        const streamPatchStartedAt = typeof startChatRenderPhase === 'function' ? startChatRenderPhase() : null;
         try {
             renderAssistantMarkdown(content, message);
             bubble.classList.toggle('thinking', message.meta?.isThinking === true);
@@ -7592,6 +7806,7 @@ function renderMessageElement(message, renderedSet) {
         if (duplicateCount !== 1 || !assistantStreamingTailMatchesResolvedTarget(session, afterTailKey, targetId, targetResolution)) {
             return bailAssistantStreamingPatch('identity-order-post-audit-failed', [...fields, `targetId=${targetId}`, `duplicateCount=${duplicateCount}`, `afterTailKey=${afterTailKey || 'null'}`, ...(targetResolution.fields || [])]);
         }
+        if (typeof finishChatRenderPhase === 'function') finishChatRenderPhase('streamPatch', streamPatchStartedAt);
         countAssistantStreamingPatchResult(targetResolution.resolution === 'alias' ? 'post-upgrade-alias-success' : 'success', [...fields, `targetId=${targetId}`, `textLen=${typeof message.text === 'string' ? message.text.length : 0}`, `statusTextLen=${typeof message.meta?.statusText === 'string' ? message.meta.statusText.length : 0}`, `domTail=${afterTailKey || 'null'}`, ...(targetResolution.fields || [])]);
         scrollToBottom(true);
         return { applied: true, reason: targetResolution.resolution === 'alias' ? 'post-upgrade-alias-success' : 'success' };
