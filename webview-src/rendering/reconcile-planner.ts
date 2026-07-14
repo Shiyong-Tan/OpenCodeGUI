@@ -5,6 +5,16 @@ export function planReconciliation(
   previous: readonly ReconcileItem[],
   next: readonly ReconcileItem[],
 ): ReconcileStep[] {
+  const assertUnique = (items: readonly ReconcileItem[], label: string): void => {
+    const keys = new Set<string>();
+    for (const item of items) {
+      if (!item.key) throw new Error(`${label} reconcile key must be non-empty`);
+      if (keys.has(item.key)) throw new Error(`Duplicate ${label} reconcile key: ${item.key}`);
+      keys.add(item.key);
+    }
+  };
+  assertUnique(previous, 'previous');
+  assertUnique(next, 'next');
   const previousByKey = new Map(previous.map((item, index) => [item.key, { item, index }]));
   const nextKeys = new Set(next.map((item) => item.key));
   const steps: ReconcileStep[] = [];

@@ -112,6 +112,7 @@ let collapsedProviders = new Set();
 let modelDropdownOutsideHandler = null;
 let simpleDropdownHandlers = new Map();
 const subagentTextExpandedByKey = new Map();
+let rekeyKeyedChatPresentation = null;
 let conflictCardEl = null;
 let stallCardEl = null;
 let lastConflictPayload = null;
@@ -3897,6 +3898,18 @@ function replaceKeyEverywhere(oldId, newId, sessionId = activeSessionId) {
     if (session.lastTurnUserId === oldId) {
         session.lastTurnUserId = newId;
     }
+    if (session.lastTurnAssistantId === oldId) {
+        session.lastTurnAssistantId = newId;
+    }
+    if (session.currentTurnAssistantMsgId === oldId) {
+        session.currentTurnAssistantMsgId = newId;
+    }
+    if (session.finalAssistantLock?.assistantMsgId === oldId) {
+        session.finalAssistantLock.assistantMsgId = newId;
+    }
+    if (session.pendingUndo?.anchorKey === oldId) {
+        session.pendingUndo.anchorKey = newId;
+    }
     if (session.appendRootUserKey === oldId) {
         session.appendRootUserKey = newId;
     }
@@ -3921,6 +3934,17 @@ function replaceKeyEverywhere(oldId, newId, sessionId = activeSessionId) {
     }
     if (session.serverIdToClientKey?.get(newId) === oldId) {
         session.serverIdToClientKey.set(newId, newId);
+    }
+    if (typeof sessionSearch !== 'undefined' && Array.isArray(sessionSearch.smartMessageIds)) {
+        sessionSearch.smartMessageIds = sessionSearch.smartMessageIds.map((id) => id === oldId ? newId : id);
+    }
+    if (typeof subagentTextExpandedByKey !== 'undefined' && subagentTextExpandedByKey instanceof Map) {
+        const expansionNeedle = `:${oldId}:`;
+        for (const [key, expanded] of Array.from(subagentTextExpandedByKey.entries())) {
+            if (!key.includes(expansionNeedle)) continue;
+            subagentTextExpandedByKey.delete(key);
+            subagentTextExpandedByKey.set(key.replace(expansionNeedle, `:${newId}:`), expanded);
+        }
     }
 
     const replacedTmpLocalAssistant = typeof oldId === 'string'
@@ -3961,6 +3985,9 @@ function replaceKeyEverywhere(oldId, newId, sessionId = activeSessionId) {
             'hadNewMsg', Boolean(existing),
             'timelineSample', timelineSample]
     });
+    if (typeof rekeyKeyedChatPresentation === 'function' && !rekeyKeyedChatPresentation(oldId, newId, sessionId)) {
+        window.__oc?.renderFromState?.('alias-rekey-fail-closed');
+    }
     logTimelineSnapshot('replace', session.timeline, `old=${oldId} new=${newId}`);
 }
 
@@ -6325,13 +6352,19 @@ document.addEventListener('DOMContentLoaded', () => {
     function appendMessageToChat(messageElement, message) {
         if (!messageElement) return;
         if (message?.role !== 'assistant' && message?.role !== 'user') {
-            chatContainer.appendChild(messageElement);
+            appendChatRenderRoot(messageElement);
             return;
         }
         const row = document.createElement('div');
         row.className = `message-row ${message.role === 'user' ? 'user' : 'bot'}`;
+        if (KEYED_CHAT_RECONCILE_ENABLED) row.dataset.renderUnitKey = message.id;
+        if (messageElement._hasFollowingTurnDivider === true) {
+            const divider = document.createElement('div');
+            divider.className = 'turn-divider';
+            row.appendChild(divider);
+        }
         row.appendChild(messageElement);
-        chatContainer.appendChild(row);
+        appendChatRenderRoot(row);
     }
 
     function renderNestedMessageElement(message) {
@@ -6561,7 +6594,7 @@ function renderMessageElement(message, renderedSet) {
         }
 
         container.appendChild(list);
-        chatContainer.appendChild(container);
+        appendChatRenderRoot(container);
         return;
     }
 
@@ -6685,7 +6718,7 @@ function renderMessageElement(message, renderedSet) {
 
             content.appendChild(card);
             div.appendChild(content);
-            chatContainer.appendChild(div);
+            appendChatRenderRoot(div);
             return;
         }
 
@@ -6998,17 +7031,21 @@ function renderMessageElement(message, renderedSet) {
         appendMessageImages(div, message);
 
         // Insert turn divider before user messages (except first)
-        if (message.role === 'user' && renderedSet && renderedSet.size > 0) {
+        if (message.role === 'user' && (keyedFollowingTurnDividerOverride === true || (keyedFollowingTurnDividerOverride === null && renderedSet && renderedSet.size > 0))) {
             const hasUserMessages = Array.from(renderedSet).some(id => {
                 const session = getSessionState(activeSessionId);
                 if (!session) return false;
                 const msg = session.messagesById.get(id);
                 return msg && msg.role === 'user';
             });
-            if (hasUserMessages) {
-                const divider = document.createElement('div');
-                divider.className = 'turn-divider';
-                chatContainer.appendChild(divider);
+            if (keyedFollowingTurnDividerOverride === true || hasUserMessages) {
+                if (KEYED_CHAT_RECONCILE_ENABLED) {
+                    div._hasFollowingTurnDivider = true;
+                } else {
+                    const divider = document.createElement('div');
+                    divider.className = 'turn-divider';
+                    chatContainer.appendChild(divider);
+                }
             }
         }
         if (message.role === 'user') {
@@ -7806,8 +7843,9 @@ function renderMessageElement(message, renderedSet) {
         if (duplicateCount !== 1 || !assistantStreamingTailMatchesResolvedTarget(session, afterTailKey, targetId, targetResolution)) {
             return bailAssistantStreamingPatch('identity-order-post-audit-failed', [...fields, `targetId=${targetId}`, `duplicateCount=${duplicateCount}`, `afterTailKey=${afterTailKey || 'null'}`, ...(targetResolution.fields || [])]);
         }
+        const keyedFingerprintAcknowledged = acknowledgeKeyedStreamPatch(session, targetId);
         if (typeof finishChatRenderPhase === 'function') finishChatRenderPhase('streamPatch', streamPatchStartedAt);
-        countAssistantStreamingPatchResult(targetResolution.resolution === 'alias' ? 'post-upgrade-alias-success' : 'success', [...fields, `targetId=${targetId}`, `textLen=${typeof message.text === 'string' ? message.text.length : 0}`, `statusTextLen=${typeof message.meta?.statusText === 'string' ? message.meta.statusText.length : 0}`, `domTail=${afterTailKey || 'null'}`, ...(targetResolution.fields || [])]);
+        countAssistantStreamingPatchResult(targetResolution.resolution === 'alias' ? 'post-upgrade-alias-success' : 'success', [...fields, `targetId=${targetId}`, `textLen=${typeof message.text === 'string' ? message.text.length : 0}`, `statusTextLen=${typeof message.meta?.statusText === 'string' ? message.meta.statusText.length : 0}`, `domTail=${afterTailKey || 'null'}`, `keyedFingerprintAcknowledged=${keyedFingerprintAcknowledged}`, ...(targetResolution.fields || [])]);
         scrollToBottom(true);
         return { applied: true, reason: targetResolution.resolution === 'alias' ? 'post-upgrade-alias-success' : 'success' };
     }
@@ -8087,7 +8125,7 @@ function shouldHideDcpUiMessage(message) {
             container.appendChild(body);
         }
 
-        chatContainer.appendChild(container);
+        appendChatRenderRoot(container);
     }
 
     function renderPendingCount() {
@@ -8101,6 +8139,272 @@ function shouldHideDcpUiMessage(message) {
         // Removed: pendingSegments no longer used in new system
         pendingEl.classList.add('hidden');
     }
+
+    const KEYED_CHAT_RECONCILE_ENABLED = window.__ocKeyedChatReconcileEnabled !== false;
+    const CHAT_STRUCTURAL_SURFACE_LIMIT = 6;
+    const INIT_NO_MODELS_STRUCTURAL_KEY = 'surface:error:no-model';
+    let keyedChatRenderCapture = null;
+    let keyedFollowingTurnDividerOverride = null;
+    let keyedChatFailedSessionId = '';
+    let keyedChatReconcileState = { sessionId: '', items: [], roots: new Map() };
+
+    function appendChatRenderRoot(root) {
+        (keyedChatRenderCapture || chatContainer).appendChild(root);
+    }
+
+    function classifyChatStructuralSurface(root, key, owner) {
+        root.dataset.chatStructuralKey = key;
+        root.dataset.chatStructuralOwner = owner;
+        const connectedIncrement = root.parentElement === chatContainer ? 0 : 1;
+        const structuralCount = chatContainer.querySelectorAll(':scope > [data-chat-structural-key]').length + connectedIncrement;
+        if (structuralCount > CHAT_STRUCTURAL_SURFACE_LIMIT) {
+            console.warn('[Render] structural surface limit exceeded', structuralCount, CHAT_STRUCTURAL_SURFACE_LIMIT);
+        }
+        return root;
+    }
+
+    function showInitNoModelsError() {
+        const existingError = chatContainer.querySelector(`:scope > [data-chat-structural-key="${INIT_NO_MODELS_STRUCTURAL_KEY}"]`);
+        const errorDiv = existingError || document.createElement('div');
+        errorDiv.className = 'message system error';
+        errorDiv.style.color = 'red';
+        errorDiv.textContent = 'Error: No models available. Please check your OpenCode configuration.';
+        classifyChatStructuralSurface(errorDiv, INIT_NO_MODELS_STRUCTURAL_KEY, 'init:no-models');
+        if (!existingError) chatContainer.appendChild(errorDiv);
+        return errorDiv;
+    }
+
+    function getSubagentExpansionPresentation(message) {
+        const entries = [];
+        const subagents = Array.isArray(message?.meta?.subagents) ? message.meta.subagents : [];
+        for (const agent of subagents) {
+            const subagentIdentity = agent?.agentSessionId || agent?.sessionId || agent?.taskId || '';
+            const parentIdentity = agent?.parentSessionId || message?.sessionId || activeSessionId || '';
+            const messageIdentity = message?.id || message?.messageId || '';
+            const lookupKey = subagentIdentity ? `${parentIdentity}:${messageIdentity}:${subagentIdentity}` : '';
+            entries.push({ lookupKey, expanded: lookupKey ? subagentTextExpandedByKey.get(lookupKey) === true : false });
+        }
+        return entries;
+    }
+
+    function getKeyedUnitPresentation(session, unit) {
+        if (unit.kind === 'greeting') {
+            return { text: 'Hello! I am OpenCode. How can I help you today?', sessionId: activeSessionId || '' };
+        }
+        if (unit.kind === 'conflict') return { payload: unit.value, sessionId: activeSessionId || '' };
+        if (unit.kind === 'segment') {
+            const segment = unit.value?.segment;
+            return {
+                sessionId: activeSessionId || '', key: unit.key, state: segment?.state,
+                isExpanded: segment?.isExpanded === true, collapsed: segment?.collapsed !== false,
+                restoreAllowed: segment?.restoreAllowed, anchorMsgId: segment?.anchorMsgId,
+                endMsgId: segment?.endMsgId,
+                memberMsgIds: Array.isArray(segment?.memberMsgIds) ? segment.memberMsgIds : Array.from(segment?.memberIds || []),
+                mergedInvalidSegments: segment?.mergedInvalidSegments || []
+            };
+        }
+        const message = unit.value?.message;
+        return {
+            sessionId: activeSessionId || '', key: unit.key, role: message?.role, text: message?.text,
+            parentId: message?.parentId || message?.parentID, meta: message?.meta || {}, appendItems: getAppendItems(message),
+            actions: {
+                canAppend: canAppendToMessage(session, message), canUndo: message?.role === 'user' && gitUndoEnabled,
+                busy: isBusy, appendHoverActive: appendHoverActiveKey === buildAppendHoverKey(activeSessionId, message?.id)
+            },
+            backgroundSubagent: shouldShowBackgroundSubagentIndicator(session, message),
+            subagentExpansion: getSubagentExpansionPresentation(message)
+        };
+    }
+
+    function getKeyedStreamStablePresentation(presentation) {
+        const meta = { ...(presentation?.meta || {}) };
+        delete meta.statusText;
+        delete meta.currentSegment;
+        delete meta.textSegments;
+        return { ...presentation, key: { $unitIdentityOwned: true }, text: { $streamOwned: true }, meta };
+    }
+
+    function acknowledgeKeyedStreamPatch(session, targetId) {
+        if (!KEYED_CHAT_RECONCILE_ENABLED || !window.__ocRendering) return false;
+        if (!session || keyedChatReconcileState.sessionId !== activeSessionId) return false;
+        const itemIndex = keyedChatReconcileState.items.findIndex((item) => item.key === targetId);
+        if (itemIndex < 0 || !keyedRootForKey(targetId)) return false;
+        const message = session.messagesById?.get?.(targetId);
+        if (!message) return false;
+        const currentPresentation = getKeyedUnitPresentation(session, {
+            key: targetId,
+            kind: 'message',
+            value: { message }
+        });
+        const rendering = window.__ocRendering;
+        const currentStreamStableFingerprint = rendering.presentationFingerprint(getKeyedStreamStablePresentation(currentPresentation));
+        const cachedItem = keyedChatReconcileState.items[itemIndex];
+        if (cachedItem.streamStableFingerprint !== currentStreamStableFingerprint) return false;
+        const nextItem = {
+            ...cachedItem,
+            fingerprint: rendering.presentationFingerprint(currentPresentation),
+            streamStableFingerprint: currentStreamStableFingerprint
+        };
+        keyedChatReconcileState.items = keyedChatReconcileState.items.map((item, index) => index === itemIndex ? nextItem : item);
+        return true;
+    }
+
+    function buildKeyedRenderCandidates(session) {
+        const timeline = Array.isArray(session?.timeline) ? session.timeline : [];
+        if (!session || timeline.length === 0) {
+            return [{ key: `greeting:${activeSessionId || 'none'}`, kind: 'greeting', value: null }];
+        }
+        const appendChildPresentationIndex = buildAppendChildPresentationIndex(session);
+        const candidates = [];
+        let hasVisibleUser = false;
+        for (const id of timeline) {
+            const message = session.messagesById.get(id);
+            if (!message) continue;
+            const segment = typeof id === 'string' && id.startsWith('system:undo:')
+                ? session.segmentsByNoticeKey.get(id)
+                : null;
+            const sanitizedUserText = message.role === 'user'
+                ? stripSystemInjections(stripAttachmentManifest(message.text || ''))
+                : '';
+            const emptyChangeList = message.meta?.kind === 'changeList'
+                && (!Array.isArray(message.meta?.files) || message.meta.files.length === 0);
+            const candidate = {
+                key: id,
+                kind: segment ? 'segment' : (message.meta?.kind === 'changeList' ? 'change-list' : 'message'),
+                value: segment ? { segment } : { message, hasPriorUser: hasVisibleUser },
+                hidden: !segment && (session.hiddenSet.has(id) || emptyChangeList),
+                appendChildHidden: !segment && isAppendChildTopLevelUser(session, message, id, appendChildPresentationIndex),
+                appendAssistantHidden: !segment && isAppendChainTopLevelAssistantHidden(session, message, id, appendChildPresentationIndex),
+                dcpHidden: !segment && shouldHideDcpUiMessage(message),
+                emptyUserText: message.role === 'user' && !sanitizedUserText.trim()
+            };
+            candidates.push(candidate);
+            if (!candidate.hidden && !candidate.appendChildHidden && !candidate.appendAssistantHidden && !candidate.dcpHidden && !candidate.emptyUserText && message.role === 'user') {
+                hasVisibleUser = true;
+            }
+        }
+        if (lastConflictPayload && lastConflictPayload.sessionId === activeSessionId) {
+            const identity = lastConflictPayload.conflictId || lastConflictPayload.operationId || 'active';
+            candidates.push({ key: `conflict:${activeSessionId || 'none'}:${identity}`, kind: 'conflict', value: lastConflictPayload });
+        }
+        return candidates;
+    }
+
+    function renderDetachedKeyedUnit(session, unit, renderedSet) {
+        const capture = document.createDocumentFragment();
+        keyedChatRenderCapture = capture;
+        keyedFollowingTurnDividerOverride = unit.kind === 'message' || unit.kind === 'change-list'
+            ? unit.value?.hasPriorUser === true
+            : null;
+        let directRoot = null;
+        try {
+            if (unit.kind === 'greeting') {
+                directRoot = document.createElement('div');
+                directRoot.className = 'message bot';
+                const content = document.createElement('div');
+                content.className = 'message-content';
+                content.textContent = 'Hello! I am OpenCode. How can I help you today?';
+                directRoot.appendChild(content);
+            } else if (unit.kind === 'segment') {
+                renderSegmentElement(session, unit.value.segment, renderedSet, unit.sourceKey);
+            } else if (unit.kind === 'conflict') {
+                directRoot = renderConflictCard(unit.value, { detached: true });
+            } else {
+                renderMessageElement(unit.value.message, renderedSet);
+            }
+        } finally {
+            keyedChatRenderCapture = null;
+            keyedFollowingTurnDividerOverride = null;
+        }
+        if (directRoot) capture.appendChild(directRoot);
+        const roots = Array.from(capture.children);
+        if (roots.length !== 1) throw new Error(`Keyed unit ${unit.key} produced ${roots.length} roots`);
+        const root = roots[0];
+        root.dataset.renderUnitKey = unit.key;
+        return root;
+    }
+
+    function keyedRoots() {
+        return Array.from(chatContainer.children).filter((child) => child.dataset?.renderUnitKey);
+    }
+
+    function keyedRootForKey(key) {
+        const matches = keyedRoots().filter((root) => root.dataset.renderUnitKey === key);
+        return matches.length === 1 ? matches[0] : null;
+    }
+
+    function applyKeyedChatReconciliation(session, units) {
+        const rendering = window.__ocRendering;
+        const nextItems = units.map((unit) => {
+            const presentation = getKeyedUnitPresentation(session, unit);
+            return {
+                key: unit.key,
+                fingerprint: rendering.presentationFingerprint(presentation),
+                streamStableFingerprint: rendering.presentationFingerprint(getKeyedStreamStablePresentation(presentation))
+            };
+        });
+        const steps = rendering.planReconciliation(keyedChatReconcileState.items, nextItems);
+        const unitByKey = new Map(units.map((unit) => [unit.key, unit]));
+        const renderedSet = new Set();
+        const counts = { create: 0, replace: 0, remove: 0, move: 0, reuse: 0, enhance: 0 };
+
+        for (const step of steps.filter((entry) => entry.type === 'remove')) {
+            const root = keyedRootForKey(step.key) || keyedChatReconcileState.roots.get(step.key);
+            if (root?.parentElement === chatContainer) root.remove();
+            keyedChatReconcileState.roots.delete(step.key);
+            counts.remove += 1;
+        }
+        for (const step of steps.filter((entry) => entry.type === 'create' || entry.type === 'replace')) {
+            const unit = unitByKey.get(step.key);
+            if (!unit) throw new Error(`Missing render unit for ${step.key}`);
+            const root = renderDetachedKeyedUnit(session, unit, renderedSet);
+            const existing = keyedRootForKey(step.key);
+            if (existing) existing.replaceWith(root);
+            else chatContainer.appendChild(root);
+            keyedChatReconcileState.roots.set(step.key, root);
+            counts[step.type] += 1;
+            counts.enhance += 1;
+        }
+        for (let index = 0; index < units.length; index += 1) {
+            const root = keyedRootForKey(units[index].key) || keyedChatReconcileState.roots.get(units[index].key);
+            if (!root) throw new Error(`Missing keyed root after reconcile: ${units[index].key}`);
+            const currentAtIndex = keyedRoots()[index] || null;
+            if (currentAtIndex !== root) {
+                chatContainer.insertBefore(root, currentAtIndex);
+                counts.move += 1;
+            }
+            keyedChatReconcileState.roots.set(units[index].key, root);
+        }
+        counts.reuse = steps.filter((entry) => entry.type === 'reuse').length;
+        keyedChatReconcileState = { sessionId: activeSessionId || '', items: nextItems, roots: keyedChatReconcileState.roots };
+        window.__ocKeyedChatLastReconcile = Object.freeze({ ...counts, unitCount: units.length });
+        return counts;
+    }
+
+    rekeyKeyedChatPresentation = (oldKey, newKey, sessionId) => {
+        if (!KEYED_CHAT_RECONCILE_ENABLED || keyedChatReconcileState.sessionId !== sessionId) return true;
+        const oldRoot = keyedRootForKey(oldKey);
+        const newRoot = keyedRootForKey(newKey);
+        if (oldRoot && newRoot && oldRoot !== newRoot) {
+            keyedChatReconcileState = { sessionId: '', items: [], roots: new Map() };
+            keyedChatFailedSessionId = sessionId || activeSessionId || '';
+            return false;
+        }
+        const root = oldRoot || newRoot;
+        if (root) {
+            root.dataset.renderUnitKey = newKey;
+            const messageRoot = root.matches?.('[data-message-id]') ? root : root.querySelector?.('[data-message-id]');
+            if (messageRoot?.dataset?.messageId === oldKey) messageRoot.dataset.messageId = newKey;
+        }
+        const cached = keyedChatReconcileState.roots.get(oldKey);
+        keyedChatReconcileState.roots.delete(oldKey);
+        if (cached || root) keyedChatReconcileState.roots.set(newKey, cached || root);
+        keyedChatReconcileState.items = keyedChatReconcileState.items.map((item) => {
+            if (item.key !== oldKey) return item;
+            return { ...item, key: newKey };
+        });
+        return true;
+    };
 
     let renderScheduled = false;
     let renderNeedsAnother = false;
@@ -8136,6 +8440,40 @@ function shouldHideDcpUiMessage(message) {
     }
 
     function renderFromState() {
+        if (!KEYED_CHAT_RECONCILE_ENABLED || !window.__ocRendering || keyedChatFailedSessionId === activeSessionId) {
+            renderFromStateLegacy();
+            return;
+        }
+        if (keyedChatFailedSessionId && keyedChatFailedSessionId !== activeSessionId) keyedChatFailedSessionId = '';
+        renderPendingCount();
+        if (!chatContainer) return;
+        const session = getSessionOrNull(activeSessionId);
+        try {
+            const units = window.__ocRendering.deriveRenderUnits(buildKeyedRenderCandidates(session));
+            applyKeyedChatReconciliation(session, units);
+            if (session) {
+                countBackgroundIndicatorApplyResult(applyBackgroundSubagentIndicator(session), [`sessionId=${activeSessionId || 'null'}`, 'source=renderFromState-keyed']);
+            }
+            renderQuestionCardInTimeline();
+            if (sessionSearch.mode === 'smart' && sessionSearch.smartMessageIds.length) {
+                applySmartSessionSearchResults(sessionSearch.smartMessageIds, { scroll: false });
+            } else if (sessionSearch.open || sessionSearch.query) {
+                refreshSessionSearchHighlights({ jumpToFirst: false });
+            }
+            if (shouldEmitSnapshotOnNextRender && activeSessionId) {
+                shouldEmitSnapshotOnNextRender = false;
+                vscode.postMessage({ type: 'ui-debug', payload: ['[WV][SNAPSHOT_ROUTE]', `sessionId=${activeSessionId}`, 'reason=drop-switch-readonly', `rendered=${units.length}`] });
+            }
+            noteUnclearAnchorCoalescedRenderComplete(activeSessionId);
+        } catch (error) {
+            keyedChatReconcileState = { sessionId: '', items: [], roots: new Map() };
+            keyedChatFailedSessionId = activeSessionId || '__no_session__';
+            vscode.postMessage({ type: 'ui-debug', payload: ['[WV][KEYED_RECONCILE_FAIL_CLOSED]', `error=${String(error)}`] });
+            renderFromStateLegacy();
+        }
+    }
+
+    function renderFromStateLegacy() {
         renderPendingCount();
         if (!chatContainer) {
             vscode.postMessage({
@@ -10993,11 +11331,7 @@ window.addEventListener('message', (event) => {
                     sendBtn.title = 'No models available';
                     
                     // Show error in chat
-                    const errorDiv = document.createElement('div');
-                    errorDiv.className = 'message system error';
-                    errorDiv.style.color = 'red';
-                    errorDiv.textContent = 'Error: No models available. Please check your OpenCode configuration.';
-                    chatContainer.appendChild(errorDiv);
+                    showInitNoModelsError();
                 } else {
                     sendBtn.title = '';
                     updateSendGate();
@@ -13707,7 +14041,7 @@ function postOpenGitDiff(filePath, sessionId, commitHead, commitBase) {
     });
 }
 
-function renderConflictCard(payload) {
+function renderConflictCard(payload, options = {}) {
     const chatContainer = document.getElementById('chat');
     if (!payload || !Array.isArray(payload.conflicts) || !chatContainer) return;
     const conflictOwner = {
@@ -13724,7 +14058,7 @@ function renderConflictCard(payload) {
         type: 'ui-debug',
         payload: ['[WV][CONFLICT_RENDER]', `sessionId=${conflictOwner.sessionId || 'null'}`, `opId=${conflictOwner.operationId || 'null'}`, `conflictId=${conflictOwner.conflictId || 'null'}`, `kind=${conflictOwner.kind || 'null'}`, `source=${conflictOwner.source || 'null'}`]
     });
-    if (conflictCardEl && conflictCardEl.parentElement) {
+    if (!options.detached && conflictCardEl && conflictCardEl.parentElement) {
         conflictCardEl.parentElement.removeChild(conflictCardEl);
     }
     const container = document.createElement('div');
@@ -13838,9 +14172,14 @@ function renderConflictCard(payload) {
     actions.appendChild(continueBtn);
     container.appendChild(actions);
 
+    if (options.detached) {
+        conflictCardEl = container;
+        return container;
+    }
     chatContainer.appendChild(container);
     conflictCardEl = container;
     chatContainer.scrollTop = chatContainer.scrollHeight;
+    return container;
 }
 
 function commitCurrentQuestionAnswers(answersForCurrent) {

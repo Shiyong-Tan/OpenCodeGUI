@@ -4,6 +4,20 @@ export interface LegacyProjectedRenderUnit<T = unknown> {
   readonly value: T;
 }
 
+export interface RenderUnitCandidate<T = unknown> extends LegacyProjectedRenderUnit<T> {
+  /** Canonical identity. Alias variants are normalized before duplicate checks. */
+  readonly canonicalKey?: string;
+  readonly hidden?: boolean;
+  readonly appendChildHidden?: boolean;
+  readonly appendAssistantHidden?: boolean;
+  readonly dcpHidden?: boolean;
+  readonly emptyUserText?: boolean;
+}
+
+export interface RenderUnit<T = unknown> extends LegacyProjectedRenderUnit<T> {
+  readonly sourceKey: string;
+}
+
 export interface ReconcileItem {
   readonly key: string;
   readonly fingerprint: string;

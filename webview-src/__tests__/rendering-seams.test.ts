@@ -15,7 +15,7 @@ describe('Wave 1 pure rendering seams', () => {
       { key: 'surface:loading', kind: 'surface', value: { pending: true } },
     ];
 
-    expect(deriveRenderUnits(input)).toEqual(input);
+    expect(deriveRenderUnits(input)).toEqual(input.map((unit) => ({ ...unit, sourceKey: unit.key })));
     expect(deriveRenderUnits(input)).not.toBe(input);
   });
 
@@ -23,6 +23,11 @@ describe('Wave 1 pure rendering seams', () => {
     expect(presentationFingerprint({ b: 2, a: ['x', { z: true }] }))
       .toBe(presentationFingerprint({ a: ['x', { z: true }], b: 2 }));
     expect(presentationFingerprint({ a: 1 })).not.toBe(presentationFingerprint({ a: 2 }));
+  });
+
+  test('presentation fingerprints use locale-independent non-ASCII code-unit ordering', () => {
+    const value = { 'ä': 1, z: 2, 'é': 3, a: 4 };
+    expect(presentationFingerprint(value)).toBe('{"a":4,"z":2,"ä":1,"é":3}');
   });
 
   test('reconcile planner returns data-only keyed reuse/move/create/replace/remove steps', () => {
