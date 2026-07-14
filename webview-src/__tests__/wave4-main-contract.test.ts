@@ -75,11 +75,11 @@ describe('Wave 4 main-script local older contract', () => {
     expect(surface.children).toHaveLength(1);
     expect(surface.children[0]).toMatchObject({ textContent: 'Start of loaded history', attributes: { role: 'status' } });
     (context as any).render({
-      state: 'remoteOlderUnknown', label: 'No more loaded messages', actionable: false,
-      hint: 'Earlier server history is unknown or unavailable until cursor support is available.',
+      state: 'deltaContinuityUnknown', label: 'History synchronization pending', actionable: false,
+      hint: 'Loaded local history is shown while continuity is being verified.',
     });
     expect(surface.children.map((child: any) => child.textContent)).toEqual([
-      'No more loaded messages', 'Earlier server history is unknown or unavailable until cursor support is available.',
+      'History synchronization pending', 'Loaded local history is shown while continuity is being verified.',
     ]);
     expect(surface.children.some((child: any) => child.textContent === 'Load older')).toBe(false);
   });

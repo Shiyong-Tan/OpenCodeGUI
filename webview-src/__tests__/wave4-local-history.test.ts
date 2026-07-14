@@ -6,23 +6,29 @@ import {
 const keys = (count: number, prefix = 'key') => Array.from({ length: count }, (_, index) => `${prefix}-${index}`);
 
 describe('Wave 4 local history presentation state', () => {
-  test('distinguishes local availability, proven local start, and conservative remote unknown', () => {
-    expect(deriveLocalOlderPresentation({ totalUnits: 1001, revealStart: 921, localStartKnown: false })).toEqual({
+  test('distinguishes local availability from every hydration coverage terminal presentation', () => {
+    expect(deriveLocalOlderPresentation({ totalUnits: 1001, revealStart: 921, hydrationCoverage: 'repairError' })).toEqual({
       state: 'localOlderAvailable', revealStart: 921, localOlderCount: 921,
       label: 'Load older', hint: '', actionable: true,
     });
-    expect(deriveLocalOlderPresentation({ totalUnits: 80, revealStart: 0, localStartKnown: true })).toEqual({
+    expect(deriveLocalOlderPresentation({ totalUnits: 80, revealStart: 0, hydrationCoverage: 'authoritativeHistoryComplete' })).toEqual({
       state: 'localStartReached', revealStart: 0, localOlderCount: 0,
       label: 'Start of loaded history', hint: '', actionable: false,
     });
-    const unknown = deriveLocalOlderPresentation({ totalUnits: 80, revealStart: 0, localStartKnown: false });
+    const unknown = deriveLocalOlderPresentation({ totalUnits: 80, revealStart: 0, hydrationCoverage: 'deltaContinuityUnknown' });
     expect(unknown).toEqual({
-      state: 'remoteOlderUnknown', revealStart: 0, localOlderCount: 0,
-      label: 'No more loaded messages',
-      hint: 'Earlier server history is unknown or unavailable until cursor support is available.',
+      state: 'deltaContinuityUnknown', revealStart: 0, localOlderCount: 0,
+      label: 'History synchronization pending',
+      hint: 'Loaded local history is shown while continuity is being verified.',
       actionable: false,
     });
-    expect(`${unknown.label} ${unknown.hint}`).not.toMatch(/server has no|start of (all|server) history/i);
+    expect(deriveLocalOlderPresentation({ totalUnits: 80, revealStart: 0, hydrationCoverage: 'repairInProgress' })).toMatchObject({
+      state: 'repairInProgress', label: 'Synchronizing loaded history', actionable: false,
+    });
+    expect(deriveLocalOlderPresentation({ totalUnits: 80, revealStart: 0, hydrationCoverage: 'repairError' })).toMatchObject({
+      state: 'repairError', label: 'History synchronization incomplete', actionable: false,
+    });
+    expect(`${unknown.label} ${unknown.hint}`).not.toMatch(/server|cursor|no more|start of loaded history/i);
   });
 
   test('reveals 1001 canonical units in accepted 40-unit batches with a final partial batch', () => {
@@ -41,7 +47,7 @@ describe('Wave 4 local history presentation state', () => {
     expect(accepted.at(-1)).toBe(1);
     expect(controller.resolve('a', canonical)).toMatchObject({
       revealStart: 0, visibleKeys: canonical,
-      presentation: { state: 'remoteOlderUnknown', actionable: false },
+      presentation: { state: 'deltaContinuityUnknown', actionable: false },
     });
     expect(canonical).toEqual(before);
   });

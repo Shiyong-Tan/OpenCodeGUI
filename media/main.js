@@ -730,6 +730,7 @@ function logIdCandidates(prefix, message, sessionId, currentSessionId) {
 
 function createSessionState() {
     return {
+        hydrationCoverage: 'deltaContinuityUnknown',
         messagesById: new Map(),
         timeline: [],
         messageIndexMap: new Map(),
@@ -776,6 +777,23 @@ function createSessionState() {
         snapshotEmittedEpoch: 0,
         snapshotFinalizeReady: false
     };
+}
+
+function normalizePayloadHydrationCoverage(value) {
+    if (
+        value === 'authoritativeHistoryComplete' ||
+        value === 'deltaContinuityUnknown' ||
+        value === 'repairInProgress' ||
+        value === 'repairError'
+    ) return value;
+    return 'deltaContinuityUnknown';
+}
+
+function applyPayloadHydrationCoverage(sessionId, message) {
+    const session = getSessionState(sessionId, false);
+    if (!session) return false;
+    session.hydrationCoverage = normalizePayloadHydrationCoverage(message?.meta?.hydrationCoverage);
+    return true;
 }
 
 function resetBaselinePreparingTimeout() {
@@ -8565,7 +8583,9 @@ function shouldHideDcpUiMessage(message) {
 
     function resolveChatLocalHistoryWindow(units) {
         const sessionId = activeSessionId || '__no_session__';
-        const resolution = chatLocalHistoryController.resolve(sessionId, units.map((unit) => unit.key), false);
+        const session = getSessionState(activeSessionId, false);
+        const coverage = normalizePayloadHydrationCoverage(session?.hydrationCoverage);
+        const resolution = chatLocalHistoryController.resolve(sessionId, units.map((unit) => unit.key), coverage);
         chatWindowState.localHistoryPresentation = resolution.presentation;
         return { ...resolution, visibleUnits: units.slice(resolution.revealStart) };
     }
@@ -11471,6 +11491,7 @@ function appendMessageImages(parentEl, message) {
         if (activeSessionId && activeSessionId !== sessionId) return skip('session-mismatch', [`activeSessionId=${activeSessionId || 'null'}`]);
 
         const session = getSessionState(sessionId, true);
+        applyPayloadHydrationCoverage(sessionId, message);
         if (!activeSessionId) {
             activeSessionId = sessionId;
             clearAppendInputForSessionChange(sessionId);
@@ -12233,6 +12254,7 @@ window.addEventListener('message', (event) => {
                     }
                     
                     const session = getSessionState(sessionId, true);
+                    applyPayloadHydrationCoverage(sessionId, message);
                     const preservedHydrationState = captureVolatileHydrationState(session);
                     
                     const hasSegments = Array.isArray(message.segments);

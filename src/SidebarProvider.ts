@@ -270,6 +270,7 @@ type LiveTurnResumePayload = {
     assistantStatus: 'streaming' | 'finalizing' | 'active';
     timestamp: number;
 };
+type HydrationCoverage = 'authoritativeHistoryComplete' | 'deltaContinuityUnknown' | 'repairInProgress' | 'repairError';
 
 /**
  * Simplified SegmentState interface (V2)
@@ -1104,6 +1105,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             messages: historyMessages,
             meta: {
                 timelineMessageIds,
+                hydrationCoverage: 'deltaContinuityUnknown' as HydrationCoverage,
                 historyOnly: true,
                 postedSessionData: false,
                 reload: false,
@@ -1260,7 +1262,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     meta: {
                         ...(snap.obj.sessionData?.meta || {}),
                         source: 'snapshot',
-                        timelineMessageIds: snapshotTimelineIds
+                        timelineMessageIds: snapshotTimelineIds,
+                        hydrationCoverage: 'deltaContinuityUnknown' as HydrationCoverage
                     }
                 });
                 return { ok: true, phase: 'snapshot', messages: baseMessages.length };
@@ -1289,7 +1292,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 messages: mergedMessages,
                 segments,
                 meta: {
-                    timelineMessageIds: [...snapshotTimelineIds, ...newIds]
+                    timelineMessageIds: [...snapshotTimelineIds, ...newIds],
+                    hydrationCoverage: 'deltaContinuityUnknown' as HydrationCoverage
                 }
             });
             return { ok: true, phase: 'recent', messages: mergedMessages.length };
@@ -1310,7 +1314,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 messages: formatted.messages,
                 segments,
                 meta: {
-                    timelineMessageIds: this.collectVisibleSnapshotMessages(formatted.messages).map((message) => (typeof message?.id === 'string' ? message.id : '')).filter((id): id is string => Boolean(id))
+                    timelineMessageIds: this.collectVisibleSnapshotMessages(formatted.messages).map((message) => (typeof message?.id === 'string' ? message.id : '')).filter((id): id is string => Boolean(id)),
+                    hydrationCoverage: 'deltaContinuityUnknown' as HydrationCoverage
                 }
             });
             return { ok: true, phase: 'full', messages: formatted.messages.length };
@@ -2102,7 +2107,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     meta: {
                         ...(snap.obj.sessionData?.meta || {}),
                         source: 'snapshot',
-                        timelineMessageIds: snapshotTimelineIds
+                        timelineMessageIds: snapshotTimelineIds,
+                        hydrationCoverage: 'deltaContinuityUnknown' as HydrationCoverage
                     }
                 };
                 const postResult = postIfStillActive(snapshotPayload, 'snapshot', baseMessages.length);
@@ -2134,7 +2140,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 messages: mergedMessages,
                 segments,
                 meta: {
-                    timelineMessageIds: [...snapshotTimelineIds, ...newIds]
+                    timelineMessageIds: [...snapshotTimelineIds, ...newIds],
+                    hydrationCoverage: 'deltaContinuityUnknown' as HydrationCoverage
                 }
             };
             const postResult = postIfStillActive(recentPayload, 'recent', mergedMessages.length);
@@ -2159,7 +2166,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 messages: formatted.messages,
                 segments,
                 meta: {
-                    timelineMessageIds: this.collectVisibleSnapshotMessages(formatted.messages).map((message) => (typeof message?.id === 'string' ? message.id : '')).filter((id): id is string => Boolean(id))
+                    timelineMessageIds: this.collectVisibleSnapshotMessages(formatted.messages).map((message) => (typeof message?.id === 'string' ? message.id : '')).filter((id): id is string => Boolean(id)),
+                    hydrationCoverage: 'deltaContinuityUnknown' as HydrationCoverage
                 }
             };
             const postResult = postIfStillActive(fullPayload, 'full', formatted.messages.length);
@@ -5479,7 +5487,8 @@ ${attachmentLines.join('\n')}`
                                     segments,
                                     meta: {
                                         ...(snapPayload.meta || {}),
-                                        source: 'snapshot'
+                                        source: 'snapshot',
+                                        hydrationCoverage: 'deltaContinuityUnknown' as HydrationCoverage
                                     }
                                 };
                                 const sent = postSessionData(payload, 'snapshot');
@@ -5543,7 +5552,8 @@ ${attachmentLines.join('\n')}`
                                 messages: mergedMessages,
                                 segments,
                                 meta: {
-                                    timelineMessageIds: [...snapshotIds, ...newIds]
+                                    timelineMessageIds: [...snapshotIds, ...newIds],
+                                    hydrationCoverage: 'deltaContinuityUnknown' as HydrationCoverage
                                 }
                             };
                             const sent = postSessionData(sessionPayload, 'recent');
@@ -5629,7 +5639,8 @@ ${attachmentLines.join('\n')}`
                                 meta: {
                                     timelineMessageIds: this.collectVisibleSnapshotMessages(formatted.messages)
                                         .map((message) => (typeof message?.id === 'string' ? message.id : ''))
-                                        .filter((id): id is string => Boolean(id))
+                                        .filter((id): id is string => Boolean(id)),
+                                    hydrationCoverage: 'deltaContinuityUnknown' as HydrationCoverage
                                 }
                             };
                         const sent = postSessionData(sessionPayload, 'full');
@@ -6967,7 +6978,8 @@ ${attachmentLines.join('\n')}`
                                     meta: {
                                         ...(snap.obj.sessionData?.meta || {}),
                                         source: 'snapshot',
-                                        timelineMessageIds: snapshotTimelineIds
+                                        timelineMessageIds: snapshotTimelineIds,
+                                        hydrationCoverage: 'deltaContinuityUnknown' as HydrationCoverage
                                     }
                                 };
                                 liveWebview.postMessage(snapshotPayload);
@@ -7014,7 +7026,8 @@ ${attachmentLines.join('\n')}`
                                 messages: mergedMessages,
                                 segments,
                                 meta: {
-                                    timelineMessageIds: timelineIds
+                                    timelineMessageIds: timelineIds,
+                                    hydrationCoverage: 'deltaContinuityUnknown' as HydrationCoverage
                                 }
                             };
                             liveWebview.postMessage(sessionPayload);
@@ -7092,7 +7105,8 @@ ${attachmentLines.join('\n')}`
                             meta: {
                                 timelineMessageIds: this.collectVisibleSnapshotMessages(formatted.messages)
                                     .map((message) => (typeof message?.id === 'string' ? message.id : ''))
-                                    .filter((id): id is string => Boolean(id))
+                                    .filter((id): id is string => Boolean(id)),
+                                hydrationCoverage: 'deltaContinuityUnknown' as HydrationCoverage
                             }
                         });
                         this.uiDebugChannel.appendLine(`[EXT][AUTO_SELECT_LOADED] sessionId=${this.currentSessionId} messages=${formatted.messages.length}`);
@@ -7115,7 +7129,11 @@ ${attachmentLines.join('\n')}`
                                     ...snap.obj.sessionData,
                                     title: snapshotFormatted.title,
                                     messages: snapshotFormatted.messages,
-                                    segments
+                                    segments,
+                                    meta: {
+                                        ...(snap.obj.sessionData?.meta || {}),
+                                        hydrationCoverage: 'deltaContinuityUnknown' as HydrationCoverage
+                                    }
                                 });
                                 this.uiDebugChannel.appendLine(`[EXT][AUTO_SELECT_SNAP_OK] sessionId=${this.currentSessionId}`);
                             }
@@ -7149,7 +7167,10 @@ ${attachmentLines.join('\n')}`
                         sessionId: this.currentSessionId,
                         title: 'New Chat',
                         messages: [],
-                        segments: []
+                        segments: [],
+                        meta: {
+                            hydrationCoverage: 'deltaContinuityUnknown' as HydrationCoverage
+                        }
                     });
                 } catch (err) {
                     this.uiDebugChannel.appendLine(`[EXT][SESSION_CREATE_FAILED] err=${String(err)}`);

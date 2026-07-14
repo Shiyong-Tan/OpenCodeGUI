@@ -1,4 +1,15 @@
-export type LocalOlderState = 'localOlderAvailable' | 'localStartReached' | 'remoteOlderUnknown';
+export type HydrationCoverage =
+  | 'authoritativeHistoryComplete'
+  | 'deltaContinuityUnknown'
+  | 'repairInProgress'
+  | 'repairError';
+
+export type LocalOlderState =
+  | 'localOlderAvailable'
+  | 'localStartReached'
+  | 'deltaContinuityUnknown'
+  | 'repairInProgress'
+  | 'repairError';
 
 export interface LocalOlderPresentation {
   readonly state: LocalOlderState;
@@ -18,7 +29,7 @@ export interface LocalHistoryResolution {
 export function deriveLocalOlderPresentation(input: {
   readonly totalUnits: number;
   readonly revealStart: number;
-  readonly localStartKnown: boolean;
+  readonly hydrationCoverage: HydrationCoverage;
 }): LocalOlderPresentation {
   const totalUnits = Math.max(0, Math.floor(input.totalUnits));
   const revealStart = Math.min(totalUnits, Math.max(0, Math.floor(input.revealStart)));
@@ -28,18 +39,43 @@ export function deriveLocalOlderPresentation(input: {
       label: 'Load older', hint: '', actionable: true,
     };
   }
-  if (input.localStartKnown) {
+  if (input.hydrationCoverage === 'authoritativeHistoryComplete') {
     return {
       state: 'localStartReached', revealStart: 0, localOlderCount: 0,
       label: 'Start of loaded history', hint: '', actionable: false,
     };
   }
-  return {
-    state: 'remoteOlderUnknown', revealStart: 0, localOlderCount: 0,
-    label: 'No more loaded messages',
-    hint: 'Earlier server history is unknown or unavailable until cursor support is available.',
-    actionable: false,
+  const terminalByCoverage: Record<Exclude<HydrationCoverage, 'authoritativeHistoryComplete'>, Pick<LocalOlderPresentation, 'state' | 'label' | 'hint'>> = {
+    deltaContinuityUnknown: {
+      state: 'deltaContinuityUnknown',
+      label: 'History synchronization pending',
+      hint: 'Loaded local history is shown while continuity is being verified.',
+    },
+    repairInProgress: {
+      state: 'repairInProgress',
+      label: 'Synchronizing loaded history',
+      hint: 'Checking continuity of loaded history.',
+    },
+    repairError: {
+      state: 'repairError',
+      label: 'History synchronization incomplete',
+      hint: 'Loaded local history remains available, but continuity could not be verified.',
+    },
   };
+  return {
+    ...terminalByCoverage[normalizeHydrationCoverage(input.hydrationCoverage) as Exclude<HydrationCoverage, 'authoritativeHistoryComplete'>],
+    revealStart: 0, localOlderCount: 0, actionable: false,
+  };
+}
+
+export function normalizeHydrationCoverage(value: unknown): HydrationCoverage {
+  if (
+    value === 'authoritativeHistoryComplete'
+    || value === 'deltaContinuityUnknown'
+    || value === 'repairInProgress'
+    || value === 'repairError'
+  ) return value;
+  return 'deltaContinuityUnknown';
 }
 
 export function createLocalHistoryPresentationController(options: {
@@ -79,12 +115,16 @@ export function createLocalHistoryPresentationController(options: {
   };
 
   return Object.freeze({
-    resolve(sessionId: string, keys: readonly string[], localStartKnown = false): LocalHistoryResolution {
+    resolve(
+      sessionId: string,
+      keys: readonly string[],
+      hydrationCoverage: HydrationCoverage = 'deltaContinuityUnknown',
+    ): LocalHistoryResolution {
       const { revealStart } = locate(sessionId, keys);
       const resolution = {
         revealStart,
         visibleKeys: keys.slice(revealStart),
-        presentation: deriveLocalOlderPresentation({ totalUnits: keys.length, revealStart, localStartKnown }),
+        presentation: deriveLocalOlderPresentation({ totalUnits: keys.length, revealStart, hydrationCoverage }),
       };
       trimInactiveLru();
       return resolution;
