@@ -211,7 +211,7 @@ assert.strictEqual(killSwitch(true, true), true);
 assert.strictEqual(killSwitch(true, false), false);
 assert(source.includes('renderFromStateLegacy();'));
 assert(source.includes('if (KEYED_CHAT_RECONCILE_ENABLED)'));
-assert(!source.includes('createTanStackVirtualAdapter('));
+assert(!extractFunction('function applyKeyedChatReconciliation(').includes('createTanStackVirtualAdapter('));
 runActualDomApplicationContract();
 
 console.log('Wave 2 keyed reconcile synthetic: PASS');

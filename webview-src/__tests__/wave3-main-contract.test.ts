@@ -76,6 +76,7 @@ describe('Wave 3 extracted runtime coordinator', () => {
     const calls: string[] = [];
     const context = executeFunctions(['function applyChatWindowOrWave2('], {
       activeSessionId: 'session-a',
+      chatWindowState: { adapter: null, localOlderSurface: null },
       isChatWindowAvailable: () => options.available,
       applyWindowedKeyedChatReconciliation: () => {
         calls.push('window');
@@ -116,8 +117,11 @@ describe('Wave 3 extracted runtime coordinator', () => {
       chatWindowState: {
         adapter: { destroy: () => calls.push('destroy') }, snapshot: {}, mountedKeys: new Set(), sessionId: 'session-a',
         pendingRangeRender: false, topSpacer: { remove: () => calls.push('top') },
-        bottomSpacer: { remove: () => calls.push('bottom') }, failedSessionId: '',
+        bottomSpacer: { remove: () => calls.push('bottom') }, failedSessionId: '', localOlderSurface: null,
+        localOlderObserver: null,
       },
+      chatLocalHistoryController: { complete: () => undefined },
+      destroyChatLocalOlderSurface: () => undefined,
       chatContainer: { classList: { remove: () => calls.push('class') } },
       vscode: { postMessage: () => calls.push('diagnostic') },
       isChatWindowAvailable: () => true,
@@ -171,8 +175,13 @@ describe('Wave 3 extracted runtime coordinator', () => {
       chatWindowState: {
         adapter: { destroy: () => calls.push('destroy'), scrollToKey: () => true }, snapshot: {}, mountedKeys: new Set(['a']),
         sessionId: 'old', pendingRangeRender: true, topSpacer: { remove: () => calls.push('top') },
-        bottomSpacer: { remove: () => calls.push('bottom') }, activityBelow: false,
+        bottomSpacer: { remove: () => calls.push('bottom') }, activityBelow: false, allUnits: [{ key: 'old-key' }],
+        localOlderSurface: null, localOlderObserver: null,
       },
+      activeSessionId: 'old',
+      chatLocalHistoryController: { complete: () => undefined, revealToKey: () => true },
+      destroyChatLocalOlderSurface: () => undefined,
+      tryPendingChatWindowScroll: () => { calls.push('pending-scroll'); return true; },
       chatContainer: { classList },
       vscode: { postMessage: () => undefined },
       isChatWindowAvailable: () => true,

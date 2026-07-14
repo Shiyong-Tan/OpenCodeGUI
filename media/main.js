@@ -8217,6 +8217,8 @@ function shouldHideDcpUiMessage(message) {
     const KEYED_CHAT_RECONCILE_ENABLED = window.__ocKeyedChatReconcileEnabled !== false;
     const TANSTACK_CHAT_WINDOW_ENABLED = window.__ocTanStackChatWindowEnabled !== false;
     const CHAT_WINDOW_INITIAL_TAIL = 80;
+    const CHAT_LOCAL_OLDER_BATCH = 40;
+    const CHAT_PENDING_SCROLL_MAX_ATTEMPTS = 4;
     const CHAT_WINDOW_OVERSCAN = 20;
     const CHAT_WINDOW_MOUNT_LIMIT = 140;
     const CHAT_WINDOW_DIRECT_CHILD_LIMIT = 146;
@@ -8227,11 +8229,16 @@ function shouldHideDcpUiMessage(message) {
     let keyedChatFailedSessionId = '';
     let keyedChatReconcileState = { sessionId: '', items: [], roots: new Map() };
     let chatWindowGeneration = 0;
+    const chatLocalHistoryController = window.__ocRendering?.createLocalHistoryPresentationController?.({
+        initialTailCount: CHAT_WINDOW_INITIAL_TAIL, batchSize: CHAT_LOCAL_OLDER_BATCH, maxSessions: 32
+    });
     const chatWindowState = {
         sessionId: '', adapter: null, snapshot: null, allUnits: [], mountedKeys: new Set(),
         topSpacer: null, bottomSpacer: null, anchorKey: '', visualOffset: 0,
         programmaticScroll: false, activityBelow: false, rendering: false,
-        pendingRangeRender: false, failedSessionId: ''
+        pendingRangeRender: false, failedSessionId: '', localOlderSurface: null,
+        localOlderObserver: null, localOlderObserverArmed: true, pendingScrollKey: '',
+        pendingScrollAttempts: 0, localHistoryPresentation: null
     };
 
     function appendChatRenderRoot(root) {
@@ -8435,10 +8442,21 @@ function shouldHideDcpUiMessage(message) {
     function isChatWindowAvailable() {
         return TANSTACK_CHAT_WINDOW_ENABLED
             && typeof window.__ocRendering?.createTanStackVirtualAdapter === 'function'
+            && !!chatLocalHistoryController
             && chatWindowState.failedSessionId !== (activeSessionId || '__no_session__');
     }
 
+    function destroyChatLocalOlderSurface() {
+        chatWindowState.localOlderObserver?.disconnect?.();
+        chatWindowState.localOlderObserver = null;
+        chatWindowState.localOlderObserverArmed = true;
+        chatWindowState.localOlderSurface?.remove?.();
+        chatWindowState.localOlderSurface = null;
+        chatWindowState.localHistoryPresentation = null;
+    }
+
     function destroyChatWindowAdapter(reason = 'unknown') {
+        const ownedSessionId = chatWindowState.sessionId;
         chatWindowGeneration += 1;
         chatWindowState.adapter?.destroy?.();
         chatWindowState.adapter = null;
@@ -8446,6 +8464,10 @@ function shouldHideDcpUiMessage(message) {
         chatWindowState.mountedKeys = new Set();
         chatWindowState.sessionId = '';
         chatWindowState.pendingRangeRender = false;
+        chatWindowState.pendingScrollKey = '';
+        chatWindowState.pendingScrollAttempts = 0;
+        chatLocalHistoryController?.complete?.(ownedSessionId);
+        destroyChatLocalOlderSurface();
         chatWindowState.topSpacer?.remove?.();
         chatWindowState.bottomSpacer?.remove?.();
         chatWindowState.topSpacer = null;
@@ -8477,6 +8499,108 @@ function shouldHideDcpUiMessage(message) {
             classifyChatStructuralSurface(bottomSpacer, 'window:bottom-spacer', 'tanstack-window');
             chatWindowState.bottomSpacer = bottomSpacer;
         }
+    }
+
+    function activateChatLocalOlder(source = 'button') {
+        const sessionId = activeSessionId || '__no_session__';
+        const keys = chatWindowState.allUnits.map((unit) => unit.key);
+        captureChatWindowAnchor();
+        const result = chatLocalHistoryController.activate(sessionId, keys, source);
+        if (!result.accepted) return false;
+        chatWindowState.activityBelow = !autoScrollPinnedToBottom;
+        scheduleRenderFromState(`local-older-${source}`);
+        return true;
+    }
+
+    function renderChatLocalOlderSurface(presentation) {
+        let surface = chatWindowState.localOlderSurface;
+        if (!surface) {
+            surface = document.createElement('div');
+            surface.className = 'chat-local-older-surface';
+            classifyChatStructuralSurface(surface, 'window:local-older', 'local-history-window');
+            chatWindowState.localOlderSurface = surface;
+        }
+        surface.replaceChildren();
+        surface.dataset.localOlderState = presentation.state;
+        if (presentation.actionable) {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'chat-local-older-button';
+            button.textContent = 'Load older';
+            button.setAttribute('aria-label', 'Load older messages');
+            button.addEventListener('click', () => activateChatLocalOlder('click'));
+            surface.appendChild(button);
+            if (!chatWindowState.localOlderObserver && typeof IntersectionObserver === 'function') {
+                chatWindowState.localOlderObserver = new IntersectionObserver((entries) => {
+                    const latest = entries[entries.length - 1];
+                    if (!latest) return;
+                    if (!latest.isIntersecting) {
+                        chatWindowState.localOlderObserverArmed = true;
+                        return;
+                    }
+                    if (!chatWindowState.localOlderObserverArmed) return;
+                    chatWindowState.localOlderObserverArmed = false;
+                    activateChatLocalOlder('intersection');
+                }, { root: chatContainer, rootMargin: '80px 0px 0px 0px' });
+                chatWindowState.localOlderObserver.observe(surface);
+            }
+        } else {
+            chatWindowState.localOlderObserver?.disconnect?.();
+            chatWindowState.localOlderObserver = null;
+            chatWindowState.localOlderObserverArmed = true;
+            const label = document.createElement('div');
+            label.className = 'chat-local-older-label';
+            label.setAttribute('role', 'status');
+            label.textContent = presentation.label;
+            surface.appendChild(label);
+            if (presentation.hint) {
+                const hint = document.createElement('div');
+                hint.className = 'chat-local-older-hint';
+                hint.textContent = presentation.hint;
+                surface.appendChild(hint);
+            }
+        }
+        chatContainer.insertBefore(surface, chatWindowState.topSpacer || keyedRoots()[0] || null);
+    }
+
+    function resolveChatLocalHistoryWindow(units) {
+        const sessionId = activeSessionId || '__no_session__';
+        const resolution = chatLocalHistoryController.resolve(sessionId, units.map((unit) => unit.key), false);
+        chatWindowState.localHistoryPresentation = resolution.presentation;
+        return { ...resolution, visibleUnits: units.slice(resolution.revealStart) };
+    }
+
+    function clearPendingChatWindowScroll(reason) {
+        if (chatWindowState.pendingScrollKey) {
+            vscode.postMessage({ type: 'ui-debug', payload: ['[WV][CHAT_WINDOW_SEARCH_PENDING_CLEAR]', `reason=${reason}`, `key=${chatWindowState.pendingScrollKey}`, `attempts=${chatWindowState.pendingScrollAttempts}`] });
+        }
+        chatWindowState.pendingScrollKey = '';
+        chatWindowState.pendingScrollAttempts = 0;
+    }
+
+    function tryPendingChatWindowScroll(reason) {
+        const targetKey = chatWindowState.pendingScrollKey;
+        if (!targetKey || !chatWindowState.adapter) return false;
+        if (!chatWindowState.allUnits.some((unit) => unit.key === targetKey)) {
+            clearPendingChatWindowScroll('target-disappeared');
+            return false;
+        }
+        chatWindowState.pendingScrollAttempts += 1;
+        if (chatWindowState.adapter.scrollToKey(targetKey, { align: 'center' })) {
+            clearPendingChatWindowScroll(`adapter-success:${reason}`);
+            return true;
+        }
+        const mountedRoot = keyedRootForKey(targetKey);
+        if (mountedRoot) {
+            mountedRoot.scrollIntoView?.({ block: 'center', behavior: 'auto' });
+            clearPendingChatWindowScroll(`mounted-success:${reason}`);
+            return true;
+        }
+        if (chatWindowState.pendingScrollAttempts >= CHAT_PENDING_SCROLL_MAX_ATTEMPTS) {
+            vscode.postMessage({ type: 'ui-debug', payload: ['[WV][CHAT_WINDOW_SEARCH_PENDING_TERMINAL]', `reason=${reason}`, `key=${targetKey}`, `attempts=${chatWindowState.pendingScrollAttempts}`] });
+            clearPendingChatWindowScroll('attempt-limit');
+        }
+        return false;
     }
 
     function captureChatWindowAnchor() {
@@ -8536,6 +8660,10 @@ function shouldHideDcpUiMessage(message) {
                         updateChatWindowSpacers(snapshot);
                         return;
                     }
+                    if (chatWindowState.rendering && chatWindowState.pendingScrollKey) {
+                        chatWindowState.pendingRangeRender = true;
+                        return;
+                    }
                     if (!chatWindowState.rendering && !chatWindowState.pendingRangeRender) {
                         chatWindowState.pendingRangeRender = true;
                         scheduleRenderFromState('window-range-change');
@@ -8548,6 +8676,10 @@ function shouldHideDcpUiMessage(message) {
                     else {
                         chatWindowState.activityBelow = true;
                         restoreChatWindowAnchor();
+                    }
+                    if (chatWindowState.pendingScrollKey && batch.changedKeys.length && !chatWindowState.pendingRangeRender) {
+                        chatWindowState.pendingRangeRender = true;
+                        scheduleRenderFromState('window-search-measurement-retry');
                     }
                 }
             });
@@ -8587,18 +8719,23 @@ function shouldHideDcpUiMessage(message) {
     }
 
     function applyWindowedKeyedChatReconciliation(session, units) {
+        const reconcileSessionId = activeSessionId || '__no_session__';
+        let reconcileSucceeded = false;
         captureChatWindowAnchor();
         chatWindowState.rendering = true;
         chatWindowState.pendingRangeRender = false;
         chatWindowState.allUnits = units;
         try {
-            const adapter = ensureChatWindowAdapter(session, units);
+            const localWindow = resolveChatLocalHistoryWindow(units);
+            const adapter = ensureChatWindowAdapter(session, localWindow.visibleUnits);
+            if (chatWindowState.pendingScrollKey) tryPendingChatWindowScroll('after-adapter-update');
             const snapshot = adapter.getRange();
             chatWindowState.snapshot = snapshot;
-            const unitByKey = new Map(units.map((unit) => [unit.key, unit]));
+            const unitByKey = new Map(localWindow.visibleUnits.map((unit) => [unit.key, unit]));
             const windowUnits = snapshot.items.map((item) => unitByKey.get(item.key)).filter(Boolean);
             applyKeyedChatReconciliation(session, windowUnits);
             updateChatWindowSpacers(snapshot);
+            renderChatLocalOlderSurface(localWindow.presentation);
             const nextMounted = new Set(windowUnits.map((unit) => unit.key));
             for (const key of chatWindowState.mountedKeys) if (!nextMounted.has(key)) adapter.unobserveElement(key);
             for (const unit of windowUnits) {
@@ -8606,15 +8743,23 @@ function shouldHideDcpUiMessage(message) {
                 if (root) adapter.observeElement(unit.key, root);
             }
             chatWindowState.mountedKeys = nextMounted;
+            if (chatWindowState.pendingScrollKey) tryPendingChatWindowScroll('after-mounted-reconcile');
             const directChildren = chatContainer.childElementCount;
             const descendants = chatContainer.querySelectorAll('*').length;
             const budget = assertChatWindowDomBudget({ mountedUnits: windowUnits.length, directChildren, descendants });
             if (autoScrollPinnedToBottom) scrollToBottom(true);
             else restoreChatWindowAnchor();
             window.__ocChatWindowLastBudget = Object.freeze(budget);
+            reconcileSucceeded = true;
             return windowUnits;
         } finally {
             chatWindowState.rendering = false;
+            chatLocalHistoryController.complete(reconcileSessionId);
+            if (reconcileSucceeded && chatWindowState.pendingRangeRender && chatWindowState.pendingScrollKey
+                && chatWindowState.pendingScrollAttempts < CHAT_PENDING_SCROLL_MAX_ATTEMPTS) {
+                chatWindowState.pendingRangeRender = false;
+                scheduleRenderFromState('window-search-range-retry');
+            }
         }
     }
 
@@ -8634,11 +8779,18 @@ function shouldHideDcpUiMessage(message) {
     };
     function mountChatWindowSearchKey(targetKey, reason = 'search') {
         if (!isChatWindowAvailable() || !chatWindowState.adapter) return false;
+        const sessionId = activeSessionId || '__no_session__';
+        const keys = chatWindowState.allUnits.map((unit) => unit.key);
+        if (!chatLocalHistoryController.revealToKey(sessionId, keys, targetKey)) return false;
         sessionSearch.windowTargetKey = targetKey;
         chatWindowState.activityBelow = !autoScrollPinnedToBottom;
-        const scrolled = chatWindowState.adapter.scrollToKey(targetKey, { align: 'center' });
-        if (scrolled) scheduleRenderFromState(`window-${reason}`);
-        return scrolled;
+        if (chatWindowState.pendingScrollKey !== targetKey) {
+            chatWindowState.pendingScrollKey = targetKey;
+            chatWindowState.pendingScrollAttempts = 0;
+        }
+        tryPendingChatWindowScroll('search-action');
+        scheduleRenderFromState(`window-${reason}`);
+        return true;
     }
     window.__oc.ensureChatWindowKeyMounted = mountChatWindowSearchKey;
 
@@ -8754,6 +8906,7 @@ function shouldHideDcpUiMessage(message) {
 
     function applyChatWindowOrWave2(session, units) {
         if (!isChatWindowAvailable()) {
+            if (chatWindowState.adapter || chatWindowState.localOlderSurface) destroyChatWindowAdapter('window-unavailable');
             applyKeyedChatReconciliation(session, units);
             return 'wave2-disabled';
         }

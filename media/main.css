@@ -543,6 +543,31 @@ body {
     margin-top: -8px;
 }
 
+.chat-local-older-surface {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 0 8px;
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.85em;
+}
+
+.chat-local-older-button {
+    color: var(--vscode-textLink-foreground);
+    background: transparent;
+    border: 1px solid var(--vscode-button-border, transparent);
+    border-radius: 4px;
+    padding: 3px 10px;
+    cursor: pointer;
+}
+
+.chat-local-older-hint {
+    max-width: 38em;
+    text-align: center;
+}
+
 .message-row {
     width: 100%;
     display: flex;

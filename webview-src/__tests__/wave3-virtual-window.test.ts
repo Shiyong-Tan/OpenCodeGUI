@@ -4,6 +4,7 @@ import {
   type VirtualizerConstructor,
 } from '../rendering/tanstack-virtual-adapter';
 import { restoreKeyedScrollAnchor } from '../rendering/scroll-anchor-model';
+import { createLocalHistoryPresentationController } from '../rendering/local-history-window';
 
 type RafCallback = (time: number) => void;
 
@@ -252,5 +253,66 @@ describe('Wave 3 keyed anchor model', () => {
     expect(restoreKeyedScrollAnchor({
       anchorKey: 'key-12', visualOffset: 37, anchorStartAfter: 500, currentScrollTop: 460,
     })).toEqual({ anchorKey: 'key-12', scrollTop: 463, correction: 3, programmatic: true });
+  });
+});
+
+describe('Wave 4 repeated local reveal integration', () => {
+  test('moves one stable capped adapter window while unpinned streaming preserves anchor within two pixels', () => {
+    const { adapter, keys, constructions } = createHarness(1001);
+    const controller = createLocalHistoryPresentationController({ initialTailCount: 80, batchSize: 40 });
+    let canonical = [...keys];
+    adapter.getRange();
+    let batches = 0;
+    while (controller.resolve('a', canonical).presentation.actionable) {
+      const activation = controller.activate('a', canonical, 'synthetic-intersection');
+      expect(activation.accepted).toBe(true);
+      canonical = [...canonical, `stream-${batches}`];
+      const local = controller.resolve('a', canonical);
+      adapter.update({
+        keys: local.visibleKeys,
+        kinds: local.visibleKeys.map(() => 'assistant'),
+        presentationRevisions: local.visibleKeys.map(() => `stream-r${batches}`),
+        keepMountedKeys: ['key-1000', canonical.at(-1)!],
+      });
+      const range = adapter.getRange();
+      const mounted = range.items.length;
+      const structuralRoots = 3; // local control/sentinel plus two spacers
+      expect(mounted).toBeLessThanOrEqual(140);
+      expect(mounted + structuralRoots).toBeLessThanOrEqual(146);
+      expect(mounted * 24 + structuralRoots).toBeLessThanOrEqual(4000);
+      const currentScrollTop = 500 + batches * 3;
+      const plan = restoreKeyedScrollAnchor({
+        anchorKey: 'key-950', visualOffset: 37,
+        anchorStartAfter: currentScrollTop + 38, currentScrollTop,
+      });
+      expect(Math.abs((plan.scrollTop + 37) - (currentScrollTop + 38))).toBeLessThanOrEqual(2);
+      controller.complete('a');
+      batches += 1;
+    }
+    expect(batches).toBeGreaterThan(20);
+    expect(constructions).toHaveLength(1);
+    expect(adapter.scrollToKey('key-10', { align: 'center' })).toBe(true);
+    expect(constructions[0].scrollCalls.at(-1)?.[0]).toBe(10);
+  });
+
+  test('one search action survives two pre-update misses then centers after local reveal update', () => {
+    const { adapter, keys, constructions } = createHarness(1001);
+    const controller = createLocalHistoryPresentationController({ initialTailCount: 80, batchSize: 40 });
+    const initial = controller.resolve('search', keys);
+    adapter.update({
+      keys: initial.visibleKeys, kinds: initial.visibleKeys.map(() => 'assistant'),
+      presentationRevisions: initial.visibleKeys.map(() => 'r1'), keepMountedKeys: [],
+    });
+    expect(adapter.scrollToKey('key-10', { align: 'center' })).toBe(false);
+    expect(adapter.scrollToKey('key-10', { align: 'center' })).toBe(false);
+    expect(controller.revealToKey('search', keys, 'key-10')).toBe(true);
+    const revealed = controller.resolve('search', keys);
+    adapter.update({
+      keys: revealed.visibleKeys, kinds: revealed.visibleKeys.map(() => 'assistant'),
+      presentationRevisions: revealed.visibleKeys.map(() => 'r1'), keepMountedKeys: ['key-10'],
+    });
+    expect(adapter.scrollToKey('key-10', { align: 'center' })).toBe(true);
+    expect(constructions).toHaveLength(1);
+    expect(constructions[0].scrollCalls.at(-1)).toEqual([0, { align: 'center', behavior: 'auto' }]);
   });
 });
