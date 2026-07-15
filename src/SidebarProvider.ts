@@ -271,6 +271,9 @@ type LiveTurnResumePayload = {
     timestamp: number;
 };
 type HydrationCoverage = 'authoritativeHistoryComplete' | 'deltaContinuityUnknown' | 'repairInProgress' | 'repairError';
+const SNAPSHOT_DELTA_CONTINUITY_REPAIR_ENABLED = !['0', 'false'].includes(
+    String(process.env.SNAPSHOT_DELTA_CONTINUITY_REPAIR_ENABLED || 'true').toLowerCase()
+);
 
 /**
  * Simplified SegmentState interface (V2)
@@ -769,6 +772,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private initPosted = false;
     private sessionSelectionEpoch = 0;
     private readonly recentSessionLoadLimit = 200;
+    private snapshotDeltaContinuityRepairEnabled = SNAPSHOT_DELTA_CONTINUITY_REPAIR_ENABLED;
     private readonly webviewLivenessPingTimeoutMs = 10000;
     private readonly webviewAutoRescueCooldownMs = 60000;
     private readonly webviewAutoRescueAckTimeoutMs = 5000;
@@ -1052,6 +1056,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         let baseTitle = 'Session';
         let baseMessages: SessionMessage[] = [];
         let snapshotTimelineIds: string[] = [];
+        let historyCoverage: HydrationCoverage = 'deltaContinuityUnknown';
         try {
             const snap = await this.readSnapshot(sessionId);
             if (this.currentSessionId !== sessionId || this.sessionSelectionEpoch !== selectionEpoch) return skip('stale-after-snapshot');
@@ -1080,15 +1085,34 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             if (formatted.title) baseTitle = formatted.title;
             const snapshotIdSet = new Set<string>(snapshotTimelineIds);
             const snapshotMaxMessageIndex = this.getMaxMessageIndex(baseMessages);
-            const appendCandidates = this.computeRecentAppendCandidates(snapshotIdSet, snapshotMaxMessageIndex, formatted.messages);
-            const appendMessages = this.enforceUserAssistantPairs(appendCandidates);
-            baseMessages = this.mergeSessionMessagesById(baseMessages, appendMessages);
-            snapshotTimelineIds = [
-                ...snapshotTimelineIds,
-                ...appendMessages.map((message) => (typeof message?.id === 'string' ? message.id : '')).filter((id): id is string => Boolean(id))
-            ];
+            const continuity = this.classifyRecentAppendCandidates(snapshotIdSet, snapshotMaxMessageIndex, formatted.messages);
+            if (snapshotTimelineIds.length === 0) {
+                baseMessages = formatted.messages;
+                snapshotTimelineIds = this.collectVisibleSnapshotMessages(formatted.messages)
+                    .map((message) => message.id || '').filter(Boolean);
+            } else if (continuity.proven) {
+                historyCoverage = 'authoritativeHistoryComplete';
+                baseMessages = this.buildImmutableSnapshotWithProvenSuffix(baseMessages, continuity.suffix);
+                snapshotTimelineIds = [
+                    ...snapshotTimelineIds,
+                    ...continuity.suffix.map((message) => (typeof message?.id === 'string' ? message.id : '')).filter((id): id is string => Boolean(id))
+                ];
+            } else if (this.snapshotDeltaContinuityRepairEnabled) {
+                const fullExport = await this.client.exportSession(sessionId);
+                if (this.currentSessionId !== sessionId || this.sessionSelectionEpoch !== selectionEpoch) return skip('stale-after-full-repair');
+                const fullFormattedRaw = this.formatSession(fullExport);
+                const fullDelta = this.buildFullExportSnapshotDelta(baseMessages, snapshotTimelineIds, fullFormattedRaw.messages);
+                const fullFormatted = await this.injectChangeLists(sessionId, { title: fullFormattedRaw.title, messages: fullDelta.messages });
+                if (this.currentSessionId !== sessionId || this.sessionSelectionEpoch !== selectionEpoch) return skip('stale-after-full-repair-format');
+                baseMessages = fullFormatted.messages;
+                snapshotTimelineIds = fullDelta.timelineMessageIds;
+                historyCoverage = fullDelta.proven ? 'authoritativeHistoryComplete' : 'deltaContinuityUnknown';
+            }
         } catch (error) {
             if (baseMessages.length === 0) return skip(`recent-failed:${String(error)}`);
+            if (snapshotTimelineIds.length > 0 && this.snapshotDeltaContinuityRepairEnabled) {
+                historyCoverage = 'repairError';
+            }
             this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.liveTurnHistory.recentFailedUsingSnapshot | sessionId=${sessionId} | panelId=${panelId} | webviewInstanceId=${webviewInstanceId} | selectionEpoch=${selectionEpoch} | reason=${String(error)} | postedSessionData=false | reload=false | recreate=false | sessionMutation=false`);
         }
 
@@ -1105,7 +1129,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             messages: historyMessages,
             meta: {
                 timelineMessageIds,
-                hydrationCoverage: 'deltaContinuityUnknown' as HydrationCoverage,
+                hydrationCoverage: historyCoverage,
                 historyOnly: true,
                 postedSessionData: false,
                 reload: false,
@@ -1266,7 +1290,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         hydrationCoverage: 'deltaContinuityUnknown' as HydrationCoverage
                     }
                 });
-                return { ok: true, phase: 'snapshot', messages: baseMessages.length };
             }
         } catch (error) {
             this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.hardRescue.sendInitGuard.compensationSkipped | sessionId=${sessionId} | panelId=${entry.panelId} | webviewInstanceId=${entry.webviewInstanceId || 'null'} | active=false | fresh=false | reason=snapshot-failed:${String(error)} | token=${entry.token} | postedSessionData=false | reload=false | recreate=false | sessionMutation=false`);
@@ -1281,9 +1304,23 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             if (formatted.title) baseTitle = formatted.title;
             const snapshotIdSet = new Set<string>(snapshotTimelineIds);
             const snapshotMaxMessageIndex = this.getMaxMessageIndex(baseMessages);
-            const appendCandidates = this.computeRecentAppendCandidates(snapshotIdSet, snapshotMaxMessageIndex, formatted.messages);
-            const appendMessages = this.enforceUserAssistantPairs(appendCandidates);
-            const mergedMessages = this.mergeSessionMessagesById(baseMessages, appendMessages);
+            const continuity = this.classifyRecentAppendCandidates(snapshotIdSet, snapshotMaxMessageIndex, formatted.messages);
+            if (snapshotTimelineIds.length > 0 && !continuity.proven) {
+                if (!this.snapshotDeltaContinuityRepairEnabled) {
+                    return { ok: true, phase: 'snapshot', messages: baseMessages.length, reason: 'repair-disabled' };
+                }
+                if (!isStillValid()) return { ok: false, reason: 'stale-before-repair' };
+                webview.postMessage({
+                    type: 'hydrationCoverage',
+                    sessionId,
+                    hydrationCoverage: 'repairInProgress' as HydrationCoverage
+                });
+                throw new Error('snapshot-boundary-unproven');
+            }
+            const appendMessages = continuity.suffix;
+            const mergedMessages = snapshotTimelineIds.length > 0
+                ? this.buildImmutableSnapshotWithProvenSuffix(baseMessages, appendMessages)
+                : formatted.messages;
             const newIds = appendMessages.map((message) => (typeof message?.id === 'string' ? message.id : '')).filter((id): id is string => Boolean(id));
             webview.postMessage({
                 type: 'sessionData',
@@ -1293,7 +1330,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 segments,
                 meta: {
                     timelineMessageIds: [...snapshotTimelineIds, ...newIds],
-                    hydrationCoverage: 'deltaContinuityUnknown' as HydrationCoverage
+                    hydrationCoverage: (snapshotTimelineIds.length > 0
+                        ? 'authoritativeHistoryComplete'
+                        : 'deltaContinuityUnknown') as HydrationCoverage
                 }
             });
             return { ok: true, phase: 'recent', messages: mergedMessages.length };
@@ -1305,7 +1344,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const exportResult = await this.client.exportSession(sessionId);
             if (!isStillValid()) return { ok: false, reason: 'stale-before-full-post' };
             const formattedRaw = this.formatSession(exportResult);
-            const formatted = await this.injectChangeLists(sessionId, formattedRaw);
+            const fullDelta = this.buildFullExportSnapshotDelta(baseMessages, snapshotTimelineIds, formattedRaw.messages);
+            const formatted = await this.injectChangeLists(sessionId, {
+                title: formattedRaw.title,
+                messages: fullDelta.messages
+            });
             if (!isStillValid()) return { ok: false, reason: 'stale-before-full-post' };
             webview.postMessage({
                 type: 'sessionData',
@@ -1314,12 +1357,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 messages: formatted.messages,
                 segments,
                 meta: {
-                    timelineMessageIds: this.collectVisibleSnapshotMessages(formatted.messages).map((message) => (typeof message?.id === 'string' ? message.id : '')).filter((id): id is string => Boolean(id)),
-                    hydrationCoverage: 'deltaContinuityUnknown' as HydrationCoverage
+                    timelineMessageIds: fullDelta.timelineMessageIds,
+                    hydrationCoverage: (fullDelta.proven
+                        ? 'authoritativeHistoryComplete'
+                        : 'deltaContinuityUnknown') as HydrationCoverage
                 }
             });
             return { ok: true, phase: 'full', messages: formatted.messages.length };
         } catch (error) {
+            if (isStillValid() && snapshotTimelineIds.length > 0) {
+                webview.postMessage({ type: 'hydrationCoverage', sessionId, hydrationCoverage: 'repairError' as HydrationCoverage });
+            }
             return { ok: false, reason: `full-failed:${String(error)}` };
         }
     }
@@ -2112,10 +2160,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     }
                 };
                 const postResult = postIfStillActive(snapshotPayload, 'snapshot', baseMessages.length);
-                if (postResult === 'posted') {
-                    return { ok: true, phase: 'snapshot', messages: baseMessages.length, branch: 'not-fresh-sessionData', rescueAttemptId };
+                if (postResult !== 'posted') {
+                    return { ok: false, reason: postResult === 'active-turn' ? 'soft-rescue-deferred-active-turn' : 'soft-rescue-aborted-stale-token' };
                 }
-                return { ok: false, reason: postResult === 'active-turn' ? 'soft-rescue-deferred-active-turn' : 'soft-rescue-aborted-stale-token' };
             }
         } catch (error) {
             this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.softRescue.snapshot.skip | panelId=${record.panelId} | sessionId=${sessionId} | token=${record.token} | err=${String(error)}`);
@@ -2129,9 +2176,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             if (!isStillActive()) return { ok: false, reason: 'soft-rescue-aborted-stale-token' };
             const snapshotIdSet = new Set<string>(snapshotTimelineIds);
             const snapshotMaxMessageIndex = this.getMaxMessageIndex(baseMessages);
-            const appendCandidates = this.computeRecentAppendCandidates(snapshotIdSet, snapshotMaxMessageIndex, formatted.messages);
-            const appendMessages = this.enforceUserAssistantPairs(appendCandidates);
-            const mergedMessages = this.mergeSessionMessagesById(baseMessages, appendMessages);
+            const continuity = this.classifyRecentAppendCandidates(snapshotIdSet, snapshotMaxMessageIndex, formatted.messages);
+            if (snapshotTimelineIds.length > 0 && !continuity.proven) {
+                if (!this.snapshotDeltaContinuityRepairEnabled) {
+                    return { ok: true, phase: 'snapshot', messages: baseMessages.length, branch: 'not-fresh-sessionData', rescueAttemptId };
+                }
+                const repairPost = postIfStillActive({
+                    type: 'hydrationCoverage',
+                    sessionId,
+                    hydrationCoverage: 'repairInProgress' as HydrationCoverage
+                }, 'snapshot', baseMessages.length);
+                if (repairPost !== 'posted') {
+                    return { ok: false, reason: repairPost === 'active-turn' ? 'soft-rescue-deferred-active-turn' : 'soft-rescue-aborted-stale-token' };
+                }
+                throw new Error('snapshot-boundary-unproven');
+            }
+            const appendMessages = continuity.suffix;
+            const mergedMessages = snapshotTimelineIds.length > 0
+                ? this.buildImmutableSnapshotWithProvenSuffix(baseMessages, appendMessages)
+                : formatted.messages;
             const newIds = appendMessages.map((message) => (typeof message?.id === 'string' ? message.id : '')).filter((id): id is string => Boolean(id));
             const recentPayload = {
                 type: 'sessionData',
@@ -2141,7 +2204,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 segments,
                 meta: {
                     timelineMessageIds: [...snapshotTimelineIds, ...newIds],
-                    hydrationCoverage: 'deltaContinuityUnknown' as HydrationCoverage
+                    hydrationCoverage: (snapshotTimelineIds.length > 0
+                        ? 'authoritativeHistoryComplete'
+                        : 'deltaContinuityUnknown') as HydrationCoverage
                 }
             };
             const postResult = postIfStillActive(recentPayload, 'recent', mergedMessages.length);
@@ -2157,7 +2222,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const exportResult = await this.client.exportSession(sessionId);
             if (!isStillActive()) return { ok: false, reason: 'soft-rescue-aborted-stale-token' };
             const formattedRaw = this.formatSession(exportResult);
-            const formatted = await this.injectChangeLists(sessionId, formattedRaw);
+            const fullDelta = this.buildFullExportSnapshotDelta(baseMessages, snapshotTimelineIds, formattedRaw.messages);
+            const formatted = await this.injectChangeLists(sessionId, { title: formattedRaw.title, messages: fullDelta.messages });
             if (!isStillActive()) return { ok: false, reason: 'soft-rescue-aborted-stale-token' };
             const fullPayload = {
                 type: 'sessionData',
@@ -2166,8 +2232,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 messages: formatted.messages,
                 segments,
                 meta: {
-                    timelineMessageIds: this.collectVisibleSnapshotMessages(formatted.messages).map((message) => (typeof message?.id === 'string' ? message.id : '')).filter((id): id is string => Boolean(id)),
-                    hydrationCoverage: 'deltaContinuityUnknown' as HydrationCoverage
+                    timelineMessageIds: fullDelta.timelineMessageIds,
+                    hydrationCoverage: (fullDelta.proven
+                        ? 'authoritativeHistoryComplete'
+                        : 'deltaContinuityUnknown') as HydrationCoverage
                 }
             };
             const postResult = postIfStillActive(fullPayload, 'full', formatted.messages.length);
@@ -2176,6 +2244,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
             return { ok: false, reason: postResult === 'active-turn' ? 'soft-rescue-deferred-active-turn' : 'soft-rescue-aborted-stale-token' };
         } catch (error) {
+            if (isStillActive() && snapshotTimelineIds.length > 0) {
+                postIfStillActive({ type: 'hydrationCoverage', sessionId, hydrationCoverage: 'repairError' as HydrationCoverage }, 'full', baseMessages.length);
+            }
             return { ok: false, reason: `full-export-failed:${String(error)}` };
         }
     }
@@ -3213,20 +3284,42 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         snapshotMaxMessageIndex: number | null,
         recentFormattedMessages: SessionMessage[]
     ): SessionMessage[] {
-        const out: SessionMessage[] = [];
-        const seen = new Set<string>();
+        return this.classifyRecentAppendCandidates(
+            snapshotTimelineIdSet,
+            snapshotMaxMessageIndex,
+            recentFormattedMessages
+        ).suffix;
+    }
+
+    private classifyRecentAppendCandidates(
+        snapshotTimelineIdSet: Set<string>,
+        snapshotMaxMessageIndex: number | null,
+        recentFormattedMessages: SessionMessage[]
+    ): { proven: boolean; suffix: SessionMessage[] } {
         const recentList = Array.isArray(recentFormattedMessages) ? recentFormattedMessages : [];
-        let lastSnapshotHitIndex = -1;
+        if (snapshotTimelineIdSet.size === 0) return { proven: false, suffix: [] };
+        const snapshotIds = Array.from(snapshotTimelineIdSet);
+        const boundaryId = snapshotIds[snapshotIds.length - 1];
+        if (!boundaryId) return { proven: false, suffix: [] };
+
+        let boundaryIndex = -1;
         for (let i = 0; i < recentList.length; i++) {
             const id = typeof recentList[i]?.id === 'string' ? recentList[i]!.id : '';
-            if (id && snapshotTimelineIdSet.has(id)) {
-                lastSnapshotHitIndex = i;
-            }
+            if (id !== boundaryId) continue;
+            if (boundaryIndex >= 0) return { proven: false, suffix: [] };
+            boundaryIndex = i;
         }
-        for (let i = 0; i < recentList.length; i++) {
-            if (i <= lastSnapshotHitIndex) continue;
+        if (boundaryIndex < 0) return { proven: false, suffix: [] };
+
+        const out: SessionMessage[] = [];
+        const seen = new Set<string>();
+        let previousIndex = snapshotMaxMessageIndex;
+        for (let i = boundaryIndex + 1; i < recentList.length; i++) {
             const message = recentList[i];
-            if (!message || typeof message.id !== 'string' || !message.id) continue;
+            if (!message || typeof message.id !== 'string' || !message.id) return { proven: false, suffix: [] };
+            if (typeof message.messageIndex !== 'number' || !Number.isFinite(message.messageIndex)) return { proven: false, suffix: [] };
+            if (previousIndex !== null && message.messageIndex < previousIndex) return { proven: false, suffix: [] };
+            previousIndex = message.messageIndex;
             const id = message.id;
             if (id.startsWith('local-') || id.startsWith('tmp:')) continue;
             if (snapshotTimelineIdSet.has(id)) continue;
@@ -3238,13 +3331,43 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 if (this.isHiddenControlUserText(visibleText)) continue;
             }
             if (message.role === 'assistant' && this.isHiddenControlAssistantText(text)) continue;
-            if (snapshotMaxMessageIndex !== null && typeof message.messageIndex === 'number' && Number.isFinite(message.messageIndex)) {
-                if (message.messageIndex <= snapshotMaxMessageIndex) continue;
-            }
             out.push(message);
             seen.add(id);
         }
-        return out;
+        return { proven: true, suffix: out };
+    }
+
+    private buildFullExportSnapshotDelta(
+        existingSnapshotRecords: SessionMessage[],
+        snapshotTimelineIds: string[],
+        fullExportRecords: SessionMessage[]
+    ): { proven: boolean; messages: SessionMessage[]; timelineMessageIds: string[] } {
+        if (snapshotTimelineIds.length === 0) {
+            const messages = this.buildImmutableSnapshotWithProvenSuffix([], fullExportRecords);
+            return {
+                proven: true,
+                messages,
+                timelineMessageIds: messages.map((message) => message.id || '').filter(Boolean)
+            };
+        }
+        const boundaryId = snapshotTimelineIds[snapshotTimelineIds.length - 1];
+        const boundaryIndexes = fullExportRecords
+            .map((message, index) => message?.id === boundaryId ? index : -1)
+            .filter((index) => index >= 0);
+        if (boundaryIndexes.length !== 1) {
+            return { proven: false, messages: [...existingSnapshotRecords], timelineMessageIds: [...snapshotTimelineIds] };
+        }
+        const suffix = fullExportRecords.slice(boundaryIndexes[0] + 1);
+        const messages = this.buildImmutableSnapshotWithProvenSuffix(existingSnapshotRecords, suffix);
+        const existingIds = new Set(snapshotTimelineIds);
+        const suffixIds = suffix
+            .map((message) => message?.id || '')
+            .filter((id) => id.startsWith('msg_') && !existingIds.has(id));
+        return {
+            proven: true,
+            messages,
+            timelineMessageIds: [...snapshotTimelineIds, ...Array.from(new Set(suffixIds))]
+        };
     }
 
     private enforceUserAssistantPairs(messages: SessionMessage[]): SessionMessage[] {
@@ -3553,22 +3676,36 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             ? snapshotObj.sessionData.messages
             : [];
         const canonicalExistingMessages = this.canonicalizeSnapshotMessagesForCurrentOwner(sessionId, existingMessages, ownershipMap);
-        const timelineIdSet = new Set(
-            canonicalTimelineIds.filter((id): id is string => typeof id === 'string' && Boolean(id))
-        );
+        const normalizedExisting = this.normalizeSnapshotStoredMessages(canonicalExistingMessages);
+        const existingTimelineRaw = Array.isArray(snapshotObj.sessionData.meta?.timelineMessageIds)
+            ? (snapshotObj.sessionData.meta.timelineMessageIds as string[])
+            : normalizedExisting.map((message) => message.id || '');
+        const existingTimeline = Array.from(new Set(existingTimelineRaw.filter((id): id is string => typeof id === 'string' && Boolean(id))));
+        const existingIdSet = new Set(existingTimeline);
+        const boundaryId = existingTimeline[existingTimeline.length - 1];
+        const boundaryIndex = boundaryId ? canonicalTimelineIds.indexOf(boundaryId) : -1;
+        const provenTimelineSuffix = existingTimeline.length === 0
+            ? canonicalTimelineIds
+            : boundaryIndex >= 0
+                ? canonicalTimelineIds.slice(boundaryIndex + 1).filter((id) => !existingIdSet.has(id))
+                : [];
+        const provenIdSet = new Set(provenTimelineSuffix);
+        const provenMessageSuffix = canonicalIncomingMessages.filter((message) => (
+            typeof message?.id === 'string' && provenIdSet.has(message.id)
+        ));
+        const immutableRemoteRecords = this.buildImmutableSnapshotWithProvenSuffix(normalizedExisting, provenMessageSuffix);
         const combinedById = new Map<string, SessionMessage>();
-        for (const message of this.normalizeSnapshotStoredMessages(canonicalExistingMessages)) {
-            if (typeof message.id === 'string' && message.id) {
-                combinedById.set(message.id, message);
-            }
+        for (const message of immutableRemoteRecords) {
+            if (typeof message.id === 'string' && message.id) combinedById.set(message.id, message);
         }
+        // Local change-list records are reapplied only after immutable remote construction.
         for (const message of canonicalIncomingMessages) {
-            if (!message || typeof message.id !== 'string' || !message.id) continue;
-            if (!timelineIdSet.has(message.id)) continue;
+            if (message?.role !== 'system' || message.meta?.kind !== 'changeList') continue;
+            if (typeof message.id !== 'string' || !provenIdSet.has(message.id) || combinedById.has(message.id)) continue;
             combinedById.set(message.id, message);
         }
         this.applyAppendSnapshotMeta(sessionId, combinedById);
-        const nextTimeline = Array.from(timelineIdSet);
+        const nextTimeline = [...existingTimeline, ...provenTimelineSuffix];
         const nextMessages = nextTimeline
             .map((id) => combinedById.get(id))
             .filter((message): message is SessionMessage => Boolean(message));
@@ -5509,13 +5646,6 @@ ${attachmentLines.join('\n')}`
                             );
                         }
 
-                        if (sessionDataSent && Array.isArray(baseMessages) && baseMessages.length > 0) {
-                            this.uiDebugChannel.appendLine(
-                                `[EXT][SESSION_RECENT_SKIP] sessionId=${targetSessionId} reason=snapshot-authoritative messages=${baseMessages.length}`
-                            );
-                            break;
-                        }
-
                         let recentFailedReason = '';
                         const recentStart = Date.now();
                         try {
@@ -5539,9 +5669,24 @@ ${attachmentLines.join('\n')}`
                                 : [];
                             const snapshotIdSet = new Set<string>(snapshotIds);
                             const snapshotMaxMessageIndex = this.getMaxMessageIndex(baseMessages);
-                            const appendCandidates = this.computeRecentAppendCandidates(snapshotIdSet, snapshotMaxMessageIndex, formatted.messages);
-                            const appendMessages = this.enforceUserAssistantPairs(appendCandidates);
-                            const mergedMessages = this.mergeSessionMessagesById(baseMessages, appendMessages);
+                            const continuity = this.classifyRecentAppendCandidates(snapshotIdSet, snapshotMaxMessageIndex, formatted.messages);
+                            if (snapshotIds.length > 0 && !continuity.proven) {
+                                if (!this.snapshotDeltaContinuityRepairEnabled) {
+                                    this.uiDebugChannel.appendLine(`[EXT][SESSION_RECENT_SKIP] sessionId=${targetSessionId} reason=repair-disabled-safe-snapshot`);
+                                    break;
+                                }
+                                postSessionData({
+                                    type: 'hydrationCoverage',
+                                    sessionId: targetSessionId,
+                                    hydrationCoverage: 'repairInProgress' as HydrationCoverage
+                                }, 'recent');
+                                sessionDataSent = false;
+                                throw new Error('snapshot-boundary-unproven');
+                            }
+                            const appendMessages = continuity.suffix;
+                            const mergedMessages = snapshotIds.length > 0
+                                ? this.buildImmutableSnapshotWithProvenSuffix(baseMessages, appendMessages)
+                                : formatted.messages;
                             const newIds = appendMessages
                                 .map((message) => (typeof message?.id === 'string' ? message.id : ''))
                                 .filter((id): id is string => Boolean(id));
@@ -5553,7 +5698,9 @@ ${attachmentLines.join('\n')}`
                                 segments,
                                 meta: {
                                     timelineMessageIds: [...snapshotIds, ...newIds],
-                                    hydrationCoverage: 'deltaContinuityUnknown' as HydrationCoverage
+                                    hydrationCoverage: (snapshotIds.length > 0
+                                        ? 'authoritativeHistoryComplete'
+                                        : 'deltaContinuityUnknown') as HydrationCoverage
                                 }
                             };
                             const sent = postSessionData(sessionPayload, 'recent');
@@ -5613,7 +5760,11 @@ ${attachmentLines.join('\n')}`
 
                         const exportData = normalized.data;
                         const formattedRaw = this.formatSession(exportData);
-                        const formatted = await this.injectChangeLists(targetSessionId, formattedRaw);
+                        const snapshotIds = Array.isArray(snapPayload?.meta?.timelineMessageIds)
+                            ? (snapPayload.meta.timelineMessageIds as string[]).filter((id): id is string => typeof id === 'string' && Boolean(id))
+                            : [];
+                        const fullDelta = this.buildFullExportSnapshotDelta(baseMessages, snapshotIds, formattedRaw.messages);
+                        const formatted = await this.injectChangeLists(targetSessionId, { title: formattedRaw.title, messages: fullDelta.messages });
 
                         // this.uiDebugChannel.appendLine(
                         //     `[EXT][SEG_HYDRATE_LOAD] sessionId=${data.sessionId} found=${segments.length} ` +
@@ -5637,10 +5788,10 @@ ${attachmentLines.join('\n')}`
                             messages: formatted.messages,
                             segments,
                                 meta: {
-                                    timelineMessageIds: this.collectVisibleSnapshotMessages(formatted.messages)
-                                        .map((message) => (typeof message?.id === 'string' ? message.id : ''))
-                                        .filter((id): id is string => Boolean(id)),
-                                    hydrationCoverage: 'deltaContinuityUnknown' as HydrationCoverage
+                                    timelineMessageIds: fullDelta.timelineMessageIds,
+                                    hydrationCoverage: (fullDelta.proven
+                                        ? 'authoritativeHistoryComplete'
+                                        : 'deltaContinuityUnknown') as HydrationCoverage
                                 }
                             };
                         const sent = postSessionData(sessionPayload, 'full');
@@ -6996,22 +7147,55 @@ ${attachmentLines.join('\n')}`
                         }
 
                         try {
+                            const recentSelectionEpoch = this.sessionSelectionEpoch;
+                            const recentLivenessOwner = this.webviewLivenessCurrent;
+                            const recentWebviewInstanceId = this._webviewInstanceId;
+                            const recentHydrationWebview = liveWebview;
+                            const isRecentHydrationCurrent = () => (
+                                this.currentSessionId === recentSessionId
+                                && this.sessionSelectionEpoch === recentSelectionEpoch
+                                && this.webviewLivenessCurrent === recentLivenessOwner
+                                && this._webviewInstanceId === recentWebviewInstanceId
+                                && (this._view?.webview || webview) === recentHydrationWebview
+                            );
+                            if (!isRecentHydrationCurrent()) throw new Error('stale-before-recent-hydration');
                             const recentExport = await this.client.exportSessionRecent(recentSessionId, this.recentSessionLoadLimit);
+                            if (!isRecentHydrationCurrent()) throw new Error('stale-after-recent-export');
                             const formattedRaw = this.formatSession(recentExport);
                             const formatted = await this.injectChangeLists(recentSessionId, formattedRaw);
+                            if (!isRecentHydrationCurrent()) throw new Error('stale-after-recent-format');
                             if (formatted.title) {
                                 baseTitle = formatted.title;
                             }
 
                             const snapshotIdSet = new Set<string>(snapshotTimelineIds);
                             const snapshotMaxMessageIndex = this.getMaxMessageIndex(baseMessages);
-                            const appendCandidates = this.computeRecentAppendCandidates(snapshotIdSet, snapshotMaxMessageIndex, formatted.messages);
-                            const appendMessages = this.enforceUserAssistantPairs(appendCandidates);
-                            const mergedMessages = this.mergeSessionMessagesById(baseMessages, appendMessages);
+                            const continuity = this.classifyRecentAppendCandidates(snapshotIdSet, snapshotMaxMessageIndex, formatted.messages);
+                            const appendMessages = continuity.suffix;
+                            let mergedMessages = snapshotTimelineIds.length > 0
+                                ? this.buildImmutableSnapshotWithProvenSuffix(baseMessages, appendMessages)
+                                : formatted.messages;
                             const newIds = appendMessages
                                 .map((message) => (typeof message?.id === 'string' ? message.id : ''))
                                 .filter((id): id is string => Boolean(id));
-                            const timelineIds = [...snapshotTimelineIds, ...newIds];
+                            let timelineIds = [...snapshotTimelineIds, ...newIds];
+                            let hydrationCoverage: HydrationCoverage = snapshotTimelineIds.length > 0 && continuity.proven
+                                ? 'authoritativeHistoryComplete'
+                                : 'deltaContinuityUnknown';
+
+                            if (snapshotTimelineIds.length > 0 && !continuity.proven && this.snapshotDeltaContinuityRepairEnabled) {
+                                if (!isRecentHydrationCurrent()) throw new Error('stale-before-full-repair');
+                                liveWebview.postMessage({ type: 'hydrationCoverage', sessionId: recentSessionId, hydrationCoverage: 'repairInProgress' as HydrationCoverage });
+                                const fullExport = await this.client.exportSession(recentSessionId);
+                                if (!isRecentHydrationCurrent()) throw new Error('stale-after-full-repair');
+                                const fullFormatted = this.formatSession(fullExport);
+                                const fullDelta = this.buildFullExportSnapshotDelta(baseMessages, snapshotTimelineIds, fullFormatted.messages);
+                                const repaired = await this.injectChangeLists(recentSessionId, { title: fullFormatted.title, messages: fullDelta.messages });
+                                if (!isRecentHydrationCurrent()) throw new Error('stale-after-full-repair-format');
+                                mergedMessages = repaired.messages;
+                                timelineIds = fullDelta.timelineMessageIds;
+                                hydrationCoverage = fullDelta.proven ? 'authoritativeHistoryComplete' : 'deltaContinuityUnknown';
+                            }
 
                             const timelineMsgCount = mergedMessages.filter((m) => typeof m.id === 'string' && m.id.startsWith('msg_')).length;
                             this.uiDebugChannel.appendLine(
@@ -7027,9 +7211,10 @@ ${attachmentLines.join('\n')}`
                                 segments,
                                 meta: {
                                     timelineMessageIds: timelineIds,
-                                    hydrationCoverage: 'deltaContinuityUnknown' as HydrationCoverage
+                                    hydrationCoverage
                                 }
                             };
+                            if (!isRecentHydrationCurrent()) throw new Error('stale-before-recent-publish');
                             liveWebview.postMessage(sessionPayload);
                             if (mergedMessages.length > 0) {
                                 sessionDataSent = true;
@@ -9353,6 +9538,24 @@ ${attachmentLines.join('\n')}`
         }
 
         return this.normalizeDisplayMessagesForSnapshot(merged);
+    }
+
+    private buildImmutableSnapshotWithProvenSuffix(
+        existingSnapshotRecords: SessionMessage[],
+        provenSuffix: SessionMessage[]
+    ): SessionMessage[] {
+        const result = Array.isArray(existingSnapshotRecords) ? [...existingSnapshotRecords] : [];
+        const seenCanonicalIds = new Set<string>();
+        for (const message of result) {
+            if (typeof message?.id === 'string' && message.id) seenCanonicalIds.add(message.id);
+        }
+        for (const message of Array.isArray(provenSuffix) ? provenSuffix : []) {
+            const id = typeof message?.id === 'string' ? message.id : '';
+            if (!id.startsWith('msg_') || seenCanonicalIds.has(id)) continue;
+            result.push(message);
+            seenCanonicalIds.add(id);
+        }
+        return result;
     }
 
     private normalizeDisplayMessagesForSnapshot(messages: SessionMessage[]): SessionMessage[] {

@@ -796,6 +796,17 @@ function applyPayloadHydrationCoverage(sessionId, message) {
     return true;
 }
 
+function handleStandaloneHydrationCoverage(message) {
+    const sessionId = typeof message?.sessionId === 'string' ? message.sessionId : '';
+    if (!sessionId) return false;
+    const updated = applyPayloadHydrationCoverage(sessionId, {
+        meta: { hydrationCoverage: message?.hydrationCoverage }
+    });
+    if (!updated) return false;
+    renderIfActive(sessionId, 'hydrationCoverage');
+    return true;
+}
+
 function resetBaselinePreparingTimeout() {
     if (baselinePreparingTimer) {
         clearTimeout(baselinePreparingTimer);
@@ -12122,6 +12133,10 @@ window.addEventListener('message', (event) => {
             }
             case 'liveTurnHistory': {
                 handleLiveTurnHistory(message);
+                break;
+            }
+            case 'hydrationCoverage': {
+                handleStandaloneHydrationCoverage(message);
                 break;
             }
             case 'webviewAutoRescueRenderCurrentState': {

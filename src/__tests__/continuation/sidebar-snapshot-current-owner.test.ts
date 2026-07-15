@@ -34,7 +34,7 @@ jest.mock('vscode', () => ({
 
 import { SidebarProvider } from '../../SidebarProvider';
 import { OpenCodeDiffProvider } from '../../OpenCodeDiffProvider';
-import { buildChainedTakeoverScenario, buildSuccessfulTakeoverScenario } from '../helpers/continuation-factories';
+import { buildChainedTakeoverScenario, buildSuccessfulTakeoverScenario, makeSessionEntry } from '../helpers/continuation-factories';
 
 const createdProviders: Array<{ dispose: () => Promise<void> }> = [];
 
@@ -66,6 +66,14 @@ describe('SidebarProvider Task 8 snapshot/reload current-owner semantics', () =>
         provider.readPersistedSessionMap = jest.fn().mockResolvedValue({
             ...scenario.sessionMap,
             continuation: scenario.handoffAfterTakeover,
+            entries: [
+                ...scenario.sessionMap.entries,
+                makeSessionEntry({
+                    turnKey: 'cont:2',
+                    finalAssistantMsgId: scenario.msgB,
+                    commitHash: scenario.commitB,
+                }),
+            ],
             msgToCommit: {
                 ...scenario.sessionMap.msgToCommit,
                 [scenario.msgB]: scenario.commitB,
@@ -129,12 +137,20 @@ describe('SidebarProvider Task 8 snapshot/reload current-owner semantics', () =>
         expect(written.sessionData.messages.map((message: any) => message.id)).toEqual(['msg_user_1', 'msg_owner_a', 'system:changeList:headA']);
     });
 
-    it('collapses chained A -> B -> C reload visibility to latest owner C only', async () => {
+    it('collapses the latest chained predecessor B -> C reload visibility to owner C', async () => {
         const provider = createProvider();
         const scenario = buildChainedTakeoverScenario();
         provider.readPersistedSessionMap = jest.fn().mockResolvedValue({
             ...scenario.sessionMap,
             continuation: scenario.handoffAfterC,
+            entries: [
+                ...scenario.sessionMap.entries,
+                makeSessionEntry({
+                    turnKey: 'cont:3',
+                    finalAssistantMsgId: scenario.msgC,
+                    commitHash: scenario.commitC,
+                }),
+            ],
             msgToCommit: {
                 ...scenario.sessionMap.msgToCommit,
                 [scenario.msgC]: scenario.commitC,
@@ -147,16 +163,63 @@ describe('SidebarProvider Task 8 snapshot/reload current-owner semantics', () =>
             title: 'Task 8 chain',
             messages: [
                 { role: 'user', id: 'msg_user_1', text: 'continue', messageIndex: 1 },
-                { role: 'assistant', id: scenario.msgA, text: 'A', messageIndex: 2 },
                 { role: 'assistant', id: scenario.msgB, text: 'B', messageIndex: 3 },
                 { role: 'assistant', id: scenario.msgC, text: 'C', messageIndex: 4 },
             ],
             meta: {
-                timelineMessageIds: ['msg_user_1', scenario.msgA, scenario.msgB, scenario.msgC],
+                timelineMessageIds: ['msg_user_1', scenario.msgB, scenario.msgC],
             },
         });
 
         expect(payload.meta.timelineMessageIds).toEqual(['msg_user_1', scenario.msgC]);
         expect(payload.messages.map((message: any) => message.id)).toEqual(['msg_user_1', scenario.msgC]);
+    });
+
+    it('does not let a finalize collision replace the persisted current-owner record', async () => {
+        const provider = createProvider();
+        const currentOwner = {
+            role: 'assistant',
+            id: 'msg_owner_b',
+            text: 'persisted owner text',
+            messageIndex: 3,
+            meta: { owner: 'current', stable: true },
+            futureOwnerField: { keep: true },
+        };
+        provider.readPersistedSessionMap = jest.fn().mockResolvedValue(null);
+        provider.readSnapshot = jest.fn().mockResolvedValue({
+            obj: {
+                sessionId: 'ses_task8',
+                exportedAt: 1,
+                sessionData: {
+                    type: 'sessionData',
+                    sessionId: 'ses_task8',
+                    title: 'Task 8',
+                    messages: [currentOwner],
+                    segments: [],
+                    meta: { timelineMessageIds: ['msg_owner_b'] },
+                },
+            },
+            bytes: 10,
+        });
+        provider.writeSnapshotAtomic = jest.fn().mockResolvedValue(100);
+        provider.client.exportSession = jest.fn().mockResolvedValue({});
+        provider.formatSession = jest.fn().mockReturnValue({
+            title: 'Task 8 remote',
+            messages: [{
+                ...currentOwner,
+                text: 'remote collision text',
+                meta: { owner: 'remote', stable: false },
+                futureOwnerField: { keep: false },
+            }],
+        });
+
+        await provider.writeFinalizeSnapshotFromCanonicalSession({
+            sessionId: 'ses_task8',
+            assistantMessageId: 'msg_owner_b',
+        });
+
+        const written = provider.writeSnapshotAtomic.mock.calls[0][1];
+        expect(written.sessionData.meta.timelineMessageIds).toEqual(['msg_owner_b']);
+        expect(written.sessionData.messages).toEqual([currentOwner]);
     });
 });
