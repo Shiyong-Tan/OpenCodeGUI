@@ -10113,7 +10113,14 @@ ${attachmentLines.join('\n')}`
                     <div class="session-list" id="session-list"></div>
                 </div>
 
-                <div class="chat-area" id="chat"></div>
+                <div class="chat-scroll-shell">
+                    <div class="chat-area" id="chat"></div>
+                    <button class="chat-jump-bottom hidden" id="chat-jump-bottom" type="button" title="Jump to latest message" aria-label="Jump to latest message">
+                        <svg width="18" height="18" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor" aria-hidden="true">
+                            <path d="M7.5 2h1v9.6l3.3-3.3.7.7-4.5 4.5L3.5 9l.7-.7 3.3 3.3V2z"/>
+                        </svg>
+                    </button>
+                </div>
 
                 <div class="input-container">
                     <div class="attachment-list" id="attachment-list"></div>

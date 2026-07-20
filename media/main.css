@@ -558,14 +558,56 @@ body {
 }
 
 /* --- Chat Area --- */
+.chat-scroll-shell {
+    position: relative;
+    display: flex;
+    flex: 1 1 auto;
+    min-height: 0;
+    min-width: 0;
+}
+
 .chat-area {
     flex: 1;
+    min-height: 0;
+    min-width: 0;
     padding: 10px;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
     gap: 12px;
     background: linear-gradient(180deg, rgba(0,0,0,0.04) 0%, rgba(0,0,0,0) 35%);
+}
+
+.chat-jump-bottom {
+    position: absolute;
+    right: 18px;
+    bottom: 14px;
+    z-index: 8;
+    width: 36px;
+    height: 36px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 1px solid var(--vscode-widget-border);
+    border-radius: 999px;
+    color: var(--vscode-button-foreground);
+    background: var(--vscode-button-background);
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.3);
+    cursor: pointer;
+}
+
+.chat-jump-bottom:hover {
+    background: var(--vscode-button-hoverBackground);
+}
+
+.chat-jump-bottom:focus-visible {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: 2px;
+}
+
+.chat-jump-bottom.hidden {
+    display: none;
 }
 
 .chat-window-spacer {

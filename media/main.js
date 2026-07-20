@@ -7022,6 +7022,7 @@ document.addEventListener('DOMContentLoaded', () => {
     sendButtonStopIconHtml = stopIcon;
     const input = document.getElementById('chat-input');
     const chatContainer = document.getElementById('chat');
+    const chatJumpBottomBtn = document.getElementById('chat-jump-bottom');
     const modelSelect = document.getElementById('model-select');
     const modeSelect = document.getElementById('mode-select');
     const variantSelect = document.getElementById('variant-select');
@@ -7067,12 +7068,19 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    function updateChatJumpBottomButton() {
+        if (!chatJumpBottomBtn || !chatContainer) return;
+        const hasScrollableDistance = chatContainer.scrollHeight > chatContainer.clientHeight + AUTO_SCROLL_BOTTOM_THRESHOLD_PX;
+        chatJumpBottomBtn.classList.toggle('hidden', !hasScrollableDistance || isNearBottom(chatContainer));
+    }
+
     function handleChatContainerScroll() {
         if (!chatWindowState.programmaticScroll) {
             chatWindowState.userScrollActiveUntil = Date.now() + 180;
             autoScrollPinnedToBottom = isNearBottom(chatContainer);
             if (!autoScrollPinnedToBottom) captureChatWindowAnchor();
         }
+        updateChatJumpBottomButton();
         hideQuoteSelectionButton();
     }
 
@@ -9638,6 +9646,10 @@ function shouldHideDcpUiMessage(message) {
             writable: false
         });
     }
+    chatJumpBottomBtn?.addEventListener('click', () => {
+        chatJumpBottomBtn.classList.add('hidden');
+        scrollToBottom(true);
+    });
     let chatWindowAcceptedPlanRevision = 0;
     let chatWindowPlanCorrection = { sessionId: '', generation: -1, planRevision: -1 };
     const chatLocalHistoryController = window.__ocRendering?.createLocalHistoryPresentationController?.({
@@ -12513,6 +12525,7 @@ function shouldHideDcpUiMessage(message) {
                     if (autoScrollPinnedToBottom) scrollToBottom(true);
                     else {
                         chatWindowState.activityBelow = true;
+                        requestAnimationFrame(updateChatJumpBottomButton);
                         restoreChatWindowAnchor();
                     }
                     if (chatWindowState.pendingScrollKey && batch.changedKeys.length && !chatWindowState.pendingRangeRender) {
@@ -14623,6 +14636,7 @@ function shouldHideDcpUiMessage(message) {
             chatContainer.scrollTop = chatContainer.scrollHeight;
             autoScrollPinnedToBottom = true;
             chatWindowState.activityBelow = false;
+            updateChatJumpBottomButton();
             requestAnimationFrame(() => { chatWindowState.programmaticScroll = false; });
         });
     }

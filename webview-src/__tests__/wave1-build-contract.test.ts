@@ -60,4 +60,16 @@ describe('Wave 1 build and package contracts', () => {
     expect(main).toContain("loadingHistory ? `history-loading:${activeSessionId}` : `greeting:${activeSessionId || 'none'}`");
     expect(main).toContain("value: loadingHistory ? { text: 'Loading history ...' } : null");
   });
+
+  test('long chats expose one floating jump-to-latest control outside the keyed chat root', () => {
+    const provider = read('src/SidebarProvider.ts');
+    const main = read('media/main.js');
+    const css = read('media/main.css');
+    expect(provider).toContain('class="chat-scroll-shell"');
+    expect(provider).toContain('id="chat-jump-bottom"');
+    expect(provider).toMatch(/<div class="chat-area" id="chat"><\/div>\s*<button class="chat-jump-bottom hidden"/);
+    expect(main).toContain("chatJumpBottomBtn?.addEventListener('click'");
+    expect(main).toContain('scrollToBottom(true);');
+    expect(css).toContain('.chat-jump-bottom.hidden');
+  });
 });
