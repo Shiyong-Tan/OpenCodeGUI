@@ -207,8 +207,6 @@ export class GitSessionMapStore {
         const commitHash = map.tmpToCommit[tmpKey];
         if (!commitHash) return map;
         const baseCommit = map.tmpToBaseCommit?.[tmpKey];
-        const boundEntry = map.entries.find((entry) => entry.tmpKey === tmpKey && entry.commitHash === commitHash);
-        const isContinuationTurn = typeof boundEntry?.turnKey === 'string' && boundEntry.turnKey.startsWith('cont:');
         const updatedEntries = map.entries.map((entry) => {
             if (entry.tmpKey === tmpKey && entry.commitHash === commitHash) {
                 return { ...entry, finalAssistantMsgId: finalMsgId };
@@ -227,20 +225,6 @@ export class GitSessionMapStore {
             lifecycleState: 'idle',
             watchedFiles: touchedFiles,
             chainId: continuation?.chainId,
-            predecessorOwnerMsgId: isContinuationTurn
-                ? (continuation
-                    ? (continuation.currentOwnerMsgId === finalMsgId
-                        ? continuation.predecessorOwnerMsgId
-                        : (continuation.currentOwnerMsgId ?? continuation.predecessorOwnerMsgId ?? null))
-                    : null)
-                : null,
-            continuationSequence: isContinuationTurn
-                ? (continuation
-                    ? (continuation.currentOwnerMsgId === finalMsgId
-                        ? continuation.continuationSequence
-                        : continuation.continuationSequence + 1)
-                    : 1)
-                : (continuation?.continuationSequence ?? 1),
         });
         return {
             ...mapWithContinuation,

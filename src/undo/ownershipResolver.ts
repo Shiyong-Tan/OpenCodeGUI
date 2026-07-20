@@ -11,31 +11,13 @@ type OwnershipSource = {
     msgToCommit?: SessionMap['msgToCommit'];
 } | null | undefined;
 
-function isContinuationTurnOwner(
-    source: OwnershipSource,
-    ownerMsgId: string | null | undefined
-): boolean {
-    if (!ownerMsgId || !Array.isArray(source?.entries)) return false;
-    return source.entries.some((entry) => {
-        const entryOwner = entry.finalAssistantMsgId || entry.assistantMsgId;
-        return entryOwner === ownerMsgId && typeof entry.turnKey === 'string' && entry.turnKey.startsWith('cont:');
-    });
-}
-
 export function resolveSessionOwnership(
     source: OwnershipSource,
     fallbackOwnerMsgId: string | null
 ): ResolvedSessionOwnership {
     const continuation = source?.continuation;
-    const currentOwnerMsgId = continuation?.currentOwnerMsgId ?? fallbackOwnerMsgId ?? null;
-    if (!isContinuationTurnOwner(source, currentOwnerMsgId)) {
-        return {
-            currentOwnerMsgId: fallbackOwnerMsgId ?? currentOwnerMsgId ?? null,
-            predecessorOwnerMsgId: null,
-        };
-    }
     return {
-        currentOwnerMsgId,
+        currentOwnerMsgId: continuation?.currentOwnerMsgId ?? fallbackOwnerMsgId ?? null,
         predecessorOwnerMsgId: continuation?.predecessorOwnerMsgId ?? null,
     };
 }
@@ -45,6 +27,28 @@ export function resolveCurrentOwnerMsgId(
     fallbackOwnerMsgId: string | null
 ): string | null {
     return resolveSessionOwnership(source, fallbackOwnerMsgId).currentOwnerMsgId;
+}
+
+function collectSupersededOwnerMsgIds(source: OwnershipSource): Set<string> {
+    const continuation = source?.continuation;
+    const superseded = new Set<string>();
+    if (!continuation) return superseded;
+
+    if (continuation.predecessorOwnerMsgId) {
+        superseded.add(continuation.predecessorOwnerMsgId);
+    }
+    const expectedCount = Math.max(0, Math.floor(continuation.continuationSequence) - 1);
+    if (superseded.size >= expectedCount || !Array.isArray(source?.entries)) {
+        return superseded;
+    }
+
+    for (let index = source.entries.length - 1; index >= 0 && superseded.size < expectedCount; index -= 1) {
+        const entry = source.entries[index];
+        const ownerMsgId = entry.finalAssistantMsgId || entry.assistantMsgId;
+        if (!ownerMsgId || ownerMsgId === continuation.currentOwnerMsgId) continue;
+        superseded.add(ownerMsgId);
+    }
+    return superseded;
 }
 
 export function resolveCurrentVisibleOwnerMsgId(
@@ -60,8 +64,7 @@ export function resolveCurrentVisibleOwnerMsgId(
     if (!currentOwnerMsgId || fallbackMessageId === currentOwnerMsgId) {
         return fallbackMessageId;
     }
-    const predecessorOwnerMsgId = source?.continuation?.predecessorOwnerMsgId;
-    return fallbackMessageId === predecessorOwnerMsgId
+    return collectSupersededOwnerMsgIds(source).has(fallbackMessageId)
         ? currentOwnerMsgId
         : fallbackMessageId;
 }

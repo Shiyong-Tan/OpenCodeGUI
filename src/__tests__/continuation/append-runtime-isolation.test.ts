@@ -153,6 +153,7 @@ function attachWebview(provider: any): { postMessage: jest.Mock; receive: (data:
         webview,
         visible: true,
         onDidChangeVisibility: (_callback: () => void) => ({ dispose: jest.fn() }),
+        onDidDispose: (_callback: () => void) => ({ dispose: jest.fn() }),
     } as any);
     if (!receive) throw new Error('webview receive callback was not registered');
     return { postMessage: webview.postMessage, receive };

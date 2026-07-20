@@ -562,8 +562,13 @@ describe('OpenCodeClient revive normal pipeline (Task 5)', () => {
             const signalSse = makeTextPartEvent(sessionId, 'msg_signal_bypass', BACKGROUND_COMPLETE_SIGNAL);
             const signalEvents: any[] = client.mapServerEventToChatEvents(signalSse.type, signalSse.props, 'sse');
 
-            // Then: signal is consumed (returns empty events) but chain IS transitioned
-            expect(signalEvents).toHaveLength(0);
+            // Then: the control text is consumed and only the lifecycle transition is emitted.
+            expect(signalEvents).toEqual([expect.objectContaining({
+                type: 'turnInFlight',
+                sessionId,
+                inFlight: true,
+                ownerMsgId: 'msg_owner_a',
+            })]);
             expect(getChain(client, sessionId)!.state).toBe('bootstrap_buffering');
         });
     });

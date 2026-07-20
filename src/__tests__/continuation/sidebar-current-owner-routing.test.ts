@@ -55,6 +55,7 @@ function createProvider(): any {
         wasChangeListEmitted: jest.fn().mockReturnValue(false),
         markChangeListEmitted: jest.fn().mockReturnValue(true),
         getCommitHashesForMessageIds: jest.fn().mockResolvedValue([]),
+        updateSessionBaseCommitAfterBind: jest.fn().mockResolvedValue(undefined),
         dispose: jest.fn().mockResolvedValue(undefined),
     };
     provider.uiDebugChannel = { appendLine: jest.fn() };
@@ -132,7 +133,16 @@ describe('SidebarProvider Task 6 current-owner changelist routing', () => {
         provider.upsertChangeList = jest.fn().mockResolvedValue(undefined);
         const webview = { postMessage: jest.fn() } as any;
 
-        await provider.emitDiffFileList('ses_task6', webview);
+        await provider.emitDiffFileList({
+            sessionId: 'ses_task6',
+            assistantMessageId: scenario.msgA,
+            commitResult: {
+                status: 'committed',
+                msgToCommit: 'head2',
+                msgToBaseCommit: 'base2',
+                touchedFiles: ['src/continued.ts'],
+            },
+        }, webview);
 
         expect(webview.postMessage).toHaveBeenCalledWith(expect.objectContaining({
             type: 'diffFileList',
@@ -147,7 +157,8 @@ describe('SidebarProvider Task 6 current-owner changelist routing', () => {
                 anchorMessageId: scenario.msgB,
                 commitHead: 'head2',
                 commitBase: 'base2',
-            })
+            }),
+            { preserveAuthoritativeFiles: true }
         );
     });
 

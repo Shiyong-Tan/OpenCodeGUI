@@ -1,4 +1,4 @@
-import { buildChainedTakeoverScenario, buildSuccessfulTakeoverScenario, makeMsgId, makeSessionMap } from '../helpers/continuation-factories';
+import { buildChainedTakeoverScenario, buildSuccessfulTakeoverScenario, makeMsgId, makeSessionEntry, makeSessionMap } from '../helpers/continuation-factories';
 import { resolveCurrentVisibleOwnerMsgId, resolveSessionOwnership } from '../../undo/ownershipResolver';
 
 describe('resolveSessionOwnership', () => {
@@ -87,5 +87,22 @@ describe('resolveSessionOwnership', () => {
         expect(resolveCurrentVisibleOwnerMsgId(sessionMap, scenario.msgA)).toBe(scenario.msgC);
         expect(resolveCurrentVisibleOwnerMsgId(sessionMap, scenario.msgB)).toBe(scenario.msgC);
         expect(resolveCurrentVisibleOwnerMsgId(sessionMap, 'msg_user_1')).toBe('msg_user_1');
+    });
+
+    it('limits reconstructed chained owners to the persisted continuation sequence', () => {
+        const scenario = buildChainedTakeoverScenario();
+        const unrelatedOwner = 'msg_unrelated_assistant';
+        const sessionMap = {
+            ...scenario.sessionMap,
+            entries: [
+                makeSessionEntry({ finalAssistantMsgId: unrelatedOwner }),
+                ...scenario.sessionMap.entries,
+            ],
+            continuation: scenario.handoffAfterC,
+        };
+
+        expect(resolveCurrentVisibleOwnerMsgId(sessionMap, unrelatedOwner)).toBe(unrelatedOwner);
+        expect(resolveCurrentVisibleOwnerMsgId(sessionMap, scenario.msgA)).toBe(scenario.msgC);
+        expect(resolveCurrentVisibleOwnerMsgId(sessionMap, scenario.msgB)).toBe(scenario.msgC);
     });
 });
