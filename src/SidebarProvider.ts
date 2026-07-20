@@ -10113,9 +10113,7 @@ ${attachmentLines.join('\n')}`
                     <div class="session-list" id="session-list"></div>
                 </div>
 
-                <div class="chat-area" id="chat">
-                    <div class="message bot">Hello! I am OpenCode. How can I help you today?</div>
-                </div>
+                <div class="chat-area" id="chat"></div>
 
                 <div class="input-container">
                     <div class="attachment-list" id="attachment-list"></div>

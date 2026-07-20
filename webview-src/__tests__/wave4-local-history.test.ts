@@ -18,8 +18,8 @@ describe('Wave 4 local history presentation state', () => {
     const unknown = deriveLocalOlderPresentation({ totalUnits: 80, revealStart: 0, hydrationCoverage: 'deltaContinuityUnknown' });
     expect(unknown).toEqual({
       state: 'deltaContinuityUnknown', revealStart: 0, localOlderCount: 0,
-      label: 'History synchronization pending',
-      hint: 'Loaded local history is shown while continuity is being verified.',
+      label: 'Loading history ...',
+      hint: '',
       actionable: false,
     });
     expect(deriveLocalOlderPresentation({ totalUnits: 80, revealStart: 0, hydrationCoverage: 'repairInProgress' })).toMatchObject({

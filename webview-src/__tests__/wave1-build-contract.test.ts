@@ -51,4 +51,13 @@ describe('Wave 1 build and package contracts', () => {
     expect(provider).toMatch(/<script src="\$\{renderingScriptUri\}"><\/script>\s*<script src="\$\{scriptUri\}"><\/script>/);
     expect(provider).not.toMatch(/Content-Security-Policy|nonce=/);
   });
+
+  test('the keyed renderer exclusively owns the initial chat greeting root', () => {
+    const provider = read('src/SidebarProvider.ts').replace(/\r\n/g, '\n');
+    expect(provider).toContain('<div class="chat-area" id="chat"></div>');
+    expect(provider).not.toMatch(/<div class="chat-area" id="chat">\s*<div class="message bot">/);
+    const main = read('media/main.js');
+    expect(main).toContain("loadingHistory ? `history-loading:${activeSessionId}` : `greeting:${activeSessionId || 'none'}`");
+    expect(main).toContain("value: loadingHistory ? { text: 'Loading history ...' } : null");
+  });
 });

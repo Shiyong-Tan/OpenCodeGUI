@@ -61,8 +61,11 @@ describe('Wave 4 main-script local older contract', () => {
       classifyChatStructuralSurface: (element: any, key: string) => { element.structuralKey = key; return element; },
       chatContainer: { insertBefore: (surface: any) => inserted.push(surface) },
       keyedRoots: () => [], activateChatLocalOlder: () => true,
+      reserveChatStructuralRoot: (element: any) => element,
+      preflightChatRenderRootAdmission: () => ({ allowed: true }),
+      chatStructuralRootReservations: new Set(),
     });
-    vm.runInContext(`${extractFunction('function renderChatLocalOlderSurface(')}; globalThis.render = renderChatLocalOlderSurface;`, context);
+    vm.runInContext(`${extractFunction('function ensureChatLocalOlderSurface(')}\n${extractFunction('function renderChatLocalOlderSurface(')}; globalThis.render = renderChatLocalOlderSurface;`, context);
     const available = { state: 'localOlderAvailable', label: 'Load older', hint: '', actionable: true };
     (context as any).render(available);
     const surface = inserted.at(-1);
@@ -75,13 +78,14 @@ describe('Wave 4 main-script local older contract', () => {
     expect(surface.children).toHaveLength(1);
     expect(surface.children[0]).toMatchObject({ textContent: 'Start of loaded history', attributes: { role: 'status' } });
     (context as any).render({
-      state: 'deltaContinuityUnknown', label: 'History synchronization pending', actionable: false,
-      hint: 'Loaded local history is shown while continuity is being verified.',
+      state: 'deltaContinuityUnknown', label: 'Loading history ...', actionable: false,
+      hint: '',
     });
-    expect(surface.children.map((child: any) => child.textContent)).toEqual([
-      'History synchronization pending', 'Loaded local history is shown while continuity is being verified.',
-    ]);
+    expect(surface.children.map((child: any) => child.textContent)).toEqual(['Loading history ...']);
     expect(surface.children.some((child: any) => child.textContent === 'Load older')).toBe(false);
+
+    (context as any).render({ state: 'deltaContinuityUnknown', label: 'Loading history ...', hint: '', actionable: false }, true);
+    expect(surface.children).toHaveLength(0);
   });
 
   test('executable next/previous search keeps full loaded ordering and jumps unrevealed keys once', () => {
@@ -92,14 +96,87 @@ describe('Wave 4 main-script local older contract', () => {
         activeKeyIndex: -1, windowTargetKey: '', matches: [], activeIndex: -1,
       },
       ensureChatWindowKeyMounted: (key: string) => { jumps.push(key); return true; },
+      keyedRootForSearchKey: () => null,
       updateActiveSessionSearchHit: () => undefined,
     });
     vm.runInContext(`${extractFunction('function goToSessionSearchMatch(')}; globalThis.go = goToSessionSearchMatch;`, context);
     (context as any).go(1);
     (context as any).go(1);
-    (context as any).go(-1);
-    expect(jumps).toEqual(['old-unrevealed', 'middle-unrevealed', 'old-unrevealed']);
-    expect((context as any).sessionSearch.fullMatchKeys).toEqual(['old-unrevealed', 'middle-unrevealed', 'recent']);
+    (context as any).go(1);
+    expect(jumps).toEqual(['old-unrevealed', 'middle-unrevealed', 'recent']);
+    expect((context as any).sessionSearch.activeKeyIndex).toBe(2);
+  });
+
+  test('text search count remains global when the mounted DOM hit count changes', () => {
+    const count = { textContent: '', classList: { toggle: () => undefined } };
+    const prev = { disabled: true };
+    const next = { disabled: true };
+    const smart = { disabled: false, textContent: '', classList: { toggle: () => undefined } };
+    const elements: Record<string, any> = {
+      'session-search-count': count, 'session-search-prev': prev,
+      'session-search-next': next, 'session-search-smart': smart,
+    };
+    const context = vm.createContext({
+      document: { getElementById: (id: string) => elements[id] || null },
+      sessionSearch: {
+        mode: 'text', query: '灰屏', smartInFlight: false,
+        fullMatchKeys: Array.from({ length: 25 }, (_, index) => `key-${index}`), activeKeyIndex: 1,
+        matches: Array.from({ length: 8 }), activeIndex: 0,
+      },
+    });
+    vm.runInContext(`${extractFunction('function getSessionSearchElements(')}\n${extractFunction('function updateSessionSearchControls(')}; globalThis.update = updateSessionSearchControls;`, context);
+    (context as any).update();
+    expect(count.textContent).toBe('2/25');
+    (context as any).sessionSearch.matches = Array.from({ length: 13 });
+    (context as any).update();
+    expect(count.textContent).toBe('2/25');
+    expect(prev.disabled).toBe(false);
+    expect(next.disabled).toBe(false);
+  });
+
+  test('global text results retain one navigation location per canonical unit', () => {
+    const context = vm.createContext({
+      activeSessionId: 'session-a',
+      getSessionState: () => ({ timeline: ['message-a'], messagesById: new Map(), hiddenSet: new Set() }),
+      window: { __oc: { getLoadedChatSearchRows: () => [
+        { id: 'message-a', text: '灰屏灰屏', matchCount: 2 },
+        { id: 'message-b', text: '灰屏', matchCount: 1 },
+      ] } },
+    });
+    vm.runInContext(`${extractFunction('function collectLoadedTextSearchKeys(')}; globalThis.collect = collectLoadedTextSearchKeys;`, context);
+    expect((context as any).collect('灰屏')).toEqual(['message-a', 'message-b']);
+    expect(source).toContain("active?.scrollIntoView?.({ block: 'center', inline: 'nearest', behavior: 'auto' });");
+    const syncOwner = extractFunction('function syncActiveTextSearchDomHit(');
+    expect(syncOwner).toContain('autoScrollPinnedToBottom = false;');
+    expect(syncOwner).not.toContain('chatWindowState');
+    expect(extractFunction('function goToSessionSearchMatch('))
+      .toContain("if (!keyedRootForSearchKey(targetKey) && ensureChatWindowKeyMounted(targetKey, 'search')) return;");
+  });
+
+  test('typing computes globally without moving the virtual window and first next selects result zero', () => {
+    const syncOwner = extractFunction('function syncActiveTextSearchDomHit(');
+    const inputStart = source.indexOf("searchInput?.addEventListener('input', () => {");
+    const inputEnd = source.indexOf("searchInput?.addEventListener('keydown'", inputStart);
+    const inputOwner = source.slice(inputStart, inputEnd);
+    expect(inputOwner).toContain('sessionSearch.activeKeyIndex = -1;');
+    expect(inputOwner).toContain("sessionSearch.windowTargetKey = '';");
+    expect(inputOwner).toContain('scheduleSessionSearchRefresh({ jumpToFirst: false });');
+    expect(inputOwner).not.toContain('jumpToFirst: true');
+
+    const updateCalls: boolean[] = [];
+    const mark = { dataset: { searchKey: 'message-a' } };
+    const context = vm.createContext({
+      sessionSearch: {
+        activeKeyIndex: 0, fullMatchKeys: ['message-a'], matches: [mark], activeIndex: -1,
+      },
+      autoScrollPinnedToBottom: true,
+      updateActiveSessionSearchHit: ({ scroll }: { scroll: boolean }) => updateCalls.push(scroll),
+    });
+    vm.runInContext(`${syncOwner}; globalThis.sync = syncActiveTextSearchDomHit;`, context);
+    (context as any).sync({ scroll: true });
+    expect((context as any).autoScrollPinnedToBottom).toBe(false);
+    expect((context as any).sessionSearch.activeIndex).toBe(0);
+    expect(updateCalls).toEqual([true]);
   });
 
   test('observer requires false-to-true re-entry and static intersecting callbacks reveal one batch', () => {
@@ -124,8 +201,11 @@ describe('Wave 4 main-script local older contract', () => {
       document: { createElement: makeElement }, classifyChatStructuralSurface: (element: any) => element,
       chatContainer: { insertBefore: () => undefined }, keyedRoots: () => [],
       activateChatLocalOlder: () => { activations += 1; return true; },
+      reserveChatStructuralRoot: (element: any) => element,
+      preflightChatRenderRootAdmission: () => ({ allowed: true }),
+      chatStructuralRootReservations: new Set(),
     });
-    vm.runInContext(`${extractFunction('function renderChatLocalOlderSurface(')}; globalThis.render = renderChatLocalOlderSurface;`, context);
+    vm.runInContext(`${extractFunction('function ensureChatLocalOlderSurface(')}\n${extractFunction('function renderChatLocalOlderSurface(')}; globalThis.render = renderChatLocalOlderSurface;`, context);
     const available = { state: 'localOlderAvailable', label: 'Load older', hint: '', actionable: true };
     (context as any).render(available);
     observerCallback?.([{ isIntersecting: true }]);
@@ -138,28 +218,169 @@ describe('Wave 4 main-script local older contract', () => {
     expect(activations).toBe(2);
   });
 
-  test('windowed reconcile completes local activation even when adapter creation fails', () => {
-    const completions: string[] = [];
-    const makeContext = (failAfterCreate: boolean) => vm.createContext({
-      activeSessionId: 'session-a', autoScrollPinnedToBottom: false, Map, Set, Object,
-      chatWindowState: { rendering: false, pendingRangeRender: false, allUnits: [], pendingScrollKey: '', mountedKeys: new Set() },
-      captureChatWindowAnchor: () => undefined,
+  test('transaction-capable windowed fake follows planned journaled prepare/seal/finalize', () => {
+    const calls: string[] = [];
+    const transaction = {
+      prepareCommit: () => { calls.push('prepare'); return true; },
+      getRange: () => ({ items: [], totalSize: 0 }),
+      setPresentationRevision: () => undefined, unobserveElement: () => undefined, observeElement: () => undefined,
+      commit: () => { calls.push('seal'); return true; },
+      finalizeCommit: () => { calls.push('finalize'); return true; },
+      hasPendingCompletion: () => false, retryCompletion: () => true, isFinalized: () => false,
+      abort: () => { calls.push('abort'); return true; },
+    };
+    const adapter = { beginTransaction: () => { calls.push('begin'); return transaction; } };
+    const windowObject: any = { __ocRendering: {
+      presentationFingerprint: () => 'revision',
+      planChatWindowContainment: () => ({
+        allowed: true, acceptedKeys: [], mountedCount: 0, directChildCount: 0, shellSelections: {},
+      }),
+    } };
+    const context = vm.createContext({
+      activeSessionId: 'session-a', autoScrollPinnedToBottom: false, Map, Set, Object, Error,
+      CHAT_WINDOW_TRANSACTION_UNAVAILABLE_RESULT: Object.freeze({
+        ok: false, status: 'window-transaction-unavailable', reason: 'missing-begin-transaction',
+      }),
+      CHAT_WINDOW_CANDIDATE_STALE_RESULT: Object.freeze({
+        ok: false, status: 'window-candidate-stale', reason: 'candidate-owner-stale',
+      }),
+      CHAT_WINDOW_MOUNT_LIMIT: 140, CHAT_WINDOW_DIRECT_CHILD_LIMIT: 146,
+      CHAT_PENDING_SCROLL_MAX_ATTEMPTS: 4, chatWindowGeneration: 1, chatWindowAcceptedPlanRevision: 0,
+      chatWindowState: {
+        sessionId: 'session-a', adapter, rendering: false, pendingRangeRender: false, allUnits: [], pendingScrollKey: '', mountedKeys: new Set(),
+      },
+      window: windowObject, chatContainer: { childElementCount: 0, querySelectorAll: () => [] },
       resolveChatLocalHistoryWindow: () => ({ visibleUnits: [], presentation: {} }),
-      ensureChatWindowAdapter: () => failAfterCreate
-        ? ({ getRange: () => ({ items: [], totalSize: 0 }) })
-        : (() => { throw new Error('adapter-create'); })(),
-      applyKeyedChatReconciliation: () => { throw new Error('post-create-reconcile'); },
-      chatLocalHistoryController: { complete: (sessionId: string) => completions.push(sessionId) },
+      captureChatWindowAcceptedState: () => ({}),
+      beginChatPresentationJournal: () => ({ adapterTransaction: null }),
+      finalizeChatPresentationJournal: () => { calls.push('journal-finalize'); calls.push('complete'); return true; },
+      abortChatPresentationJournal: () => { calls.push('journal-abort'); return true; },
+      captureChatWindowAnchor: () => undefined, reserveChatWindowStructuralRoots: () => undefined,
+      ensureChatWindowAdapter: () => adapter,
+      getChatWindowUnitKind: () => 'system', getKeyedUnitPresentation: () => ({}), getChatWindowKeepMountedKeys: () => [],
+      buildChatWindowContainmentRequest: () => ({ requestedKeys: [], limits: { mounted: 140, directChildren: 146 } }),
+      runChatPresentationFailureSeam: () => undefined,
+      applyKeyedChatReconciliation: () => calls.push('keyed-planned'),
+      updateChatWindowSpacers: () => true, renderChatLocalOlderSurface: () => true,
+      isActiveSessionHistoryLoading: () => false,
+      keyedRootForKey: () => null, keyedRoots: () => [], getChatStructuralIntegrityRoots: () => [],
+      sampleChatRenderDom: () => undefined, recordChatWindowPressureAttribution: () => undefined,
+      assertChatWindowDomBudget: (budget: any) => budget, scheduleChatWindowPlanCorrection: () => null,
+      tryPendingChatWindowScroll: () => true, scrollToBottom: () => undefined, restoreChatWindowAnchor: () => undefined,
+      chatLocalHistoryController: { complete: () => calls.push('unexpected-direct-complete') },
     });
-    const beforeCreate = makeContext(false);
-    vm.runInContext(`${extractFunction('function applyWindowedKeyedChatReconciliation(')}; globalThis.apply = applyWindowedKeyedChatReconciliation;`, beforeCreate);
-    expect(() => (beforeCreate as any).apply({}, [])).toThrow('adapter-create');
-    expect((beforeCreate as any).chatWindowState.rendering).toBe(false);
-    const afterCreate = makeContext(true);
-    vm.runInContext(`${extractFunction('function applyWindowedKeyedChatReconciliation(')}; globalThis.apply = applyWindowedKeyedChatReconciliation;`, afterCreate);
-    expect(() => (afterCreate as any).apply({}, [])).toThrow('post-create-reconcile');
-    expect(completions).toEqual(['session-a', 'session-a']);
-    expect((afterCreate as any).chatWindowState.rendering).toBe(false);
+    vm.runInContext(`${extractFunction('function applyWindowedKeyedChatReconciliation(')}; globalThis.apply = applyWindowedKeyedChatReconciliation;`, context);
+    expect((context as any).apply({}, [])).toEqual([]);
+    expect(calls).toEqual(['begin', 'prepare', 'keyed-planned', 'seal', 'finalize', 'journal-finalize', 'complete']);
+    expect((context as any).chatWindowState.rendering).toBe(false);
+  });
+
+  test.each([
+    ['window-unavailable-retained', 1, 'retained'],
+    ['window-unavailable-bootstrap-pending', 0, 'empty'],
+  ])('missing beginTransaction routes to %s with exact sentinel and zero mutation', (expectedRoute, rootCount, status) => {
+    const calls: string[] = [];
+    const sentinel = Object.freeze({
+      ok: false, status: 'window-transaction-unavailable', reason: 'missing-begin-transaction',
+    });
+    const roots = Array.from({ length: rootCount }, (_, index) => ({ dataset: { renderUnitKey: `k${index}` } }));
+    const state = { sessionId: 'session-a', adapter: {}, rendering: false, pendingRangeRender: false, allUnits: [], pendingScrollKey: '', mountedKeys: new Set() };
+    const context = vm.createContext({
+      activeSessionId: 'session-a', Map, Set, Object, Math, Number, Array, Error,
+      CHAT_WINDOW_TRANSACTION_UNAVAILABLE_RESULT: sentinel,
+      CHAT_WINDOW_CANDIDATE_STALE_RESULT: Object.freeze({
+        ok: false, status: 'window-candidate-stale', reason: 'candidate-owner-stale',
+      }),
+      CHAT_WINDOW_INITIAL_TAIL: 80, CHAT_WINDOW_MOUNT_LIMIT: 140, CHAT_WINDOW_DIRECT_CHILD_LIMIT: 146,
+      TANSTACK_CHAT_WINDOW_ENABLED: true, CHAT_WINDOW_CONTAINMENT_POLICY_ENABLED: true, CHAT_WINDOW_RECOVERY_ENABLED: true,
+      chatWindowState: state, keyedChatReconcileFailure: null, keyedRoots: () => roots,
+      isChatWindowAvailable: () => true, projectChatWindowStructuralRoots: () => 2,
+      isActiveSessionHistoryLoading: () => false,
+      sessionSearch: { windowTargetKey: '' }, window: { __ocRendering: { planChatWindowContainment: () => null } },
+      vscode: { postMessage: () => calls.push('recovery') },
+      applyKeyedChatReconciliation: () => calls.push('forbidden-keyed'),
+      resolveChatLocalHistoryWindow: () => { calls.push('forbidden-local-window'); return { visibleUnits: [], presentation: {} }; },
+      ensureChatWindowAdapter: () => { calls.push('forbidden-adapter-create'); return null; },
+      chatLocalHistoryController: { complete: () => calls.push('forbidden-complete') },
+    });
+    vm.runInContext(`${extractFunction('function applyWindowedKeyedChatReconciliation(')}\n${extractFunction('function applyChatWindowOrWave2(')}; Object.assign(globalThis, { applyWindowedKeyedChatReconciliation, applyChatWindowOrWave2 });`, context);
+    const stateIdentity = (context as any).chatWindowState;
+    expect((context as any).applyWindowedKeyedChatReconciliation({}, [])).toBe(sentinel);
+    expect((context as any).applyChatWindowOrWave2({}, [])).toBe(expectedRoute);
+    expect((context as any).window.__ocChatWindowRecovery).toEqual({
+      status, reason: 'missing-begin-transaction', retryAttempted: false, retryPending: true, boundedRootCount: rootCount,
+    });
+    expect(calls).toEqual(['recovery']);
+    expect((context as any).chatWindowState).toBe(stateIdentity);
+    expect(source).not.toContain('applyKeyedChatReconciliation(session, legacyUnits)');
+    expect(extractFunction('function applyChatWindowOrWave2(')).not.toMatch(/renderFromStateLegacy|disableChatWindowForSession|destroyChatWindowAdapter|session\.timeline/);
+  });
+
+  test('adapter-creation exception stays unpublished and does not resolve or complete local history', () => {
+    const calls: string[] = [];
+    const unavailable = Object.freeze({
+      ok: false, status: 'window-transaction-unavailable', reason: 'missing-begin-transaction',
+    });
+    const state: any = {
+      sessionId: '', adapter: null, snapshot: { accepted: true }, rendering: false,
+      pendingRangeRender: false, allUnits: [], pendingScrollKey: '', mountedKeys: new Set(),
+      anchorKey: '', localHistoryPresentation: { accepted: true },
+    };
+    const context = vm.createContext({
+      activeSessionId: 'session-a', chatWindowGeneration: 7, Map, Set, Object, Math,
+      CHAT_WINDOW_TRANSACTION_UNAVAILABLE_RESULT: unavailable,
+      CHAT_WINDOW_CANDIDATE_STALE_RESULT: Object.freeze({
+        ok: false, status: 'window-candidate-stale', reason: 'candidate-owner-stale',
+      }),
+      CHAT_WINDOW_REQUIRED_TRANSACTION_METHODS: Object.freeze([
+        'getRange', 'update', 'observeElement', 'unobserveElement', 'invalidateMeasurement',
+        'setPresentationRevision', 'migrateKey', 'prepareCommit', 'commit', 'finalizeCommit',
+        'retryCompletion', 'isFinalized', 'isDegraded', 'hasPendingCompletion', 'abort',
+      ]),
+      disposedUnpublishedChatWindowCandidates: new WeakSet(),
+      chatWindowState: state, CHAT_WINDOW_INITIAL_TAIL: 80, CHAT_WINDOW_OVERSCAN: 20,
+      CHAT_WINDOW_MOUNT_LIMIT: 140, CHAT_WINDOW_DIRECT_CHILD_LIMIT: 146,
+      sessionSearch: { windowTargetKey: '' }, chatContainer: {},
+      getSessionState: () => ({ hydrationCoverage: null }), normalizePayloadHydrationCoverage: () => null,
+      projectChatWindowStructuralRoots: () => 3, getKeyedUnitPresentation: () => ({}),
+      beginChatWindowPressureGeneration: () => calls.push('forbidden-pressure'),
+      recordChatWindowStaleCallback: () => calls.push('forbidden-stale'),
+      scheduleRenderFromState: () => calls.push('forbidden-schedule'),
+      vscode: { postMessage: () => calls.push('forbidden-message') },
+      autoScrollPinnedToBottom: false, scrollToBottom: () => calls.push('forbidden-scroll'),
+      restoreChatWindowAnchor: () => calls.push('forbidden-anchor'),
+      window: { __ocRendering: {
+        deriveLocalOlderPresentation: () => { calls.push('derive'); return { state: 'hidden' }; },
+        planChatWindowContainment: (request: any) => {
+          calls.push('plan');
+          return { allowed: true, acceptedKeys: request.requestedKeys, mountedCount: 1, directChildCount: 4, shellSelections: {} };
+        },
+        presentationFingerprint: () => 'revision',
+        createTanStackVirtualAdapter: (options: any) => {
+          calls.push(`factory:${options.initialOwnerMode}`);
+          throw new Error('adapter-create');
+        },
+      } },
+      resolveChatLocalHistoryWindow: () => { calls.push('forbidden-local-window'); return {}; },
+      chatLocalHistoryController: { complete: (sessionId: string) => calls.push(`complete:${sessionId}`) },
+    });
+    vm.runInContext(`
+      ${extractFunction('function getChatWindowKeepMountedKeys(')}
+      ${extractFunction('function getChatWindowUnitKind(')}
+      ${extractFunction('function getKeyedPresentationIdentity(')}
+      ${extractFunction('function disposeUnpublishedChatWindowAdapterCandidate(')}
+      ${extractFunction('function prepareUnpublishedChatWindowTransaction(')}
+      globalThis.prepare = prepareUnpublishedChatWindowTransaction;
+    `, context);
+    const stateIdentity = (context as any).chatWindowState;
+    const snapshotIdentity = state.snapshot;
+    expect((context as any).prepare({}, [{ key: 'unit-a', kind: 'message', value: { message: { role: 'assistant' } } }], [], null))
+      .toBe(unavailable);
+    expect(calls).toEqual(['derive', 'plan', 'factory:deferred-transaction']);
+    expect((context as any).chatWindowState).toBe(stateIdentity);
+    expect(state.adapter).toBeNull();
+    expect(state.snapshot).toBe(snapshotIdentity);
+    expect((context as any).chatWindowGeneration).toBe(7);
   });
 
   test('pending search key survives two misses, clears on success, and has a bounded terminal path', () => {

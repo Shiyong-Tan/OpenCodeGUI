@@ -14,6 +14,52 @@ body {
     --card-header-size: 0.9em;
 }
 
+/* Generic bounded presentation shell. Family adapters must not add styles here. */
+.safe-shell {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+    padding: 8px;
+    border: 1px solid var(--vscode-widget-border);
+    border-radius: 6px;
+    background: var(--vscode-editor-background);
+}
+
+.safe-shell-heading {
+    font-weight: 600;
+}
+
+.safe-shell-status,
+.safe-shell-page-status {
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.9em;
+}
+
+.safe-shell-viewer-region {
+    min-width: 0;
+}
+
+.safe-shell-viewer {
+    max-width: 100%;
+    margin: 0;
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.safe-shell-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+.safe-shell-action:focus-visible,
+.safe-shell-viewer:focus-visible {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: 2px;
+}
+
 /* --- Session Header --- */
 .session-header {
     display: flex;

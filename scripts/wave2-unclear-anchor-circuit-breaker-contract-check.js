@@ -43,9 +43,12 @@ function run() {
   assertContains(webview, 'skipReason=open-window', 'open-window local-patch skip exists');
   assertContains(webview, 'noteUnclearAnchorCoalescedRenderComplete(activeSessionId)', 'successful render reset hook exists');
 
-  assertContains(webview, 'recordUnclearAnchorLocalPatchFailure(sessionId, source, reason, fields)', 'subagent status failure path records breaker failures');
   assertContains(webview, "armBackgroundSubagentIndicator(sessionId, anchorAssistantId, 'backgroundActivityPulse')", 'background pulse source is passed to breaker');
-  assertContains(webview, "isUnclearAnchorCircuitBreakerOpen(sessionId, 'subagentStatus', 'unclear-anchor'", 'subagent status local patch is gated while breaker is open');
+  const subagentStart = webview.indexOf("case 'subagentStatus':");
+  const subagentEnd = webview.indexOf("case 'backgroundActivityPulse':", subagentStart);
+  const subagentHandler = webview.slice(subagentStart, subagentEnd);
+  assertContains(subagentHandler, "scheduleCoalescedSessionMetadataRender(sessionId, 'subagentStatus-coalesced'", 'subagent status uses its bounded metadata render owner');
+  assertNotContains(subagentHandler, 'isUnclearAnchorCircuitBreakerOpen', 'subagent status no longer enters a permanent unclear-anchor retry loop');
 
   assertNotContains(webview, 'location.reload(', 'no WebView reload introduced');
   assertNotContains(webview, 'recreate=true', 'no recreate marker introduced');

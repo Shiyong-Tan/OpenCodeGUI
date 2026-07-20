@@ -48,8 +48,8 @@ export function deriveLocalOlderPresentation(input: {
   const terminalByCoverage: Record<Exclude<HydrationCoverage, 'authoritativeHistoryComplete'>, Pick<LocalOlderPresentation, 'state' | 'label' | 'hint'>> = {
     deltaContinuityUnknown: {
       state: 'deltaContinuityUnknown',
-      label: 'History synchronization pending',
-      hint: 'Loaded local history is shown while continuity is being verified.',
+      label: 'Loading history ...',
+      hint: '',
     },
     repairInProgress: {
       state: 'repairInProgress',

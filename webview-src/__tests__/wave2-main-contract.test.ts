@@ -16,18 +16,23 @@ function extractFunction(marker: string): string {
 }
 
 describe('Wave 2 main-script contract', () => {
-  test('keyed reconcile is deterministically default-on with an exact legacy fallback', () => {
+  test('keyed reconcile is default-on without automatic legacy while historical definition remains', () => {
+    const outer = extractFunction('function renderFromState()');
+    const legacy = extractFunction('function renderFromStateLegacy()');
     expect(source).toContain('const KEYED_CHAT_RECONCILE_ENABLED = window.__ocKeyedChatReconcileEnabled !== false;');
-    expect(source).toContain('if (!KEYED_CHAT_RECONCILE_ENABLED || !window.__ocRendering || keyedChatFailedSessionId === activeSessionId)');
-    expect(source).toContain('renderFromStateLegacy();');
-    expect(extractFunction('function renderFromState()')).not.toContain("chatContainer.innerHTML = ''");
-    expect(extractFunction('function renderFromStateLegacy()')).toContain("chatContainer.innerHTML = ''");
+    expect(source.match(/renderFromStateLegacy\(\);/g) || []).toHaveLength(0);
+    for (const forbidden of [
+      'renderFromStateLegacy', "chatContainer.innerHTML = ''", 'destroyChatWindowAdapter',
+      'applyKeyedChatReconciliation(session, units)', 'keyedChatReconcileState = { sessionId:',
+    ]) expect(outer).not.toContain(forbidden);
+    expect(legacy).toContain("chatContainer.innerHTML = ''");
+    expect(legacy).toContain('function renderFromStateLegacy()');
   });
 
   test('keyed reconciler alone owns unit-root structure and unchanged units skip factories', () => {
     const apply = extractFunction('function applyKeyedChatReconciliation(');
     expect(apply).toContain("entry.type === 'create' || entry.type === 'replace'");
-    expect(apply).toContain('renderDetachedKeyedUnit(session, unit, renderedSet)');
+    expect(apply).toContain('renderDetachedKeyedUnit(session, unit, renderedSet, presentationSelections?.[unit.key])');
     expect(apply).toContain('chatContainer.insertBefore(root, currentAtIndex)');
     expect(apply).not.toContain('enhanceCodeBlocksWithCopyButtons');
     expect(apply).not.toContain('wrapTables');
@@ -51,8 +56,9 @@ describe('Wave 2 main-script contract', () => {
     expect(source).toContain("const INIT_NO_MODELS_STRUCTURAL_KEY = 'surface:error:no-model';");
     expect(source).toContain("const CHAT_STRUCTURAL_SURFACE_LIMIT = 6;");
     const showError = extractFunction('function showInitNoModelsError()');
+    expect(showError).toContain('reserveChatStructuralRoot(errorDiv);');
     expect(showError).toContain('classifyChatStructuralSurface(errorDiv, INIT_NO_MODELS_STRUCTURAL_KEY, \'init:no-models\');');
-    expect(showError).toContain('if (!existingError) chatContainer.appendChild(errorDiv);');
+    expect(showError).toContain('if (!existingError) appendChatRenderRoot(errorDiv);');
     expect(source).toContain('showInitNoModelsError();');
     expect(extractFunction('function keyedRoots()')).toContain('child.dataset?.renderUnitKey');
     expect(extractFunction('function getMessageKeyFromChatChild(')).not.toContain('chatStructuralKey');
@@ -67,7 +73,7 @@ describe('Wave 2 main-script contract', () => {
     expect(stable).toContain('key: { $unitIdentityOwned: true }');
     expect(stable).not.toContain('delete meta.isThinking');
     expect(acknowledge).toContain('cachedItem.streamStableFingerprint !== currentStreamStableFingerprint');
-    expect(acknowledge).toContain('fingerprint: rendering.presentationFingerprint(currentPresentation)');
+    expect(acknowledge).toContain('fingerprint: rendering.presentationFingerprint(getKeyedPresentationIdentity(currentPresentation, presentationSelection))');
     expect(source).toContain('const keyedFingerprintAcknowledged = acknowledgeKeyedStreamPatch(session, targetId);');
   });
 

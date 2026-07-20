@@ -1,4 +1,94 @@
 ﻿const vscode = acquireVsCodeApi();
+const B4_SYNTHETIC_EVIDENCE_BOOT_ACCEPTED = window.__ocChatWindowAdaptiveShadowTestConfig?.syntheticEnvironment === true;
+const CF3_RANGE_DIAG_MARKER = 'CF3_RANGE_DIAG_V1';
+const CF3_RANGE_DIAG_SOURCE_TOKEN = 'cf3-main-range-v1';
+const cf3RangeDiagnosticState = {
+    phase: 'async-core', sync: 'unknown', rangeCount: 0, rangeSignatures: new Set(), markerEmitted: false
+};
+
+function emitCF3RangeDiagnosticMarker() {
+    if (cf3RangeDiagnosticState.markerEmitted) return;
+    cf3RangeDiagnosticState.markerEmitted = true;
+    vscode.postMessage({
+        type: 'ui-debug', payload: [CF3_RANGE_DIAG_MARKER, { sourceToken: CF3_RANGE_DIAG_SOURCE_TOKEN }]
+    });
+}
+
+function runCF3RangeDiagnosticPhase(phase, operation) {
+    const priorPhase = cf3RangeDiagnosticState.phase;
+    const priorSync = cf3RangeDiagnosticState.sync;
+    cf3RangeDiagnosticState.phase = phase;
+    cf3RangeDiagnosticState.sync = true;
+    try {
+        return operation();
+    } finally {
+        cf3RangeDiagnosticState.sync = false;
+        cf3RangeDiagnosticState.phase = priorPhase;
+        cf3RangeDiagnosticState.sync = priorSync;
+    }
+}
+
+function getCF3RangeFirstDifference(snapshot, acknowledged) {
+    try {
+        if (!acknowledged) return 'missing-ack';
+        const rawItems = Array.isArray(snapshot?.items) ? snapshot.items : [];
+        const acknowledgedItems = Array.isArray(acknowledged?.items) ? acknowledged.items : [];
+        if (rawItems.length !== acknowledgedItems.length) return 'count';
+        for (let index = 0; index < rawItems.length; index += 1) {
+            const raw = rawItems[index];
+            const prior = acknowledgedItems[index];
+            if (raw?.key !== prior?.key) return 'key';
+            if (raw?.index !== prior?.index) return 'index';
+            if (raw?.start !== prior?.start) return 'start';
+            if (raw?.end !== prior?.end) return 'end';
+            if (raw?.size !== prior?.size) return 'size';
+        }
+        if (snapshot?.totalSize !== acknowledged?.totalSize) return 'totalSize';
+        return 'none';
+    } catch {
+        return 'missing-ack';
+    }
+}
+
+function recordCF3RangeDiagnostic(snapshot, diagnosticContext) {
+    try {
+        const context = diagnosticContext && typeof diagnosticContext === 'object' ? diagnosticContext : null;
+        const phase = ['initial-create', 'established-update', 'transaction-finalize', 'async-core'].includes(cf3RangeDiagnosticState.phase)
+            ? cf3RangeDiagnosticState.phase : 'async-core';
+        const sync = cf3RangeDiagnosticState.sync === true || cf3RangeDiagnosticState.sync === false
+            ? cf3RangeDiagnosticState.sync : 'unknown';
+        const allowedDifferences = ['missing-ack', 'count', 'key', 'index', 'start', 'end', 'size', 'totalSize', 'none'];
+        const firstDifference = allowedDifferences.includes(context?.firstDifference)
+            ? context.firstDifference : 'missing-ack';
+        cf3RangeDiagnosticState.rangeCount += 1;
+        const signature = `${phase}|${String(sync)}|${firstDifference}`;
+        const firstSignature = !cf3RangeDiagnosticState.rangeSignatures.has(signature);
+        cf3RangeDiagnosticState.rangeSignatures.add(signature);
+        if (cf3RangeDiagnosticState.rangeCount > 20
+            && cf3RangeDiagnosticState.rangeCount % 50 !== 0
+            && !firstSignature) return;
+        const rawItems = Array.isArray(snapshot?.items) ? snapshot.items : [];
+        const diagnostic = Object.freeze({
+            phase,
+            sync,
+            rendering: context?.rendering === true,
+            pendingRangeRender: context?.pendingRangeRender === true,
+            pendingScrollPresent: context?.pendingScrollPresent === true,
+            programmaticScroll: context?.programmaticScroll === true,
+            rawCount: rawItems.length,
+            rawTotalSize: Number.isFinite(snapshot?.totalSize) ? Number(snapshot.totalSize) : 0,
+            acknowledgedCount: Number.isSafeInteger(context?.acknowledgedCount) && context.acknowledgedCount >= 0
+                ? Number(context.acknowledgedCount) : 0,
+            acknowledgedTotalSize: Number.isFinite(context?.acknowledgedTotalSize)
+                ? Number(context.acknowledgedTotalSize) : 0,
+            firstDifference,
+            scrollTop: Number.isFinite(context?.scrollTop) ? Number(context.scrollTop) : 0,
+            adapterOffsetAvailable: false,
+            adapterOffset: 'unavailable'
+        });
+        vscode.postMessage({ type: 'ui-debug', payload: ['[WV][CF3_RANGE_DIAG]', diagnostic] });
+    } catch { /* diagnostic-only path must not affect range ownership */ }
+}
 
 // Global error handler for catching uncaught exceptions
 window.onerror = function (message, source, lineno, colno, error) {
@@ -114,6 +204,7 @@ let simpleDropdownHandlers = new Map();
 const subagentTextExpandedByKey = new Map();
 let rekeyKeyedChatPresentation = null;
 let conflictCardEl = null;
+let conflictShellPresentationGeneration = 0;
 let stallCardEl = null;
 let lastConflictPayload = null;
 let questionOverlayEl = null;
@@ -789,6 +880,12 @@ function normalizePayloadHydrationCoverage(value) {
     return 'deltaContinuityUnknown';
 }
 
+function isActiveSessionHistoryLoading() {
+    if (!activeSessionId || hydratedSessions.has(activeSessionId)) return false;
+    const session = getSessionState(activeSessionId, false);
+    return !session || !Array.isArray(session.timeline) || session.timeline.length === 0;
+}
+
 function applyPayloadHydrationCoverage(sessionId, message) {
     const session = getSessionState(sessionId, false);
     if (!session) return false;
@@ -1180,8 +1277,10 @@ const UNCLEAR_ANCHOR_CIRCUIT_BREAKER_LONG_LIMIT = 100;
 const UNCLEAR_ANCHOR_CIRCUIT_BREAKER_IDLE_RESET_MS = 10000;
 const UNCLEAR_ANCHOR_CIRCUIT_BREAKER_RENDER_RESET_COOLDOWN_MS = 1200;
 const UNCLEAR_ANCHOR_CIRCUIT_BREAKER_OPEN_COOLDOWN_MS = 5000;
+const SESSION_METADATA_RENDER_INTERVAL_MS = 250;
 const unclearAnchorCircuitBreakers = new Map();
 const pendingStatusOnlyCoalescedByKey = new Map();
+const sessionMetadataRenderStates = new Map();
 const renderStormCounters = {
     fullRenderRequestsByReason: Object.create(null),
     suppressedFallbackRenderRequestsByReason: Object.create(null),
@@ -1231,7 +1330,8 @@ const chatRenderMetrics = {
     renderedCount: { samples: 0, total: 0, max: 0, last: 0 },
     scenarioBands: Object.fromEntries(['50', '200', '1000+'].map((key) => [key, 0])),
     longTasks: { count: 0, totalMs: 0, maxMs: 0 },
-    warnings: { directChildren: 0, descendants: 0 }
+    warnings: { directChildren: 0, descendants: 0 },
+    pressureAttribution: null
 };
 
 function isChatRenderMetricsEnabled() {
@@ -1308,13 +1408,14 @@ function emitChatRenderPressureWarning(kind, value, threshold) {
     });
 }
 
-function sampleChatRenderDom(chatContainer) {
+function sampleChatRenderDom(chatContainer, audit = null) {
     if (!isChatRenderMetricsEnabled() || !chatContainer) return;
     const session = getSessionState(activeSessionId, false);
     const timelineCount = Array.isArray(session?.timeline) ? session.timeline.length : 0;
     const renderedCount = chatContainer.querySelectorAll('[data-message-id], [data-segment-key]').length;
-    const directChildren = chatContainer.childElementCount;
-    const descendants = chatContainer.querySelectorAll('*').length;
+    const directChildren = Number.isFinite(audit?.directChildren) ? Math.max(0, audit.directChildren) : chatContainer.childElementCount;
+    const descendants = Number.isFinite(audit?.descendants) ? Math.max(0, audit.descendants) : chatContainer.querySelectorAll('*').length;
+    const structuralIntegrityRoots = Array.isArray(audit?.structuralIntegrityRoots) ? audit.structuralIntegrityRoots : [];
     recordChatRenderScalar(chatRenderMetrics.timelineCount, timelineCount);
     recordChatRenderScalar(chatRenderMetrics.renderedCount, renderedCount);
     recordChatRenderScalar(chatRenderMetrics.directChildren, directChildren);
@@ -1351,7 +1452,7 @@ function installChatRenderMetrics(chatContainer) {
     if (!isChatRenderMetricsEnabled()) return;
     try {
         if (typeof MutationObserver === 'function' && chatContainer) {
-            chatRenderDomObserver = new MutationObserver(() => sampleChatRenderDom(chatContainer));
+            chatRenderDomObserver = new MutationObserver(() => { chatRenderMetricsDirty = true; });
             chatRenderDomObserver.observe(chatContainer, { childList: true, subtree: true });
         }
     } catch {
@@ -2372,6 +2473,52 @@ function renderIfActive(sessionId, reason, options = {}) {
     return true;
 }
 
+function scheduleCoalescedSessionMetadataRender(sessionId, reason, options) {
+    options = options || {};
+    if (!sessionId || sessionId !== activeSessionId) {
+        logBackgroundStateUpdate(sessionId, reason, { extra: ['render=false', 'coalesced=inactive'] });
+        return false;
+    }
+    const key = sessionId;
+    let state = sessionMetadataRenderStates.get(key);
+    if (!state) {
+        state = { timer: null, lastRenderedAt: 0, reason: '' };
+        sessionMetadataRenderStates.set(key, state);
+    }
+    state.reason = reason || state.reason || 'session-metadata-coalesced';
+    const render = () => {
+        state.timer = null;
+        if (sessionId !== activeSessionId) {
+            sessionMetadataRenderStates.delete(key);
+            return;
+        }
+        state.lastRenderedAt = Date.now();
+        const renderReason = state.reason;
+        state.reason = '';
+        window.__oc?.renderFromState?.(renderReason);
+    };
+    if (options.immediate === true) {
+        if (state.timer !== null) clearTimeout(state.timer);
+        render();
+        return true;
+    }
+    if (state.timer !== null) return true;
+    const delay = Math.max(0, SESSION_METADATA_RENDER_INTERVAL_MS - (Date.now() - state.lastRenderedAt));
+    state.timer = setTimeout(render, delay);
+    return true;
+}
+
+function disposeSessionMetadataRenderStates() {
+    for (const state of sessionMetadataRenderStates.values()) {
+        if (state?.timer !== null) clearTimeout(state.timer);
+    }
+    sessionMetadataRenderStates.clear();
+}
+
+if (typeof window.addEventListener === 'function') {
+    window.addEventListener('pagehide', disposeSessionMetadataRenderStates, { once: true });
+}
+
 function applySubagentStatusLocalPatch(sessionId, counts = {}) {
     if (!sessionId || sessionId !== activeSessionId) {
         return { applied: false, reason: 'inactive-session' };
@@ -2407,29 +2554,7 @@ function applySubagentStatusLocalPatch(sessionId, counts = {}) {
     if (!targetBubble) {
         return { applied: false, reason: 'missing-target-bubble' };
     }
-    if (Array.isArray(currentThinking.meta?.subagents) && currentThinking.meta.subagents.length) {
-        return { applied: false, reason: 'unclear-anchor' };
-    }
     return { applied: true, reason: indicator ? 'applied' : 'no-active-indicator' };
-}
-
-function getSubagentStatusNoClearAnchorReason(sessionId) {
-    if (!sessionId || sessionId !== activeSessionId) {
-        return '';
-    }
-    const session = getSessionState(sessionId);
-    const currentThinking = session?.thinkingId ? session.messagesById.get(session.thinkingId) : null;
-    if (!currentThinking || !currentThinking.meta?.isThinking) {
-        return '';
-    }
-    const targetId = currentThinking.id || session.thinkingId || '';
-    if (!targetId) {
-        return 'unclear-anchor';
-    }
-    if (Array.isArray(currentThinking.meta?.subagents) && currentThinking.meta.subagents.length) {
-        return 'unclear-anchor';
-    }
-    return '';
 }
 
 function isTerminalSubagentStatusUpdate(agents, doneJustNowCount) {
@@ -2445,7 +2570,7 @@ function isTerminalSubagentStatusUpdate(agents, doneJustNowCount) {
     });
 }
 
-function handleSubagentStatusPatchResult(sessionId, result, source, fields = []) {
+function handleSubagentStatusPatchResult(sessionId, result, source, fields = [], options = {}) {
     logRenderStormMetric('subagent-status-local-patch', [
         `applied=${result?.applied === true ? 'true' : 'false'}`,
         `reason=${result?.reason || 'unknown'}`,
@@ -2467,6 +2592,12 @@ function handleSubagentStatusPatchResult(sessionId, result, source, fields = [])
     }
     if (reason === 'missing-target-bubble' || reason === 'unclear-anchor') {
         countLocalPatchFailed(reason, [`sessionId=${sessionId || 'null'}`, `source=${source || 'unknown'}`, ...fields]);
+        if (options.coalescedRender === true) {
+            suppressFallbackRender(`subagentStatus-${reason}`, [
+                `sessionId=${sessionId || 'null'}`, `source=${source || 'unknown'}`, 'reason=metadata-render-owned', ...fields
+            ]);
+            return false;
+        }
         recordUnclearAnchorLocalPatchFailure(sessionId, source, reason, fields);
         requestThrottledBackgroundFallbackRender(sessionId, `subagentStatus-${reason}`, [`source=${source || 'unknown'}`, ...fields]);
         return false;
@@ -5108,6 +5239,965 @@ function shouldLinkifyAssistantMessage(message) {
     return Boolean(message?.role === 'assistant' && message?.meta?.isThinking !== true);
 }
 
+function scanSafeShellCodePage(text, requestedBlock, requestedPage, pageContract) {
+    const source = typeof text === 'string' ? text : '';
+    const wantedBlock = Number.isFinite(requestedBlock) && requestedBlock > 0 ? Math.floor(requestedBlock) : 1;
+    const wantedPage = Number.isFinite(requestedPage) && requestedPage > 0 ? Math.floor(requestedPage) : 1;
+    const maxCodeUnits = pageContract.maxCodeUnits;
+    const maxLines = pageContract.maxLines;
+    let blockCount = 0;
+    let selectedStart = 0;
+    let selectedEnd = 0;
+    let selectedLanguage = 'plaintext';
+    let cursor = 0;
+
+    const lineEndAt = (start) => {
+        const newline = source.indexOf('\n', start);
+        return newline === -1 ? source.length : newline;
+    };
+    const inspectFence = (lineStart, lineEnd, closingMarker, closingLength) => {
+        let markerStart = lineStart;
+        let indentation = 0;
+        while (markerStart < lineEnd && source[markerStart] === ' ' && indentation < 4) {
+            markerStart += 1;
+            indentation += 1;
+        }
+        if (indentation > 3 || markerStart >= lineEnd) return null;
+        const marker = source[markerStart];
+        if (marker !== '`' && marker !== '~') return null;
+        let markerEnd = markerStart;
+        while (markerEnd < lineEnd && source[markerEnd] === marker) markerEnd += 1;
+        const markerLength = markerEnd - markerStart;
+        if (markerLength < 3) return null;
+        if (closingMarker) {
+            if (marker !== closingMarker || markerLength < closingLength) return null;
+            for (let index = markerEnd; index < lineEnd; index += 1) {
+                if (source[index] !== ' ' && source[index] !== '\t' && source[index] !== '\r') return null;
+            }
+            return { marker, markerLength, markerEnd };
+        }
+        if (marker === '`') {
+            for (let index = markerEnd; index < lineEnd; index += 1) {
+                if (source[index] === '`') return null;
+            }
+        }
+        return { marker, markerLength, markerEnd };
+    };
+    const readLanguage = (start, end) => {
+        while (start < end && (source[start] === ' ' || source[start] === '\t')) start += 1;
+        let tokenEnd = start;
+        while (tokenEnd < end && source[tokenEnd] !== ' ' && source[tokenEnd] !== '\t' && source[tokenEnd] !== '\r') tokenEnd += 1;
+        if (tokenEnd === start) return 'plaintext';
+        const visibleEnd = Math.min(tokenEnd, start + 80);
+        const label = source.slice(start, visibleEnd).replace(/[\u0000-\u001f\u007f]/g, '�');
+        return tokenEnd > visibleEnd ? `${label}…` : label;
+    };
+
+    while (cursor < source.length) {
+        const openingLineEnd = lineEndAt(cursor);
+        const opening = inspectFence(cursor, openingLineEnd, '', 0);
+        if (!opening) {
+            if (openingLineEnd === source.length) break;
+            cursor = openingLineEnd + 1;
+            continue;
+        }
+        blockCount += 1;
+        const bodyStart = openingLineEnd < source.length ? openingLineEnd + 1 : source.length;
+        let bodyEnd = source.length;
+        let nextCursor = source.length;
+        let lineStart = bodyStart;
+        while (lineStart < source.length) {
+            const lineEnd = lineEndAt(lineStart);
+            const closing = inspectFence(lineStart, lineEnd, opening.marker, opening.markerLength);
+            if (closing) {
+                bodyEnd = lineStart;
+                nextCursor = lineEnd < source.length ? lineEnd + 1 : source.length;
+                break;
+            }
+            if (lineEnd === source.length) break;
+            lineStart = lineEnd + 1;
+        }
+        if (blockCount === wantedBlock) {
+            selectedStart = bodyStart;
+            selectedEnd = bodyEnd;
+            selectedLanguage = readLanguage(opening.markerEnd, openingLineEnd);
+        }
+        cursor = nextCursor;
+    }
+
+    const selectedBlock = blockCount > 0 ? Math.min(wantedBlock, blockCount) : 1;
+    if (blockCount > 0 && wantedBlock > blockCount) {
+        return scanSafeShellCodePage(source, blockCount, wantedPage, pageContract);
+    }
+    let currentPage = 1;
+    let currentCodeUnits = 0;
+    let currentLines = 1;
+    let newlineCount = 0;
+    let pageText = '';
+    for (let index = selectedStart; index < selectedEnd; index += 1) {
+        const character = source[index];
+        if (currentCodeUnits >= maxCodeUnits || (character === '\n' && currentLines >= maxLines)) {
+            currentPage += 1;
+            currentCodeUnits = 0;
+            currentLines = 1;
+        }
+        if (currentPage === wantedPage) pageText += character;
+        currentCodeUnits += 1;
+        if (character === '\n') {
+            currentLines += 1;
+            newlineCount += 1;
+        }
+    }
+    const totalPages = selectedEnd > selectedStart ? currentPage : 1;
+    if (wantedPage > totalPages) {
+        return scanSafeShellCodePage(source, selectedBlock, totalPages, pageContract);
+    }
+    return {
+        blockCount,
+        selectedBlock,
+        language: selectedLanguage,
+        contentStart: selectedStart,
+        contentEnd: selectedEnd,
+        pageText,
+        totalPages,
+        selectedPage: Math.min(wantedPage, totalPages),
+        codeUnitCount: selectedEnd - selectedStart,
+        lineCount: selectedEnd > selectedStart ? newlineCount + 1 : 0
+    };
+}
+
+function renderSafeShellCodeMessage(session, unit, presentationSelection) {
+    const rendering = window.__ocRendering;
+    if (!rendering || typeof rendering.getSafeShellSpec !== 'function') return null;
+    if (presentationSelection?.mode !== 'safe-shell' || presentationSelection?.family !== 'message-code') return null;
+    const message = unit.value?.message;
+    if (!message || message.role !== 'assistant' || message.meta?.isThinking === true) return null;
+    if (message.meta?.kind || message.meta?.isDiff
+        || Array.isArray(message.meta?.images) && message.meta.images.length > 0
+        || Array.isArray(message.meta?.subagents) && message.meta.subagents.length > 0) return null;
+    const canonicalMarkdown = typeof message.text === 'string' ? message.text : '';
+    const initialSpec = rendering.getSafeShellSpec({
+        mode: presentationSelection.mode,
+        family: presentationSelection.family,
+        blockPage: 1,
+        contentPage: 1,
+        shape: { blockCount: 1, codeUnitCount: 1, lineCount: 1 }
+    });
+    if (!initialSpec?.allowed || initialSpec.shellSelected !== true || !initialSpec.page?.content || !initialSpec.page?.primary) return null;
+    let requestedBlock = 1;
+    let requestedPage = 1;
+    let scan = scanSafeShellCodePage(canonicalMarkdown, requestedBlock, requestedPage, initialSpec.page.content);
+    if (scan.blockCount === 0) return null;
+
+    const root = document.createElement('div');
+    root.className = 'safe-shell';
+    root.dataset.safeShellFamily = initialSpec.family;
+    root.dataset.messageId = message.id;
+    const generation = ++safeShellPresentationGeneration;
+    root.dataset.safeShellGeneration = String(generation);
+    const ownership = {
+        sessionId: activeSessionId,
+        unitKey: unit.key,
+        generation,
+        root,
+        disposed: false,
+        timers: new Set(),
+        frames: new Set()
+    };
+    safeShellMountOwnership.set(root, ownership);
+    root._safeShellDispose = () => disposeSafeShellRoot(root);
+    const deterministicKey = encodeURIComponent(String(unit.key)).replace(/%/g, '-');
+    const viewerId = `safe-shell-code-viewer-${deterministicKey}-${generation}`;
+    let open = false;
+
+    const scheduleFocus = (role) => {
+        let frame = null;
+        frame = requestAnimationFrame(() => {
+            ownership.frames.delete(frame);
+            if (!isSafeShellMountCurrent(root, ownership)) return;
+            root.querySelector(`[data-safe-shell-role="${role}"]`)?.focus?.();
+        });
+        ownership.frames.add(frame);
+    };
+    const makeButton = (role, label, onClick) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'safe-shell-action';
+        button.dataset.safeShellRole = role;
+        button.textContent = label;
+        button.setAttribute('aria-label', label);
+        button.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (!isSafeShellMountCurrent(root, ownership)) return;
+            onClick(button);
+        });
+        return button;
+    };
+    const render = () => {
+        scan = scanSafeShellCodePage(canonicalMarkdown, requestedBlock, requestedPage, initialSpec.page.content);
+        requestedBlock = scan.selectedBlock;
+        requestedPage = scan.selectedPage;
+        const spec = rendering.getSafeShellSpec({
+            mode: presentationSelection.mode,
+            family: presentationSelection.family,
+            blockPage: requestedBlock,
+            contentPage: requestedPage,
+            shape: { blockCount: scan.blockCount, codeUnitCount: scan.codeUnitCount, lineCount: scan.lineCount }
+        });
+        if (!spec?.allowed || spec.shellSelected !== true) return;
+        const heading = document.createElement('div');
+        heading.className = 'safe-shell-heading';
+        heading.textContent = spec.labels.title;
+        const status = document.createElement('div');
+        status.className = 'safe-shell-status';
+        status.dataset.safeShellRole = 'status';
+        status.id = `${viewerId}-status`;
+        status.setAttribute('role', 'status');
+        status.setAttribute('aria-live', 'polite');
+        status.textContent = `${scan.blockCount} code ${scan.blockCount === 1 ? 'block' : 'blocks'}; language ${scan.language}; block ${scan.selectedBlock} of ${scan.blockCount}; page ${scan.selectedPage} of ${scan.totalPages}; ${scan.codeUnitCount} code units across ${scan.lineCount} logical lines${open ? '.' : '; content omitted from collapsed preview.'}`;
+        const viewerRegion = document.createElement('div');
+        viewerRegion.className = 'safe-shell-viewer-region';
+        viewerRegion.dataset.safeShellRole = 'viewer-region';
+        viewerRegion.id = viewerId;
+        viewerRegion.setAttribute('aria-describedby', status.id);
+        const viewer = document.createElement('pre');
+        viewer.className = 'safe-shell-viewer';
+        viewer.dataset.safeShellRole = 'viewer';
+        viewer.tabIndex = -1;
+        viewer.textContent = open ? scan.pageText : '';
+        viewerRegion.appendChild(viewer);
+        if (open) {
+            const blockStatus = document.createElement('span');
+            blockStatus.className = 'safe-shell-page-status';
+            blockStatus.dataset.safeShellRole = 'block-status';
+            blockStatus.setAttribute('role', 'status');
+            blockStatus.textContent = `Block ${scan.selectedBlock} of ${scan.blockCount}; language ${scan.language}`;
+            viewerRegion.appendChild(blockStatus);
+            const pageStatus = document.createElement('span');
+            pageStatus.className = 'safe-shell-page-status';
+            pageStatus.dataset.safeShellRole = 'page-status';
+            pageStatus.setAttribute('role', 'status');
+            pageStatus.textContent = `Page ${scan.selectedPage} of ${scan.totalPages}`;
+            viewerRegion.appendChild(pageStatus);
+        }
+        const actions = document.createElement('div');
+        actions.className = 'safe-shell-actions';
+        const labels = spec.labels.actions;
+        const openButton = makeButton('open-full', labels['open-full'], () => {
+            if (open) return;
+            open = true;
+            render();
+            scheduleFocus('viewer');
+        });
+        openButton.setAttribute('aria-controls', viewerId);
+        openButton.setAttribute('aria-expanded', open ? 'true' : 'false');
+        openButton.disabled = open;
+        actions.appendChild(openButton);
+        if (open) {
+            const previous = makeButton('previous', labels.previous, () => {
+                if (requestedPage > 1) requestedPage -= 1;
+                else if (requestedBlock > 1) { requestedBlock -= 1; requestedPage = 1; }
+                render();
+                scheduleFocus('viewer');
+            });
+            previous.disabled = requestedBlock <= 1 && requestedPage <= 1;
+            actions.appendChild(previous);
+            const next = makeButton('next', labels.next, () => {
+                if (requestedPage < scan.totalPages) requestedPage += 1;
+                else if (requestedBlock < scan.blockCount) { requestedBlock += 1; requestedPage = 1; }
+                render();
+                scheduleFocus('viewer');
+            });
+            next.disabled = requestedBlock >= scan.blockCount && requestedPage >= scan.totalPages;
+            actions.appendChild(next);
+            actions.appendChild(makeButton('close', labels.close, () => {
+                open = false;
+                render();
+                if (isSafeShellMountCurrent(root, ownership)) root.querySelector('[data-safe-shell-role="open-full"]')?.focus?.();
+            }));
+        }
+        actions.appendChild(makeButton('copy-full', labels['copy-full'], (button) => {
+            const canonicalBlock = canonicalMarkdown.slice(scan.contentStart, scan.contentEnd);
+            Promise.resolve(writeTextToClipboard(canonicalBlock)).then((copied) => {
+                if (!isSafeShellMountCurrent(root, ownership)) return;
+                root.dataset.safeShellCopyState = copied ? 'copied' : 'failed';
+                button.textContent = copied ? 'Copied' : 'Copy failed';
+                const timer = setTimeout(() => {
+                    ownership.timers.delete(timer);
+                    if (!isSafeShellMountCurrent(root, ownership)) return;
+                    delete root.dataset.safeShellCopyState;
+                    render();
+                }, copied ? 900 : 1200);
+                ownership.timers.add(timer);
+            });
+        }));
+        root.replaceChildren(heading, status, viewerRegion, actions);
+    };
+    render();
+    return root;
+}
+
+function scanSafeShellDiffPage(text, requestedPage, pageContract) {
+    const source = typeof text === 'string' ? text : '';
+    const wantedPage = Number.isFinite(requestedPage) && requestedPage > 0 ? Math.floor(requestedPage) : 1;
+    let currentPage = 1;
+    let currentCodeUnits = 0;
+    let currentLines = 1;
+    let newlineCount = 0;
+    let hunkCount = 0;
+    let atLineStart = true;
+    let pageText = '';
+    for (let index = 0; index < source.length; index += 1) {
+        const character = source[index];
+        if (atLineStart && character === '@' && source[index + 1] === '@') hunkCount += 1;
+        if (currentCodeUnits >= pageContract.maxCodeUnits || (character === '\n' && currentLines >= pageContract.maxLines)) {
+            currentPage += 1;
+            currentCodeUnits = 0;
+            currentLines = 1;
+        }
+        if (currentPage === wantedPage) pageText += character;
+        currentCodeUnits += 1;
+        if (character === '\n') {
+            currentLines += 1;
+            newlineCount += 1;
+            atLineStart = true;
+        } else {
+            atLineStart = false;
+        }
+    }
+    const totalPages = source.length > 0 ? currentPage : 1;
+    if (wantedPage > totalPages) return scanSafeShellDiffPage(source, totalPages, pageContract);
+    return { pageText, totalPages, selectedPage: Math.min(wantedPage, totalPages), codeUnitCount: source.length,
+        lineCount: source.length > 0 ? newlineCount + 1 : 0, hunkCount };
+}
+
+function renderSafeShellDiffMessage(session, unit, presentationSelection) {
+    const rendering = window.__ocRendering;
+    if (!rendering || typeof rendering.getSafeShellSpec !== 'function') return null;
+    if (presentationSelection?.mode !== 'safe-shell' || presentationSelection?.family !== 'message-diff') return null;
+    const message = unit.value?.message;
+    if (!message || message.meta?.isDiff !== true) return null;
+    const canonicalDiff = String(message.meta?.diffText || message.text || '');
+    const initialSpec = rendering.getSafeShellSpec({ mode: presentationSelection.mode, family: presentationSelection.family,
+        contentPage: 1, shape: { codeUnitCount: canonicalDiff.length, lineCount: canonicalDiff.length > 0 ? 1 : 0 } });
+    if (!initialSpec?.allowed || initialSpec.shellSelected !== true || !initialSpec.page?.content) return null;
+    const root = document.createElement('div');
+    root.className = 'safe-shell';
+    root.dataset.safeShellFamily = initialSpec.family;
+    root.dataset.messageId = message.id;
+    const generation = ++safeShellPresentationGeneration;
+    root.dataset.safeShellGeneration = String(generation);
+    const ownership = { sessionId: activeSessionId, unitKey: unit.key, generation, root, disposed: false, timers: new Set(), frames: new Set() };
+    safeShellMountOwnership.set(root, ownership);
+    root._safeShellDispose = () => disposeSafeShellRoot(root);
+    const viewerId = `safe-shell-diff-viewer-${encodeURIComponent(String(unit.key)).replace(/%/g, '-')}-${generation}`;
+    let open = false;
+    let requestedPage = 1;
+    let scan = scanSafeShellDiffPage(canonicalDiff, requestedPage, initialSpec.page.content);
+    const scheduleFocus = (role) => {
+        let frame = null;
+        frame = requestAnimationFrame(() => {
+            ownership.frames.delete(frame);
+            if (isSafeShellMountCurrent(root, ownership)) root.querySelector(`[data-safe-shell-role="${role}"]`)?.focus?.();
+        });
+        ownership.frames.add(frame);
+    };
+    const makeButton = (role, label, onClick) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'safe-shell-action';
+        button.dataset.safeShellRole = role;
+        button.textContent = label;
+        button.setAttribute('aria-label', label);
+        button.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (isSafeShellMountCurrent(root, ownership)) onClick(button);
+        });
+        return button;
+    };
+    const render = () => {
+        scan = scanSafeShellDiffPage(canonicalDiff, requestedPage, initialSpec.page.content);
+        requestedPage = scan.selectedPage;
+        const spec = rendering.getSafeShellSpec({ mode: presentationSelection.mode, family: presentationSelection.family,
+            contentPage: requestedPage, shape: { codeUnitCount: scan.codeUnitCount, lineCount: scan.lineCount } });
+        if (!spec?.allowed || spec.shellSelected !== true) return;
+        const heading = document.createElement('div');
+        heading.className = 'safe-shell-heading';
+        heading.textContent = spec.labels.title;
+        const status = document.createElement('div');
+        status.className = 'safe-shell-status';
+        status.dataset.safeShellRole = 'status';
+        status.id = `${viewerId}-status`;
+        status.setAttribute('role', 'status');
+        status.setAttribute('aria-live', 'polite');
+        status.textContent = `${scan.hunkCount} ${scan.hunkCount === 1 ? 'hunk' : 'hunks'}; ${scan.codeUnitCount} code units across ${scan.lineCount} logical lines; page ${scan.selectedPage} of ${scan.totalPages}${open ? '.' : '; content omitted from collapsed preview.'}`;
+        const viewerRegion = document.createElement('div');
+        viewerRegion.className = 'safe-shell-viewer-region';
+        viewerRegion.dataset.safeShellRole = 'viewer-region';
+        viewerRegion.id = viewerId;
+        viewerRegion.setAttribute('aria-describedby', status.id);
+        const viewer = document.createElement('pre');
+        viewer.className = 'safe-shell-viewer';
+        viewer.dataset.safeShellRole = 'viewer';
+        viewer.tabIndex = -1;
+        viewer.textContent = open ? scan.pageText : '';
+        viewerRegion.appendChild(viewer);
+        if (open) {
+            const pageStatus = document.createElement('span');
+            pageStatus.className = 'safe-shell-page-status';
+            pageStatus.dataset.safeShellRole = 'page-status';
+            pageStatus.setAttribute('role', 'status');
+            pageStatus.textContent = `Page ${scan.selectedPage} of ${scan.totalPages}`;
+            viewerRegion.appendChild(pageStatus);
+        }
+        const actions = document.createElement('div');
+        actions.className = 'safe-shell-actions';
+        const labels = spec.labels.actions;
+        const openButton = makeButton('open-full', labels['open-full'], () => { open = true; render(); scheduleFocus('viewer'); });
+        openButton.setAttribute('aria-controls', viewerId);
+        openButton.setAttribute('aria-expanded', open ? 'true' : 'false');
+        openButton.disabled = open;
+        actions.appendChild(openButton);
+        if (open) {
+            const previous = makeButton('previous', labels.previous, () => { requestedPage = Math.max(1, requestedPage - 1); render(); scheduleFocus('viewer'); });
+            previous.disabled = requestedPage <= 1;
+            actions.appendChild(previous);
+            const next = makeButton('next', labels.next, () => { requestedPage += 1; render(); scheduleFocus('viewer'); });
+            next.disabled = requestedPage >= scan.totalPages;
+            actions.appendChild(next);
+            actions.appendChild(makeButton('close', labels.close, () => {
+                open = false;
+                render();
+                if (isSafeShellMountCurrent(root, ownership)) root.querySelector('[data-safe-shell-role="open-full"]')?.focus?.();
+            }));
+        }
+        actions.appendChild(makeButton('copy-full', labels['copy-full'], (button) => {
+            Promise.resolve(writeTextToClipboard(canonicalDiff)).then((copied) => {
+                if (!isSafeShellMountCurrent(root, ownership)) return;
+                root.dataset.safeShellCopyState = copied ? 'copied' : 'failed';
+                button.textContent = copied ? 'Copied' : 'Copy failed';
+                const timer = setTimeout(() => {
+                    ownership.timers.delete(timer);
+                    if (!isSafeShellMountCurrent(root, ownership)) return;
+                    delete root.dataset.safeShellCopyState;
+                    render();
+                }, copied ? 900 : 1200);
+                ownership.timers.add(timer);
+            });
+        }));
+        root.replaceChildren(heading, status, viewerRegion, actions);
+    };
+    render();
+    return root;
+}
+
+function scanSafeShellTablePage(text, requestedRowPage, requestedColumnPage, rowContract, columnContract) {
+    const source = typeof text === 'string' ? text : '';
+    const rowLimit = Math.max(1, Number(rowContract?.limit) || 1);
+    const columnLimit = Math.max(1, Number(columnContract?.limit) || 1);
+    const wantedRowPage = Number.isFinite(requestedRowPage) && requestedRowPage > 0 ? Math.floor(requestedRowPage) : 1;
+    const wantedColumnPage = Number.isFinite(requestedColumnPage) && requestedColumnPage > 0 ? Math.floor(requestedColumnPage) : 1;
+    const lineEndAt = (start) => {
+        const newline = source.indexOf('\n', start);
+        let end = newline === -1 ? source.length : newline;
+        if (end > start && source[end - 1] === '\r') end -= 1;
+        return { end, next: newline === -1 ? source.length : newline + 1 };
+    };
+    const trimRange = (start, end) => {
+        while (start < end && (source[start] === ' ' || source[start] === '\t')) start += 1;
+        while (end > start && (source[end - 1] === ' ' || source[end - 1] === '\t')) end -= 1;
+        return { start, end };
+    };
+    const visitCells = (lineStart, lineEnd, visitor) => {
+        let range = trimRange(lineStart, lineEnd);
+        let start = range.start;
+        let end = range.end;
+        if (start < end && source[start] === '|') start += 1;
+        if (end > start && source[end - 1] === '|' && (end < 2 || source[end - 2] !== '\\')) end -= 1;
+        let cellStart = start;
+        let count = 0;
+        let escaped = false;
+        for (let index = start; index <= end; index += 1) {
+            const character = index < end ? source[index] : '|';
+            if (character === '\\' && !escaped) {
+                escaped = true;
+                continue;
+            }
+            if (character === '|' && !escaped) {
+                const cell = trimRange(cellStart, index);
+                visitor?.(count, cell.start, cell.end);
+                count += 1;
+                cellStart = index + 1;
+            }
+            escaped = false;
+        }
+        return count;
+    };
+    const isDelimiter = (start, end, expectedCount) => {
+        let valid = true;
+        const count = visitCells(start, end, (_index, cellStart, cellEnd) => {
+            let cursor = cellStart;
+            if (cursor < cellEnd && source[cursor] === ':') cursor += 1;
+            const dashStart = cursor;
+            while (cursor < cellEnd && source[cursor] === '-') cursor += 1;
+            if (cursor === dashStart) valid = false;
+            if (cursor < cellEnd && source[cursor] === ':') cursor += 1;
+            if (cursor !== cellEnd) valid = false;
+        });
+        return valid && count === expectedCount && count > 0;
+    };
+    const hasPipe = (start, end) => {
+        for (let index = start; index < end; index += 1) if (source[index] === '|') return true;
+        return false;
+    };
+    const displayCell = (start, end) => {
+        const visibleEnd = Math.min(end, start + 256);
+        const value = source.slice(start, visibleEnd);
+        return end > visibleEnd ? `${value}… (${end - start} code units)` : value;
+    };
+
+    let cursor = 0;
+    let fencedMarker = '';
+    let headerStart = -1;
+    let headerEnd = -1;
+    let bodyStart = -1;
+    let columnCount = 0;
+    while (cursor < source.length) {
+        const line = lineEndAt(cursor);
+        const trimmed = trimRange(cursor, line.end);
+        const marker = source.slice(trimmed.start, Math.min(trimmed.end, trimmed.start + 3));
+        if (marker === '```' || marker === '~~~') {
+            if (!fencedMarker) fencedMarker = marker;
+            else if (fencedMarker === marker) fencedMarker = '';
+            cursor = line.next;
+            continue;
+        }
+        if (!fencedMarker && hasPipe(cursor, line.end) && line.next < source.length) {
+            const columns = visitCells(cursor, line.end);
+            const delimiterLine = lineEndAt(line.next);
+            if (isDelimiter(line.next, delimiterLine.end, columns)) {
+                headerStart = cursor;
+                headerEnd = line.end;
+                bodyStart = delimiterLine.next;
+                columnCount = columns;
+                break;
+            }
+        }
+        if (line.next === source.length) break;
+        cursor = line.next;
+    }
+    if (headerStart < 0) return { found: false, rowCount: 0, columnCount: 0, rows: [], headers: [] };
+
+    let rowCount = 0;
+    cursor = bodyStart;
+    while (cursor < source.length) {
+        const line = lineEndAt(cursor);
+        const trimmed = trimRange(cursor, line.end);
+        if (trimmed.start === trimmed.end || !hasPipe(cursor, line.end)) break;
+        rowCount += 1;
+        if (line.next === source.length) break;
+        cursor = line.next;
+    }
+    const rowPages = Math.max(1, Math.ceil(rowCount / rowLimit));
+    const columnPages = Math.max(1, Math.ceil(columnCount / columnLimit));
+    const selectedRowPage = Math.min(wantedRowPage, rowPages);
+    const selectedColumnPage = Math.min(wantedColumnPage, columnPages);
+    const rowStart = (selectedRowPage - 1) * rowLimit;
+    const rowEnd = Math.min(rowCount, rowStart + rowLimit);
+    const columnStart = (selectedColumnPage - 1) * columnLimit;
+    const columnEnd = Math.min(columnCount, columnStart + columnLimit);
+    const headers = [];
+    visitCells(headerStart, headerEnd, (index, start, end) => {
+        if (index >= columnStart && index < columnEnd) headers.push(displayCell(start, end));
+    });
+    while (headers.length < columnEnd - columnStart) headers.push('');
+    const rows = [];
+    cursor = bodyStart;
+    let rowIndex = 0;
+    while (cursor < source.length && rowIndex < rowEnd) {
+        const line = lineEndAt(cursor);
+        const trimmed = trimRange(cursor, line.end);
+        if (trimmed.start === trimmed.end || !hasPipe(cursor, line.end)) break;
+        if (rowIndex >= rowStart) {
+            const cells = [];
+            visitCells(cursor, line.end, (index, start, end) => {
+                if (index >= columnStart && index < columnEnd) cells.push(displayCell(start, end));
+            });
+            while (cells.length < columnEnd - columnStart) cells.push('');
+            if (cells.length > columnEnd - columnStart) cells.length = columnEnd - columnStart;
+            rows.push(cells);
+        }
+        rowIndex += 1;
+        if (line.next === source.length) break;
+        cursor = line.next;
+    }
+    return { found: true, rowCount, columnCount, rowPages, columnPages, selectedRowPage, selectedColumnPage,
+        rowStart, rowEnd, columnStart, columnEnd, headers, rows };
+}
+
+function renderSafeShellTableMessage(session, unit, presentationSelection) {
+    const rendering = window.__ocRendering;
+    if (!rendering || typeof rendering.getSafeShellSpec !== 'function') return null;
+    if (presentationSelection?.mode !== 'safe-shell' || presentationSelection?.family !== 'message-table') return null;
+    const message = unit.value?.message;
+    if (!message || message.role !== 'assistant' || message.meta?.isThinking === true || message.meta?.kind || message.meta?.isDiff
+        || Array.isArray(message.meta?.images) && message.meta.images.length > 0
+        || Array.isArray(message.meta?.subagents) && message.meta.subagents.length > 0) return null;
+    const canonicalMarkdown = typeof message.text === 'string' ? message.text : '';
+    const initialSpec = rendering.getSafeShellSpec({ mode: presentationSelection.mode, family: presentationSelection.family,
+        page: 1, columnPage: 1, shape: { rowCount: 0, columnCount: 0 } });
+    if (!initialSpec?.allowed || initialSpec.shellSelected !== true || !initialSpec.page?.rows || !initialSpec.page?.columns) return null;
+    let rowPage = 1;
+    let columnPage = 1;
+    let scan = scanSafeShellTablePage(canonicalMarkdown, rowPage, columnPage, initialSpec.page.rows, initialSpec.page.columns);
+    if (!scan.found) return null;
+    const root = document.createElement('div');
+    root.className = 'safe-shell';
+    root.dataset.safeShellFamily = initialSpec.family;
+    root.dataset.messageId = message.id;
+    const generation = ++safeShellPresentationGeneration;
+    root.dataset.safeShellGeneration = String(generation);
+    const ownership = { sessionId: activeSessionId, unitKey: unit.key, generation, root, disposed: false, timers: new Set(), frames: new Set() };
+    safeShellMountOwnership.set(root, ownership);
+    root._safeShellDispose = () => disposeSafeShellRoot(root);
+    const viewerId = `safe-shell-table-viewer-${encodeURIComponent(String(unit.key)).replace(/%/g, '-')}-${generation}`;
+    let open = false;
+    const scheduleFocus = (role) => {
+        let frame = null;
+        frame = requestAnimationFrame(() => {
+            ownership.frames.delete(frame);
+            if (isSafeShellMountCurrent(root, ownership)) root.querySelector(`[data-safe-shell-role="${role}"]`)?.focus?.();
+        });
+        ownership.frames.add(frame);
+    };
+    const makeButton = (role, label, onClick) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'safe-shell-action';
+        button.dataset.safeShellRole = role;
+        button.textContent = label;
+        button.setAttribute('aria-label', label);
+        button.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (isSafeShellMountCurrent(root, ownership)) onClick(button);
+        });
+        return button;
+    };
+    const render = () => {
+        scan = scanSafeShellTablePage(canonicalMarkdown, rowPage, columnPage, initialSpec.page.rows, initialSpec.page.columns);
+        rowPage = scan.selectedRowPage;
+        columnPage = scan.selectedColumnPage;
+        const spec = rendering.getSafeShellSpec({ mode: presentationSelection.mode, family: presentationSelection.family,
+            page: rowPage, columnPage, shape: { rowCount: scan.rowCount, columnCount: scan.columnCount } });
+        if (!spec?.allowed || spec.shellSelected !== true) return;
+        const heading = document.createElement('div');
+        heading.className = 'safe-shell-heading';
+        heading.textContent = spec.labels.title;
+        const omittedRows = scan.rowCount - (open ? scan.rows.length : 0);
+        const omittedColumns = scan.columnCount - (open ? scan.headers.length : 0);
+        const status = document.createElement('div');
+        status.className = 'safe-shell-status';
+        status.dataset.safeShellRole = 'status';
+        status.id = `${viewerId}-status`;
+        status.setAttribute('role', 'status');
+        status.setAttribute('aria-live', 'polite');
+        status.textContent = `${scan.rowCount} rows and ${scan.columnCount} columns; ${omittedRows} omitted ${omittedRows === 1 ? 'row' : 'rows'} and ${omittedColumns} omitted ${omittedColumns === 1 ? 'column' : 'columns'}${open ? '.' : '; table omitted from collapsed preview.'}`;
+        const viewerRegion = document.createElement('div');
+        viewerRegion.className = 'safe-shell-viewer-region';
+        viewerRegion.dataset.safeShellRole = 'viewer-region';
+        viewerRegion.id = viewerId;
+        viewerRegion.tabIndex = -1;
+        viewerRegion.setAttribute('aria-describedby', status.id);
+        if (open) {
+            const table = document.createElement('table');
+            const caption = document.createElement('caption');
+            caption.textContent = `Rows ${scan.rowCount ? scan.rowStart + 1 : 0}–${scan.rowEnd} of ${scan.rowCount}; columns ${scan.columnCount ? scan.columnStart + 1 : 0}–${scan.columnEnd} of ${scan.columnCount}`;
+            table.appendChild(caption);
+            const thead = document.createElement('thead');
+            const headerRow = document.createElement('tr');
+            for (const value of scan.headers) {
+                const cell = document.createElement('th');
+                cell.setAttribute('scope', 'col');
+                cell.textContent = value;
+                headerRow.appendChild(cell);
+            }
+            thead.appendChild(headerRow);
+            table.appendChild(thead);
+            const tbody = document.createElement('tbody');
+            for (const values of scan.rows) {
+                const row = document.createElement('tr');
+                for (const value of values) {
+                    const cell = document.createElement('td');
+                    cell.textContent = value;
+                    row.appendChild(cell);
+                }
+                tbody.appendChild(row);
+            }
+            table.appendChild(tbody);
+            viewerRegion.appendChild(table);
+            const rowStatus = document.createElement('span');
+            rowStatus.dataset.safeShellRole = 'row-page-status';
+            rowStatus.setAttribute('role', 'status');
+            rowStatus.textContent = `Rows ${scan.rowCount ? scan.rowStart + 1 : 0}–${scan.rowEnd} of ${scan.rowCount}`;
+            viewerRegion.appendChild(rowStatus);
+            const columnStatus = document.createElement('span');
+            columnStatus.dataset.safeShellRole = 'column-page-status';
+            columnStatus.setAttribute('role', 'status');
+            columnStatus.textContent = `Columns ${scan.columnCount ? scan.columnStart + 1 : 0}–${scan.columnEnd} of ${scan.columnCount}`;
+            viewerRegion.appendChild(columnStatus);
+        }
+        const actions = document.createElement('div');
+        actions.className = 'safe-shell-actions';
+        const labels = spec.labels.actions;
+        const openButton = makeButton('open-full', labels['open-full'], () => { open = true; render(); scheduleFocus('viewer-region'); });
+        openButton.setAttribute('aria-controls', viewerId);
+        openButton.setAttribute('aria-expanded', open ? 'true' : 'false');
+        openButton.disabled = open;
+        actions.appendChild(openButton);
+        if (open) {
+            const rowPrevious = makeButton('row-previous', 'Previous rows', () => { rowPage = Math.max(1, rowPage - 1); render(); scheduleFocus('viewer-region'); });
+            rowPrevious.disabled = rowPage <= 1;
+            actions.appendChild(rowPrevious);
+            const rowNext = makeButton('row-next', 'Next rows', () => { rowPage += 1; render(); scheduleFocus('viewer-region'); });
+            rowNext.disabled = rowPage >= scan.rowPages;
+            actions.appendChild(rowNext);
+            const columnPrevious = makeButton('column-previous', 'Previous columns', () => { columnPage = Math.max(1, columnPage - 1); render(); scheduleFocus('viewer-region'); });
+            columnPrevious.disabled = columnPage <= 1;
+            actions.appendChild(columnPrevious);
+            const columnNext = makeButton('column-next', 'Next columns', () => { columnPage += 1; render(); scheduleFocus('viewer-region'); });
+            columnNext.disabled = columnPage >= scan.columnPages;
+            actions.appendChild(columnNext);
+            actions.appendChild(makeButton('close', labels.close, () => {
+                open = false;
+                render();
+                if (isSafeShellMountCurrent(root, ownership)) root.querySelector('[data-safe-shell-role="open-full"]')?.focus?.();
+            }));
+        }
+        actions.appendChild(makeButton('copy-full', labels['copy-full'], (button) => {
+            Promise.resolve(writeTextToClipboard(canonicalMarkdown)).then((copied) => {
+                if (!isSafeShellMountCurrent(root, ownership)) return;
+                root.dataset.safeShellCopyState = copied ? 'copied' : 'failed';
+                button.textContent = copied ? 'Copied' : 'Copy failed';
+                const timer = setTimeout(() => {
+                    ownership.timers.delete(timer);
+                    if (!isSafeShellMountCurrent(root, ownership)) return;
+                    delete root.dataset.safeShellCopyState;
+                    render();
+                }, copied ? 900 : 1200);
+                ownership.timers.add(timer);
+            });
+        }));
+        root.replaceChildren(heading, status, viewerRegion, actions);
+    };
+    render();
+    return root;
+}
+
+function scanSafeShellMarkdownPage(text, requestedPage, pageContract, referenceLimit) {
+    const source = typeof text === 'string' ? text : '';
+    const wantedPage = Number.isFinite(requestedPage) && requestedPage > 0 ? Math.floor(requestedPage) : 1;
+    const maxReferences = Math.max(1, Number(referenceLimit) || 1);
+    let currentPage = 1;
+    let currentCodeUnits = 0;
+    let currentLines = 1;
+    let newlineCount = 0;
+    let pageText = '';
+    let blockCount = 0;
+    let linkCount = 0;
+    let tableCount = 0;
+    let lineStart = true;
+    let lineHasContent = false;
+    let previousLineHadContent = false;
+    let previousLineHadPipe = false;
+    let lineHadPipe = false;
+    let lineOnlyDelimiter = true;
+    let lineHadDash = false;
+    const finishLine = () => {
+        if (lineHasContent && !previousLineHadContent) blockCount += 1;
+        if (previousLineHadPipe && lineOnlyDelimiter && lineHadDash) tableCount += 1;
+        previousLineHadContent = lineHasContent;
+        previousLineHadPipe = lineHadPipe;
+        lineHasContent = false;
+        lineHadPipe = false;
+        lineOnlyDelimiter = true;
+        lineHadDash = false;
+        lineStart = true;
+    };
+    for (let index = 0; index < source.length; index += 1) {
+        const character = source[index];
+        if (currentCodeUnits >= pageContract.maxCodeUnits || (character === '\n' && currentLines >= pageContract.maxLines)) {
+            currentPage += 1;
+            currentCodeUnits = 0;
+            currentLines = 1;
+        }
+        if (currentPage === wantedPage) pageText += character;
+        currentCodeUnits += 1;
+        if (character === ']' && source[index + 1] === '(') linkCount += 1;
+        if (character === '\n') {
+            newlineCount += 1;
+            currentLines += 1;
+            finishLine();
+            continue;
+        }
+        lineStart = false;
+        if (character !== ' ' && character !== '\t' && character !== '\r') lineHasContent = true;
+        if (character === '|') lineHadPipe = true;
+        if (character === '-') lineHadDash = true;
+        if (character !== ' ' && character !== '\t' && character !== '\r' && character !== ':' && character !== '-' && character !== '|') lineOnlyDelimiter = false;
+    }
+    if (source.length > 0) finishLine();
+    const totalPages = source.length > 0 ? currentPage : 1;
+    if (wantedPage > totalPages) return scanSafeShellMarkdownPage(source, totalPages, pageContract, maxReferences);
+    const pageReferences = [];
+    const references = new RegExp(`${FILE_REF_RE.source}|${FILE_ONLY_RE.source}`, 'g');
+    let match = references.exec(pageText);
+    while (match && pageReferences.length < maxReferences) {
+        const filePath = match[1] || match[4] || '';
+        if (filePath && isAllowedFileExt(filePath)) pageReferences.push({ filePath, line: match[2] || '', col: match[3] || '', label: match[0] });
+        match = references.exec(pageText);
+    }
+    return { pageText, pageReferences, totalPages, selectedPage: Math.min(wantedPage, totalPages), codeUnitCount: source.length,
+        lineCount: source.length > 0 ? newlineCount + 1 : 0, blockCount, linkCount, tableCount };
+}
+
+function renderSafeShellMarkdownMessage(session, unit, presentationSelection) {
+    const rendering = window.__ocRendering;
+    if (!rendering || typeof rendering.getSafeShellSpec !== 'function') return null;
+    if (presentationSelection?.mode !== 'safe-shell' || presentationSelection?.family !== 'message-markdown') return null;
+    const message = unit.value?.message;
+    if (!message || message.role !== 'assistant' || message.meta?.isThinking === true || message.meta?.kind || message.meta?.isDiff
+        || Array.isArray(message.meta?.images) && message.meta.images.length > 0
+        || Array.isArray(message.meta?.subagents) && message.meta.subagents.length > 0) return null;
+    const canonicalMarkdown = typeof message.text === 'string' ? message.text : '';
+    const initialSpec = rendering.getSafeShellSpec({ mode: presentationSelection.mode, family: presentationSelection.family,
+        contentPage: 1, shape: { codeUnitCount: canonicalMarkdown.length, lineCount: canonicalMarkdown.length > 0 ? 1 : 0 } });
+    if (!initialSpec?.allowed || initialSpec.shellSelected !== true || !initialSpec.page?.content) return null;
+    const root = document.createElement('div');
+    root.className = 'safe-shell';
+    root.dataset.safeShellFamily = initialSpec.family;
+    root.dataset.messageId = message.id;
+    const generation = ++safeShellPresentationGeneration;
+    root.dataset.safeShellGeneration = String(generation);
+    const ownership = { sessionId: activeSessionId, unitKey: unit.key, generation, root, disposed: false, timers: new Set(), frames: new Set() };
+    safeShellMountOwnership.set(root, ownership);
+    root._safeShellDispose = () => disposeSafeShellRoot(root);
+    const viewerId = `safe-shell-markdown-viewer-${encodeURIComponent(String(unit.key)).replace(/%/g, '-')}-${generation}`;
+    const referenceLimit = initialSpec.budgets.openDescendants - initialSpec.budgets.collapsedDescendants;
+    let open = false;
+    let requestedPage = 1;
+    let scan = scanSafeShellMarkdownPage(canonicalMarkdown, requestedPage, initialSpec.page.content, referenceLimit);
+    const scheduleFocus = (role) => {
+        let frame = null;
+        frame = requestAnimationFrame(() => {
+            ownership.frames.delete(frame);
+            if (isSafeShellMountCurrent(root, ownership)) root.querySelector(`[data-safe-shell-role="${role}"]`)?.focus?.();
+        });
+        ownership.frames.add(frame);
+    };
+    const makeButton = (role, label, onClick) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'safe-shell-action';
+        button.dataset.safeShellRole = role;
+        button.textContent = label;
+        button.setAttribute('aria-label', label);
+        button.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (isSafeShellMountCurrent(root, ownership)) onClick(button);
+        });
+        return button;
+    };
+    const render = () => {
+        scan = scanSafeShellMarkdownPage(canonicalMarkdown, requestedPage, initialSpec.page.content, referenceLimit);
+        requestedPage = scan.selectedPage;
+        const spec = rendering.getSafeShellSpec({ mode: presentationSelection.mode, family: presentationSelection.family,
+            contentPage: requestedPage, shape: { codeUnitCount: scan.codeUnitCount, lineCount: scan.lineCount } });
+        if (!spec?.allowed || spec.shellSelected !== true) return;
+        const heading = document.createElement('div');
+        heading.className = 'safe-shell-heading';
+        heading.textContent = spec.labels.title;
+        const status = document.createElement('div');
+        status.className = 'safe-shell-status';
+        status.dataset.safeShellRole = 'status';
+        status.id = `${viewerId}-status`;
+        status.setAttribute('role', 'status');
+        status.setAttribute('aria-live', 'polite');
+        status.textContent = `${scan.blockCount} blocks, ${scan.linkCount} links, and ${scan.tableCount} tables; ${scan.codeUnitCount} code units across ${scan.lineCount} logical lines; page ${scan.selectedPage} of ${scan.totalPages}${open ? '.' : '; raw markdown omitted from collapsed preview.'}`;
+        const viewerRegion = document.createElement('div');
+        viewerRegion.className = 'safe-shell-viewer-region';
+        viewerRegion.dataset.safeShellRole = 'viewer-region';
+        viewerRegion.id = viewerId;
+        viewerRegion.setAttribute('aria-describedby', status.id);
+        const viewer = document.createElement('pre');
+        viewer.className = 'safe-shell-viewer';
+        viewer.dataset.safeShellRole = 'viewer';
+        viewer.tabIndex = -1;
+        viewer.textContent = open ? scan.pageText : '';
+        viewerRegion.appendChild(viewer);
+        if (open) {
+            const pageStatus = document.createElement('span');
+            pageStatus.dataset.safeShellRole = 'page-status';
+            pageStatus.setAttribute('role', 'status');
+            pageStatus.textContent = `Page ${scan.selectedPage} of ${scan.totalPages}`;
+            viewerRegion.appendChild(pageStatus);
+            if (scan.pageReferences.length > 0) {
+                const fileLinks = document.createElement('div');
+                for (const reference of scan.pageReferences) {
+                    const link = document.createElement('a');
+                    const line = reference.line ? `&line=${reference.line}&col=${reference.col || '1'}` : '';
+                    link.href = `ocfile://open?path=${encodeURIComponent(reference.filePath)}${line}`;
+                    link.textContent = reference.label;
+                    link.setAttribute('aria-label', `${spec.labels.actions['open-file']}: ${reference.label}`);
+                    fileLinks.appendChild(link);
+                }
+                viewerRegion.appendChild(fileLinks);
+            }
+        }
+        const actions = document.createElement('div');
+        actions.className = 'safe-shell-actions';
+        const labels = spec.labels.actions;
+        const openButton = makeButton('open-full', labels['open-full'], () => { open = true; render(); scheduleFocus('viewer'); });
+        openButton.setAttribute('aria-controls', viewerId);
+        openButton.setAttribute('aria-expanded', open ? 'true' : 'false');
+        openButton.disabled = open;
+        actions.appendChild(openButton);
+        if (open) {
+            const previous = makeButton('previous', labels.previous, () => { requestedPage = Math.max(1, requestedPage - 1); render(); scheduleFocus('viewer'); });
+            previous.disabled = requestedPage <= 1;
+            actions.appendChild(previous);
+            const next = makeButton('next', labels.next, () => { requestedPage += 1; render(); scheduleFocus('viewer'); });
+            next.disabled = requestedPage >= scan.totalPages;
+            actions.appendChild(next);
+            actions.appendChild(makeButton('close', labels.close, () => {
+                open = false;
+                render();
+                if (isSafeShellMountCurrent(root, ownership)) root.querySelector('[data-safe-shell-role="open-full"]')?.focus?.();
+            }));
+        }
+        actions.appendChild(makeButton('copy-full', labels['copy-full'], (button) => {
+            Promise.resolve(writeTextToClipboard(canonicalMarkdown)).then((copied) => {
+                if (!isSafeShellMountCurrent(root, ownership)) return;
+                root.dataset.safeShellCopyState = copied ? 'copied' : 'failed';
+                button.textContent = copied ? 'Copied' : 'Copy failed';
+                const timer = setTimeout(() => {
+                    ownership.timers.delete(timer);
+                    if (!isSafeShellMountCurrent(root, ownership)) return;
+                    delete root.dataset.safeShellCopyState;
+                    render();
+                }, copied ? 900 : 1200);
+                ownership.timers.add(timer);
+            });
+        }));
+        root.replaceChildren(heading, status, viewerRegion, actions);
+    };
+    render();
+    return root;
+}
+
 function renderAssistantMarkdown(content, message) {
     const text = typeof message?.text === 'string' ? message.text : '';
     const linkifyRefs = shouldLinkifyAssistantMessage(message);
@@ -5428,8 +6518,10 @@ function clearSessionSearchHighlights() {
 
 function updateSessionSearchControls() {
     const { count, prev, next, smart } = getSessionSearchElements();
-    const total = sessionSearch.matches.length;
-    const current = total > 0 && sessionSearch.activeIndex >= 0 ? sessionSearch.activeIndex + 1 : 0;
+    const textMode = sessionSearch.mode === 'text';
+    const total = textMode ? sessionSearch.fullMatchKeys.length : sessionSearch.matches.length;
+    const activeIndex = textMode ? sessionSearch.activeKeyIndex : sessionSearch.activeIndex;
+    const current = total > 0 && activeIndex >= 0 ? activeIndex + 1 : 0;
     const hasQuery = Boolean(String(sessionSearch.query || '').trim());
     if (count) {
         count.textContent = sessionSearch.smartInFlight ? '' : (hasQuery ? `${current}/${total}` : '0/0');
@@ -5453,29 +6545,197 @@ function updateActiveSessionSearchHit({ scroll = false } = {}) {
     updateSessionSearchControls();
     if (!scroll || total === 0 || sessionSearch.activeIndex < 0) return;
     const active = sessionSearch.matches[sessionSearch.activeIndex];
-    active?.scrollIntoView?.({ block: 'center', inline: 'nearest', behavior: 'smooth' });
+    active?.scrollIntoView?.({ block: 'center', inline: 'nearest', behavior: 'auto' });
+}
+
+function pickMode(agent) {
+    if (typeof agent?.mode === 'string' && agent.mode.trim()) return agent.mode.trim();
+    if (typeof agent?.description === 'string' && agent.description.trim()) return agent.description.trim();
+    return '';
+}
+
+function cleanSubagentTitle(title) {
+    const raw = typeof title === 'string' ? title.trim() : '';
+    if (!raw) return 'Subagent';
+    return raw
+        .replace(/\s*[（(]\s*@[^()]*[)）]\s*$/i, '')
+        .trim() || 'Subagent';
+}
+
+function formatSubagentModel(agent) {
+    const modelId = (typeof agent?.model === 'string' && agent.model.trim()) ? agent.model.trim() : '';
+    const providerId = (typeof agent?.providerId === 'string' && agent.providerId.trim()) ? agent.providerId.trim() : '';
+    if (modelId && providerId) return `${modelId}/${providerId}`;
+    return modelId || providerId || '';
+}
+
+function visitLoadedChatSearchChunks(session, unit, visitor) {
+    if (!unit || typeof visitor !== 'function') return;
+    let hasValue = false;
+    let stopped = false;
+    const visitValue = (value) => {
+        if (stopped || typeof value !== 'string' || !value) return;
+        if (hasValue && visitor(' ') === false) {
+            stopped = true;
+            return;
+        }
+        if (visitor(value) === false) {
+            stopped = true;
+            return;
+        }
+        hasValue = true;
+    };
+    const visitMessage = (message, subagentsOnly = false) => {
+        if (!message) return;
+        const meta = message.meta || {};
+        if (!subagentsOnly) {
+            if (meta.isDiff === true) {
+                visitValue(String(meta.diffText || message.text || ''));
+                return;
+            }
+            visitValue(message.text || '');
+            visitValue(meta.diffText || '');
+            if (Array.isArray(meta.files)) {
+                for (const file of meta.files) {
+                    visitValue(typeof file === 'string' ? file : file?.path || file?.name || '');
+                    if (stopped) break;
+                }
+            }
+            if (!stopped && Array.isArray(meta.todos)) {
+                for (const todo of meta.todos) visitValue(todo?.content || todo?.text || '');
+            }
+            return;
+        }
+        if (!Array.isArray(meta.subagents)) return;
+        for (const agent of meta.subagents) {
+            if (!agent) continue;
+            visitValue(cleanSubagentTitle(agent.title));
+            visitValue(pickMode(agent));
+            visitValue(formatSubagentModel(agent));
+            const latestFullText = typeof agent.latestFullText === 'string' ? agent.latestFullText.trim() : '';
+            const latestText = typeof agent.latestText === 'string' ? agent.latestText.trim() : '';
+            visitValue(latestFullText || latestText);
+            visitValue(typeof agent.latestTool === 'string' ? agent.latestTool.trim() : '');
+            visitValue(typeof agent.latestToolInput === 'string' ? agent.latestToolInput.trim() : '');
+            if (stopped) break;
+        }
+    };
+
+    const message = unit.value?.message;
+    const memberIds = unit.kind === 'segment'
+        ? unit.value?.segment?.memberMsgIds || unit.value?.segment?.memberIds
+        : null;
+    const appendItems = message && typeof getAppendItems === 'function' ? getAppendItems(message) : [];
+    visitMessage(message, false);
+    if (!stopped && memberIds && typeof memberIds[Symbol.iterator] === 'function') {
+        for (const id of memberIds) {
+            visitMessage(session?.messagesById?.get?.(id), false);
+            if (stopped) break;
+        }
+    }
+    if (!stopped && Array.isArray(appendItems)) {
+        for (const item of appendItems) {
+            visitMessage(item, false);
+            if (stopped) break;
+        }
+    }
+    if (stopped) return;
+    visitMessage(message, true);
+    if (!stopped && unit.kind === 'segment') {
+        if (memberIds && typeof memberIds[Symbol.iterator] === 'function') {
+            for (const id of memberIds) {
+                visitMessage(session?.messagesById?.get?.(id), true);
+                if (stopped) break;
+            }
+        }
+    }
+    if (!stopped && Array.isArray(appendItems)) {
+        for (const item of appendItems) visitMessage(item, true);
+    }
+}
+
+function createLinearSearchMatcher(query) {
+    const needle = String(query || '').trim().toLowerCase();
+    const failure = new Uint32Array(needle.length);
+    for (let index = 1, matched = 0; index < needle.length; index += 1) {
+        while (matched > 0 && needle[index] !== needle[matched]) matched = failure[matched - 1];
+        if (needle[index] === needle[matched]) matched += 1;
+        failure[index] = matched;
+    }
+    let matchedLength = 0;
+    let found = needle.length === 0;
+    const visit = (value) => {
+        if (found || typeof value !== 'string' || !value) return;
+        for (let offset = 0; offset < value.length && !found; offset += 4096) {
+            const lower = value.slice(offset, offset + 4096).toLowerCase();
+            for (let index = 0; index < lower.length; index += 1) {
+                while (matchedLength > 0 && lower[index] !== needle[matchedLength]) matchedLength = failure[matchedLength - 1];
+                if (lower[index] === needle[matchedLength]) matchedLength += 1;
+                if (matchedLength === needle.length) found = true;
+            }
+        }
+    };
+    return { visit, matched: () => found };
+}
+
+function collectBoundedSmartSearchText(produce, cap = 2200, normalizeWhitespace = false) {
+    const limit = Math.max(0, Math.min(2200, Number.isFinite(cap) ? Math.trunc(cap) : 2200));
+    const buffer = new Uint16Array(limit);
+    let length = 0;
+    let pendingSpace = false;
+    if (typeof produce === 'function' && limit > 0) {
+        produce((value) => {
+            if (length >= limit) return false;
+            if (typeof value !== 'string' || !value) return true;
+            if (normalizeWhitespace) {
+                for (let index = 0; index < value.length && length < limit; index += 1) {
+                    const code = value.charCodeAt(index);
+                    const isWhitespace = code === 9 || code === 10 || code === 11 || code === 12 || code === 13 || code === 32
+                        || code === 160 || code === 5760 || (code >= 8192 && code <= 8202) || code === 8232 || code === 8233
+                        || code === 8239 || code === 8287 || code === 12288 || code === 65279;
+                    if (isWhitespace) {
+                        if (length > 0) pendingSpace = true;
+                        continue;
+                    }
+                    if (pendingSpace && length < limit) buffer[length++] = 32;
+                    pendingSpace = false;
+                    if (length < limit) buffer[length++] = code;
+                }
+                return length < limit;
+            }
+            const take = Math.min(value.length, limit - length);
+            for (let index = 0; index < take; index += 1) buffer[length + index] = value.charCodeAt(index);
+            length += take;
+            return length < limit;
+        });
+    }
+    return length ? String.fromCharCode(...buffer.subarray(0, length)) : '';
 }
 
 function collectLoadedTextSearchKeys(query) {
-    const session = getSessionOrNull(activeSessionId);
+    const session = getSessionState(activeSessionId, false);
     const queryLower = String(query || '').trim().toLowerCase();
     if (!session || !queryLower || !Array.isArray(session.timeline)) return [];
-    const projectedRows = window.__oc?.getLoadedChatSearchRows?.();
-    if (Array.isArray(projectedRows) && projectedRows.length) {
-        return projectedRows.filter((row) => String(row.text || '').toLowerCase().includes(queryLower)).map((row) => row.id);
+    const projectedRows = window.__oc?.getLoadedChatSearchRows?.(queryLower);
+    if (Array.isArray(projectedRows)) {
+        const projectedKeys = [];
+        for (const row of projectedRows) if (row?.id) projectedKeys.push(row.id);
+        return projectedKeys;
     }
     const keys = [];
     for (const id of session.timeline) {
         const message = session.messagesById?.get?.(id);
         if (!message || session.hiddenSet?.has?.(id)) continue;
-        const text = getLoadedSessionSearchText(message).toLowerCase();
-        if (text.includes(queryLower)) keys.push(id);
+        const matcher = createLinearSearchMatcher(queryLower);
+        visitLoadedChatSearchChunks(session, { key: id, kind: 'message', value: { message } }, matcher.visit);
+        if (matcher.matched()) keys.push(id);
     }
     return keys;
 }
 
 function getLoadedSessionSearchText(message) {
     const meta = message?.meta || {};
+    if (meta.isDiff === true) return String(meta.diffText || message?.text || '');
     const files = Array.isArray(meta.files) ? meta.files.map((file) => typeof file === 'string' ? file : file?.path || file?.name || '') : [];
     const todos = Array.isArray(meta.todos) ? meta.todos.map((todo) => todo?.content || todo?.text || '') : [];
     return [message?.text || '', meta.diffText || '', ...files, ...todos].filter(Boolean).join(' ');
@@ -5517,6 +6777,8 @@ function highlightSessionSearchTextNode(node, query, queryLower) {
         mark.className = 'session-search-hit';
         mark.textContent = text.slice(index, index + query.length);
         mark.dataset.searchIndex = String(sessionSearch.matches.length);
+        const owner = node.parentElement?.closest?.('[data-render-unit-key], [data-message-id], [data-segment-key]');
+        mark.dataset.searchKey = owner?.dataset?.renderUnitKey || owner?.dataset?.messageId || owner?.dataset?.segmentKey || '';
         sessionSearch.matches.push(mark);
         fragment.appendChild(mark);
         cursor = index + query.length;
@@ -5528,12 +6790,28 @@ function highlightSessionSearchTextNode(node, query, queryLower) {
     node.parentNode?.replaceChild(fragment, node);
 }
 
+function syncActiveTextSearchDomHit(options) {
+    const scroll = options?.scroll === true;
+    const activeKeyIndex = sessionSearch.activeKeyIndex;
+    const targetKey = activeKeyIndex >= 0 ? sessionSearch.fullMatchKeys[activeKeyIndex] : '';
+    let targetOccurrence = 0;
+    for (let index = 0; targetKey && index < activeKeyIndex; index += 1) {
+        if (sessionSearch.fullMatchKeys[index] === targetKey) targetOccurrence += 1;
+    }
+    const mountedForKey = sessionSearch.matches.filter((mark) => mark?.dataset?.searchKey === targetKey);
+    const target = mountedForKey[Math.min(targetOccurrence, Math.max(0, mountedForKey.length - 1))] || null;
+    sessionSearch.activeIndex = target ? sessionSearch.matches.indexOf(target) : -1;
+    if (scroll && target) {
+        autoScrollPinnedToBottom = false;
+    }
+    updateActiveSessionSearchHit({ scroll });
+}
+
 function refreshSessionSearchHighlights({ jumpToFirst = false } = {}) {
     if (sessionSearch.mode === 'smart') {
         updateSessionSearchControls();
         return;
     }
-    const previousIndex = sessionSearch.activeIndex;
     clearSessionSearchHighlights();
 
     const query = String(sessionSearch.query || '').trim();
@@ -5581,18 +6859,7 @@ function refreshSessionSearchHighlights({ jumpToFirst = false } = {}) {
         }
     }
 
-    if (sessionSearch.matches.length === 0) {
-        sessionSearch.activeIndex = -1;
-        updateSessionSearchControls();
-        return;
-    }
-
-    if (jumpToFirst || previousIndex < 0) {
-        sessionSearch.activeIndex = 0;
-    } else {
-        sessionSearch.activeIndex = Math.min(previousIndex, sessionSearch.matches.length - 1);
-    }
-    updateActiveSessionSearchHit({ scroll: jumpToFirst });
+    syncActiveTextSearchDomHit({ scroll: jumpToFirst });
 }
 
 function scheduleSessionSearchRefresh({ jumpToFirst = false } = {}) {
@@ -5612,7 +6879,9 @@ function goToSessionSearchMatch(delta) {
         sessionSearch.activeKeyIndex = (sessionSearch.activeKeyIndex + delta + totalKeys) % totalKeys;
         const targetKey = sessionSearch.fullMatchKeys[sessionSearch.activeKeyIndex];
         sessionSearch.windowTargetKey = targetKey;
-        if (ensureChatWindowKeyMounted(targetKey, 'search')) return;
+        if (!keyedRootForSearchKey(targetKey) && ensureChatWindowKeyMounted(targetKey, 'search')) return;
+        syncActiveTextSearchDomHit({ scroll: true });
+        return;
     }
     const total = sessionSearch.matches.length;
     if (!total) return;
@@ -5655,7 +6924,7 @@ function closeSessionSearch() {
 }
 
 function collectSmartSearchMessages() {
-    const session = getSessionOrNull(activeSessionId);
+    const session = getSessionState(activeSessionId, false);
     if (!session || !Array.isArray(session.timeline)) return [];
     const projectedRows = window.__oc?.getLoadedChatSearchRows?.();
     if (Array.isArray(projectedRows) && projectedRows.length) return projectedRows;
@@ -5666,12 +6935,14 @@ function collectSmartSearchMessages() {
         seen.add(id);
         const message = session.messagesById?.get?.(id);
         if (!message || session.hiddenSet?.has?.(id)) continue;
-        const text = getLoadedSessionSearchText(message).replace(/\s+/g, ' ').trim();
+        const text = collectBoundedSmartSearchText((visit) => {
+            visitLoadedChatSearchChunks(session, { key: id, kind: 'message', value: { message } }, visit);
+        }, 2200, true);
         if (!text) continue;
         rows.push({
             id,
             role: message.role || 'system',
-            text: text.slice(0, 2200)
+            text
         });
     }
     return rows;
@@ -5734,6 +7005,7 @@ function runSmartSessionSearch() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+    emitCF3RangeDiagnosticMarker();
     sendBtn = document.getElementById('send-btn');
     const sendIcon = `
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -5795,15 +7067,19 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    function handleChatContainerScroll() {
+        if (!chatWindowState.programmaticScroll) {
+            autoScrollPinnedToBottom = isNearBottom(chatContainer);
+            if (!autoScrollPinnedToBottom) captureChatWindowAnchor();
+        }
+        hideQuoteSelectionButton();
+    }
+
     if (chatContainer) {
         if (typeof installChatRenderMetrics === 'function') installChatRenderMetrics(chatContainer);
         autoScrollPinnedToBottom = isNearBottom(chatContainer);
         chatContainer.addEventListener('scroll', () => {
-            if (!chatWindowState.programmaticScroll) {
-                autoScrollPinnedToBottom = isNearBottom(chatContainer);
-                if (!autoScrollPinnedToBottom) captureChatWindowAnchor();
-            }
-            hideQuoteSelectionButton();
+            handleChatContainerScroll();
         }, { passive: true });
         chatContainer.addEventListener('mouseup', () => {
             setTimeout(showQuoteSelectionButton, 0);
@@ -6350,7 +7626,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const session = getSessionState(activeSessionId);
         const content = document.createElement('div');
         content.className = 'message-content';
-        content.textContent = 'Hello! I am OpenCode. How can I help you today?';
+        content.textContent = isActiveSessionHistoryLoading()
+            ? 'Loading history ...'
+            : 'Hello! I am OpenCode. How can I help you today?';
         div.appendChild(content);
         chatContainer.appendChild(div);
     }
@@ -6465,6 +7743,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function renderNestedMessageElement(message) {
+        const safeShellDiff = renderSafeShellDiffMessage(getSessionOrNull(activeSessionId), { key: keyedUnitKeyOverride, value: { message } }, keyedPresentationSelectionOverride);
+        if (safeShellDiff) return safeShellDiff;
         const messageType = message.role === 'assistant'
             ? 'bot'
             : message.role === 'user'
@@ -6931,27 +8211,6 @@ function renderMessageElement(message, renderedSet) {
              const inlineContainer = document.createElement('div');
              inlineContainer.className = 'subagent-inline';
              const messageIsThinking = Boolean(message.meta?.isThinking);
-
-            function pickMode(agent) {
-                if (typeof agent.mode === 'string' && agent.mode.trim()) return agent.mode.trim();
-                if (typeof agent.description === 'string' && agent.description.trim()) return agent.description.trim();
-                return '';
-            }
-
-            function cleanSubagentTitle(title) {
-                const raw = typeof title === 'string' ? title.trim() : '';
-                if (!raw) return 'Subagent';
-                return raw
-                    .replace(/\s*[（(]\s*@[^()]*[)）]\s*$/i, '')
-                    .trim() || 'Subagent';
-            }
-
-            function formatSubagentModel(agent) {
-                const modelId = (typeof agent.model === 'string' && agent.model.trim()) ? agent.model.trim() : '';
-                const providerId = (typeof agent.providerId === 'string' && agent.providerId.trim()) ? agent.providerId.trim() : '';
-                if (modelId && providerId) return `${modelId}/${providerId}`;
-                return modelId || providerId || '';
-            }
 
             function addSubagentTextToggle(textRow, options = {}) {
                 const collapsedLineCount = 5;
@@ -7620,6 +8879,17 @@ function renderMessageElement(message, renderedSet) {
             return bailUserMessageAppendFastPath('scroll-unpinned', [...fields, ...(tailSafety.fields || [])]);
         }
 
+        const rootAdmission = preflightChatRenderRootAdmission(null, messageId);
+        if (!rootAdmission.allowed) {
+            scheduleRenderFromState('window-append-fast-path-capacity');
+            return bailUserMessageAppendFastPath('window-capacity-declined', [
+                ...fields,
+                `mounted=${rootAdmission.mountedCount}`,
+                `directChildren=${rootAdmission.directChildCount}`,
+                ...(tailSafety.fields || [])
+            ]);
+        }
+
         const renderedSet = getRenderedMessageIdSetFromDom();
         const beforeChildren = chatContainer.childElementCount;
         const appendFastPathStartedAt = typeof startChatRenderPhase === 'function' ? startChatRenderPhase() : null;
@@ -8245,19 +9515,130 @@ function shouldHideDcpUiMessage(message) {
 
     const KEYED_CHAT_RECONCILE_ENABLED = window.__ocKeyedChatReconcileEnabled !== false;
     const TANSTACK_CHAT_WINDOW_ENABLED = window.__ocTanStackChatWindowEnabled !== false;
+    const CHAT_WINDOW_CONTAINMENT_POLICY_ENABLED = window.__ocChatWindowContainmentPolicyEnabled !== false;
+    const CHAT_WINDOW_RECOVERY_ENABLED = window.__ocChatWindowRecoveryEnabled !== false;
+    const CHAT_WINDOW_EMERGENCY_ENABLED = window.__ocChatWindowEmergencyEnabled !== false;
     const CHAT_WINDOW_INITIAL_TAIL = 80;
     const CHAT_LOCAL_OLDER_BATCH = 40;
     const CHAT_PENDING_SCROLL_MAX_ATTEMPTS = 4;
     const CHAT_WINDOW_OVERSCAN = 20;
     const CHAT_WINDOW_MOUNT_LIMIT = 140;
     const CHAT_WINDOW_DIRECT_CHILD_LIMIT = 146;
+    const CHAT_WINDOW_ADAPTIVE_RANGE_ENABLED = window.__ocChatWindowAdaptiveRangeEnabled !== false;
+    const CHAT_WINDOW_ADAPTIVE_SHADOW_CONFIG = Object.freeze({
+        enabled: CHAT_WINDOW_ADAPTIVE_RANGE_ENABLED,
+        revision: 2,
+        pressure: Object.freeze({
+            mountedAtLeast: 130, directChildrenAtLeast: 140, descendantsAtLeast: 900,
+            renderCostAtLeast: 80, measureCostAtLeast: 70
+        }),
+        headroom: Object.freeze({
+            mountedAtMost: 90, directChildrenAtMost: 96, descendantsAtMost: 400,
+            renderCostAtMost: 30, measureCostAtMost: 25
+        }),
+        pressureConsecutiveIntervals: 2,
+        headroomConsecutiveIntervals: 2,
+        cooldownIntervals: 2,
+        minimumAheadItems: 1,
+        minimumBehindItems: 1,
+        fastScrollDirectionalReserve: 5
+    });
+    const CHAT_WINDOW_TRANSACTION_UNAVAILABLE_RESULT = Object.freeze({
+        ok: false,
+        status: 'window-transaction-unavailable',
+        reason: 'missing-begin-transaction'
+    });
+    const CHAT_WINDOW_CANDIDATE_STALE_RESULT = Object.freeze({
+        ok: false,
+        status: 'window-candidate-stale',
+        reason: 'candidate-owner-stale'
+    });
+    const CHAT_WINDOW_REQUIRED_TRANSACTION_METHODS = Object.freeze([
+        'getRange', 'update', 'observeElement', 'unobserveElement', 'invalidateMeasurement',
+        'setPresentationRevision', 'migrateKey', 'prepareCommit', 'commit', 'finalizeCommit',
+        'retryCompletion', 'isFinalized', 'isDegraded', 'hasPendingCompletion', 'abort'
+    ]);
     const CHAT_STRUCTURAL_SURFACE_LIMIT = 6;
     const INIT_NO_MODELS_STRUCTURAL_KEY = 'surface:error:no-model';
+    const CHAT_WINDOW_PROJECTED_TOP_SPACER = Object.freeze({ key: 'window:top-spacer' });
+    const CHAT_WINDOW_PROJECTED_BOTTOM_SPACER = Object.freeze({ key: 'window:bottom-spacer' });
+    const CHAT_WINDOW_PROJECTED_LOCAL_OLDER = Object.freeze({ key: 'window:local-older' });
+    const chatStructuralRootReservations = new Set();
+    const disposedUnpublishedChatWindowCandidates = new WeakSet();
+    const consumedChatWindowStagedAttempts = new WeakSet();
+    const unpublishedChatWindowCandidateAcceptedStates = new WeakMap();
     let keyedChatRenderCapture = null;
     let keyedFollowingTurnDividerOverride = null;
+    let keyedPresentationSelectionOverride = null;
+    let keyedUnitKeyOverride = null;
+    let keyedChatReconcileFailure = null;
     let keyedChatFailedSessionId = '';
     let keyedChatReconcileState = { sessionId: '', items: [], roots: new Map() };
     let chatWindowGeneration = 0;
+    const B4_SYNTHETIC_EVIDENCE_OPTIONS = Object.freeze([
+        Object.freeze({ optionIndex: 0, overscanTier: 20, initialTail: 80, forwardReserve: 13, backwardReserve: 7 }),
+        Object.freeze({ optionIndex: 1, overscanTier: 20, initialTail: 40, forwardReserve: 13, backwardReserve: 7 }),
+        Object.freeze({ optionIndex: 2, overscanTier: 20, initialTail: 24, forwardReserve: 13, backwardReserve: 7 }),
+        Object.freeze({ optionIndex: 3, overscanTier: 10, initialTail: 80, forwardReserve: 7, backwardReserve: 3 }),
+        Object.freeze({ optionIndex: 4, overscanTier: 10, initialTail: 40, forwardReserve: 7, backwardReserve: 3 }),
+        Object.freeze({ optionIndex: 5, overscanTier: 10, initialTail: 24, forwardReserve: 7, backwardReserve: 3 }),
+        Object.freeze({ optionIndex: 6, overscanTier: 4, initialTail: 80, forwardReserve: 3, backwardReserve: 1 }),
+        Object.freeze({ optionIndex: 7, overscanTier: 4, initialTail: 40, forwardReserve: 3, backwardReserve: 1 }),
+        Object.freeze({ optionIndex: 8, overscanTier: 4, initialTail: 24, forwardReserve: 3, backwardReserve: 1 })
+    ]);
+    let chatWindowSyntheticEvidenceRequest = null;
+    let chatWindowSyntheticEvidenceAttempt = 0;
+
+    function clearChatWindowSyntheticEvidenceRequest() {
+        const hadRequest = chatWindowSyntheticEvidenceRequest !== null;
+        chatWindowSyntheticEvidenceRequest = null;
+        return hadRequest;
+    }
+
+    function armChatWindowSyntheticEvidenceRequest(optionIndex) {
+        if (!B4_SYNTHETIC_EVIDENCE_BOOT_ACCEPTED) return null;
+        if (!Number.isInteger(optionIndex) || optionIndex < 0 || optionIndex >= B4_SYNTHETIC_EVIDENCE_OPTIONS.length) return null;
+        const option = B4_SYNTHETIC_EVIDENCE_OPTIONS[optionIndex];
+        chatWindowSyntheticEvidenceAttempt += 1;
+        const owner = Object.freeze({
+            token: Object.freeze({}),
+            ownerSessionId: activeSessionId || '__no_session__',
+            ownerGeneration: chatWindowGeneration,
+            request: Object.freeze({
+                optionIndex: option.optionIndex,
+                overscanTier: option.overscanTier,
+                initialTail: option.initialTail,
+                forwardReserve: option.forwardReserve,
+                backwardReserve: option.backwardReserve,
+                attempt: chatWindowSyntheticEvidenceAttempt
+            })
+        });
+        chatWindowSyntheticEvidenceRequest = owner;
+        return owner.token;
+    }
+
+    function consumeChatWindowSyntheticEvidenceRequest(token) {
+        if (!B4_SYNTHETIC_EVIDENCE_BOOT_ACCEPTED || !chatWindowSyntheticEvidenceRequest) return null;
+        const owner = chatWindowSyntheticEvidenceRequest;
+        chatWindowSyntheticEvidenceRequest = null;
+        if (owner.token !== token) return null;
+        if (owner.ownerSessionId !== (activeSessionId || '__no_session__') || owner.ownerGeneration !== chatWindowGeneration) return null;
+        return owner.request;
+    }
+
+    if (B4_SYNTHETIC_EVIDENCE_BOOT_ACCEPTED) {
+        Object.defineProperty(window, '__ocChatWindowAdaptiveEvidence', {
+            value: Object.freeze({
+                arm: armChatWindowSyntheticEvidenceRequest,
+                consume: consumeChatWindowSyntheticEvidenceRequest
+            }),
+            enumerable: false,
+            configurable: false,
+            writable: false
+        });
+    }
+    let chatWindowAcceptedPlanRevision = 0;
+    let chatWindowPlanCorrection = { sessionId: '', generation: -1, planRevision: -1 };
     const chatLocalHistoryController = window.__ocRendering?.createLocalHistoryPresentationController?.({
         initialTailCount: CHAT_WINDOW_INITIAL_TAIL, batchSize: CHAT_LOCAL_OLDER_BATCH, maxSessions: 32
     });
@@ -8267,17 +9648,470 @@ function shouldHideDcpUiMessage(message) {
         programmaticScroll: false, activityBelow: false, rendering: false,
         pendingRangeRender: false, failedSessionId: '', localOlderSurface: null,
         localOlderObserver: null, localOlderObserverArmed: true, pendingScrollKey: '',
-        pendingScrollAttempts: 0, localHistoryPresentation: null
+        pendingScrollAttempts: 0, localHistoryPresentation: null, acknowledgedRawSnapshot: null
     };
+    let chatWindowPressureLifecycle = { current: null, closures: [] };
+    let chatWindowAdaptiveShadow = null;
+    let chatWindowOuterRecovery = Object.freeze({
+        status: 'idle', sessionId: '', generation: -1, reason: 'none', rawIntegrity: null
+    });
+
+    function boundedChatAdaptiveCount(value) {
+        if (!Number.isFinite(value)) return 0;
+        return Math.min(1000000, Math.max(0, Math.trunc(value)));
+    }
+
+    function createChatWindowAdaptiveShadowState(generation) {
+        return Object.freeze({
+            sessionGeneration: boundedChatAdaptiveCount(generation),
+            lastDecisionInterval: 0,
+            overscanTier: 20,
+            initialTail: 80,
+            pressureCount: 0,
+            headroomCount: 0,
+            cooldownRemaining: 0,
+            lastSignal: 'none',
+            decisionGeneration: 0
+        });
+    }
+
+    function publishChatWindowAdaptiveShadowTelemetry(result, provenance, overrideReason = '') {
+        const state = result?.state || chatWindowAdaptiveShadow?.state || createChatWindowAdaptiveShadowState(chatWindowGeneration);
+        const range = result?.range || {};
+        const closedReasons = new Set([
+            'invalid-input', 'disabled', 'session-reset', 'stale-session', 'duplicate-or-stale-interval',
+            'self-churn', 'cooldown', 'neutral', 'pressure-pending', 'headroom-pending',
+            'pressure-transition', 'headroom-transition', 'minimum-tier', 'maximum-tier'
+        ]);
+        const telemetry = Object.freeze({
+            enabled: result?.enabled === true,
+            allowed: result?.allowed === true,
+            configRevision: boundedChatAdaptiveCount(result?.configRevision),
+            decisionInterval: boundedChatAdaptiveCount(result?.decisionInterval),
+            generation: boundedChatAdaptiveCount(state.sessionGeneration),
+            decisionGeneration: boundedChatAdaptiveCount(state.decisionGeneration),
+            overscanTier: [20, 10, 4].includes(state.overscanTier) ? state.overscanTier : 20,
+            initialTail: [80, 40, 24].includes(state.initialTail) ? state.initialTail : 80,
+            pressureCount: boundedChatAdaptiveCount(state.pressureCount),
+            headroomCount: boundedChatAdaptiveCount(state.headroomCount),
+            cooldownRemaining: boundedChatAdaptiveCount(state.cooldownRemaining),
+            decision: ['hold', 'shrink', 'grow'].includes(result?.decision) ? result.decision : 'hold',
+            reason: overrideReason || (closedReasons.has(result?.reason) ? result.reason : 'invalid-input'),
+            provenance: Object.freeze({
+                kind: provenance?.kind === 'self' ? 'self' : 'external',
+                decisionGeneration: boundedChatAdaptiveCount(provenance?.decisionGeneration)
+            }),
+            range: Object.freeze({
+                viewportItems: boundedChatAdaptiveCount(range.viewportItems),
+                aheadItems: boundedChatAdaptiveCount(range.aheadItems),
+                behindItems: boundedChatAdaptiveCount(range.behindItems),
+                totalDemand: boundedChatAdaptiveCount(range.totalDemand)
+            })
+        });
+        window.__ocChatWindowAdaptiveShadow = telemetry;
+        return telemetry;
+    }
+
+    function resetChatWindowAdaptiveShadow(reason = 'reset', expectedGeneration = null) {
+        if (expectedGeneration !== null && chatWindowAdaptiveShadow
+            && chatWindowAdaptiveShadow.ownerGeneration !== expectedGeneration) return false;
+        const generation = boundedChatAdaptiveCount(chatWindowGeneration);
+        const state = createChatWindowAdaptiveShadowState(generation);
+        chatWindowAdaptiveShadow = Object.freeze({
+            ownerSessionId: activeSessionId || '__no_session__',
+            ownerGeneration: generation,
+            decisionInterval: 0,
+            state,
+            observations: null
+        });
+        publishChatWindowAdaptiveShadowTelemetry({
+            enabled: typeof CHAT_WINDOW_ADAPTIVE_RANGE_ENABLED !== 'undefined' && CHAT_WINDOW_ADAPTIVE_RANGE_ENABLED,
+            allowed: true, configRevision: CHAT_WINDOW_ADAPTIVE_SHADOW_CONFIG.revision,
+            decisionInterval: 0, decision: 'hold', reason, state, range: null
+        }, { kind: 'external', decisionGeneration: 0 }, reason);
+        return true;
+    }
+
+    function resolveChatWindowAdaptiveShadowConfig() {
+        const explicitTest = window.__ocChatWindowAdaptiveShadowTestConfig;
+        if (!explicitTest || explicitTest.syntheticEnvironment !== true) return CHAT_WINDOW_ADAPTIVE_SHADOW_CONFIG;
+        return Object.freeze({
+            ...CHAT_WINDOW_ADAPTIVE_SHADOW_CONFIG,
+            enabled: explicitTest.enabled === true,
+            revision: boundedChatAdaptiveCount(explicitTest.revision),
+            pressure: Object.freeze({ ...CHAT_WINDOW_ADAPTIVE_SHADOW_CONFIG.pressure, ...(explicitTest.pressure || {}) }),
+            headroom: Object.freeze({ ...CHAT_WINDOW_ADAPTIVE_SHADOW_CONFIG.headroom, ...(explicitTest.headroom || {}) }),
+            pressureConsecutiveIntervals: explicitTest.pressureConsecutiveIntervals ?? CHAT_WINDOW_ADAPTIVE_SHADOW_CONFIG.pressureConsecutiveIntervals,
+            headroomConsecutiveIntervals: explicitTest.headroomConsecutiveIntervals ?? CHAT_WINDOW_ADAPTIVE_SHADOW_CONFIG.headroomConsecutiveIntervals,
+            cooldownIntervals: explicitTest.cooldownIntervals ?? CHAT_WINDOW_ADAPTIVE_SHADOW_CONFIG.cooldownIntervals,
+            minimumAheadItems: explicitTest.minimumAheadItems ?? CHAT_WINDOW_ADAPTIVE_SHADOW_CONFIG.minimumAheadItems,
+            minimumBehindItems: explicitTest.minimumBehindItems ?? CHAT_WINDOW_ADAPTIVE_SHADOW_CONFIG.minimumBehindItems,
+            fastScrollDirectionalReserve: explicitTest.fastScrollDirectionalReserve ?? CHAT_WINDOW_ADAPTIVE_SHADOW_CONFIG.fastScrollDirectionalReserve
+        });
+    }
+
+    function observeChatWindowAdaptiveShadow(observations, provenance = null) {
+        const ownerSessionId = activeSessionId || '__no_session__';
+        const ownerGeneration = boundedChatAdaptiveCount(chatWindowGeneration);
+        if (!chatWindowAdaptiveShadow || chatWindowAdaptiveShadow.ownerSessionId !== ownerSessionId
+            || chatWindowAdaptiveShadow.ownerGeneration !== ownerGeneration) resetChatWindowAdaptiveShadow('session-reset');
+        const decide = window.__ocRendering?.decideChatWindowAdaptivePolicy;
+        if (typeof decide !== 'function') return null;
+        const selfObservation = provenance?.kind === 'self';
+        if (selfObservation && boundedChatAdaptiveCount(provenance?.decisionGeneration)
+            !== boundedChatAdaptiveCount(chatWindowAdaptiveShadow.state.decisionGeneration)) return null;
+        const countRoles = (roles) => Object.freeze({
+            visible: boundedChatAdaptiveCount(roles?.visible),
+            core: boundedChatAdaptiveCount(roles?.core),
+            currentStreamingAssistant: boundedChatAdaptiveCount(roles?.currentStreamingAssistant),
+            thinkingAlias: boundedChatAdaptiveCount(roles?.thinkingAlias),
+            pairedActiveUser: boundedChatAdaptiveCount(roles?.pairedActiveUser),
+            appendRoot: boundedChatAdaptiveCount(roles?.appendRoot),
+            readingAnchor: boundedChatAdaptiveCount(roles?.readingAnchor),
+            searchTarget: boundedChatAdaptiveCount(roles?.searchTarget),
+            overscan: boundedChatAdaptiveCount(roles?.overscan)
+        });
+        const measurements = Object.freeze({
+            mountedCount: boundedChatAdaptiveCount(observations?.mountedCount),
+            directChildCount: boundedChatAdaptiveCount(observations?.directChildCount),
+            descendantCount: boundedChatAdaptiveCount(observations?.descendantCount),
+            viewportItemDemand: boundedChatAdaptiveCount(observations?.viewportItemDemand),
+            renderCost: boundedChatAdaptiveCount(observations?.renderCost),
+            measureCost: boundedChatAdaptiveCount(observations?.measureCost),
+            projectedStructuralRoots: boundedChatAdaptiveCount(observations?.projectedStructuralRoots),
+            currentRequestedCount: boundedChatAdaptiveCount(observations?.currentRequestedCount),
+            currentAcceptedCount: boundedChatAdaptiveCount(observations?.currentAcceptedCount)
+        });
+        const roleOutcomes = Object.freeze({
+            accepted: countRoles(observations?.roleOutcomes?.accepted),
+            capped: countRoles(observations?.roleOutcomes?.capped),
+            deferred: countRoles(observations?.roleOutcomes?.deferred)
+        });
+        const decisionInterval = boundedChatAdaptiveCount(chatWindowAdaptiveShadow.decisionInterval + 1);
+        const taggedProvenance = Object.freeze({
+            kind: provenance?.kind === 'self' ? 'self' : 'external',
+            decisionGeneration: boundedChatAdaptiveCount(provenance?.decisionGeneration
+                ?? chatWindowAdaptiveShadow.state.decisionGeneration)
+        });
+        const input = Object.freeze({
+            config: resolveChatWindowAdaptiveShadowConfig(),
+            state: chatWindowAdaptiveShadow.state,
+            decisionInterval,
+            sessionGeneration: ownerGeneration,
+            provenance: taggedProvenance,
+            direction: ['forward', 'backward'].includes(observations?.direction) ? observations.direction : 'stationary',
+            velocity: ['slow', 'fast'].includes(observations?.velocity) ? observations.velocity : 'idle',
+            measurements,
+            roleOutcomes,
+            syntheticEnvironment: window.__ocChatWindowAdaptiveShadowTestConfig?.syntheticEnvironment === true
+        });
+        let result;
+        try {
+            result = decide(input);
+        } catch {
+            resetChatWindowAdaptiveShadow('facade-exception');
+            return null;
+        }
+        if ((activeSessionId || '__no_session__') !== ownerSessionId
+            || boundedChatAdaptiveCount(chatWindowGeneration) !== ownerGeneration) {
+            resetChatWindowAdaptiveShadow('stale-owner');
+            return null;
+        }
+        if (!result || typeof result !== 'object' || !result.state || typeof result.state !== 'object') {
+            resetChatWindowAdaptiveShadow('policy-result-invalid');
+            return null;
+        }
+        if (selfObservation) {
+            chatWindowAdaptiveShadow = Object.freeze({
+                ownerSessionId,
+                ownerGeneration,
+                decisionInterval,
+                state: chatWindowAdaptiveShadow.state,
+                observations: chatWindowAdaptiveShadow.observations
+            });
+            return result;
+        }
+        chatWindowAdaptiveShadow = Object.freeze({
+            ownerSessionId,
+            ownerGeneration,
+            decisionInterval,
+            state: result.state,
+            observations: Object.freeze({ ...measurements, roleOutcomes })
+        });
+        publishChatWindowAdaptiveShadowTelemetry(result, taggedProvenance);
+        return result;
+    }
+
+    function createChatWindowAdaptiveObservations(snapshot, budget = null, requestedCount = 0, acceptedPlan = null, session = null, measureCost = 0) {
+        const mountedCount = boundedChatAdaptiveCount(snapshot?.items?.length);
+        const directChildCount = boundedChatAdaptiveCount(budget?.directChildren);
+        const descendantCount = boundedChatAdaptiveCount(budget?.descendants);
+        const projectedStructuralRoots = boundedChatAdaptiveCount(acceptedPlan?.projectedStructuralRoots
+            ?? Math.max(0, directChildCount - mountedCount));
+        const viewportItemDemand = mountedCount > 0
+            ? Math.max(1, Math.min(mountedCount, Math.ceil(boundedChatAdaptiveCount(chatContainer?.clientHeight) / 48) || 1))
+            : 0;
+        const accepted = new Set(Array.isArray(acceptedPlan?.acceptedKeys) ? acceptedPlan.acceptedKeys : []);
+        const roles = {
+            visible: viewportItemDemand,
+            core: 0,
+            currentStreamingAssistant: accepted.has(session?.currentTurnAssistantKey) ? 1 : 0,
+            thinkingAlias: accepted.has(session?.thinkingId) ? 1 : 0,
+            pairedActiveUser: accepted.has(session?.lastTurnUserId) ? 1 : 0,
+            appendRoot: accepted.has(session?.appendRootUserKey) ? 1 : 0,
+            readingAnchor: accepted.has(chatWindowState.anchorKey) ? 1 : 0,
+            searchTarget: accepted.has(sessionSearch.windowTargetKey) ? 1 : 0,
+            overscan: Math.max(0, mountedCount - viewportItemDemand)
+        };
+        roles.core = roles.currentStreamingAssistant + roles.thinkingAlias + roles.pairedActiveUser + roles.appendRoot;
+        const deferred = {
+            visible: 0, core: 0, currentStreamingAssistant: 0, thinkingAlias: 0,
+            pairedActiveUser: 0, appendRoot: 0, readingAnchor: 0, searchTarget: 0, overscan: 0
+        };
+        const roleField = {
+            'current-streaming-assistant': 'currentStreamingAssistant',
+            'thinking-alias': 'thinkingAlias',
+            'paired-active-user': 'pairedActiveUser',
+            'append-root': 'appendRoot',
+            'reading-anchor': 'readingAnchor',
+            'search-target': 'searchTarget'
+        };
+        for (const entry of Array.isArray(acceptedPlan?.deferredPins) ? acceptedPlan.deferredPins.slice(0, 6) : []) {
+            const field = roleField[entry?.role];
+            if (field) deferred[field] = boundedChatAdaptiveCount(deferred[field] + 1);
+        }
+        deferred.core = deferred.currentStreamingAssistant + deferred.thinkingAlias + deferred.pairedActiveUser + deferred.appendRoot;
+        const capped = {
+            visible: 0, core: 0, currentStreamingAssistant: 0, thinkingAlias: 0,
+            pairedActiveUser: 0, appendRoot: 0, readingAnchor: 0, searchTarget: 0,
+            overscan: Math.max(0, boundedChatAdaptiveCount(requestedCount) - mountedCount)
+        };
+        return Object.freeze({
+            mountedCount,
+            directChildCount,
+            descendantCount,
+            viewportItemDemand,
+            renderCost: 0,
+            measureCost: boundedChatAdaptiveCount(measureCost),
+            projectedStructuralRoots,
+            currentRequestedCount: Math.max(boundedChatAdaptiveCount(requestedCount), viewportItemDemand + 2),
+            currentAcceptedCount: Math.max(mountedCount, viewportItemDemand + 2),
+            roleOutcomes: Object.freeze({
+                accepted: Object.freeze(roles), capped: Object.freeze(capped), deferred: Object.freeze(deferred)
+            })
+        });
+    }
+
+    function resolveChatWindowAdaptiveRangePolicy() {
+        if (typeof CHAT_WINDOW_ADAPTIVE_RANGE_ENABLED === 'undefined' || !CHAT_WINDOW_ADAPTIVE_RANGE_ENABLED
+            || typeof chatWindowAdaptiveShadow === 'undefined' || !chatWindowAdaptiveShadow) return undefined;
+        const ownerSessionId = activeSessionId || '__no_session__';
+        if (chatWindowAdaptiveShadow.ownerSessionId !== ownerSessionId
+            || chatWindowAdaptiveShadow.ownerGeneration !== boundedChatAdaptiveCount(chatWindowGeneration)) return undefined;
+        const state = chatWindowAdaptiveShadow.state;
+        const overscanTier = [20, 10, 4].includes(state?.overscanTier) ? state.overscanTier : CHAT_WINDOW_OVERSCAN;
+        const initialTail = [80, 40, 24].includes(state?.initialTail) ? state.initialTail : CHAT_WINDOW_INITIAL_TAIL;
+        const beforeReserve = overscanTier === 20 ? 7 : overscanTier === 10 ? 3 : 1;
+        return Object.freeze({
+            overscanTier,
+            beforeReserve,
+            afterReserve: overscanTier - beforeReserve,
+            initialTail
+        });
+    }
+
+    resetChatWindowAdaptiveShadow('initial');
+
+    function captureChatWindowAcceptedState() {
+        const directChildren = Array.from(chatContainer.children);
+        const acceptedNodes = new Set([
+            ...directChildren,
+            ...chatStructuralRootReservations,
+            chatWindowState.topSpacer,
+            chatWindowState.bottomSpacer,
+            chatWindowState.localOlderSurface
+        ].filter(Boolean));
+        const nodeStates = new Map(Array.from(acceptedNodes).map((root) => [root, {
+            dataset: { ...(root.dataset || {}) },
+            style: root.getAttribute?.('style') ?? null,
+            children: Array.from(root.childNodes || [])
+        }]));
+        const windowGlobals = {};
+        for (const name of [
+            '__ocKeyedChatLastReconcile', '__ocChatWindowLastBudget', '__ocChatWindowDomBudgetAudit',
+            '__ocChatWindowRecovery'
+        ]) {
+            windowGlobals[name] = { owned: Object.prototype.hasOwnProperty.call(window, name), value: window[name] };
+        }
+        return {
+            directChildren,
+            nodeStates,
+            chatWindowValues: Object.fromEntries(Object.keys(chatWindowState).map((key) => [key, chatWindowState[key]])),
+            keyedState: {
+                sessionId: keyedChatReconcileState.sessionId,
+                items: keyedChatReconcileState.items,
+                roots: new Map(keyedChatReconcileState.roots)
+            },
+            chatStructuralRootReservations: new Set(chatStructuralRootReservations),
+            chatWindowAcceptedPlanRevision,
+            chatWindowPlanCorrection,
+            keyedChatReconcileFailure,
+            conflictCardEl,
+            conflictShellPresentationGeneration,
+            chatWindowGeneration,
+            pressureLifecycleCurrent: chatWindowPressureLifecycle.current,
+            pressureLifecycleClosures: chatWindowPressureLifecycle.closures,
+            metricsPressureLifecycle: typeof chatRenderMetrics !== 'undefined'
+                ? { owned: Object.prototype.hasOwnProperty.call(chatRenderMetrics, 'pressureLifecycle'), value: chatRenderMetrics.pressureLifecycle }
+                : null,
+            chatRenderMetricsDirty,
+            scrollTop: chatContainer.scrollTop,
+            className: chatContainer.getAttribute?.('class') ?? null,
+            windowGlobals
+        };
+    }
+
+    function restoreChatContainerChildren(children) {
+        chatContainer.replaceChildren(...children);
+    }
+
+    function restoreChatWindowAcceptedState(acceptedState) {
+        const attemptedAdapter = chatWindowState.adapter;
+        const retainedAdapter = acceptedState.chatWindowValues.adapter;
+        const attemptedObserver = chatWindowState.localOlderObserver;
+        const retainedObserver = acceptedState.chatWindowValues.localOlderObserver;
+        if (attemptedObserver && attemptedObserver !== retainedObserver) attemptedObserver.disconnect?.();
+        if (attemptedAdapter && attemptedAdapter !== retainedAdapter) attemptedAdapter.destroy?.();
+        restoreChatContainerChildren(acceptedState.directChildren);
+        for (const [root, state] of acceptedState.nodeStates) {
+            if (root.dataset) {
+                for (const key of Object.keys(root.dataset)) if (!Object.prototype.hasOwnProperty.call(state.dataset, key)) delete root.dataset[key];
+                Object.assign(root.dataset, state.dataset);
+            }
+            if (root.setAttribute && root.removeAttribute) {
+                if (state.style === null) root.removeAttribute('style');
+                else root.setAttribute('style', state.style);
+            }
+            if (root === acceptedState.chatWindowValues.localOlderSurface) root.replaceChildren?.(...state.children);
+        }
+        for (const [key, value] of Object.entries(acceptedState.chatWindowValues)) chatWindowState[key] = value;
+        keyedChatReconcileState = {
+            sessionId: acceptedState.keyedState.sessionId,
+            items: acceptedState.keyedState.items,
+            roots: new Map(acceptedState.keyedState.roots)
+        };
+        chatStructuralRootReservations.clear();
+        for (const root of acceptedState.chatStructuralRootReservations) chatStructuralRootReservations.add(root);
+        chatWindowAcceptedPlanRevision = acceptedState.chatWindowAcceptedPlanRevision;
+        chatWindowPlanCorrection = acceptedState.chatWindowPlanCorrection;
+        keyedChatReconcileFailure = acceptedState.keyedChatReconcileFailure;
+        conflictCardEl = acceptedState.conflictCardEl;
+        conflictShellPresentationGeneration = acceptedState.conflictShellPresentationGeneration;
+        chatWindowGeneration = acceptedState.chatWindowGeneration;
+        chatWindowPressureLifecycle.current = acceptedState.pressureLifecycleCurrent;
+        chatWindowPressureLifecycle.closures = acceptedState.pressureLifecycleClosures;
+        if (acceptedState.metricsPressureLifecycle && typeof chatRenderMetrics !== 'undefined') {
+            if (acceptedState.metricsPressureLifecycle.owned) chatRenderMetrics.pressureLifecycle = acceptedState.metricsPressureLifecycle.value;
+            else delete chatRenderMetrics.pressureLifecycle;
+        }
+        chatRenderMetricsDirty = acceptedState.chatRenderMetricsDirty;
+        chatContainer.scrollTop = acceptedState.scrollTop;
+        if (chatContainer.setAttribute && chatContainer.removeAttribute) {
+            if (acceptedState.className === null) chatContainer.removeAttribute('class');
+            else chatContainer.setAttribute('class', acceptedState.className);
+        }
+        for (const [name, record] of Object.entries(acceptedState.windowGlobals)) {
+            if (record.owned) window[name] = record.value;
+            else delete window[name];
+        }
+        if (retainedObserver && acceptedState.chatWindowValues.localOlderSurface) {
+            retainedObserver.observe?.(acceptedState.chatWindowValues.localOlderSurface);
+        }
+    }
+
+    function beginChatPresentationJournal(acceptedState = captureChatWindowAcceptedState(), reconcileSessionId = '') {
+        return {
+            acceptedState,
+            reconcileSessionId,
+            preparedRoots: new Set(),
+            supersededRoots: new Set(),
+            disposedPreparedRoots: new Set(),
+            disposedSupersededRoots: new Set(),
+            cleanupRemovals: [],
+            adapterTransaction: null,
+            completion: { cleanupRecorded: new Set(), localComplete: false, degraded: false },
+            aborted: false,
+            finalized: false
+        };
+    }
+
+    function disposePreparedChatRoot(journal, root) {
+        if (!root || journal.disposedPreparedRoots.has(root)) return;
+        journal.disposedPreparedRoots.add(root);
+        root._safeShellDispose?.();
+    }
+
+    function disposeSupersededChatRoot(journal, root) {
+        if (!root || journal.disposedSupersededRoots.has(root)) return;
+        journal.disposedSupersededRoots.add(root);
+        root._safeShellDispose?.();
+    }
+
+    function abortChatPresentationJournal(journal) {
+        if (!journal || journal.aborted || journal.finalized) return false;
+        journal.adapterTransaction?.abort?.();
+        for (const root of journal.preparedRoots) disposePreparedChatRoot(journal, root);
+        restoreChatContainerChildren(journal.acceptedState.directChildren);
+        restoreChatWindowAcceptedState(journal.acceptedState);
+        journal.aborted = true;
+        return true;
+    }
+
+    function finalizeChatPresentationJournal(journal) {
+        if (!journal || journal.aborted || journal.finalized) return false;
+        for (const root of journal.supersededRoots) {
+            try { disposeSupersededChatRoot(journal, root); } catch { journal.completion.degraded = true; }
+        }
+        for (let index = 0; index < journal.cleanupRemovals.length; index += 1) {
+            if (journal.completion.cleanupRecorded.has(index)) continue;
+            journal.completion.cleanupRecorded.add(index);
+            try {
+                const root = journal.cleanupRemovals[index];
+                const residual = root?.parentElement === chatContainer ? 1 : 0;
+                recordChatWindowCleanupCheckpoint('removal', chatWindowGeneration, 1, residual ? 0 : 1, residual);
+            } catch { journal.completion.degraded = true; }
+        }
+        if (!journal.completion.localComplete) {
+            journal.completion.localComplete = true;
+            try { chatLocalHistoryController.complete(journal.reconcileSessionId); } catch { journal.completion.degraded = true; }
+        }
+        journal.finalized = true;
+        return true;
+    }
+
+    function runChatPresentationFailureSeam(stage, detail = null) {
+        window.__ocChatPresentationFailureSeam?.(stage, detail);
+    }
 
     function appendChatRenderRoot(root) {
         if (keyedChatRenderCapture) {
             keyedChatRenderCapture.appendChild(root);
-        } else if (chatWindowState.bottomSpacer?.parentElement === chatContainer) {
+            return true;
+        }
+        const admission = preflightChatRenderRootAdmission(root);
+        if (!admission.allowed) return false;
+        if (chatWindowState.bottomSpacer?.parentElement === chatContainer) {
             chatContainer.insertBefore(root, chatWindowState.bottomSpacer);
         } else {
             chatContainer.appendChild(root);
         }
+        chatStructuralRootReservations.delete(root);
+        return true;
+    }
+
+    function reserveChatStructuralRoot(root) {
+        if (root && root.parentElement !== chatContainer) chatStructuralRootReservations.add(root);
+        return root;
     }
 
     function classifyChatStructuralSurface(root, key, owner) {
@@ -8294,11 +10128,13 @@ function shouldHideDcpUiMessage(message) {
     function showInitNoModelsError() {
         const existingError = chatContainer.querySelector(`:scope > [data-chat-structural-key="${INIT_NO_MODELS_STRUCTURAL_KEY}"]`);
         const errorDiv = existingError || document.createElement('div');
+        reserveChatStructuralRoot(errorDiv);
         errorDiv.className = 'message system error';
         errorDiv.style.color = 'red';
         errorDiv.textContent = 'Error: No models available. Please check your OpenCode configuration.';
         classifyChatStructuralSurface(errorDiv, INIT_NO_MODELS_STRUCTURAL_KEY, 'init:no-models');
-        if (!existingError) chatContainer.appendChild(errorDiv);
+        if (!existingError) appendChatRenderRoot(errorDiv);
+        else chatStructuralRootReservations.delete(errorDiv);
         return errorDiv;
     }
 
@@ -8317,7 +10153,10 @@ function shouldHideDcpUiMessage(message) {
 
     function getKeyedUnitPresentation(session, unit) {
         if (unit.kind === 'greeting') {
-            return { text: 'Hello! I am OpenCode. How can I help you today?', sessionId: activeSessionId || '' };
+            return {
+                text: unit.value?.text || 'Hello! I am OpenCode. How can I help you today?',
+                sessionId: activeSessionId || ''
+            };
         }
         if (unit.kind === 'conflict') return { payload: unit.value, sessionId: activeSessionId || '' };
         if (unit.kind === 'segment') {
@@ -8352,6 +10191,14 @@ function shouldHideDcpUiMessage(message) {
         return { ...presentation, key: { $unitIdentityOwned: true }, text: { $streamOwned: true }, meta };
     }
 
+    function getKeyedPresentationIdentity(presentation, presentationSelection) {
+        return {
+            presentation,
+            mode: presentationSelection?.mode || 'normal-rich',
+            family: presentationSelection?.family || ''
+        };
+    }
+
     function acknowledgeKeyedStreamPatch(session, targetId) {
         if (!KEYED_CHAT_RECONCILE_ENABLED || !window.__ocRendering) return false;
         if (!session || keyedChatReconcileState.sessionId !== activeSessionId) return false;
@@ -8365,12 +10212,16 @@ function shouldHideDcpUiMessage(message) {
             value: { message }
         });
         const rendering = window.__ocRendering;
-        const currentStreamStableFingerprint = rendering.presentationFingerprint(getKeyedStreamStablePresentation(currentPresentation));
         const cachedItem = keyedChatReconcileState.items[itemIndex];
+        const presentationSelection = cachedItem.presentationSelection;
+        const currentStreamStableFingerprint = rendering.presentationFingerprint(getKeyedPresentationIdentity(
+            getKeyedStreamStablePresentation(currentPresentation),
+            presentationSelection
+        ));
         if (cachedItem.streamStableFingerprint !== currentStreamStableFingerprint) return false;
         const nextItem = {
             ...cachedItem,
-            fingerprint: rendering.presentationFingerprint(currentPresentation),
+            fingerprint: rendering.presentationFingerprint(getKeyedPresentationIdentity(currentPresentation, presentationSelection)),
             streamStableFingerprint: currentStreamStableFingerprint
         };
         keyedChatReconcileState.items = keyedChatReconcileState.items.map((item, index) => index === itemIndex ? nextItem : item);
@@ -8380,7 +10231,12 @@ function shouldHideDcpUiMessage(message) {
     function buildKeyedRenderCandidates(session) {
         const timeline = Array.isArray(session?.timeline) ? session.timeline : [];
         if (!session || timeline.length === 0) {
-            return [{ key: `greeting:${activeSessionId || 'none'}`, kind: 'greeting', value: null }];
+            const loadingHistory = isActiveSessionHistoryLoading();
+            return [{
+                key: loadingHistory ? `history-loading:${activeSessionId}` : `greeting:${activeSessionId || 'none'}`,
+                kind: 'greeting',
+                value: loadingHistory ? { text: 'Loading history ...' } : null
+            }];
         }
         const appendChildPresentationIndex = buildAppendChildPresentationIndex(session);
         const candidates = [];
@@ -8418,31 +10274,1663 @@ function shouldHideDcpUiMessage(message) {
         return candidates;
     }
 
-    function renderDetachedKeyedUnit(session, unit, renderedSet) {
+    let safeShellPresentationGeneration = 0;
+    const safeShellMountOwnership = new WeakMap();
+
+    function forEachSafeShellUserCanonicalPart(message, visitor) {
+        const raw = typeof message?.text === 'string' ? message.text : '';
+        const mainText = stripSystemInjections(stripAttachmentManifest(raw)).trim();
+        let hasPriorPart = false;
+        let appendedCount = 0;
+        if (mainText) {
+            visitor(mainText);
+            hasPriorPart = true;
+        }
+        for (const item of getAppendItems(message)) {
+            if (!item || typeof item.text !== 'string') continue;
+            const text = item.text.trim();
+            if (!text) continue;
+            if (hasPriorPart) visitor('\n\n');
+            visitor(text);
+            hasPriorPart = true;
+            appendedCount += 1;
+        }
+        return { appendedCount, hasContent: hasPriorPart };
+    }
+
+    function scanSafeShellTextPage(message, requestedPage, pageContract) {
+        const maxCodeUnits = pageContract.maxCodeUnits;
+        const maxLines = pageContract.maxLines;
+        let currentPage = 1;
+        let currentPageCodeUnits = 0;
+        let currentPageLines = 1;
+        let codeUnitCount = 0;
+        let newlineCount = 0;
+        let pageText = '';
+        const page = Number.isFinite(requestedPage) && requestedPage > 0 ? Math.floor(requestedPage) : 1;
+        const consume = (text) => {
+            for (let index = 0; index < text.length; index += 1) {
+                const character = text[index];
+                if (currentPageCodeUnits >= maxCodeUnits || (character === '\n' && currentPageLines >= maxLines)) {
+                    currentPage += 1;
+                    currentPageCodeUnits = 0;
+                    currentPageLines = 1;
+                }
+                if (currentPage === page) pageText += character;
+                currentPageCodeUnits += 1;
+                codeUnitCount += 1;
+                if (character === '\n') {
+                    currentPageLines += 1;
+                    newlineCount += 1;
+                }
+            }
+        };
+        const canonical = forEachSafeShellUserCanonicalPart(message, consume);
+        const totalPages = canonical.hasContent ? currentPage : 1;
+        return {
+            pageText,
+            totalPages,
+            codeUnitCount,
+            lineCount: canonical.hasContent ? newlineCount + 1 : 0,
+            appendedCount: canonical.appendedCount
+        };
+    }
+
+    function scanSafeShellAssistantTextPage(text, requestedPage, pageContract, referenceLimit) {
+        const maxCodeUnits = pageContract.maxCodeUnits;
+        const maxLines = pageContract.maxLines;
+        const maxReferences = Math.max(1, referenceLimit);
+        const page = Number.isFinite(requestedPage) && requestedPage > 0 ? Math.floor(requestedPage) : 1;
+        let currentPage = 1;
+        let currentPageCodeUnits = 0;
+        let currentPageLines = 1;
+        let currentPageReferences = 0;
+        let newlineCount = 0;
+        let pageText = '';
+        let referenceCount = 0;
+        const pageReferences = [];
+        const nextPage = () => {
+            currentPage += 1;
+            currentPageCodeUnits = 0;
+            currentPageLines = 1;
+            currentPageReferences = 0;
+        };
+        const consumeRange = (start, end) => {
+            for (let index = start; index < end; index += 1) {
+                const character = text[index];
+                if (currentPageCodeUnits >= maxCodeUnits || (character === '\n' && currentPageLines >= maxLines)) {
+                    nextPage();
+                }
+                if (currentPage === page) pageText += character;
+                currentPageCodeUnits += 1;
+                if (character === '\n') {
+                    currentPageLines += 1;
+                    newlineCount += 1;
+                }
+            }
+        };
+        let cursor = 0;
+        while (cursor < text.length) {
+            const newline = text.indexOf('\n', cursor);
+            const lineEnd = newline === -1 ? text.length : newline;
+            const lineText = text.slice(cursor, lineEnd);
+            const mayContainReference = lineText.includes('/') || lineText.includes(':');
+            if (mayContainReference) {
+                const references = new RegExp(`${FILE_REF_RE.source}|${FILE_ONLY_RE.source}`, 'g');
+                let lineCursor = 0;
+                let match = references.exec(lineText);
+                while (match) {
+                    consumeRange(cursor + lineCursor, cursor + match.index);
+                    const filePath = match[1] || match[4] || '';
+                    if (filePath && isAllowedFileExt(filePath)) {
+                        if (currentPageReferences >= maxReferences) nextPage();
+                        const line = match[2] || '';
+                        const col = match[3] || '';
+                        if (currentPage === page) pageReferences.push({ filePath, line, col, label: match[0] });
+                        currentPageReferences += 1;
+                        referenceCount += 1;
+                    }
+                    consumeRange(cursor + match.index, cursor + references.lastIndex);
+                    lineCursor = references.lastIndex;
+                    match = references.exec(lineText);
+                }
+                consumeRange(cursor + lineCursor, lineEnd);
+            } else {
+                consumeRange(cursor, lineEnd);
+            }
+            if (newline === -1) break;
+            consumeRange(newline, newline + 1);
+            cursor = newline + 1;
+        }
+        return {
+            pageText,
+            pageReferences,
+            totalPages: text.length > 0 ? currentPage : 1,
+            codeUnitCount: text.length,
+            lineCount: text.length > 0 ? newlineCount + 1 : 0,
+            referenceCount
+        };
+    }
+
+    function isSafeShellMountCurrent(root, ownership) {
+        if (!root || !ownership || ownership.disposed === true) return false;
+        if (activeSessionId !== ownership.sessionId
+            || root.dataset.safeShellGeneration !== String(ownership.generation)
+            || safeShellMountOwnership.get(root) !== ownership
+            || !root.isConnected) return false;
+        const keyedRoot = keyedRootForKey(ownership.unitKey);
+        let current = root;
+        while (current && current !== keyedRoot) current = current.parentElement;
+        return current === keyedRoot;
+    }
+
+    function disposeSafeShellRoot(root) {
+        if (!root) return;
+        const ownership = safeShellMountOwnership.get(root);
+        if (!ownership || ownership.disposed === true) return;
+        ownership.disposed = true;
+        for (const timer of ownership.timers) clearTimeout(timer);
+        for (const frame of ownership.frames) cancelAnimationFrame(frame);
+        ownership.timers.clear();
+        ownership.frames.clear();
+        safeShellMountOwnership.delete(root);
+    }
+
+    function renderSafeShellImageMessage(session, unit, presentationSelection) {
+        const rendering = window.__ocRendering;
+        if (!rendering || typeof rendering.getSafeShellSpec !== 'function') return null;
+        if (presentationSelection?.mode !== 'safe-shell' || presentationSelection?.family !== 'message-image') return null;
+        const message = unit.value?.message;
+        const images = Array.isArray(message?.meta?.images) ? message.meta.images : [];
+        if (!message || (message.role !== 'user' && message.role !== 'assistant') || images.length === 0) return null;
+
+        const initialSpec = rendering.getSafeShellSpec({
+            mode: presentationSelection.mode,
+            family: presentationSelection.family,
+            page: 1,
+            shape: { imageCount: images.length }
+        });
+        if (!initialSpec?.allowed || initialSpec.shellSelected !== true || !initialSpec.page?.primary) return null;
+
+        const root = document.createElement('div');
+        root.className = 'safe-shell';
+        root.dataset.safeShellFamily = initialSpec.family;
+        root.dataset.messageId = message.id;
+        const generation = ++safeShellPresentationGeneration;
+        root.dataset.safeShellGeneration = String(generation);
+        const ownership = {
+            sessionId: activeSessionId,
+            unitKey: unit.key,
+            generation,
+            root,
+            disposed: false,
+            timers: new Set(),
+            frames: new Set()
+        };
+        safeShellMountOwnership.set(root, ownership);
+        root._safeShellDispose = () => disposeSafeShellRoot(root);
+
+        const deterministicKey = encodeURIComponent(String(unit.key)).replace(/%/g, '-');
+        const viewerId = `safe-shell-viewer-${deterministicKey}-${generation}`;
+        let open = false;
+        let imagePage = 1;
+        let pageToken = 0;
+
+        const makeButton = (roleName, label, onClick) => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'safe-shell-action';
+            button.dataset.safeShellRole = roleName;
+            button.textContent = label;
+            button.setAttribute('aria-label', label);
+            button.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                if (!button.isConnected || !isSafeShellMountCurrent(root, ownership)) return;
+                onClick();
+            });
+            return button;
+        };
+
+        const render = () => {
+            const token = ++pageToken;
+            const spec = rendering.getSafeShellSpec({
+                mode: presentationSelection.mode,
+                family: presentationSelection.family,
+                page: imagePage,
+                shape: { imageCount: images.length }
+            });
+            if (!spec?.allowed || spec.shellSelected !== true || !spec.page?.primary) return;
+            imagePage = spec.page.primary.index;
+            const imageIndex = spec.page.primary.start;
+
+            const heading = document.createElement('div');
+            heading.className = 'safe-shell-heading';
+            heading.textContent = spec.labels.title;
+
+            const status = document.createElement('div');
+            status.className = 'safe-shell-status';
+            status.dataset.safeShellRole = 'status';
+            status.id = `${viewerId}-status`;
+            status.setAttribute('role', 'status');
+            status.setAttribute('aria-live', 'polite');
+            status.textContent = open
+                ? `${images.length} images; showing image ${imageIndex + 1} of ${images.length}.`
+                : `${images.length} images; none loaded in the collapsed preview. Open full to view one image at a time.`;
+
+            const viewerRegion = document.createElement('div');
+            viewerRegion.className = 'safe-shell-viewer-region';
+            viewerRegion.dataset.safeShellRole = 'viewer-region';
+            viewerRegion.id = viewerId;
+            viewerRegion.setAttribute('aria-describedby', status.id);
+            if (open) {
+                const imageStatus = document.createElement('span');
+                imageStatus.className = 'safe-shell-page-status';
+                imageStatus.dataset.safeShellRole = 'image-status';
+                imageStatus.setAttribute('role', 'status');
+                imageStatus.textContent = `Image ${imageIndex + 1} of ${images.length}`;
+                viewerRegion.appendChild(imageStatus);
+
+                const src = images[imageIndex];
+                if (typeof src === 'string' && src.length > 0) {
+                    const img = document.createElement('img');
+                    img.src = src;
+                    img.alt = `Attachment ${imageIndex + 1}`;
+                    img.loading = 'lazy';
+                    const isCurrentImageCallback = () => isSafeShellMountCurrent(root, ownership)
+                        && pageToken === token
+                        && imagePage === imageIndex + 1
+                        && img.parentElement === viewerRegion;
+                    img.addEventListener('load', () => {
+                        if (!isCurrentImageCallback()) return;
+                        img.dataset.safeShellImageState = 'loaded';
+                    }, { once: true });
+                    img.addEventListener('error', () => {
+                        if (!isCurrentImageCallback()) return;
+                        const fallback = document.createElement('div');
+                        fallback.className = 'message-image-missing';
+                        fallback.dataset.safeShellRole = 'image-fallback';
+                        fallback.textContent = 'Image unavailable';
+                        viewerRegion.replaceChild(fallback, img);
+                    }, { once: true });
+                    viewerRegion.appendChild(img);
+                } else {
+                    const fallback = document.createElement('div');
+                    fallback.className = 'message-image-missing';
+                    fallback.dataset.safeShellRole = 'image-fallback';
+                    fallback.textContent = 'Image unavailable';
+                    viewerRegion.appendChild(fallback);
+                }
+            }
+
+            const actions = document.createElement('div');
+            actions.className = 'safe-shell-actions';
+            const actionLabels = spec.labels.actions;
+            const openButton = makeButton('open-full', actionLabels['open-full'], () => {
+                if (open) return;
+                open = true;
+                render();
+            });
+            openButton.setAttribute('aria-controls', viewerId);
+            openButton.setAttribute('aria-expanded', open ? 'true' : 'false');
+            openButton.disabled = open;
+            actions.appendChild(openButton);
+            if (open) {
+                const previous = makeButton('previous', actionLabels.previous, () => {
+                    imagePage = Math.max(1, imagePage - 1);
+                    render();
+                });
+                previous.disabled = spec.page.primary.hasPrevious !== true;
+                actions.appendChild(previous);
+                const next = makeButton('next', actionLabels.next, () => {
+                    imagePage += 1;
+                    render();
+                });
+                next.disabled = spec.page.primary.hasNext !== true;
+                actions.appendChild(next);
+                actions.appendChild(makeButton('close', actionLabels.close, () => {
+                    open = false;
+                    render();
+                    if (isSafeShellMountCurrent(root, ownership)) {
+                        root.querySelector('[data-safe-shell-role="open-full"]')?.focus?.();
+                    }
+                }));
+            }
+            root.replaceChildren(heading, status, viewerRegion, actions);
+        };
+
+        render();
+        return root;
+    }
+
+    function renderSafeShellUserMessage(session, unit, presentationSelection) {
+        const rendering = window.__ocRendering;
+        if (!rendering || typeof rendering.getSafeShellSpec !== 'function') return null;
+        if (presentationSelection?.mode !== 'safe-shell' || presentationSelection?.family !== 'message-user') return null;
+        const message = unit.value?.message;
+        if (!message || message.role !== 'user') return null;
+
+        const initialSpec = rendering.getSafeShellSpec({
+            mode: presentationSelection.mode,
+            family: presentationSelection.family,
+            shape: {}
+        });
+        if (!initialSpec?.allowed || initialSpec.shellSelected !== true || !initialSpec.page?.content) return null;
+
+        const root = document.createElement('div');
+        root.className = 'safe-shell';
+        root.dataset.safeShellFamily = initialSpec.family;
+        root.dataset.messageId = message.id;
+        const generation = ++safeShellPresentationGeneration;
+        root.dataset.safeShellGeneration = String(generation);
+        const ownership = {
+            sessionId: activeSessionId,
+            unitKey: unit.key,
+            generation,
+            root,
+            disposed: false,
+            timers: new Set(),
+            frames: new Set()
+        };
+        safeShellMountOwnership.set(root, ownership);
+        root._safeShellDispose = () => disposeSafeShellRoot(root);
+
+        const deterministicKey = encodeURIComponent(String(unit.key)).replace(/%/g, '-');
+        const viewerId = `safe-shell-viewer-${deterministicKey}-${generation}`;
+        let open = false;
+        let requestedPage = 1;
+
+        const scheduleFocus = (role) => {
+            let frame = null;
+            frame = requestAnimationFrame(() => {
+                ownership.frames.delete(frame);
+                if (!isSafeShellMountCurrent(root, ownership)) return;
+                root.querySelector(`[data-safe-shell-role="${role}"]`)?.focus?.();
+            });
+            ownership.frames.add(frame);
+        };
+
+        const makeButton = (role, label, onClick) => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'safe-shell-action';
+            button.dataset.safeShellRole = role;
+            button.textContent = label;
+            button.setAttribute('aria-label', label);
+            button.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                if (!isSafeShellMountCurrent(root, ownership)) return;
+                onClick(button);
+            });
+            return button;
+        };
+
+        const render = () => {
+            const scan = scanSafeShellTextPage(message, requestedPage, initialSpec.page.content);
+            requestedPage = Math.min(requestedPage, scan.totalPages);
+            const descriptorShape = {
+                codeUnitCount: ((scan.totalPages - 1) * initialSpec.page.content.maxCodeUnits) + 1,
+                lineCount: 1
+            };
+            const spec = rendering.getSafeShellSpec({
+                mode: presentationSelection.mode,
+                family: presentationSelection.family,
+                contentPage: requestedPage,
+                shape: descriptorShape
+            });
+            if (!spec?.allowed || spec.shellSelected !== true) return;
+
+            const heading = document.createElement('div');
+            heading.className = 'safe-shell-heading';
+            heading.textContent = spec.labels.title;
+
+            const imageCount = Array.isArray(message?.meta?.images) ? message.meta.images.length : 0;
+            const status = document.createElement('div');
+            status.className = 'safe-shell-status';
+            status.dataset.safeShellRole = 'status';
+            status.id = `${viewerId}-status`;
+            status.setAttribute('role', 'status');
+            status.setAttribute('aria-live', 'polite');
+            status.textContent = open
+                ? `${spec.labels.page}; ${scan.codeUnitCount} code units across ${scan.lineCount} logical lines; ${scan.appendedCount} appended prompts; ${imageCount} images.`
+                : `Full content omitted from the collapsed preview: ${scan.codeUnitCount} code units across ${scan.lineCount} logical lines; ${scan.appendedCount} appended prompts; ${imageCount} images. Open full for bounded paging.`;
+
+            const viewerRegion = document.createElement('div');
+            viewerRegion.className = 'safe-shell-viewer-region';
+            viewerRegion.dataset.safeShellRole = 'viewer-region';
+            viewerRegion.id = viewerId;
+            viewerRegion.setAttribute('aria-describedby', status.id);
+            const viewer = document.createElement('pre');
+            viewer.className = 'safe-shell-viewer';
+            viewer.dataset.safeShellRole = 'viewer';
+            viewer.tabIndex = -1;
+            viewer.textContent = scan.pageText;
+            viewerRegion.appendChild(viewer);
+            if (open) {
+                const pageStatus = document.createElement('span');
+                pageStatus.className = 'safe-shell-page-status';
+                pageStatus.dataset.safeShellRole = 'page-status';
+                pageStatus.setAttribute('role', 'status');
+                pageStatus.textContent = spec.labels.page;
+                viewerRegion.appendChild(pageStatus);
+            }
+
+            const actions = document.createElement('div');
+            actions.className = 'safe-shell-actions';
+            const actionLabels = spec.labels.actions;
+            if (spec.actions.includes('open-full')) {
+                const openButton = makeButton('open-full', actionLabels['open-full'], () => {
+                    if (open) return;
+                    open = true;
+                    render();
+                    scheduleFocus('viewer');
+                });
+                openButton.setAttribute('aria-controls', viewerId);
+                openButton.setAttribute('aria-expanded', open ? 'true' : 'false');
+                openButton.disabled = open;
+                actions.appendChild(openButton);
+            }
+            if (open && spec.actions.includes('previous')) {
+                const previous = makeButton('previous', actionLabels.previous, () => {
+                    requestedPage = Math.max(1, requestedPage - 1);
+                    render();
+                    scheduleFocus('viewer');
+                });
+                previous.disabled = spec.page.content.hasPrevious !== true;
+                actions.appendChild(previous);
+            }
+            if (open && spec.actions.includes('next')) {
+                const next = makeButton('next', actionLabels.next, () => {
+                    requestedPage += 1;
+                    render();
+                    scheduleFocus('viewer');
+                });
+                next.disabled = requestedPage >= scan.totalPages || spec.page.content.hasNext !== true;
+                actions.appendChild(next);
+            }
+            if (open && spec.actions.includes('close')) {
+                actions.appendChild(makeButton('close', actionLabels.close, () => {
+                    open = false;
+                    render();
+                    if (isSafeShellMountCurrent(root, ownership)) {
+                        root.querySelector('[data-safe-shell-role="open-full"]')?.focus?.();
+                    }
+                }));
+            }
+            if (spec.actions.includes('copy-full')) {
+                actions.appendChild(makeButton('copy-full', actionLabels['copy-full'], (button) => {
+                    const canonicalText = getUserMessageCopyText(message);
+                    Promise.resolve(writeTextToClipboard(canonicalText)).then((copied) => {
+                        if (!isSafeShellMountCurrent(root, ownership)) return;
+                        root.dataset.safeShellCopyState = copied ? 'copied' : 'failed';
+                        button.textContent = copied ? 'Copied' : 'Copy failed';
+                        const timer = setTimeout(() => {
+                            ownership.timers.delete(timer);
+                            if (!isSafeShellMountCurrent(root, ownership)) return;
+                            delete root.dataset.safeShellCopyState;
+                            render();
+                        }, copied ? 900 : 1200);
+                        ownership.timers.add(timer);
+                    });
+                }));
+            }
+
+            const appendAllowed = canAppendToMessage(session, message);
+            if (appendAllowed && spec.actions.includes('append')) {
+                actions.appendChild(makeButton('append', actionLabels.append, () => {
+                    const currentSession = getSessionState(activeSessionId);
+                    const currentMessage = currentSession?.messagesById?.get?.(message.id);
+                    if (!currentMessage || !canAppendToMessage(currentSession, currentMessage)) return;
+                    enterAppendInputMode(currentMessage.id);
+                }));
+            } else if (spec.actions.includes('undo')) {
+                const undoVerdict = canUndo(session, message.id);
+                const undoButton = makeButton('undo', actionLabels.undo, () => {
+                    if (isBusy) return;
+                    const sessionId = activeSessionId;
+                    const currentSession = getSessionState(sessionId);
+                    const currentMessage = currentSession?.messagesById?.get?.(message.id);
+                    if (!currentMessage) return;
+                    const verdict = canUndo(currentSession, message.id);
+                    if (!verdict.allowed || !verdict.msgId) return;
+                    discardAllSegments(sessionId, 'undo', selectedMode || 'unknown', { anchorMsgId: verdict.msgId });
+                    handleUndoToMessage(sessionId, verdict.msgId);
+                });
+                undoButton.disabled = isBusy || undoVerdict.allowed !== true;
+                undoButton.title = undoButton.disabled ? `Undo unavailable: ${isBusy ? 'busy' : undoVerdict.reason}` : actionLabels.undo;
+                actions.appendChild(undoButton);
+            }
+
+            root.replaceChildren(heading, status, viewerRegion, actions);
+        };
+
+        render();
+        return root;
+    }
+
+    function renderSafeShellAssistantMessage(session, unit, presentationSelection) {
+        const rendering = window.__ocRendering;
+        if (!rendering || typeof rendering.getSafeShellSpec !== 'function') return null;
+        if (presentationSelection?.mode !== 'safe-shell' || presentationSelection?.family !== 'message-assistant') return null;
+        const message = unit.value?.message;
+        if (!message || message.role !== 'assistant' || message.meta?.isThinking === true) return null;
+        if (message.meta?.kind || message.meta?.isDiff
+            || Array.isArray(message.meta?.images) && message.meta.images.length > 0
+            || Array.isArray(message.meta?.subagents) && message.meta.subagents.length > 0
+            || Array.isArray(message.meta?.todos) && message.meta.todos.length > 0) return null;
+
+        const initialSpec = rendering.getSafeShellSpec({
+            mode: presentationSelection.mode,
+            family: presentationSelection.family,
+            shape: {}
+        });
+        if (!initialSpec?.allowed || initialSpec.shellSelected !== true || !initialSpec.page?.content) return null;
+
+        const root = document.createElement('div');
+        root.className = 'safe-shell';
+        root.dataset.safeShellFamily = initialSpec.family;
+        root.dataset.messageId = message.id;
+        const generation = ++safeShellPresentationGeneration;
+        root.dataset.safeShellGeneration = String(generation);
+        const ownership = {
+            sessionId: activeSessionId,
+            unitKey: unit.key,
+            generation,
+            root,
+            disposed: false,
+            timers: new Set(),
+            frames: new Set()
+        };
+        safeShellMountOwnership.set(root, ownership);
+        root._safeShellDispose = () => disposeSafeShellRoot(root);
+
+        const deterministicKey = encodeURIComponent(String(unit.key)).replace(/%/g, '-');
+        const viewerId = `safe-shell-viewer-${deterministicKey}-${generation}`;
+        const canonicalText = getDisplayedAssistantCopyText(message);
+        const referenceLimit = initialSpec.budgets.openDescendants - initialSpec.budgets.collapsedDescendants;
+        let open = false;
+        let requestedPage = 1;
+
+        const scheduleFocus = (role) => {
+            let frame = null;
+            frame = requestAnimationFrame(() => {
+                ownership.frames.delete(frame);
+                if (!isSafeShellMountCurrent(root, ownership)) return;
+                root.querySelector(`[data-safe-shell-role="${role}"]`)?.focus?.();
+            });
+            ownership.frames.add(frame);
+        };
+        const makeButton = (role, label, onClick) => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'safe-shell-action';
+            button.dataset.safeShellRole = role;
+            button.textContent = label;
+            button.setAttribute('aria-label', label);
+            button.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                if (!isSafeShellMountCurrent(root, ownership)) return;
+                onClick(button);
+            });
+            return button;
+        };
+
+        const render = () => {
+            const scan = scanSafeShellAssistantTextPage(canonicalText, requestedPage, initialSpec.page.content, referenceLimit);
+            requestedPage = Math.min(requestedPage, scan.totalPages);
+            const spec = rendering.getSafeShellSpec({
+                mode: presentationSelection.mode,
+                family: presentationSelection.family,
+                contentPage: requestedPage,
+                shape: {
+                    codeUnitCount: ((scan.totalPages - 1) * initialSpec.page.content.maxCodeUnits) + 1,
+                    lineCount: 1
+                }
+            });
+            if (!spec?.allowed || spec.shellSelected !== true) return;
+
+            const heading = document.createElement('div');
+            heading.className = 'safe-shell-heading';
+            heading.textContent = spec.labels.title;
+
+            const status = document.createElement('div');
+            status.className = 'safe-shell-status';
+            status.dataset.safeShellRole = 'status';
+            status.id = `${viewerId}-status`;
+            status.setAttribute('role', 'status');
+            status.setAttribute('aria-live', 'polite');
+            status.textContent = open
+                ? `${spec.labels.page}; ${scan.codeUnitCount} code units across ${scan.lineCount} logical lines; ${scan.referenceCount} validated file references.`
+                : `Full assistant text omitted from the collapsed preview: ${scan.codeUnitCount} code units across ${scan.lineCount} logical lines; ${scan.referenceCount} validated file references. Open full for bounded paging.`;
+
+            const viewerRegion = document.createElement('div');
+            viewerRegion.className = 'safe-shell-viewer-region';
+            viewerRegion.dataset.safeShellRole = 'viewer-region';
+            viewerRegion.id = viewerId;
+            viewerRegion.setAttribute('aria-describedby', status.id);
+            const viewer = document.createElement('pre');
+            viewer.className = 'safe-shell-viewer';
+            viewer.dataset.safeShellRole = 'viewer';
+            viewer.tabIndex = -1;
+            viewer.textContent = scan.pageText;
+            viewerRegion.appendChild(viewer);
+            if (open) {
+                const pageStatus = document.createElement('span');
+                pageStatus.className = 'safe-shell-page-status';
+                pageStatus.dataset.safeShellRole = 'page-status';
+                pageStatus.setAttribute('role', 'status');
+                pageStatus.textContent = spec.labels.page;
+                viewerRegion.appendChild(pageStatus);
+                if (scan.pageReferences.length > 0) {
+                    const fileLinks = document.createElement('div');
+                    fileLinks.className = 'safe-shell-file-links';
+                    for (const reference of scan.pageReferences) {
+                        const link = document.createElement('a');
+                        const line = reference.line ? `&line=${reference.line}&col=${reference.col || '1'}` : '';
+                        link.href = `ocfile://open?path=${encodeURIComponent(reference.filePath)}${line}`;
+                        link.textContent = reference.label;
+                        link.setAttribute('aria-label', `${spec.labels.actions['open-file']}: ${reference.label}`);
+                        fileLinks.appendChild(link);
+                    }
+                    viewerRegion.appendChild(fileLinks);
+                }
+            }
+
+            const actions = document.createElement('div');
+            actions.className = 'safe-shell-actions';
+            const actionLabels = spec.labels.actions;
+            const openButton = makeButton('open-full', actionLabels['open-full'], () => {
+                if (open) return;
+                open = true;
+                render();
+                scheduleFocus('viewer');
+            });
+            openButton.setAttribute('aria-controls', viewerId);
+            openButton.setAttribute('aria-expanded', open ? 'true' : 'false');
+            openButton.disabled = open;
+            actions.appendChild(openButton);
+            if (open) {
+                const previous = makeButton('previous', actionLabels.previous, () => {
+                    requestedPage = Math.max(1, requestedPage - 1);
+                    render();
+                    scheduleFocus('viewer');
+                });
+                previous.disabled = requestedPage <= 1;
+                actions.appendChild(previous);
+                const next = makeButton('next', actionLabels.next, () => {
+                    requestedPage += 1;
+                    render();
+                    scheduleFocus('viewer');
+                });
+                next.disabled = requestedPage >= scan.totalPages;
+                actions.appendChild(next);
+                actions.appendChild(makeButton('close', actionLabels.close, () => {
+                    open = false;
+                    render();
+                    if (isSafeShellMountCurrent(root, ownership)) {
+                        root.querySelector('[data-safe-shell-role="open-full"]')?.focus?.();
+                    }
+                }));
+            }
+            actions.appendChild(makeButton('copy-full', actionLabels['copy-full'], (button) => {
+                const displayedText = getDisplayedAssistantCopyText(message);
+                Promise.resolve(writeTextToClipboard(displayedText)).then((copied) => {
+                    if (!isSafeShellMountCurrent(root, ownership)) return;
+                    root.dataset.safeShellCopyState = copied ? 'copied' : 'failed';
+                    button.textContent = copied ? 'Copied' : 'Copy failed';
+                    const timer = setTimeout(() => {
+                        ownership.timers.delete(timer);
+                        if (!isSafeShellMountCurrent(root, ownership)) return;
+                        delete root.dataset.safeShellCopyState;
+                        render();
+                    }, copied ? 900 : 1200);
+                    ownership.timers.add(timer);
+                });
+            }));
+            root.replaceChildren(heading, status, viewerRegion, actions);
+        };
+
+        render();
+        return root;
+    }
+
+    function renderSafeShellSubagentMessage(session, unit, presentationSelection) {
+        const rendering = window.__ocRendering;
+        if (!rendering || typeof rendering.getSafeShellSpec !== 'function') return null;
+        if (presentationSelection?.mode !== 'safe-shell' || presentationSelection?.family !== 'message-subagent') return null;
+        const message = unit.value?.message;
+        const agents = Array.isArray(message?.meta?.subagents) ? message.meta.subagents : [];
+        if (!message || message.role !== 'assistant' || agents.length === 0) return null;
+
+        const initialSpec = rendering.getSafeShellSpec({
+            mode: presentationSelection.mode,
+            family: presentationSelection.family,
+            shape: { itemCount: agents.length }
+        });
+        if (!initialSpec?.allowed || initialSpec.shellSelected !== true || !initialSpec.page?.content) return null;
+
+        const root = document.createElement('div');
+        root.className = 'safe-shell';
+        root.dataset.safeShellFamily = initialSpec.family;
+        root.dataset.messageId = message.id;
+        const generation = ++safeShellPresentationGeneration;
+        root.dataset.safeShellGeneration = String(generation);
+        const ownership = {
+            sessionId: activeSessionId,
+            unitKey: unit.key,
+            generation,
+            root,
+            disposed: false,
+            timers: new Set(),
+            frames: new Set()
+        };
+        safeShellMountOwnership.set(root, ownership);
+        root._safeShellDispose = () => disposeSafeShellRoot(root);
+
+        const agentsPerPage = 6;
+        const deterministicKey = encodeURIComponent(String(unit.key)).replace(/%/g, '-');
+        const viewerId = `safe-shell-viewer-${deterministicKey}-${generation}`;
+        const stateCounts = new Map();
+        const stateOf = (agent) => {
+            const explicit = typeof agent?.state === 'string' ? agent.state.trim().toLowerCase() : '';
+            return explicit || (agent?.isDone === true ? 'done' : 'running');
+        };
+        const safeIdentity = (value) => typeof value === 'string' && value.trim() ? value.trim() : '';
+        const parentIdentityOf = (agent) => safeIdentity(agent?.parentSessionId)
+            || safeIdentity(message.sessionId)
+            || safeIdentity(activeSessionId)
+            || 'unavailable';
+        const fieldsOf = (agent) => {
+            const latestText = typeof agent?.latestText === 'string' ? agent.latestText.trim() : '';
+            const latestFullText = typeof agent?.latestFullText === 'string' ? agent.latestFullText.trim() : '';
+            return {
+                title: cleanSubagentTitle(agent?.title),
+                mode: pickMode(agent),
+                model: formatSubagentModel(agent),
+                state: stateOf(agent),
+                latestText,
+                fullText: latestFullText || latestText,
+                tool: typeof agent?.latestTool === 'string' ? agent.latestTool.trim() : '',
+                input: typeof agent?.latestToolInput === 'string' ? agent.latestToolInput.trim() : '',
+                parentIdentity: parentIdentityOf(agent)
+            };
+        };
+        for (const agent of agents) {
+            const state = stateOf(agent);
+            stateCounts.set(state, (stateCounts.get(state) || 0) + 1);
+        }
+
+        const stateSummary = () => {
+            const ordered = ['running', 'done', 'failed', 'finalizing', 'cancelled'];
+            const parts = [];
+            for (const state of ordered) {
+                const count = stateCounts.get(state) || 0;
+                if (count) parts.push(`${count} ${state}`);
+            }
+            let otherCount = 0;
+            for (const [state, count] of stateCounts) if (!ordered.includes(state)) otherCount += count;
+            if (otherCount) parts.push(`${otherCount} other`);
+            return parts.join(', ');
+        };
+        const detailTextOf = (agent, index) => {
+            const fields = fieldsOf(agent);
+            return [
+                `Subagent ${index + 1}: ${fields.title}`,
+                `State: ${fields.state}`,
+                `Mode: ${fields.mode || 'unavailable'}`,
+                `Model: ${fields.model || 'unavailable'}`,
+                `Parent session: ${fields.parentIdentity}`,
+                `Latest preview: ${fields.latestText || 'unavailable'}`,
+                `Full text: ${fields.fullText || 'unavailable'}`,
+                `Latest tool: ${fields.tool || 'unavailable'}`,
+                `Tool input: ${fields.input || 'unavailable'}`
+            ].join('\n');
+        };
+        const completeCopyText = () => {
+            const parts = new Array(agents.length);
+            for (let index = 0; index < agents.length; index += 1) parts[index] = detailTextOf(agents[index], index);
+            return parts.join('\n\n');
+        };
+
+        let open = false;
+        let agentPage = 1;
+        let selectedIndex = 0;
+        let detailPage = 1;
+
+        const scheduleFocus = (roleName) => {
+            let frame = null;
+            frame = requestAnimationFrame(() => {
+                ownership.frames.delete(frame);
+                if (!isSafeShellMountCurrent(root, ownership)) return;
+                root.querySelector(`[data-safe-shell-role="${roleName}"]`)?.focus?.();
+            });
+            ownership.frames.add(frame);
+        };
+        const makeButton = (roleName, label, onClick) => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'safe-shell-action';
+            button.dataset.safeShellRole = roleName;
+            button.textContent = label;
+            button.setAttribute('aria-label', label);
+            button.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                if (!isSafeShellMountCurrent(root, ownership)) return;
+                onClick(button);
+            });
+            return button;
+        };
+
+        const render = () => {
+            const totalAgentPages = Math.max(1, Math.ceil(agents.length / agentsPerPage));
+            agentPage = Math.min(Math.max(1, agentPage), totalAgentPages);
+            const pageStart = (agentPage - 1) * agentsPerPage;
+            const pageEnd = Math.min(agents.length, pageStart + agentsPerPage);
+            if (selectedIndex < pageStart || selectedIndex >= pageEnd) selectedIndex = pageStart;
+            const selectedText = detailTextOf(agents[selectedIndex], selectedIndex);
+            let detailScan = scanSafeShellAssistantTextPage(selectedText, detailPage, initialSpec.page.content, 1);
+            detailPage = Math.min(Math.max(1, detailPage), detailScan.totalPages);
+            if (detailPage !== 1) detailScan = scanSafeShellAssistantTextPage(selectedText, detailPage, initialSpec.page.content, 1);
+            const spec = rendering.getSafeShellSpec({
+                mode: presentationSelection.mode,
+                family: presentationSelection.family,
+                contentPage: detailPage,
+                itemPage: agentPage,
+                shape: { itemCount: agents.length, codeUnitCount: selectedText.length }
+            });
+            if (!spec?.allowed || spec.shellSelected !== true) return;
+
+            const heading = document.createElement('div');
+            heading.className = 'safe-shell-heading';
+            heading.textContent = spec.labels?.title || 'Subagents';
+
+            const status = document.createElement('div');
+            status.className = 'safe-shell-status';
+            status.dataset.safeShellRole = 'status';
+            status.id = `${viewerId}-status`;
+            status.setAttribute('role', 'status');
+            status.setAttribute('aria-live', 'polite');
+            status.textContent = `${agents.length} agents; ${stateSummary()}. ${open ? `Showing agents ${pageStart + 1}–${pageEnd}.` : 'Details omitted from the collapsed preview.'}`;
+
+            const agentList = document.createElement('div');
+            agentList.className = 'safe-shell-agent-list';
+            agentList.dataset.safeShellRole = 'agent-list';
+            for (let index = pageStart; index < pageEnd; index += 1) {
+                const fields = fieldsOf(agents[index]);
+                const summary = [
+                    `${index + 1}. ${fields.title}`,
+                    fields.state,
+                    fields.mode,
+                    fields.model,
+                    `parent ${fields.parentIdentity}`
+                ].filter(Boolean).join(' · ');
+                const agentButton = makeButton(`agent-${index}`, summary, () => {
+                    selectedIndex = index;
+                    detailPage = 1;
+                    render();
+                    if (open) scheduleFocus('viewer');
+                });
+                agentButton.setAttribute('aria-pressed', selectedIndex === index ? 'true' : 'false');
+                agentList.appendChild(agentButton);
+            }
+
+            const viewerRegion = document.createElement('div');
+            viewerRegion.className = 'safe-shell-viewer-region';
+            viewerRegion.dataset.safeShellRole = 'viewer-region';
+            viewerRegion.id = viewerId;
+            viewerRegion.setAttribute('aria-describedby', status.id);
+            if (open) {
+                const agentPageStatus = document.createElement('span');
+                agentPageStatus.dataset.safeShellRole = 'agent-page-status';
+                agentPageStatus.setAttribute('role', 'status');
+                agentPageStatus.textContent = `Agents ${pageStart + 1}–${pageEnd} of ${agents.length}`;
+                viewerRegion.appendChild(agentPageStatus);
+                const viewer = document.createElement('pre');
+                viewer.className = 'safe-shell-viewer';
+                viewer.dataset.safeShellRole = 'viewer';
+                viewer.tabIndex = -1;
+                viewer.textContent = detailScan.pageText;
+                viewerRegion.appendChild(viewer);
+                const detailPageStatus = document.createElement('span');
+                detailPageStatus.dataset.safeShellRole = 'detail-page-status';
+                detailPageStatus.setAttribute('role', 'status');
+                detailPageStatus.textContent = `Detail page ${detailPage} of ${detailScan.totalPages}`;
+                viewerRegion.appendChild(detailPageStatus);
+            }
+
+            const actions = document.createElement('div');
+            actions.className = 'safe-shell-actions';
+            const actionLabels = spec.labels?.actions || {};
+            const openButton = makeButton('open-full', actionLabels['open-full'] || 'Open full', () => {
+                if (open) return;
+                open = true;
+                render();
+                scheduleFocus('viewer');
+            });
+            openButton.setAttribute('aria-controls', viewerId);
+            openButton.setAttribute('aria-expanded', open ? 'true' : 'false');
+            openButton.disabled = open;
+            actions.appendChild(openButton);
+            if (open) {
+                const agentPrevious = makeButton('agent-previous', 'Previous agents', () => {
+                    agentPage = Math.max(1, agentPage - 1);
+                    detailPage = 1;
+                    render();
+                    scheduleFocus('viewer');
+                });
+                agentPrevious.disabled = agentPage <= 1;
+                actions.appendChild(agentPrevious);
+                const agentNext = makeButton('agent-next', 'Next agents', () => {
+                    agentPage = Math.min(totalAgentPages, agentPage + 1);
+                    detailPage = 1;
+                    render();
+                    scheduleFocus('viewer');
+                });
+                agentNext.disabled = agentPage >= totalAgentPages;
+                actions.appendChild(agentNext);
+                const detailPrevious = makeButton('detail-previous', 'Previous detail page', () => {
+                    detailPage = Math.max(1, detailPage - 1);
+                    render();
+                    scheduleFocus('viewer');
+                });
+                detailPrevious.disabled = detailPage <= 1;
+                actions.appendChild(detailPrevious);
+                const detailNext = makeButton('detail-next', 'Next detail page', () => {
+                    detailPage = Math.min(detailScan.totalPages, detailPage + 1);
+                    render();
+                    scheduleFocus('viewer');
+                });
+                detailNext.disabled = detailPage >= detailScan.totalPages;
+                actions.appendChild(detailNext);
+                actions.appendChild(makeButton('close', actionLabels.close || 'Close', () => {
+                    open = false;
+                    render();
+                    if (isSafeShellMountCurrent(root, ownership)) root.querySelector('[data-safe-shell-role="open-full"]')?.focus?.();
+                }));
+            }
+            if (!Array.isArray(spec.actions) || spec.actions.includes('copy-full')) {
+                actions.appendChild(makeButton('copy-full', actionLabels['copy-full'] || 'Copy full', (button) => {
+                    Promise.resolve(writeTextToClipboard(completeCopyText())).then((copied) => {
+                        if (!isSafeShellMountCurrent(root, ownership)) return;
+                        root.dataset.safeShellCopyState = copied ? 'copied' : 'failed';
+                        button.textContent = copied ? 'Copied' : 'Copy failed';
+                        const timer = setTimeout(() => {
+                            ownership.timers.delete(timer);
+                            if (!isSafeShellMountCurrent(root, ownership)) return;
+                            delete root.dataset.safeShellCopyState;
+                            render();
+                        }, copied ? 900 : 1200);
+                        ownership.timers.add(timer);
+                    });
+                }));
+            }
+            root.replaceChildren(heading, status, agentList, viewerRegion, actions);
+        };
+
+        render();
+        return root;
+    }
+
+    function renderSafeShellChangeList(session, unit, presentationSelection) {
+        const rendering = window.__ocRendering;
+        if (!rendering || typeof rendering.getSafeShellSpec !== 'function') return null;
+        if (unit.kind !== 'change-list'
+            || presentationSelection?.mode !== 'safe-shell'
+            || presentationSelection?.family !== 'change-list') return null;
+        const message = unit.value?.message;
+        const files = Array.isArray(message?.meta?.files) ? message.meta.files : [];
+        if (!message || message.meta?.kind !== 'changeList' || files.length === 0) return null;
+
+        const initialSpec = rendering.getSafeShellSpec({
+            mode: presentationSelection.mode,
+            family: presentationSelection.family,
+            page: 1,
+            shape: { itemCount: files.length }
+        });
+        const filesPerPage = initialSpec?.page?.primary?.limit;
+        if (!initialSpec?.allowed || initialSpec.shellSelected !== true || !Number.isFinite(filesPerPage)) return null;
+
+        const root = document.createElement('div');
+        root.className = 'safe-shell';
+        root.dataset.safeShellFamily = initialSpec.family;
+        root.dataset.messageId = message.id;
+        const generation = ++safeShellPresentationGeneration;
+        root.dataset.safeShellGeneration = String(generation);
+        const ownership = {
+            sessionId: activeSessionId,
+            unitKey: unit.key,
+            generation,
+            root,
+            disposed: false,
+            timers: new Set(),
+            frames: new Set()
+        };
+        safeShellMountOwnership.set(root, ownership);
+        root._safeShellDispose = () => disposeSafeShellRoot(root);
+
+        const deterministicKey = encodeURIComponent(String(unit.key)).replace(/%/g, '-');
+        const viewerId = `safe-shell-viewer-${deterministicKey}-${generation}`;
+        const commitHead = typeof message.meta?.commitHead === 'string' ? message.meta.commitHead : undefined;
+        const commitBase = typeof message.meta?.commitBase === 'string' ? message.meta.commitBase : undefined;
+        const statsByPath = message.meta?.statsByPath && typeof message.meta.statsByPath === 'object'
+            ? message.meta.statsByPath
+            : {};
+        let open = false;
+        let filePage = 1;
+
+        const scheduleFocus = (roleName) => {
+            let frame = null;
+            frame = requestAnimationFrame(() => {
+                ownership.frames.delete(frame);
+                if (!isSafeShellMountCurrent(root, ownership)) return;
+                root.querySelector(`[data-safe-shell-role="${roleName}"]`)?.focus?.();
+            });
+            ownership.frames.add(frame);
+        };
+        const makeButton = (roleName, label, onClick) => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'safe-shell-action';
+            button.dataset.safeShellRole = roleName;
+            button.textContent = label;
+            button.setAttribute('aria-label', label);
+            button.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                if (!button.isConnected || !isSafeShellMountCurrent(root, ownership)) return;
+                onClick(button);
+            });
+            return button;
+        };
+        const statsLabel = (normalizedPath) => {
+            const stats = statsByPath[normalizedPath];
+            if (!stats || typeof stats !== 'object') return 'stats unavailable';
+            const additions = Number.isFinite(stats.additions) ? `+${stats.additions}` : 'additions unavailable';
+            const deletions = Number.isFinite(stats.deletions) ? `-${stats.deletions}` : 'deletions unavailable';
+            return `${additions}, ${deletions}`;
+        };
+
+        const render = () => {
+            const spec = rendering.getSafeShellSpec({
+                mode: presentationSelection.mode,
+                family: presentationSelection.family,
+                page: filePage,
+                shape: { itemCount: files.length }
+            });
+            if (!spec?.allowed || spec.shellSelected !== true || !spec.page?.primary) return;
+            filePage = spec.page.primary.index;
+            const pageStart = spec.page.primary.start;
+            const pageEnd = Math.min(files.length, pageStart + spec.page.primary.limit);
+
+            const heading = document.createElement('div');
+            heading.className = 'safe-shell-heading';
+            heading.textContent = spec.labels.title;
+
+            const status = document.createElement('div');
+            status.className = 'safe-shell-status';
+            status.dataset.safeShellRole = 'status';
+            status.id = `${viewerId}-status`;
+            status.setAttribute('role', 'status');
+            status.setAttribute('aria-live', 'polite');
+            const reverted = message.meta?.reverted === true ? 'yes' : 'no';
+            const commitDisclosure = `commit head ${commitHead ? 'available' : 'unavailable'}; commit base ${commitBase ? 'available' : 'unavailable'}`;
+            status.textContent = open
+                ? `${files.length} changed files; reverted: ${reverted}; ${commitDisclosure}; showing files ${pageStart + 1}–${pageEnd}; ${spec.labels.page}.`
+                : `${files.length} changed files; reverted: ${reverted}; ${commitDisclosure}. Only files ${pageStart + 1}–${pageEnd} are represented; open full for bounded paging.`;
+
+            const fileList = document.createElement('div');
+            fileList.className = 'safe-shell-file-links';
+            fileList.dataset.safeShellRole = 'viewer-region';
+            fileList.id = viewerId;
+            fileList.setAttribute('aria-describedby', status.id);
+            for (let index = pageStart; index < pageEnd; index += 1) {
+                const rawPath = files[index];
+                const normalizedPath = typeof rawPath === 'string' ? rawPath.replace(/\\/g, '/') : '';
+                const pathLabel = normalizedPath || `Unavailable file ${index + 1}`;
+                const statistic = normalizedPath ? statsLabel(normalizedPath) : 'stats unavailable';
+                const action = normalizedPath && /\.md$/i.test(normalizedPath) ? 'Open file' : 'Open diff';
+                const fileButton = makeButton(`file-${index}`, `${action}: ${pathLabel}; ${statistic}`, () => {
+                    if (!normalizedPath) return;
+                    if (/\.md$/i.test(normalizedPath)) {
+                        vscode.postMessage({
+                            type: 'openFileAtLocation',
+                            path: normalizedPath,
+                            sessionId: activeSessionId || null
+                        });
+                        return;
+                    }
+                    postOpenGitDiff(normalizedPath, activeSessionId, commitHead, commitBase);
+                });
+                fileButton.disabled = !normalizedPath;
+                fileList.appendChild(fileButton);
+            }
+            if (open) {
+                const pageStatus = document.createElement('span');
+                pageStatus.dataset.safeShellRole = 'file-page-status';
+                pageStatus.setAttribute('role', 'status');
+                pageStatus.textContent = `Files ${pageStart + 1}–${pageEnd} of ${files.length}`;
+                fileList.appendChild(pageStatus);
+            }
+
+            const actions = document.createElement('div');
+            actions.className = 'safe-shell-actions';
+            const actionLabels = spec.labels.actions;
+            const openButton = makeButton('open-full', actionLabels['open-full'], () => {
+                if (open) return;
+                open = true;
+                render();
+                scheduleFocus(`file-${pageStart}`);
+            });
+            openButton.setAttribute('aria-controls', viewerId);
+            openButton.setAttribute('aria-expanded', open ? 'true' : 'false');
+            openButton.disabled = open;
+            actions.appendChild(openButton);
+            if (open) {
+                const previous = makeButton('previous', actionLabels.previous, () => {
+                    filePage = Math.max(1, filePage - 1);
+                    render();
+                    scheduleFocus(`file-${Math.max(0, (filePage - 1) * filesPerPage)}`);
+                });
+                previous.disabled = spec.page.primary.hasPrevious !== true;
+                actions.appendChild(previous);
+                const next = makeButton('next', actionLabels.next, () => {
+                    filePage += 1;
+                    render();
+                    scheduleFocus(`file-${(filePage - 1) * filesPerPage}`);
+                });
+                next.disabled = spec.page.primary.hasNext !== true;
+                actions.appendChild(next);
+                actions.appendChild(makeButton('close', actionLabels.close, () => {
+                    open = false;
+                    render();
+                    if (isSafeShellMountCurrent(root, ownership)) {
+                        root.querySelector('[data-safe-shell-role="open-full"]')?.focus?.();
+                    }
+                }));
+            }
+            root.replaceChildren(heading, status, fileList, actions);
+        };
+
+        render();
+        return root;
+    }
+
+    function renderSafeShellSegment(session, unit, presentationSelection) {
+        const rendering = window.__ocRendering;
+        if (!rendering || typeof rendering.getSafeShellSpec !== 'function') return null;
+        if (presentationSelection?.mode !== 'safe-shell' || presentationSelection?.family !== 'segment') return null;
+
+        const message = unit.kind === 'message' ? unit.value?.message : null;
+        const isPlaceholder = unit.kind === 'message'
+            && (message?.meta?.kind === 'undoSegmentPlaceholder' || message?.id?.startsWith?.('system:undo-seg:'));
+        const noticeKey = isPlaceholder
+            ? message?.meta?.noticeKey || message?.id?.replace?.('system:undo-seg:', '') || ''
+            : '';
+        const segment = unit.kind === 'segment'
+            ? unit.value?.segment
+            : isPlaceholder && noticeKey
+                ? session?.segmentsByNoticeKey?.get?.(noticeKey)
+                : null;
+        if (!segment || (unit.kind !== 'segment' && !isPlaceholder)) return null;
+
+        const memberIds = Array.isArray(segment.memberMsgIds)
+            ? segment.memberMsgIds
+            : segment.memberIds && typeof segment.memberIds[Symbol.iterator] === 'function'
+                ? segment.memberIds
+                : [];
+        const memberCount = Number.isFinite(memberIds.length) ? memberIds.length : Number.isFinite(memberIds.size) ? memberIds.size : 0;
+        const invalidSegments = Array.isArray(segment.mergedInvalidSegments) ? segment.mergedInvalidSegments : [];
+        const entryCount = memberCount + invalidSegments.length;
+        const initialSpec = rendering.getSafeShellSpec({
+            mode: presentationSelection.mode,
+            family: presentationSelection.family,
+            page: 1,
+            shape: { itemCount: entryCount }
+        });
+        const entriesPerPage = initialSpec?.page?.primary?.limit;
+        if (!initialSpec?.allowed || initialSpec.shellSelected !== true || !Number.isFinite(entriesPerPage)) return null;
+
+        let availableCount = 0;
+        for (const id of memberIds) if (session?.messagesById?.has?.(id)) availableCount += 1;
+        const isDirect = unit.kind === 'segment';
+        const anchorMsgId = segment.anchorMsgId || segment.anchor?.msgId || '';
+        const restoreEligible = isDirect
+            ? segment.state === 'restorable' && !isBusy && Boolean(anchorMsgId)
+            : segment.restoreAllowed === true;
+        const stateLabel = isDirect
+            ? (typeof segment.state === 'string' && segment.state ? segment.state : 'unknown')
+            : segment.restoreAllowed === true ? 'restorable' : 'discarded';
+
+        const root = document.createElement('div');
+        root.className = 'safe-shell';
+        root.dataset.safeShellFamily = initialSpec.family;
+        if (isDirect) root.dataset.segmentKey = unit.sourceKey || unit.key;
+        else root.dataset.messageId = message.id;
+        const generation = ++safeShellPresentationGeneration;
+        root.dataset.safeShellGeneration = String(generation);
+        const ownership = {
+            sessionId: activeSessionId,
+            unitKey: unit.key,
+            generation,
+            root,
+            disposed: false,
+            timers: new Set(),
+            frames: new Set()
+        };
+        safeShellMountOwnership.set(root, ownership);
+        root._safeShellDispose = () => disposeSafeShellRoot(root);
+
+        const deterministicKey = encodeURIComponent(String(unit.key)).replace(/%/g, '-');
+        const viewerId = `safe-shell-viewer-${deterministicKey}-${generation}`;
+        let open = false;
+        let entryPage = 1;
+
+        const memberAt = (targetIndex) => {
+            if (Array.isArray(memberIds)) return memberIds[targetIndex];
+            let index = 0;
+            for (const id of memberIds) {
+                if (index === targetIndex) return id;
+                index += 1;
+            }
+            return undefined;
+        };
+        const entryAt = (index) => {
+            if (index < memberCount) {
+                const id = memberAt(index);
+                return {
+                    kind: 'member',
+                    label: `${index + 1}. Member ${typeof id === 'string' && id ? id : 'unavailable identity'} — ${session?.messagesById?.has?.(id) ? 'available' : 'unavailable'}`
+                };
+            }
+            const invalidIndex = index - memberCount;
+            const child = invalidSegments[invalidIndex];
+            const childKey = typeof child?.noticeKey === 'string' && child.noticeKey
+                ? child.noticeKey
+                : `unavailable identity ${invalidIndex + 1}`;
+            const childMembers = Array.isArray(child?.memberMsgIds) ? child.memberMsgIds.length : 0;
+            const childEligible = child?.restoreAllowed === false ? 'unrestorable' : 'restorable';
+            return { kind: 'merged-invalid', label: `${index + 1}. Merged-invalid ${childKey} — ${childMembers} members; ${childEligible}` };
+        };
+        const scheduleFocus = (roleName) => {
+            let frame = null;
+            frame = requestAnimationFrame(() => {
+                ownership.frames.delete(frame);
+                if (!isSafeShellMountCurrent(root, ownership)) return;
+                root.querySelector(`[data-safe-shell-role="${roleName}"]`)?.focus?.();
+            });
+            ownership.frames.add(frame);
+        };
+        const makeButton = (roleName, label, onClick) => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'safe-shell-action';
+            button.dataset.safeShellRole = roleName;
+            button.textContent = label;
+            button.setAttribute('aria-label', label);
+            button.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                if (!button.isConnected || !isSafeShellMountCurrent(root, ownership)) return;
+                onClick(button);
+            });
+            return button;
+        };
+
+        const render = () => {
+            const spec = rendering.getSafeShellSpec({
+                mode: presentationSelection.mode,
+                family: presentationSelection.family,
+                page: entryPage,
+                shape: { itemCount: entryCount }
+            });
+            if (!spec?.allowed || spec.shellSelected !== true || !spec.page?.primary) return;
+            entryPage = spec.page.primary.index;
+            const pageStart = spec.page.primary.start;
+            const pageEnd = Math.min(entryCount, pageStart + spec.page.primary.limit);
+
+            const heading = document.createElement('div');
+            heading.className = 'safe-shell-heading';
+            heading.textContent = spec.labels.title;
+
+            const status = document.createElement('div');
+            status.className = 'safe-shell-status';
+            status.dataset.safeShellRole = 'status';
+            status.id = `${viewerId}-status`;
+            status.setAttribute('role', 'status');
+            status.setAttribute('aria-live', 'polite');
+            const availability = `${availableCount} available of ${memberCount} members; ${invalidSegments.length} merged-invalid entries; state ${stateLabel}; restore eligible: ${restoreEligible ? 'yes' : 'no'}`;
+            status.textContent = open
+                ? `${availability}; showing entries ${entryCount ? pageStart + 1 : 0}–${pageEnd} of ${entryCount}; ${spec.labels.page}.`
+                : `${availability}. Only entries ${entryCount ? pageStart + 1 : 0}–${pageEnd} are represented; open full for bounded paging.`;
+
+            const entryList = document.createElement('div');
+            entryList.className = 'safe-shell-file-links';
+            entryList.dataset.safeShellRole = 'viewer-region';
+            entryList.id = viewerId;
+            entryList.setAttribute('aria-describedby', status.id);
+            for (let index = pageStart; index < pageEnd; index += 1) {
+                const entry = entryAt(index);
+                const entryButton = makeButton(`entry-${index}`, entry.label, () => {});
+                entryButton.setAttribute('aria-label', entry.label);
+                entryList.appendChild(entryButton);
+            }
+            if (open) {
+                const pageStatus = document.createElement('span');
+                pageStatus.dataset.safeShellRole = 'entry-page-status';
+                pageStatus.setAttribute('role', 'status');
+                pageStatus.textContent = `Entries ${entryCount ? pageStart + 1 : 0}–${pageEnd} of ${entryCount}`;
+                entryList.appendChild(pageStatus);
+            }
+
+            const actions = document.createElement('div');
+            actions.className = 'safe-shell-actions';
+            const actionLabels = spec.labels.actions;
+            const openButton = makeButton('open-full', actionLabels['open-full'], () => {
+                if (open) return;
+                open = true;
+                render();
+                scheduleFocus(entryCount ? `entry-${pageStart}` : 'close');
+            });
+            openButton.setAttribute('aria-controls', viewerId);
+            openButton.setAttribute('aria-expanded', open ? 'true' : 'false');
+            openButton.disabled = open;
+            actions.appendChild(openButton);
+            if (open) {
+                const previous = makeButton('previous', actionLabels.previous, () => {
+                    entryPage = Math.max(1, entryPage - 1);
+                    render();
+                    scheduleFocus(`entry-${Math.max(0, (entryPage - 1) * entriesPerPage)}`);
+                });
+                previous.disabled = spec.page.primary.hasPrevious !== true;
+                actions.appendChild(previous);
+                const next = makeButton('next', actionLabels.next, () => {
+                    entryPage += 1;
+                    render();
+                    scheduleFocus(`entry-${(entryPage - 1) * entriesPerPage}`);
+                });
+                next.disabled = spec.page.primary.hasNext !== true;
+                actions.appendChild(next);
+                actions.appendChild(makeButton('close', actionLabels.close, () => {
+                    open = false;
+                    render();
+                    if (isSafeShellMountCurrent(root, ownership)) root.querySelector('[data-safe-shell-role="open-full"]')?.focus?.();
+                }));
+            }
+            const restore = makeButton('restore', actionLabels.restore, () => {
+                if (!restoreEligible) return;
+                if (!isDirect) {
+                    handleRestoreSegment(activeSessionId, noticeKey);
+                    return;
+                }
+                const segKey = segment.noticeKey ?? segment.id ?? '';
+                const canonicalNoticeKey = typeof segKey === 'string' && segKey.startsWith('seg:') ? segKey.slice(4) : segKey;
+                const operationId = createOperationId();
+                vscode.postMessage({
+                    type: 'restoreSegment',
+                    sessionId: activeSessionId,
+                    operationId,
+                    noticeKey: canonicalNoticeKey,
+                    anchorMsgId,
+                    endMsgId: segment.endMsgId
+                });
+                vscode.postMessage({
+                    type: 'ui-debug',
+                    payload: ['[WV][SEG_RESTORE_SEND]', `sessionId=${activeSessionId || 'null'}`, `opId=${operationId || 'null'}`, `noticeKey=${canonicalNoticeKey || 'null'}`, `anchorMsgId=${anchorMsgId || 'null'}`, `endMsgId=${segment.endMsgId || 'null'}`, 'type=restoreSegment']
+                });
+                logSessionState(activeSessionId, 'UI_RESTORE_SEGMENT');
+            });
+            restore.disabled = !restoreEligible;
+            actions.appendChild(restore);
+            actions.appendChild(makeButton('toggle', actionLabels.toggle, () => {
+                handleToggleSegment(activeSessionId, isDirect ? segment.id : noticeKey);
+                window.__oc?.renderFromState?.();
+                if (isDirect) logSessionState(activeSessionId, 'UI_TOGGLE_SEGMENT_EXPAND');
+            }));
+            root.replaceChildren(heading, status, entryList, actions);
+        };
+
+        render();
+        return root;
+    }
+
+    function renderSafeShellToolMetaMessage(session, unit, presentationSelection) {
+        const rendering = window.__ocRendering;
+        if (!rendering || typeof rendering.getSafeShellSpec !== 'function') return null;
+        if (presentationSelection?.mode !== 'safe-shell' || presentationSelection?.family !== 'message-tool-meta') return null;
+        const message = unit.value?.message;
+        const role = message?.role;
+        const hasAssistantMetaKind = typeof message?.meta?.kind === 'string' && message.meta.kind.trim().length > 0;
+        const kind = typeof message?.meta?.kind === 'string' && /^[A-Za-z0-9._:/-]{1,160}$/.test(message.meta.kind.trim())
+            ? message.meta.kind.trim()
+            : 'unknown';
+        const isMultiplexedRole = role === 'tool' || role === 'system' || (role === 'assistant' && hasAssistantMetaKind);
+        if (!message || !isMultiplexedRole || message.meta?.kind === 'changeList' || message.meta?.kind === 'undoSegmentPlaceholder') return null;
+        if (message.meta?.isDiff
+            || Array.isArray(message.meta?.images) && message.meta.images.length > 0
+            || Array.isArray(message.meta?.subagents) && message.meta.subagents.length > 0
+            || Array.isArray(message.meta?.todos) && message.meta.todos.length > 0) return null;
+
+        const initialSpec = rendering.getSafeShellSpec({
+            mode: presentationSelection.mode,
+            family: presentationSelection.family,
+            shape: {}
+        });
+        if (!initialSpec?.allowed || initialSpec.shellSelected !== true || !initialSpec.page?.content) return null;
+
+        const root = document.createElement('div');
+        root.className = 'safe-shell';
+        root.dataset.safeShellFamily = initialSpec.family;
+        root.dataset.messageId = message.id;
+        const generation = ++safeShellPresentationGeneration;
+        root.dataset.safeShellGeneration = String(generation);
+        const ownership = {
+            sessionId: activeSessionId,
+            unitKey: unit.key,
+            generation,
+            root,
+            disposed: false,
+            timers: new Set(),
+            frames: new Set()
+        };
+        safeShellMountOwnership.set(root, ownership);
+        root._safeShellDispose = () => disposeSafeShellRoot(root);
+
+        const deterministicKey = encodeURIComponent(String(unit.key)).replace(/%/g, '-');
+        const viewerId = `safe-shell-viewer-${deterministicKey}-${generation}`;
+        const messageCopyText = getMessageCopyText(message);
+        const canonicalText = role === 'assistant'
+            ? messageCopyText
+            : (typeof message.text === 'string' ? message.text : '');
+        const statusEntryCount = Array.isArray(message.meta?.statuses) ? message.meta.statuses.length : 0;
+        const statusAvailable = statusEntryCount > 0
+            || typeof message.meta?.status === 'string' && message.meta.status.length > 0
+            || typeof message.meta?.statusText === 'string' && message.meta.statusText.length > 0;
+        let open = false;
+        let requestedPage = 1;
+
+        const scheduleFocus = (roleName) => {
+            let frame = null;
+            frame = requestAnimationFrame(() => {
+                ownership.frames.delete(frame);
+                if (!isSafeShellMountCurrent(root, ownership)) return;
+                root.querySelector(`[data-safe-shell-role="${roleName}"]`)?.focus?.();
+            });
+            ownership.frames.add(frame);
+        };
+        const makeButton = (roleName, label, onClick) => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'safe-shell-action';
+            button.dataset.safeShellRole = roleName;
+            button.textContent = label;
+            button.setAttribute('aria-label', label);
+            button.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                if (!isSafeShellMountCurrent(root, ownership)) return;
+                onClick(button);
+            });
+            return button;
+        };
+
+        const render = () => {
+            const scan = scanSafeShellAssistantTextPage(canonicalText, requestedPage, initialSpec.page.content, 1);
+            requestedPage = Math.min(requestedPage, scan.totalPages);
+            const spec = rendering.getSafeShellSpec({
+                mode: presentationSelection.mode,
+                family: presentationSelection.family,
+                contentPage: requestedPage,
+                shape: {
+                    codeUnitCount: ((scan.totalPages - 1) * initialSpec.page.content.maxCodeUnits) + 1,
+                    lineCount: 1
+                }
+            });
+            if (!spec?.allowed || spec.shellSelected !== true) return;
+
+            const heading = document.createElement('div');
+            heading.className = 'safe-shell-heading';
+            heading.textContent = spec.labels.title;
+
+            const status = document.createElement('div');
+            status.className = 'safe-shell-status';
+            status.dataset.safeShellRole = 'status';
+            status.id = `${viewerId}-status`;
+            status.setAttribute('role', 'status');
+            status.setAttribute('aria-live', 'polite');
+            const identity = `role ${role}; kind ${kind}; status ${statusAvailable ? 'available' : 'unavailable'}; ${statusEntryCount} status entries`;
+            status.textContent = open
+                ? `${spec.labels.page}; ${identity}; ${scan.codeUnitCount} text code units across ${scan.lineCount} logical lines.`
+                : `Full text omitted from the collapsed preview: ${identity}; ${scan.codeUnitCount} text code units across ${scan.lineCount} logical lines. Open full for bounded paging.`;
+
+            const viewerRegion = document.createElement('div');
+            viewerRegion.className = 'safe-shell-viewer-region';
+            viewerRegion.dataset.safeShellRole = 'viewer-region';
+            viewerRegion.id = viewerId;
+            viewerRegion.setAttribute('aria-describedby', status.id);
+            const viewer = document.createElement('pre');
+            viewer.className = 'safe-shell-viewer';
+            viewer.dataset.safeShellRole = 'viewer';
+            viewer.tabIndex = -1;
+            viewer.textContent = scan.pageText;
+            viewerRegion.appendChild(viewer);
+            if (open) {
+                const pageStatus = document.createElement('span');
+                pageStatus.className = 'safe-shell-page-status';
+                pageStatus.dataset.safeShellRole = 'page-status';
+                pageStatus.setAttribute('role', 'status');
+                pageStatus.textContent = spec.labels.page;
+                viewerRegion.appendChild(pageStatus);
+            }
+
+            const actions = document.createElement('div');
+            actions.className = 'safe-shell-actions';
+            const actionLabels = spec.labels.actions;
+            const openButton = makeButton('open-full', actionLabels['open-full'], () => {
+                if (open) return;
+                open = true;
+                render();
+                scheduleFocus('viewer');
+            });
+            openButton.setAttribute('aria-controls', viewerId);
+            openButton.setAttribute('aria-expanded', open ? 'true' : 'false');
+            openButton.disabled = open;
+            actions.appendChild(openButton);
+            if (open) {
+                const previous = makeButton('previous', actionLabels.previous, () => {
+                    requestedPage = Math.max(1, requestedPage - 1);
+                    render();
+                    scheduleFocus('viewer');
+                });
+                previous.disabled = requestedPage <= 1;
+                actions.appendChild(previous);
+                const next = makeButton('next', actionLabels.next, () => {
+                    requestedPage += 1;
+                    render();
+                    scheduleFocus('viewer');
+                });
+                next.disabled = requestedPage >= scan.totalPages;
+                actions.appendChild(next);
+                actions.appendChild(makeButton('close', actionLabels.close, () => {
+                    open = false;
+                    render();
+                    if (isSafeShellMountCurrent(root, ownership)) {
+                        root.querySelector('[data-safe-shell-role="open-full"]')?.focus?.();
+                    }
+                }));
+            }
+            if (messageCopyText && spec.actions.includes('copy-full')) {
+                actions.appendChild(makeButton('copy-full', actionLabels['copy-full'], (button) => {
+                    const canonicalCopy = getMessageCopyText(message);
+                    Promise.resolve(writeTextToClipboard(canonicalCopy)).then((copied) => {
+                        if (!isSafeShellMountCurrent(root, ownership)) return;
+                        root.dataset.safeShellCopyState = copied ? 'copied' : 'failed';
+                        button.textContent = copied ? 'Copied' : 'Copy failed';
+                        const timer = setTimeout(() => {
+                            ownership.timers.delete(timer);
+                            if (!isSafeShellMountCurrent(root, ownership)) return;
+                            delete root.dataset.safeShellCopyState;
+                            render();
+                        }, copied ? 900 : 1200);
+                        ownership.timers.add(timer);
+                    });
+                }));
+            }
+            root.replaceChildren(heading, status, viewerRegion, actions);
+        };
+
+        render();
+        return root;
+    }
+
+    function renderDetachedKeyedUnit(session, unit, renderedSet, presentationSelection) {
         const capture = document.createDocumentFragment();
         keyedChatRenderCapture = capture;
+        keyedPresentationSelectionOverride = presentationSelection;
+        keyedUnitKeyOverride = unit.key;
         keyedFollowingTurnDividerOverride = unit.kind === 'message' || unit.kind === 'change-list'
             ? unit.value?.hasPriorUser === true
             : null;
         let directRoot = null;
         try {
-            if (unit.kind === 'greeting') {
+            const safeShellRoot = renderSafeShellSegment(session, unit, presentationSelection)
+                || (unit.kind === 'change-list'
+                ? renderSafeShellChangeList(session, unit, presentationSelection)
+                : unit.kind === 'message'
+                    ? renderSafeShellImageMessage(session, unit, presentationSelection)
+                    || renderSafeShellDiffMessage(session, unit, presentationSelection)
+                    || renderSafeShellCodeMessage(session, unit, presentationSelection)
+                    || renderSafeShellTableMessage(session, unit, presentationSelection)
+                    || renderSafeShellMarkdownMessage(session, unit, presentationSelection)
+                    || renderSafeShellUserMessage(session, unit, presentationSelection)
+                    || renderSafeShellAssistantMessage(session, unit, presentationSelection)
+                    || renderSafeShellSubagentMessage(session, unit, presentationSelection)
+                    || renderSafeShellToolMetaMessage(session, unit, presentationSelection)
+                    : null);
+            if (safeShellRoot) {
+                directRoot = safeShellRoot;
+                renderedSet?.add?.(unit.value?.message?.id);
+            } else if (unit.kind === 'greeting') {
                 directRoot = document.createElement('div');
                 directRoot.className = 'message bot';
                 const content = document.createElement('div');
                 content.className = 'message-content';
-                content.textContent = 'Hello! I am OpenCode. How can I help you today?';
+                content.textContent = unit.value?.text || 'Hello! I am OpenCode. How can I help you today?';
                 directRoot.appendChild(content);
             } else if (unit.kind === 'segment') {
                 renderSegmentElement(session, unit.value.segment, renderedSet, unit.sourceKey);
             } else if (unit.kind === 'conflict') {
-                directRoot = renderConflictCard(unit.value, { detached: true });
+                directRoot = renderConflictCard(unit.value, { detached: true, presentationSelection, unitKey: unit.key });
             } else {
                 renderMessageElement(unit.value.message, renderedSet);
             }
         } finally {
             keyedChatRenderCapture = null;
             keyedFollowingTurnDividerOverride = null;
+            keyedPresentationSelectionOverride = null;
+            keyedUnitKeyOverride = null;
         }
         if (directRoot) capture.appendChild(directRoot);
         const roots = Array.from(capture.children);
@@ -8485,11 +11973,16 @@ function shouldHideDcpUiMessage(message) {
     }
 
     function destroyChatWindowAdapter(reason = 'unknown') {
+        clearChatWindowSyntheticEvidenceRequest();
         const ownedSessionId = chatWindowState.sessionId;
+        const destroyedGeneration = chatWindowGeneration;
+        const adapterWasOwned = !!chatWindowState.adapter;
         chatWindowGeneration += 1;
+        if (typeof resetChatWindowAdaptiveShadow === 'function') resetChatWindowAdaptiveShadow(reason, destroyedGeneration);
         chatWindowState.adapter?.destroy?.();
         chatWindowState.adapter = null;
         chatWindowState.snapshot = null;
+        chatWindowState.acknowledgedRawSnapshot = null;
         chatWindowState.mountedKeys = new Set();
         chatWindowState.sessionId = '';
         chatWindowState.pendingRangeRender = false;
@@ -8503,6 +11996,14 @@ function shouldHideDcpUiMessage(message) {
         chatWindowState.bottomSpacer = null;
         chatContainer?.classList?.remove?.('chat-window-active');
         vscode.postMessage({ type: 'ui-debug', payload: ['[WV][CHAT_WINDOW_DESTROY]', `reason=${reason}`] });
+        if (typeof closeChatWindowPressureGeneration === 'function') {
+            closeChatWindowPressureGeneration(
+                destroyedGeneration,
+                reason === 'session-switch',
+                adapterWasOwned,
+                keyedRoots().length
+            );
+        }
     }
 
     function disableChatWindowForSession(reason, error) {
@@ -8518,16 +12019,43 @@ function shouldHideDcpUiMessage(message) {
         chatContainer.classList.add('chat-window-active');
         if (!chatWindowState.topSpacer) {
             const topSpacer = document.createElement('div');
+            reserveChatStructuralRoot(topSpacer);
             topSpacer.className = 'chat-window-spacer chat-window-spacer-top';
             classifyChatStructuralSurface(topSpacer, 'window:top-spacer', 'tanstack-window');
             chatWindowState.topSpacer = topSpacer;
         }
         if (!chatWindowState.bottomSpacer) {
             const bottomSpacer = document.createElement('div');
+            reserveChatStructuralRoot(bottomSpacer);
             bottomSpacer.className = 'chat-window-spacer chat-window-spacer-bottom';
             classifyChatStructuralSurface(bottomSpacer, 'window:bottom-spacer', 'tanstack-window');
             chatWindowState.bottomSpacer = bottomSpacer;
         }
+    }
+
+    function transitionActiveSessionPresentationOwner(previousSessionId, targetSessionId) {
+        const previousOwner = previousSessionId || '__no_session__';
+        const targetOwner = targetSessionId || '__no_session__';
+        const presentationOwner = chatWindowState.sessionId || previousOwner;
+        const hasOwnedPresentation = Boolean(chatWindowState.adapter || chatWindowState.sessionId);
+        if (!hasOwnedPresentation || (previousOwner === targetOwner && presentationOwner === targetOwner)) return false;
+        destroyChatWindowAdapter('session-switch');
+        return true;
+    }
+
+    function ensureChatLocalOlderSurface() {
+        if (chatWindowState.localOlderSurface) return chatWindowState.localOlderSurface;
+        const surface = document.createElement('div');
+        reserveChatStructuralRoot(surface);
+        surface.className = 'chat-local-older-surface';
+        classifyChatStructuralSurface(surface, 'window:local-older', 'local-history-window');
+        chatWindowState.localOlderSurface = surface;
+        return surface;
+    }
+
+    function reserveChatWindowStructuralRoots() {
+        ensureChatWindowSpacers();
+        ensureChatLocalOlderSurface();
     }
 
     function activateChatLocalOlder(source = 'button') {
@@ -8541,17 +12069,15 @@ function shouldHideDcpUiMessage(message) {
         return true;
     }
 
-    function renderChatLocalOlderSurface(presentation) {
-        let surface = chatWindowState.localOlderSurface;
-        if (!surface) {
-            surface = document.createElement('div');
-            surface.className = 'chat-local-older-surface';
-            classifyChatStructuralSurface(surface, 'window:local-older', 'local-history-window');
-            chatWindowState.localOlderSurface = surface;
-        }
+    function renderChatLocalOlderSurface(presentation, suppressContent) {
+        const surface = ensureChatLocalOlderSurface();
         surface.replaceChildren();
         surface.dataset.localOlderState = presentation.state;
-        if (presentation.actionable) {
+        if (suppressContent === true) {
+            chatWindowState.localOlderObserver?.disconnect?.();
+            chatWindowState.localOlderObserver = null;
+            chatWindowState.localOlderObserverArmed = true;
+        } else if (presentation.actionable) {
             const button = document.createElement('button');
             button.type = 'button';
             button.className = 'chat-local-older-button';
@@ -8589,7 +12115,11 @@ function shouldHideDcpUiMessage(message) {
                 surface.appendChild(hint);
             }
         }
+        const admission = preflightChatRenderRootAdmission(surface);
+        if (!admission.allowed) return false;
         chatContainer.insertBefore(surface, chatWindowState.topSpacer || keyedRoots()[0] || null);
+        chatStructuralRootReservations.delete(surface);
+        return true;
     }
 
     function resolveChatLocalHistoryWindow(units) {
@@ -8598,7 +12128,13 @@ function shouldHideDcpUiMessage(message) {
         const coverage = normalizePayloadHydrationCoverage(session?.hydrationCoverage);
         const resolution = chatLocalHistoryController.resolve(sessionId, units.map((unit) => unit.key), coverage);
         chatWindowState.localHistoryPresentation = resolution.presentation;
-        return { ...resolution, visibleUnits: units.slice(resolution.revealStart) };
+        return {
+            ...resolution,
+            visibleUnits: units.slice(resolution.revealStart),
+            suppressSurfaceContent: isActiveSessionHistoryLoading()
+                || resolution.presentation.state === 'deltaContinuityUnknown'
+                || units.every((unit) => unit.kind === 'greeting')
+        };
     }
 
     function clearPendingChatWindowScroll(reason) {
@@ -8667,24 +12203,269 @@ function shouldHideDcpUiMessage(message) {
         return [...new Set(keys)];
     }
 
-    function ensureChatWindowAdapter(session, units) {
-        const sessionId = activeSessionId || '__no_session__';
+    function projectChatWindowStructuralRoots() {
+        const projectedRoots = new Set();
+        for (const child of Array.from(chatContainer.children)) {
+            if (!child.dataset?.renderUnitKey) projectedRoots.add(child);
+        }
+        for (const root of chatStructuralRootReservations) projectedRoots.add(root);
+        projectedRoots.add(chatWindowState.topSpacer || CHAT_WINDOW_PROJECTED_TOP_SPACER);
+        projectedRoots.add(chatWindowState.bottomSpacer || CHAT_WINDOW_PROJECTED_BOTTOM_SPACER);
+        projectedRoots.add(chatWindowState.localOlderSurface || CHAT_WINDOW_PROJECTED_LOCAL_OLDER);
+        return projectedRoots.size;
+    }
+
+    function getChatStructuralIntegrityRoots() {
+        return Array.from(chatContainer.children)
+            .filter((child) => !child.dataset?.renderUnitKey)
+            .map((child) => ({ classified: Boolean(child.dataset?.chatStructuralKey) }));
+    }
+
+    function preflightChatRenderRootAdmission(root, projectedUnitKey = '') {
+        if (keyedChatRenderCapture) return { allowed: true, detached: true, mountedCount: 0, directChildCount: 0 };
+        const unitKey = projectedUnitKey || root?.dataset?.renderUnitKey || '';
+        if (root && !unitKey) reserveChatStructuralRoot(root);
+        if (!isChatWindowAvailable()) {
+            return { allowed: true, mountedCount: keyedRoots().length, directChildCount: chatContainer.childElementCount };
+        }
+        const requestedKeys = keyedRoots().map((keyedRoot) => keyedRoot.dataset.renderUnitKey);
+        if (unitKey && !requestedKeys.includes(unitKey)) requestedKeys.push(unitKey);
+        const projectedStructuralRoots = projectChatWindowStructuralRoots();
+        const directChildCount = requestedKeys.length + projectedStructuralRoots;
+        const planContainment = globalThis.window?.__ocRendering?.planChatWindowContainment;
+        const plan = typeof planContainment === 'function'
+            ? planContainment({
+                requestedKeys,
+                visibleLoadedKeys: requestedKeys,
+                viewportKeys: requestedKeys,
+                coreKeys: [],
+                overscanKeys: [],
+                adapterSnapshotKeys: requestedKeys,
+                appendRootUserKey: unitKey || undefined,
+                projectedStructuralRoots,
+                limits: { mounted: CHAT_WINDOW_MOUNT_LIMIT, directChildren: CHAT_WINDOW_DIRECT_CHILD_LIMIT },
+                shellRequests: []
+            })
+            : null;
+        const acceptedKeys = Array.isArray(plan?.acceptedKeys) ? new Set(plan.acceptedKeys) : new Set();
+        const preservesMountedSet = requestedKeys.every((key) => acceptedKeys.has(key));
+        const allowed = plan?.allowed === true
+            && preservesMountedSet
+            && requestedKeys.length <= CHAT_WINDOW_MOUNT_LIMIT
+            && directChildCount <= CHAT_WINDOW_DIRECT_CHILD_LIMIT
+            && Number(plan.directChildCount) <= CHAT_WINDOW_DIRECT_CHILD_LIMIT;
+        const isWindowStructuralRoot = root === chatWindowState.topSpacer
+            || root === chatWindowState.bottomSpacer
+            || root === chatWindowState.localOlderSurface;
+        if (!allowed && root && !isWindowStructuralRoot) chatStructuralRootReservations.delete(root);
+        return { allowed, mountedCount: requestedKeys.length, directChildCount, plan };
+    }
+
+    function buildChatWindowContainmentRequest(session, visibleUnits, snapshot, explicitShellRequests = []) {
+        const requestedKeys = snapshot.items.map((item) => item.key);
+        const visibleLoadedKeys = visibleUnits.map((unit) => unit.key);
+        const viewportStart = Math.max(0, Number(chatContainer.scrollTop) || 0);
+        const viewportEnd = viewportStart + Math.max(0, Number(chatContainer.clientHeight) || 0);
+        const coreKeys = snapshot.items
+            .filter((item) => item.end > viewportStart && item.start < viewportEnd)
+            .map((item) => item.key);
+        const coreSet = new Set(coreKeys);
+        const optionalKeys = requestedKeys.filter((key) => !coreSet.has(key));
+        return {
+            requestedKeys,
+            visibleLoadedKeys,
+            viewportKeys: coreKeys,
+            coreKeys: [],
+            overscanKeys: optionalKeys,
+            adapterSnapshotKeys: requestedKeys,
+            currentTurnAssistantKey: session?.currentTurnAssistantKey,
+            thinkingId: session?.thinkingId,
+            lastTurnUserId: session?.lastTurnUserId,
+            appendRootUserKey: session?.appendRootUserKey,
+            anchorKey: chatWindowState.anchorKey,
+            searchTargetKey: sessionSearch.windowTargetKey,
+            projectedStructuralRoots: projectChatWindowStructuralRoots(),
+            limits: { mounted: CHAT_WINDOW_MOUNT_LIMIT, directChildren: CHAT_WINDOW_DIRECT_CHILD_LIMIT },
+            shellRequests: explicitShellRequests
+        };
+    }
+
+    function disposeUnpublishedChatWindowAdapterCandidate(candidateAdapter) {
+        if (!candidateAdapter || (typeof candidateAdapter !== 'object' && typeof candidateAdapter !== 'function')
+            || disposedUnpublishedChatWindowCandidates.has(candidateAdapter)) return false;
+        disposedUnpublishedChatWindowCandidates.add(candidateAdapter);
+        try {
+            const destroy = candidateAdapter.destroy;
+            if (typeof destroy === 'function') destroy.call(candidateAdapter);
+        } catch { /* unpublished candidate cleanup is best-effort and never reaches live ownership */ }
+        return true;
+    }
+
+    function prepareUnpublishedChatWindowTransaction(session, units, explicitShellRequests = [], transactionControl = null) {
+        const cf3RunPhase = typeof runCF3RangeDiagnosticPhase === 'function'
+            ? runCF3RangeDiagnosticPhase : (_phase, operation) => operation();
+        const candidateAcceptedState = typeof captureChatWindowAcceptedState === 'function'
+            ? captureChatWindowAcceptedState()
+            : null;
+        const capturedActiveSessionId = activeSessionId || '__no_session__';
+        const capturedGeneration = chatWindowGeneration;
+        const capturedAdapter = chatWindowState.adapter;
+        const capturedOwnerSessionId = chatWindowState.sessionId;
+        if (capturedAdapter) return CHAT_WINDOW_CANDIDATE_STALE_RESULT;
+        const syntheticEvidenceRequest = typeof consumeChatWindowSyntheticEvidenceRequest === 'function'
+            ? consumeChatWindowSyntheticEvidenceRequest(transactionControl?.syntheticEvidenceToken)
+            : null;
+        const syntheticEvidenceDirection = transactionControl?.syntheticEvidenceDirection === 'backward' ? 'backward' : 'forward';
+        const rangePolicy = syntheticEvidenceRequest ? Object.freeze({
+            overscanTier: syntheticEvidenceRequest.overscanTier,
+            beforeReserve: syntheticEvidenceDirection === 'backward'
+                ? syntheticEvidenceRequest.forwardReserve : syntheticEvidenceRequest.backwardReserve,
+            afterReserve: syntheticEvidenceDirection === 'backward'
+                ? syntheticEvidenceRequest.backwardReserve : syntheticEvidenceRequest.forwardReserve,
+            initialTail: syntheticEvidenceRequest.initialTail
+        }) : typeof resolveChatWindowAdaptiveRangePolicy === 'function'
+            ? resolveChatWindowAdaptiveRangePolicy() : undefined;
         const rendering = window.__ocRendering;
-        const keys = units.map((unit) => unit.key);
-        const kinds = units.map(getChatWindowUnitKind);
-        const presentationRevisions = units.map((unit) => rendering.presentationFingerprint(getKeyedUnitPresentation(session, unit)));
-        const keepMountedKeys = getChatWindowKeepMountedKeys(session, units);
-        if (chatWindowState.adapter && chatWindowState.sessionId !== sessionId) destroyChatWindowAdapter('session-switch');
-        if (!chatWindowState.adapter) {
-            const generation = ++chatWindowGeneration;
-            chatWindowState.sessionId = sessionId;
-            chatWindowState.adapter = rendering.createTanStackVirtualAdapter({
-                keys, kinds, presentationRevisions, keepMountedKeys, scrollElement: chatContainer,
-                overscan: CHAT_WINDOW_OVERSCAN, initialTailCount: CHAT_WINDOW_INITIAL_TAIL,
-                maxMounted: CHAT_WINDOW_MOUNT_LIMIT, gap: 8,
+        const boundedUnits = units.slice(-CHAT_WINDOW_INITIAL_TAIL);
+        const requestedKeys = boundedUnits.map((unit) => unit.key);
+        const sessionState = getSessionState(activeSessionId, false);
+        const hydrationCoverage = normalizePayloadHydrationCoverage(sessionState?.hydrationCoverage);
+        const revealStart = Math.max(0, units.length - boundedUnits.length);
+        const deriveLocalOlderPresentation = rendering?.deriveLocalOlderPresentation;
+        const planContainment = rendering?.planChatWindowContainment;
+        if (typeof deriveLocalOlderPresentation !== 'function' || typeof planContainment !== 'function') {
+            return CHAT_WINDOW_TRANSACTION_UNAVAILABLE_RESULT;
+        }
+        const presentation = deriveLocalOlderPresentation({
+            totalUnits: units.length,
+            revealStart,
+            hydrationCoverage
+        });
+        const acceptedPlan = transactionControl?.acceptedPlanOverride || planContainment({
+            requestedKeys,
+            visibleLoadedKeys: requestedKeys,
+            viewportKeys: requestedKeys,
+            coreKeys: [],
+            overscanKeys: [],
+            adapterSnapshotKeys: requestedKeys,
+            currentTurnAssistantKey: session?.currentTurnAssistantKey,
+            thinkingId: session?.thinkingId,
+            lastTurnUserId: session?.lastTurnUserId,
+            appendRootUserKey: session?.appendRootUserKey,
+            anchorKey: chatWindowState.anchorKey,
+            searchTargetKey: sessionSearch.windowTargetKey,
+            projectedStructuralRoots: projectChatWindowStructuralRoots(),
+            limits: { mounted: CHAT_WINDOW_MOUNT_LIMIT, directChildren: CHAT_WINDOW_DIRECT_CHILD_LIMIT },
+            shellRequests: explicitShellRequests
+        });
+        if (!acceptedPlan?.allowed || !Array.isArray(acceptedPlan.acceptedKeys)
+            || acceptedPlan.mountedCount > CHAT_WINDOW_MOUNT_LIMIT
+            || acceptedPlan.directChildCount > CHAT_WINDOW_DIRECT_CHILD_LIMIT) {
+            return CHAT_WINDOW_TRANSACTION_UNAVAILABLE_RESULT;
+        }
+        const unitByKey = new Map(boundedUnits.map((unit) => [unit.key, unit]));
+        const acceptedUnits = acceptedPlan.acceptedKeys.map((key) => unitByKey.get(key)).filter(Boolean);
+        const acceptedKeySet = new Set(acceptedUnits.map((unit) => unit.key));
+        const adapterUpdate = Object.freeze({
+            keys: Object.freeze(acceptedUnits.map((unit) => unit.key)),
+            kinds: Object.freeze(acceptedUnits.map(getChatWindowUnitKind)),
+            presentationRevisions: Object.freeze(acceptedUnits.map((unit) => rendering.presentationFingerprint(
+                getKeyedPresentationIdentity(getKeyedUnitPresentation(session, unit), acceptedPlan.shellSelections?.[unit.key])
+            ))),
+            keepMountedKeys: Object.freeze(getChatWindowKeepMountedKeys(session, acceptedUnits)
+                .filter((key) => acceptedKeySet.has(key))),
+            ...(rangePolicy ? { rangePolicy } : {})
+        });
+        const localWindow = Object.freeze({
+            revealStart,
+            visibleKeys: adapterUpdate.keys,
+            presentation,
+            visibleUnits: Object.freeze(acceptedUnits)
+        });
+        const candidateGeneration = capturedGeneration + 1;
+        let published = false;
+        let candidateAdapter = null;
+        let adapterTransaction = null;
+        let candidateAbort = null;
+        let abortAttempted = false;
+        const abortCandidateTransaction = () => {
+            if (abortAttempted || typeof candidateAbort !== 'function') return false;
+            abortAttempted = true;
+            try {
+                candidateAbort.call(adapterTransaction);
+            } catch { /* unavailable-handle abort is best-effort */ }
+            return true;
+        };
+        const rejectCandidate = (result) => {
+            abortCandidateTransaction();
+            disposeUnpublishedChatWindowAdapterCandidate(candidateAdapter);
+            return result;
+        };
+        try {
+            candidateAdapter = cf3RunPhase('initial-create', () => rendering.createTanStackVirtualAdapter({
+                keys: adapterUpdate.keys,
+                kinds: adapterUpdate.kinds,
+                presentationRevisions: adapterUpdate.presentationRevisions,
+                keepMountedKeys: adapterUpdate.keepMountedKeys,
+                scrollElement: chatContainer,
+                overscan: CHAT_WINDOW_OVERSCAN,
+                initialTailCount: CHAT_WINDOW_INITIAL_TAIL,
+                maxMounted: CHAT_WINDOW_MOUNT_LIMIT,
+                gap: 8,
+                initialOwnerMode: 'deferred-transaction',
                 onRangeChange(snapshot) {
-                    if (generation !== chatWindowGeneration || chatWindowState.sessionId !== sessionId) return;
+                    if (!published) return;
+                    if (candidateGeneration !== chatWindowGeneration || chatWindowState.sessionId !== capturedActiveSessionId) {
+                        recordChatWindowStaleCallback(candidateGeneration, 'range');
+                        if (typeof resetChatWindowAdaptiveShadow === 'function') resetChatWindowAdaptiveShadow('stale-generation', candidateGeneration);
+                        return;
+                    }
+                    const acknowledged = chatWindowState.acknowledgedRawSnapshot;
+                    if (typeof recordCF3RangeDiagnostic === 'function') recordCF3RangeDiagnostic(snapshot, Object.freeze({
+                        rendering: chatWindowState.rendering === true,
+                        pendingRangeRender: chatWindowState.pendingRangeRender === true,
+                        pendingScrollPresent: Boolean(chatWindowState.pendingScrollKey),
+                        programmaticScroll: chatWindowState.programmaticScroll === true,
+                        acknowledgedCount: Array.isArray(acknowledged?.items) ? acknowledged.items.length : 0,
+                        acknowledgedTotalSize: Number.isFinite(acknowledged?.totalSize) ? Number(acknowledged.totalSize) : 0,
+                        firstDifference: typeof getCF3RangeFirstDifference === 'function'
+                            ? getCF3RangeFirstDifference(snapshot, acknowledged) : 'missing-ack',
+                        scrollTop: Number.isFinite(chatContainer?.scrollTop) ? Number(chatContainer.scrollTop) : 0
+                    }));
                     chatWindowState.snapshot = snapshot;
+                    const sameAcknowledgedRawSnapshot = acknowledged
+                        && snapshot.totalSize === acknowledged.totalSize
+                        && snapshot.items.length === acknowledged.items.length
+                        && snapshot.items.every((item, index) => {
+                            const prior = acknowledged.items[index];
+                            return item.key === prior.key
+                                && item.index === prior.index
+                                && item.start === prior.start
+                                && item.end === prior.end
+                                && item.size === prior.size;
+                        });
+                    if (sameAcknowledgedRawSnapshot) {
+                        if (chatWindowState.rendering && chatWindowState.pendingScrollKey) {
+                            chatWindowState.pendingRangeRender = true;
+                        }
+                        return;
+                    }
+                    const priorObservations = typeof chatWindowAdaptiveShadow !== 'undefined'
+                        ? chatWindowAdaptiveShadow?.observations : null;
+                    const rangeObservations = typeof createChatWindowAdaptiveObservations === 'function' ? createChatWindowAdaptiveObservations(
+                        snapshot,
+                        priorObservations ? {
+                            directChildren: priorObservations.directChildCount,
+                            descendants: priorObservations.descendantCount
+                        } : null,
+                        priorObservations?.currentRequestedCount || adapterUpdate.keys.length,
+                        acceptedPlan,
+                        session
+                    ) : null;
+                    if (rangeObservations && typeof observeChatWindowAdaptiveShadow === 'function') observeChatWindowAdaptiveShadow(rangeObservations, {
+                        kind: 'self', decisionGeneration: typeof chatWindowAdaptiveShadow !== 'undefined'
+                            ? chatWindowAdaptiveShadow?.state?.decisionGeneration : 0
+                    });
                     const sameMountedRange = snapshot.items.length === chatWindowState.mountedKeys.size
                         && snapshot.items.every((item) => chatWindowState.mountedKeys.has(item.key));
                     if (sameMountedRange && chatWindowState.topSpacer && chatWindowState.bottomSpacer) {
@@ -8701,7 +12482,27 @@ function shouldHideDcpUiMessage(message) {
                     }
                 },
                 onMeasurements(batch) {
-                    if (generation !== chatWindowGeneration || chatWindowState.sessionId !== sessionId) return;
+                    if (!published) return;
+                    if (candidateGeneration !== chatWindowGeneration || chatWindowState.sessionId !== capturedActiveSessionId) {
+                        recordChatWindowStaleCallback(candidateGeneration, 'measurement');
+                        if (typeof resetChatWindowAdaptiveShadow === 'function') resetChatWindowAdaptiveShadow('stale-generation', candidateGeneration);
+                        return;
+                    }
+                    const priorObservations = typeof chatWindowAdaptiveShadow !== 'undefined'
+                        ? chatWindowAdaptiveShadow?.observations : null;
+                    if (chatWindowState.snapshot && typeof createChatWindowAdaptiveObservations === 'function'
+                        && typeof observeChatWindowAdaptiveShadow === 'function') observeChatWindowAdaptiveShadow(createChatWindowAdaptiveObservations(
+                        chatWindowState.snapshot,
+                        priorObservations ? {
+                            directChildren: priorObservations.directChildCount,
+                            descendants: priorObservations.descendantCount
+                        } : null,
+                        priorObservations?.currentRequestedCount || adapterUpdate.keys.length,
+                        acceptedPlan,
+                        session,
+                        batch.changedKeys.length
+                    ), { kind: 'self', decisionGeneration: typeof chatWindowAdaptiveShadow !== 'undefined'
+                        ? chatWindowAdaptiveShadow?.state?.decisionGeneration : 0 });
                     vscode.postMessage({ type: 'ui-debug', payload: ['[WV][CHAT_WINDOW_MEASURE]', `changed=${batch.changedKeys.length}`, `totalSize=${batch.totalSize}`] });
                     if (autoScrollPinnedToBottom) scrollToBottom(true);
                     else {
@@ -8713,10 +12514,71 @@ function shouldHideDcpUiMessage(message) {
                         scheduleRenderFromState('window-search-measurement-retry');
                     }
                 }
-            });
-        } else {
-            chatWindowState.adapter.update({ keys, kinds, presentationRevisions, keepMountedKeys });
+            }));
+        } catch {
+            return rejectCandidate(CHAT_WINDOW_TRANSACTION_UNAVAILABLE_RESULT);
         }
+        let getInitialOwnerState;
+        try { getInitialOwnerState = candidateAdapter?.getInitialOwnerState; } catch {
+            return rejectCandidate(CHAT_WINDOW_TRANSACTION_UNAVAILABLE_RESULT);
+        }
+        if (typeof getInitialOwnerState !== 'function') return rejectCandidate(CHAT_WINDOW_TRANSACTION_UNAVAILABLE_RESULT);
+        try {
+            if (getInitialOwnerState.call(candidateAdapter) !== 'deferred') {
+                return rejectCandidate(CHAT_WINDOW_TRANSACTION_UNAVAILABLE_RESULT);
+            }
+        } catch {
+            return rejectCandidate(CHAT_WINDOW_TRANSACTION_UNAVAILABLE_RESULT);
+        }
+        let beginTransaction;
+        try { beginTransaction = candidateAdapter?.beginTransaction; } catch {
+            return rejectCandidate(CHAT_WINDOW_TRANSACTION_UNAVAILABLE_RESULT);
+        }
+        if (typeof beginTransaction !== 'function') return rejectCandidate(CHAT_WINDOW_TRANSACTION_UNAVAILABLE_RESULT);
+        try {
+            adapterTransaction = beginTransaction.call(candidateAdapter, adapterUpdate);
+        } catch {
+            return rejectCandidate(CHAT_WINDOW_TRANSACTION_UNAVAILABLE_RESULT);
+        }
+        if (!adapterTransaction) return rejectCandidate(CHAT_WINDOW_TRANSACTION_UNAVAILABLE_RESULT);
+        try {
+            candidateAbort = adapterTransaction.abort;
+            for (const method of CHAT_WINDOW_REQUIRED_TRANSACTION_METHODS) {
+                const member = method === 'abort' ? candidateAbort : adapterTransaction[method];
+                if (typeof member !== 'function') {
+                    return rejectCandidate(CHAT_WINDOW_TRANSACTION_UNAVAILABLE_RESULT);
+                }
+            }
+        } catch {
+            return rejectCandidate(CHAT_WINDOW_TRANSACTION_UNAVAILABLE_RESULT);
+        }
+        if ((activeSessionId || '__no_session__') !== capturedActiveSessionId
+            || chatWindowGeneration !== capturedGeneration
+            || chatWindowState.adapter !== capturedAdapter
+            || chatWindowState.sessionId !== capturedOwnerSessionId) {
+            return rejectCandidate(CHAT_WINDOW_CANDIDATE_STALE_RESULT);
+        }
+        chatWindowGeneration = candidateGeneration;
+        chatWindowState.sessionId = capturedActiveSessionId;
+        chatWindowState.adapter = candidateAdapter;
+        if (candidateAcceptedState) unpublishedChatWindowCandidateAcceptedStates.set(candidateAdapter, candidateAcceptedState);
+        beginChatWindowPressureGeneration(candidateGeneration);
+        published = true;
+        return Object.freeze({ candidateAdapter, adapterTransaction, adapterUpdate, localWindow, acceptedPlan });
+    }
+
+    function ensureChatWindowAdapter(session, units, explicitShellRequests = [], transactionControl = null) {
+        const sessionId = activeSessionId || '__no_session__';
+        const rendering = window.__ocRendering;
+        if (!chatWindowState.adapter) {
+            return prepareUnpublishedChatWindowTransaction(session, units, explicitShellRequests, transactionControl);
+        }
+        if (chatWindowState.sessionId !== sessionId) return CHAT_WINDOW_CANDIDATE_STALE_RESULT;
+        const keys = units.map((unit) => unit.key);
+        const kinds = units.map(getChatWindowUnitKind);
+        const presentationRevisions = units.map((unit) => rendering.presentationFingerprint(getKeyedUnitPresentation(session, unit)));
+        const keepMountedKeys = getChatWindowKeepMountedKeys(session, units);
+        chatWindowState.adapter.update({ keys, kinds, presentationRevisions, keepMountedKeys });
         return chatWindowState.adapter;
     }
 
@@ -8726,66 +12588,561 @@ function shouldHideDcpUiMessage(message) {
         const last = snapshot.items[snapshot.items.length - 1];
         chatWindowState.topSpacer.style.height = `${Math.max(0, first?.start || 0)}px`;
         chatWindowState.bottomSpacer.style.height = `${Math.max(0, snapshot.totalSize - (last?.end || 0))}px`;
+        const topAdmission = preflightChatRenderRootAdmission(chatWindowState.topSpacer);
+        const bottomAdmission = preflightChatRenderRootAdmission(chatWindowState.bottomSpacer);
+        if (!topAdmission.allowed || !bottomAdmission.allowed) return false;
         chatContainer.insertBefore(chatWindowState.topSpacer, keyedRoots()[0] || chatWindowState.bottomSpacer || null);
         chatContainer.appendChild(chatWindowState.bottomSpacer);
+        chatStructuralRootReservations.delete(chatWindowState.topSpacer);
+        chatStructuralRootReservations.delete(chatWindowState.bottomSpacer);
+        return true;
     }
 
     function assertChatWindowDomBudget(budget) {
-        if (budget.mountedUnits > CHAT_WINDOW_MOUNT_LIMIT) {
-            throw new Error(`Mounted unit cap exceeded: ${budget.mountedUnits}`);
-        }
-        if (budget.directChildren > CHAT_WINDOW_DIRECT_CHILD_LIMIT) {
-            throw new Error(`Direct chat child cap exceeded: ${budget.directChildren}`);
-        }
-        if (budget.descendants > 4000) {
-            window.__ocChatWindowDescendantAcceptanceBlocker = {
-                sessionId: activeSessionId || '', descendants: budget.descendants
-            };
-            console.warn('[Render] chat window descendant acceptance blocker', budget.descendants, 4000);
-            const error = new Error(`Chat window descendant acceptance blocker: ${budget.descendants}`);
-            error.code = 'CHAT_WINDOW_DESCENDANT_ACCEPTANCE_BLOCKER';
-            throw error;
-        }
+        const bounded = (value) => Number.isFinite(value)
+            ? Math.min(1000000000, Math.max(0, Math.trunc(value)))
+            : 0;
+        let descendantsAdvisory = false;
+        if (budget.descendants > 4000) descendantsAdvisory = true;
+        window.__ocChatWindowDomBudgetAudit = Object.freeze({
+            mountedUnits: bounded(budget.mountedUnits),
+            directChildren: bounded(budget.directChildren),
+            descendants: bounded(budget.descendants),
+            mountedExceeded: budget.mountedUnits > CHAT_WINDOW_MOUNT_LIMIT,
+            directChildrenExceeded: budget.directChildren > CHAT_WINDOW_DIRECT_CHILD_LIMIT,
+            descendantsAdvisory
+        });
         return budget;
     }
 
-    function applyWindowedKeyedChatReconciliation(session, units) {
+    function scheduleChatWindowPlanCorrection(options) {
+        const { sessionId, generation, planRevision, request, acceptedPlan, observedBudget } = options;
+        const mountedMismatch = Math.max(0, observedBudget.mountedUnits - acceptedPlan.mountedCount);
+        const directChildMismatch = Math.max(0, observedBudget.directChildren - acceptedPlan.directChildCount);
+        if (mountedMismatch === 0 && directChildMismatch === 0) return null;
+        if ((activeSessionId || '__no_session__') !== sessionId || chatWindowGeneration !== generation) return null;
+        if (chatWindowPlanCorrection.sessionId === sessionId
+            && chatWindowPlanCorrection.generation === generation
+            && chatWindowPlanCorrection.planRevision === planRevision) return null;
+        chatWindowPlanCorrection = { sessionId, generation, planRevision };
+        const planContainment = window.__ocRendering?.planChatWindowContainment;
+        if (typeof planContainment !== 'function') return null;
+        const correctionRequest = {
+            ...request,
+            limits: {
+                mounted: Math.max(0, request.limits.mounted - mountedMismatch),
+                directChildren: Math.max(0, request.limits.directChildren - directChildMismatch)
+            }
+        };
+        const correctedPlan = planContainment(correctionRequest);
+        if ((activeSessionId || '__no_session__') !== sessionId || chatWindowGeneration !== generation) return null;
+        if (!correctedPlan?.allowed || !Array.isArray(correctedPlan.acceptedKeys)) return null;
+        const requestedKeySet = new Set(request.requestedKeys);
+        const baselineMounted = acceptedPlan.acceptedKeys.filter((key) => requestedKeySet.has(key)).length;
+        const baselineDirectChildren = Math.min(
+            acceptedPlan.directChildCount,
+            baselineMounted + request.projectedStructuralRoots
+        );
+        const reduced = correctedPlan.acceptedKeys.length < baselineMounted
+            || correctedPlan.mountedCount < baselineMounted
+            || correctedPlan.directChildCount < baselineDirectChildren;
+        return reduced ? correctedPlan : null;
+    }
+
+    function boundedChatPressureCount(value) {
+        if (!Number.isFinite(value)) return 0;
+        return Math.min(1000000000, Math.max(0, Math.trunc(value)));
+    }
+
+    function publishChatWindowPressureLifecycle() {
+        if (typeof isChatRenderMetricsEnabled !== 'function' || !isChatRenderMetricsEnabled()) return;
+        if (typeof chatRenderMetrics === 'undefined') return;
+        const current = chatWindowPressureLifecycle.current;
+        chatRenderMetrics.pressureLifecycle = {
+            current: current ? {
+                generation: boundedChatPressureCount(current.generation),
+                unobserveRequested: boundedChatPressureCount(current.unobserveRequested),
+                unobserveCompleted: boundedChatPressureCount(current.unobserveCompleted),
+                removalRequested: boundedChatPressureCount(current.removalRequested),
+                removalCompleted: boundedChatPressureCount(current.removalCompleted),
+                staleRangeRejections: boundedChatPressureCount(current.staleRangeRejections),
+                staleMeasurementRejections: boundedChatPressureCount(current.staleMeasurementRejections),
+                residualRootAudits: boundedChatPressureCount(current.residualRootAudits),
+                residualRoots: boundedChatPressureCount(current.residualRoots),
+                residualRootsPresent: current.residualRoots > 0
+            } : null,
+            closures: chatWindowPressureLifecycle.closures.slice(-8).map((closure) => ({
+                generation: boundedChatPressureCount(closure.generation),
+                unobserveRequested: boundedChatPressureCount(closure.unobserveRequested),
+                unobserveCompleted: boundedChatPressureCount(closure.unobserveCompleted),
+                removalRequested: boundedChatPressureCount(closure.removalRequested),
+                removalCompleted: boundedChatPressureCount(closure.removalCompleted),
+                staleRangeRejections: boundedChatPressureCount(closure.staleRangeRejections),
+                staleMeasurementRejections: boundedChatPressureCount(closure.staleMeasurementRejections),
+                adapterDestroyRequested: boundedChatPressureCount(closure.adapterDestroyRequested),
+                adapterDestroyCompleted: boundedChatPressureCount(closure.adapterDestroyCompleted),
+                sessionSwitch: closure.sessionSwitch === true,
+                generationClosed: closure.generationClosed === true,
+                residualRootAudits: boundedChatPressureCount(closure.residualRootAudits),
+                residualRoots: boundedChatPressureCount(closure.residualRoots),
+                residualRootsPresent: closure.residualRoots > 0
+            }))
+        };
+        chatRenderMetricsDirty = true;
+    }
+
+    function beginChatWindowPressureGeneration(generation) {
+        if (typeof isChatRenderMetricsEnabled !== 'function' || !isChatRenderMetricsEnabled()) return;
+        chatWindowPressureLifecycle.current = {
+            generation: boundedChatPressureCount(generation),
+            unobserveRequested: 0,
+            unobserveCompleted: 0,
+            removalRequested: 0,
+            removalCompleted: 0,
+            staleRangeRejections: 0,
+            staleMeasurementRejections: 0,
+            residualRootAudits: 0,
+            residualRoots: 0
+        };
+        publishChatWindowPressureLifecycle();
+    }
+
+    function recordChatWindowCleanupCheckpoint(kind, generation, requested, completed, residualRoots) {
+        if (typeof isChatRenderMetricsEnabled !== 'function' || !isChatRenderMetricsEnabled()) return;
+        const current = chatWindowPressureLifecycle.current;
+        if (!current || current.generation !== boundedChatPressureCount(generation)) return;
+        const requestedCount = boundedChatPressureCount(requested);
+        const completedCount = boundedChatPressureCount(completed);
+        if (kind === 'unobserve') {
+            current.unobserveRequested = boundedChatPressureCount(current.unobserveRequested + requestedCount);
+            current.unobserveCompleted = boundedChatPressureCount(current.unobserveCompleted + completedCount);
+        } else if (kind === 'removal') {
+            current.removalRequested = boundedChatPressureCount(current.removalRequested + requestedCount);
+            current.removalCompleted = boundedChatPressureCount(current.removalCompleted + completedCount);
+        } else {
+            return;
+        }
+        current.residualRootAudits = boundedChatPressureCount(current.residualRootAudits + 1);
+        current.residualRoots = boundedChatPressureCount(current.residualRoots + boundedChatPressureCount(residualRoots));
+        publishChatWindowPressureLifecycle();
+    }
+
+    function recordChatWindowStaleCallback(generation, kind) {
+        if (typeof isChatRenderMetricsEnabled !== 'function' || !isChatRenderMetricsEnabled()) return;
+        const normalizedGeneration = boundedChatPressureCount(generation);
+        const owner = chatWindowPressureLifecycle.current?.generation === normalizedGeneration
+            ? chatWindowPressureLifecycle.current
+            : chatWindowPressureLifecycle.closures.find((closure) => closure.generation === normalizedGeneration);
+        if (!owner) return;
+        if (kind === 'range') owner.staleRangeRejections = boundedChatPressureCount(owner.staleRangeRejections + 1);
+        else if (kind === 'measurement') owner.staleMeasurementRejections = boundedChatPressureCount(owner.staleMeasurementRejections + 1);
+        else return;
+        publishChatWindowPressureLifecycle();
+    }
+
+    function closeChatWindowPressureGeneration(generation, sessionSwitch, adapterDestroyed, residualRoots) {
+        if (typeof isChatRenderMetricsEnabled !== 'function' || !isChatRenderMetricsEnabled()) return;
+        const normalizedGeneration = boundedChatPressureCount(generation);
+        const current = chatWindowPressureLifecycle.current;
+        if (!current || current.generation !== normalizedGeneration) return;
+        if (!chatWindowPressureLifecycle.closures.some((closure) => closure.generation === normalizedGeneration)) {
+            chatWindowPressureLifecycle.closures.push({
+                generation: normalizedGeneration,
+                unobserveRequested: current.unobserveRequested,
+                unobserveCompleted: current.unobserveCompleted,
+                removalRequested: current.removalRequested,
+                removalCompleted: current.removalCompleted,
+                staleRangeRejections: current.staleRangeRejections,
+                staleMeasurementRejections: current.staleMeasurementRejections,
+                adapterDestroyRequested: adapterDestroyed ? 1 : 0,
+                adapterDestroyCompleted: adapterDestroyed ? 1 : 0,
+                sessionSwitch: sessionSwitch === true,
+                generationClosed: true,
+                residualRootAudits: boundedChatPressureCount(current.residualRootAudits + 1),
+                residualRoots: boundedChatPressureCount(current.residualRoots + boundedChatPressureCount(residualRoots))
+            });
+            chatWindowPressureLifecycle.closures = chatWindowPressureLifecycle.closures.slice(-8);
+        }
+        chatWindowPressureLifecycle.current = null;
+        if (typeof chatRenderMetrics !== 'undefined') chatRenderMetrics.pressureAttribution = null;
+        publishChatWindowPressureLifecycle();
+    }
+
+    function normalizeChatPressureKind(value) {
+        return ['greeting', 'message', 'change-list', 'segment', 'conflict', 'system'].includes(value)
+            ? value
+            : 'unknown';
+    }
+
+    function normalizeChatPressureRole(value) {
+        return ['user', 'assistant', 'system'].includes(value) ? value : 'unknown';
+    }
+
+    function recordChatWindowPressureAttribution(visibleUnits, windowUnits, snapshot, pins, directChildren, descendants) {
+        if (!isChatRenderMetricsEnabled()) return;
+        const buildAttribution = window.__ocRendering?.buildChatPressureAttribution;
+        if (typeof buildAttribution !== 'function') return;
+
+        const acceptedItems = Array.isArray(snapshot?.items)
+            ? snapshot.items.slice(0, CHAT_WINDOW_MOUNT_LIMIT)
+            : [];
+        const acceptedKeys = new Set(acceptedItems.map((item) => item.key));
+        const pinnedKeys = new Set(Array.isArray(pins) ? pins.slice(0, CHAT_WINDOW_MOUNT_LIMIT) : []);
+        const unitByKey = new Map((Array.isArray(windowUnits) ? windowUnits : []).slice(0, CHAT_WINDOW_MOUNT_LIMIT).map((unit) => [unit.key, unit]));
+        const directRoots = Array.from(chatContainer.children);
+        const keyedRootList = keyedRoots();
+        const rootByKey = new Map();
+        let offRangeRoots = 0;
+        for (const root of keyedRootList) {
+            const key = root?.dataset?.renderUnitKey;
+            if (!key) continue;
+            if (!acceptedKeys.has(key)) offRangeRoots += 1;
+            else if (!rootByKey.has(key)) rootByKey.set(key, root);
+        }
+
+        const units = [];
+        let attributedDescendants = 0;
+        let attributedDirectChildren = 0;
+        for (const item of acceptedItems) {
+            const root = rootByKey.get(item.key);
+            const unit = unitByKey.get(item.key);
+            if (!root || !unit || !Number.isFinite(item.index)) continue;
+            const rootDescendants = boundedChatPressureCount(root.querySelectorAll('*').length);
+            const rootDirectChildren = boundedChatPressureCount(root.childElementCount);
+            const kind = normalizeChatPressureKind(unit.kind);
+            const role = normalizeChatPressureRole(unit.value?.message?.role);
+            attributedDescendants = boundedChatPressureCount(attributedDescendants + rootDescendants);
+            attributedDirectChildren = boundedChatPressureCount(attributedDirectChildren + rootDirectChildren);
+            units.push({
+                unitIndex: boundedChatPressureCount(item.index),
+                kind,
+                role,
+                descendants: rootDescendants,
+                directChildren: rootDirectChildren,
+                pinned: pinnedKeys.has(item.key)
+            });
+        }
+
+        const lifecycle = typeof chatWindowPressureLifecycle !== 'undefined'
+            && chatWindowPressureLifecycle.current?.generation === boundedChatPressureCount(chatWindowGeneration)
+            ? chatWindowPressureLifecycle.current
+            : null;
+        const model = buildAttribution({
+            generation: boundedChatPressureCount(chatWindowGeneration),
+            auditAvailable: true,
+            coverageAvailable: units.length === acceptedItems.length,
+            totalDescendants: attributedDescendants,
+            cleanup: lifecycle ? {
+                available: true,
+                generation: boundedChatPressureCount(lifecycle.generation),
+                ownedUnmount: lifecycle.unobserveRequested > 0 || lifecycle.removalRequested > 0,
+                residualRoots: boundedChatPressureCount(lifecycle.residualRoots),
+                staleRejections: boundedChatPressureCount(lifecycle.staleRangeRejections + lifecycle.staleMeasurementRejections)
+            } : undefined,
+            units: units.map((unit) => ({
+                unitIndex: unit.unitIndex,
+                kind: unit.kind,
+                role: unit.role,
+                descendants: unit.descendants,
+                directChildren: unit.directChildren,
+                mounted: true,
+                pinned: unit.pinned
+            }))
+        });
+        const topContributors = Array.isArray(model?.topContributors)
+            ? model.topContributors.slice(0, 8).map((unit) => ({
+                unitIndex: boundedChatPressureCount(unit.unitIndex),
+                kind: normalizeChatPressureKind(unit.kind),
+                role: normalizeChatPressureRole(unit.role),
+                descendants: boundedChatPressureCount(unit.descendants),
+                directChildren: boundedChatPressureCount(unit.directChildren)
+            }))
+            : [];
+        chatRenderMetrics.pressureAttribution = {
+            generation: boundedChatPressureCount(model?.generation),
+            units: units.map((unit) => ({
+                unitIndex: unit.unitIndex,
+                kind: unit.kind,
+                role: unit.role,
+                descendants: unit.descendants,
+                directChildren: unit.directChildren
+            })),
+            totals: {
+                descendants: boundedChatPressureCount(descendants),
+                attributedDescendants,
+                directChildren: boundedChatPressureCount(directChildren),
+                attributedDirectChildren,
+                structuralChildren: boundedChatPressureCount(directRoots.filter((root) => root?.dataset?.chatStructuralKey).length),
+                mountedRoots: boundedChatPressureCount(units.length),
+                offRangeRoots: boundedChatPressureCount(offRangeRoots)
+            },
+            range: {
+                requested: { available: Array.isArray(visibleUnits), value: Array.isArray(visibleUnits) ? boundedChatPressureCount(visibleUnits.length) : null },
+                accepted: { available: Array.isArray(snapshot?.items), value: Array.isArray(snapshot?.items) ? boundedChatPressureCount(snapshot.items.length) : null },
+                core: { available: false, value: null },
+                overscan: { available: false, value: null },
+                pins: { available: Array.isArray(pins), value: Array.isArray(pins) ? boundedChatPressureCount(pins.length) : null }
+            },
+            topContributors
+        };
+        if (lifecycle) {
+            chatRenderMetrics.pressureAttribution.cleanup = {
+                available: model?.cleanup?.available === true,
+                generationMatches: model?.cleanup?.generationMatches === true,
+                ownedUnmount: model?.cleanup?.ownedUnmount === true,
+                residualRoots: boundedChatPressureCount(model?.cleanup?.residualRoots),
+                staleRejections: boundedChatPressureCount(model?.cleanup?.staleRejections)
+            };
+            chatRenderMetrics.pressureAttribution.classification = {
+                value: ['cumulative-ordinary', 'exceptional-unit', 'suspected-cleanup-drift', 'mixed'].includes(model?.classification?.value)
+                    ? model.classification.value
+                    : 'unknown',
+                residualRootsPresent: boundedChatPressureCount(model?.cleanup?.residualRoots) > 0
+            };
+        }
+        chatRenderMetricsDirty = true;
+    }
+
+    function applyWindowedKeyedChatReconciliation(session, units, explicitShellRequests = [], transactionControl = null) {
+        const cf3RunPhase = typeof runCF3RangeDiagnosticPhase === 'function'
+            ? runCF3RangeDiagnosticPhase : (_phase, operation) => operation();
         const reconcileSessionId = activeSessionId || '__no_session__';
+        const existingAdapter = chatWindowState.adapter;
+        if (existingAdapter && chatWindowState.sessionId !== reconcileSessionId) {
+            return CHAT_WINDOW_CANDIDATE_STALE_RESULT;
+        }
+        if (existingAdapter && typeof existingAdapter.beginTransaction !== 'function') {
+            return CHAT_WINDOW_TRANSACTION_UNAVAILABLE_RESULT;
+        }
+        const syntheticEvidenceRequest = existingAdapter && typeof consumeChatWindowSyntheticEvidenceRequest === 'function'
+            ? consumeChatWindowSyntheticEvidenceRequest(transactionControl?.syntheticEvidenceToken)
+            : null;
+        const syntheticEvidenceDirection = transactionControl?.syntheticEvidenceDirection === 'backward' ? 'backward' : 'forward';
+        const rangePolicy = syntheticEvidenceRequest ? Object.freeze({
+            overscanTier: syntheticEvidenceRequest.overscanTier,
+            beforeReserve: syntheticEvidenceDirection === 'backward'
+                ? syntheticEvidenceRequest.forwardReserve : syntheticEvidenceRequest.backwardReserve,
+            afterReserve: syntheticEvidenceDirection === 'backward'
+                ? syntheticEvidenceRequest.backwardReserve : syntheticEvidenceRequest.forwardReserve,
+            initialTail: syntheticEvidenceRequest.initialTail
+        }) : typeof resolveChatWindowAdaptiveRangePolicy === 'function'
+            ? resolveChatWindowAdaptiveRangePolicy() : undefined;
+        let stagedAttempt = transactionControl?.stagedAttempt || null;
+        if (!existingAdapter && !stagedAttempt) {
+            const prepared = ensureChatWindowAdapter(session, units, explicitShellRequests, transactionControl);
+            if (prepared === CHAT_WINDOW_TRANSACTION_UNAVAILABLE_RESULT || prepared === CHAT_WINDOW_CANDIDATE_STALE_RESULT) {
+                return prepared;
+            }
+            stagedAttempt = prepared;
+            transactionControl = {
+                ...(transactionControl || {}),
+                stagedAttempt,
+                acceptedPlanOverride: stagedAttempt.acceptedPlan,
+                skipCorrection: true
+            };
+        }
+        if (stagedAttempt) {
+            if (consumedChatWindowStagedAttempts.has(stagedAttempt)
+                || chatWindowState.adapter !== stagedAttempt.candidateAdapter
+                || stagedAttempt.adapterTransaction == null) return CHAT_WINDOW_CANDIDATE_STALE_RESULT;
+            consumedChatWindowStagedAttempts.add(stagedAttempt);
+        }
+        const transactionOwnerSessionId = activeSessionId || '__no_session__';
+        const transactionOwnerGeneration = chatWindowGeneration;
+        const transactionOwnerAdapter = chatWindowState.adapter;
+        let journal = null;
+        let transactionUnavailable = false;
         let reconcileSucceeded = false;
-        captureChatWindowAnchor();
-        chatWindowState.rendering = true;
-        chatWindowState.pendingRangeRender = false;
-        chatWindowState.allUnits = units;
+        let adapterTransaction = null;
+        let applied = null;
+        let rawSnapshotToAcknowledge = null;
+        const acknowledgeRawSnapshot = () => {
+            if (!rawSnapshotToAcknowledge) return;
+            chatWindowState.acknowledgedRawSnapshot = Object.freeze({
+                items: Object.freeze(rawSnapshotToAcknowledge.items.map((item) => Object.freeze({
+                    key: item.key,
+                    index: item.index,
+                    start: item.start,
+                    end: item.end,
+                    size: item.size
+                }))),
+                totalSize: rawSnapshotToAcknowledge.totalSize
+            });
+        };
         try {
-            const localWindow = resolveChatLocalHistoryWindow(units);
-            const adapter = ensureChatWindowAdapter(session, localWindow.visibleUnits);
-            if (chatWindowState.pendingScrollKey) tryPendingChatWindowScroll('after-adapter-update');
-            const snapshot = adapter.getRange();
+            const localWindow = stagedAttempt?.localWindow || (() => {
+                const localWindow = resolveChatLocalHistoryWindow(units);
+                return localWindow;
+            })();
+            // Established immediate transactions intentionally bypass
+            // ensureChatWindowAdapter(session, localWindow.visibleUnits) to avoid a redundant active-owner publication.
+            const adapter = stagedAttempt?.candidateAdapter || chatWindowState.adapter;
+            if (adapter === CHAT_WINDOW_CANDIDATE_STALE_RESULT) return adapter;
+            if (!adapter || (!stagedAttempt && typeof adapter.beginTransaction !== 'function')) {
+                transactionUnavailable = true;
+                return CHAT_WINDOW_TRANSACTION_UNAVAILABLE_RESULT;
+            }
+            const acceptedState = stagedAttempt
+                ? unpublishedChatWindowCandidateAcceptedStates.get(adapter)
+                    || (typeof captureChatWindowAcceptedState === 'function' ? captureChatWindowAcceptedState() : null)
+                : typeof captureChatWindowAcceptedState === 'function' ? captureChatWindowAcceptedState() : null;
+            journal = typeof beginChatPresentationJournal === 'function'
+                ? beginChatPresentationJournal(acceptedState, reconcileSessionId)
+                : null;
+            captureChatWindowAnchor();
+            chatWindowState.rendering = true;
+            chatWindowState.pendingRangeRender = false;
+            chatWindowState.allUnits = units;
+            if (stagedAttempt) chatWindowState.localHistoryPresentation = localWindow.presentation;
+            reserveChatWindowStructuralRoots(localWindow.presentation);
+            const renderingFacade = globalThis.window?.__ocRendering;
+            const adapterUpdate = stagedAttempt?.adapterUpdate || {
+                keys: localWindow.visibleUnits.map((unit) => unit.key),
+                kinds: localWindow.visibleUnits.map(getChatWindowUnitKind),
+                presentationRevisions: localWindow.visibleUnits.map((unit) => renderingFacade.presentationFingerprint(getKeyedUnitPresentation(session, unit))),
+                keepMountedKeys: getChatWindowKeepMountedKeys(session, localWindow.visibleUnits),
+                ...(rangePolicy ? { rangePolicy } : {})
+            };
+            adapterTransaction = stagedAttempt?.adapterTransaction || adapter.beginTransaction(adapterUpdate);
+            journal.adapterTransaction = adapterTransaction;
+            if (!adapterTransaction || !adapterTransaction.prepareCommit()) throw new Error('Chat window adapter transaction prepare failed');
+            runChatPresentationFailureSeam('adapter-prepared', adapterTransaction);
+            const snapshot = adapterTransaction.getRange();
+            rawSnapshotToAcknowledge = snapshot;
             chatWindowState.snapshot = snapshot;
             const unitByKey = new Map(localWindow.visibleUnits.map((unit) => [unit.key, unit]));
-            const windowUnits = snapshot.items.map((item) => unitByKey.get(item.key)).filter(Boolean);
-            applyKeyedChatReconciliation(session, windowUnits);
-            updateChatWindowSpacers(snapshot);
-            renderChatLocalOlderSurface(localWindow.presentation);
-            const nextMounted = new Set(windowUnits.map((unit) => unit.key));
-            for (const key of chatWindowState.mountedKeys) if (!nextMounted.has(key)) adapter.unobserveElement(key);
-            for (const unit of windowUnits) {
-                const root = keyedRootForKey(unit.key);
-                if (root) adapter.observeElement(unit.key, root);
+            const planContainment = stagedAttempt ? null : renderingFacade?.planChatWindowContainment;
+            const containmentRequest = !stagedAttempt && typeof planContainment === 'function'
+                ? buildChatWindowContainmentRequest(session, localWindow.visibleUnits, snapshot, explicitShellRequests)
+                : null;
+            const planned = stagedAttempt?.acceptedPlan || (typeof planContainment === 'function'
+                ? planContainment(buildChatWindowContainmentRequest(
+                    session, localWindow.visibleUnits, snapshot, explicitShellRequests
+                ))
+                : typeof window === 'undefined'
+                    ? {
+                        allowed: true,
+                        acceptedKeys: snapshot.items.map((item) => item.key),
+                        mountedCount: snapshot.items.length,
+                        directChildCount: snapshot.items.length,
+                        shellSelections: {},
+                        syntheticNonBrowser: true
+                    }
+                    : null);
+            const acceptedPlan = transactionControl?.acceptedPlanOverride || planned;
+            if (!acceptedPlan?.allowed) {
+                abortChatPresentationJournal(journal);
+                return [];
             }
-            chatWindowState.mountedKeys = nextMounted;
-            if (chatWindowState.pendingScrollKey) tryPendingChatWindowScroll('after-mounted-reconcile');
-            const directChildren = chatContainer.childElementCount;
-            const descendants = chatContainer.querySelectorAll('*').length;
-            const budget = assertChatWindowDomBudget({ mountedUnits: windowUnits.length, directChildren, descendants });
+            if (!acceptedPlan.syntheticNonBrowser && (acceptedPlan.mountedCount > CHAT_WINDOW_MOUNT_LIMIT
+                || acceptedPlan.directChildCount > CHAT_WINDOW_DIRECT_CHILD_LIMIT)) {
+                abortChatPresentationJournal(journal);
+                return [];
+            }
+            if ((activeSessionId || '__no_session__') !== transactionOwnerSessionId
+                || chatWindowGeneration !== transactionOwnerGeneration
+                || chatWindowState.adapter !== transactionOwnerAdapter) {
+                abortChatPresentationJournal(journal);
+                return CHAT_WINDOW_CANDIDATE_STALE_RESULT;
+            }
+            const planRevision = containmentRequest ? ++chatWindowAcceptedPlanRevision : 0;
+            const applyAcceptedPlan = (acceptedPlan) => {
+                const acceptedUnits = acceptedPlan.acceptedKeys.map((key) => unitByKey.get(key)).filter(Boolean);
+                const acceptedKeySet = new Set(acceptedPlan.acceptedKeys);
+                const acceptedSnapshot = {
+                    ...snapshot,
+                    items: snapshot.items.filter((item) => acceptedKeySet.has(item.key))
+                };
+                for (const unit of acceptedUnits) {
+                    const presentationSelection = acceptedPlan.shellSelections[unit.key];
+                    if (!presentationSelection) continue;
+                    adapterTransaction.setPresentationRevision(unit.key, renderingFacade.presentationFingerprint(getKeyedPresentationIdentity(
+                        getKeyedUnitPresentation(session, unit),
+                        presentationSelection
+                    )));
+                }
+                applyKeyedChatReconciliation(session, acceptedUnits, acceptedPlan.shellSelections, journal);
+                updateChatWindowSpacers(acceptedSnapshot);
+                runChatPresentationFailureSeam('spacer-applied', acceptedSnapshot);
+                renderChatLocalOlderSurface(localWindow.presentation, localWindow.suppressSurfaceContent === true);
+                runChatPresentationFailureSeam('local-surface-applied', localWindow.presentation);
+                const nextMounted = new Set(acceptedUnits.map((unit) => unit.key));
+                for (const key of chatWindowState.mountedKeys) if (!nextMounted.has(key)) {
+                    adapterTransaction.unobserveElement(key);
+                }
+                for (const unit of acceptedUnits) {
+                    const root = keyedRootForKey(unit.key);
+                    if (root) adapterTransaction.observeElement(unit.key, root);
+                }
+                chatWindowState.mountedKeys = nextMounted;
+                const directChildren = chatContainer.childElementCount;
+                const descendants = chatContainer.querySelectorAll('*').length;
+                const keepMountedKeys = getChatWindowKeepMountedKeys(session, localWindow.visibleUnits);
+                const structuralIntegrityRoots = getChatStructuralIntegrityRoots();
+                sampleChatRenderDom(chatContainer, { directChildren, descendants, structuralIntegrityRoots });
+                recordChatWindowPressureAttribution(localWindow.visibleUnits, acceptedUnits, acceptedSnapshot, keepMountedKeys, directChildren, descendants);
+                const budget = assertChatWindowDomBudget({ mountedUnits: keyedRoots().length, directChildren, descendants });
+                const adaptiveObservations = typeof createChatWindowAdaptiveObservations === 'function'
+                    ? createChatWindowAdaptiveObservations(
+                        acceptedSnapshot, budget, localWindow.visibleUnits.length, acceptedPlan, session
+                    ) : null;
+                return { acceptedUnits, budget, adaptiveObservations };
+            };
+            applied = applyAcceptedPlan(acceptedPlan);
+            const correctedPlan = containmentRequest && transactionControl?.skipCorrection !== true ? scheduleChatWindowPlanCorrection({
+                sessionId: reconcileSessionId,
+                generation: chatWindowGeneration,
+                planRevision,
+                request: containmentRequest,
+                acceptedPlan,
+                observedBudget: applied.budget
+            }) : null;
+            window.__ocChatWindowLastBudget = Object.freeze(applied.budget);
+            if (!adapterTransaction.commit()) throw new Error('Chat window adapter transaction commit failed');
+            runChatPresentationFailureSeam('adapter-sealed-pre-finalize', adapterTransaction);
+            if (!cf3RunPhase('transaction-finalize', () => adapterTransaction.finalizeCommit())) throw new Error('Chat window adapter transaction finalize failed');
+            if (adapterTransaction.hasPendingCompletion?.()) adapterTransaction.retryCompletion?.();
+            journal.adapterTransaction = null;
+            if (!finalizeChatPresentationJournal(journal)) throw new Error('Chat presentation journal finalize failed');
+            acknowledgeRawSnapshot();
+            if (applied?.adaptiveObservations && typeof observeChatWindowAdaptiveShadow === 'function') {
+                observeChatWindowAdaptiveShadow(applied.adaptiveObservations, {
+                    kind: 'external', decisionGeneration: typeof chatWindowAdaptiveShadow !== 'undefined'
+                        ? chatWindowAdaptiveShadow?.state?.decisionGeneration : 0
+                });
+            }
+            if (stagedAttempt) unpublishedChatWindowCandidateAcceptedStates.delete(adapter);
+            chatWindowState.rendering = false;
+            if (chatWindowState.pendingScrollKey) tryPendingChatWindowScroll('after-transaction-finalize');
             if (autoScrollPinnedToBottom) scrollToBottom(true);
             else restoreChatWindowAnchor();
-            window.__ocChatWindowLastBudget = Object.freeze(budget);
             reconcileSucceeded = true;
-            return windowUnits;
+            if (transactionControl && correctedPlan) transactionControl.correctedPlan = correctedPlan;
+            return applied.acceptedUnits;
+        } catch (error) {
+            if (adapterTransaction?.isFinalized?.()) {
+                journal.adapterTransaction = null;
+                adapterTransaction.retryCompletion?.();
+                finalizeChatPresentationJournal(journal);
+                acknowledgeRawSnapshot();
+                if (applied?.adaptiveObservations && typeof observeChatWindowAdaptiveShadow === 'function') {
+                    observeChatWindowAdaptiveShadow(applied.adaptiveObservations, {
+                        kind: 'external', decisionGeneration: typeof chatWindowAdaptiveShadow !== 'undefined'
+                            ? chatWindowAdaptiveShadow?.state?.decisionGeneration : 0
+                    });
+                }
+                chatWindowState.rendering = false;
+                window.__ocChatWindowRecovery = Object.freeze({ status: 'committed-degraded', generation: chatWindowGeneration });
+                reconcileSucceeded = true;
+                return applied?.acceptedUnits || [];
+            }
+            if (journal) abortChatPresentationJournal(journal);
+            throw error;
         } finally {
-            chatWindowState.rendering = false;
-            chatLocalHistoryController.complete(reconcileSessionId);
+            if (!journal && !transactionUnavailable) {
+                chatWindowState.rendering = false;
+                chatLocalHistoryController.complete(reconcileSessionId); // chatLocalHistoryController.complete(reconcileSessionId);
+            }
             if (reconcileSucceeded && chatWindowState.pendingRangeRender && chatWindowState.pendingScrollKey
                 && chatWindowState.pendingScrollAttempts < CHAT_PENDING_SCROLL_MAX_ATTEMPTS) {
                 chatWindowState.pendingRangeRender = false;
@@ -8794,27 +13151,42 @@ function shouldHideDcpUiMessage(message) {
         }
     }
 
+    function applyAcceptedOuterTransactionalBootstrap(session, acceptedUnits, shellRequests, acceptedPlan) {
+        return applyWindowedKeyedChatReconciliation(session, acceptedUnits, shellRequests, {
+            acceptedPlanOverride: acceptedPlan,
+            skipCorrection: true
+        });
+    }
+
     window.__oc = window.__oc || {};
-    window.__oc.getLoadedChatSearchRows = () => {
+    function getLoadedChatSearchRows(query = '') {
         const session = getSessionOrNull(activeSessionId);
+        const queryText = String(query || '').trim();
+        if (queryText && chatWindowState.allUnits.length === 0) return null;
         return chatWindowState.allUnits.map((unit) => {
             const message = unit.value?.message;
-            const segmentIds = unit.kind === 'segment'
-                ? (unit.value?.segment?.memberMsgIds || Array.from(unit.value?.segment?.memberIds || []))
-                : [];
-            const segmentText = segmentIds.map((id) => getLoadedSessionSearchText(session?.messagesById?.get?.(id))).join(' ');
-            const appendText = message ? getAppendItems(message).map((item) => getLoadedSessionSearchText(item)).join(' ') : '';
-            const text = [getLoadedSessionSearchText(message), segmentText, appendText].filter(Boolean).join(' ').slice(0, 2200);
-            return { id: unit.key, role: message?.role || 'system', text };
-        }).filter((row) => row.text);
-    };
+            const matcher = queryText ? createLinearSearchMatcher(queryText) : null;
+            const text = collectBoundedSmartSearchText((visit) => {
+                visitLoadedChatSearchChunks(session, unit, (chunk) => {
+                    const collecting = visit(chunk) !== false;
+                    matcher?.visit(chunk);
+                    return matcher ? (collecting || !matcher.matched()) : collecting;
+                });
+            });
+            return text && (!matcher || matcher.matched())
+                ? { id: unit.key, role: message?.role || 'system', text }
+                : null;
+        }).filter(Boolean);
+    }
+    window.__oc.getLoadedChatSearchRows = getLoadedChatSearchRows;
     function mountChatWindowSearchKey(targetKey, reason = 'search') {
         if (!isChatWindowAvailable() || !chatWindowState.adapter) return false;
         const sessionId = activeSessionId || '__no_session__';
         const keys = chatWindowState.allUnits.map((unit) => unit.key);
         if (!chatLocalHistoryController.revealToKey(sessionId, keys, targetKey)) return false;
         sessionSearch.windowTargetKey = targetKey;
-        chatWindowState.activityBelow = !autoScrollPinnedToBottom;
+        autoScrollPinnedToBottom = false;
+        chatWindowState.activityBelow = true;
         if (chatWindowState.pendingScrollKey !== targetKey) {
             chatWindowState.pendingScrollKey = targetKey;
             chatWindowState.pendingScrollAttempts = 0;
@@ -8825,55 +13197,98 @@ function shouldHideDcpUiMessage(message) {
     }
     window.__oc.ensureChatWindowKeyMounted = mountChatWindowSearchKey;
 
-    function applyKeyedChatReconciliation(session, units) {
+    function applyKeyedChatReconciliation(session, units, presentationSelections = null, externalJournal = null) {
         const rendering = window.__ocRendering;
-        const nextItems = units.map((unit) => {
-            const presentation = getKeyedUnitPresentation(session, unit);
-            return {
-                key: unit.key,
-                fingerprint: rendering.presentationFingerprint(presentation),
-                streamStableFingerprint: rendering.presentationFingerprint(getKeyedStreamStablePresentation(presentation))
-            };
-        });
-        const steps = rendering.planReconciliation(keyedChatReconcileState.items, nextItems);
-        const unitByKey = new Map(units.map((unit) => [unit.key, unit]));
-        const renderedSet = new Set();
-        const counts = { create: 0, replace: 0, remove: 0, move: 0, reuse: 0, enhance: 0 };
-
-        for (const step of steps.filter((entry) => entry.type === 'remove')) {
-            const root = keyedRootForKey(step.key) || keyedChatReconcileState.roots.get(step.key);
-            if (root?.parentElement === chatContainer) root.remove();
-            keyedChatReconcileState.roots.delete(step.key);
-            counts.remove += 1;
-        }
-        for (const step of steps.filter((entry) => entry.type === 'create' || entry.type === 'replace')) {
-            const unit = unitByKey.get(step.key);
-            if (!unit) throw new Error(`Missing render unit for ${step.key}`);
-            const root = renderDetachedKeyedUnit(session, unit, renderedSet);
-            const existing = keyedRootForKey(step.key);
-            if (existing) existing.replaceWith(root);
-            else chatContainer.appendChild(root);
-            keyedChatReconcileState.roots.set(step.key, root);
-            counts[step.type] += 1;
-            counts.enhance += 1;
-        }
-        for (let index = 0; index < units.length; index += 1) {
-            const root = keyedRootForKey(units[index].key) || keyedChatReconcileState.roots.get(units[index].key);
-            if (!root) throw new Error(`Missing keyed root after reconcile: ${units[index].key}`);
-            const currentAtIndex = keyedRoots()[index] || null;
-            if (currentAtIndex !== root) {
-                chatContainer.insertBefore(root, currentAtIndex);
-                counts.move += 1;
+        const journal = externalJournal || beginChatPresentationJournal();
+        const ownsJournal = !externalJournal;
+        keyedChatReconcileFailure = null;
+        try {
+            const nextItems = units.map((unit) => {
+                const presentation = getKeyedUnitPresentation(session, unit);
+                const presentationSelection = presentationSelections?.[unit.key];
+                return {
+                    key: unit.key,
+                    fingerprint: rendering.presentationFingerprint(getKeyedPresentationIdentity(presentation, presentationSelection)),
+                    streamStableFingerprint: rendering.presentationFingerprint(getKeyedPresentationIdentity(
+                        getKeyedStreamStablePresentation(presentation),
+                        presentationSelection
+                    )),
+                    presentationSelection
+                };
+            });
+            const steps = rendering.planReconciliation(keyedChatReconcileState.items, nextItems);
+            const unitByKey = new Map(units.map((unit) => [unit.key, unit]));
+            const renderedSet = new Set();
+            const counts = { create: 0, replace: 0, remove: 0, move: 0, reuse: 0, enhance: 0 };
+            const preparedRoots = new Map();
+            for (const step of steps.filter((entry) => entry.type === 'create' || entry.type === 'replace')) {
+                const unit = unitByKey.get(step.key);
+                if (!unit) throw new Error(`Missing render unit for ${step.key}`);
+                keyedChatReconcileFailure = { key: step.key, operation: step.type };
+                const root = renderDetachedKeyedUnit(session, unit, renderedSet, presentationSelections?.[unit.key]);
+                preparedRoots.set(step.key, root);
+                journal.preparedRoots.add(root);
+                runChatPresentationFailureSeam('factory-prepared', { key: step.key, root });
             }
-            keyedChatReconcileState.roots.set(units[index].key, root);
+
+            for (const step of steps.filter((entry) => entry.type === 'remove')) {
+                keyedChatReconcileFailure = { key: step.key, operation: 'remove' };
+                const root = keyedRootForKey(step.key) || keyedChatReconcileState.roots.get(step.key);
+                if (root?.parentElement === chatContainer) root.remove();
+                if (root) journal.supersededRoots.add(root);
+                keyedChatReconcileState.roots.delete(step.key);
+                journal.cleanupRemovals.push(root);
+                counts.remove += 1;
+                runChatPresentationFailureSeam('remove-applied', { key: step.key, root });
+            }
+            for (const step of steps.filter((entry) => entry.type === 'create' || entry.type === 'replace')) {
+                keyedChatReconcileFailure = { key: step.key, operation: step.type };
+                const root = preparedRoots.get(step.key);
+                const existing = keyedRootForKey(step.key);
+                if (existing) {
+                    // existing._safeShellDispose?.(); is deferred to the accepted finalization barrier.
+                    journal.supersededRoots.add(existing);
+                    existing.replaceWith(root);
+                }
+                else chatContainer.appendChild(root);
+                keyedChatReconcileState.roots.set(step.key, root);
+                counts[step.type] += 1;
+                counts.enhance += 1;
+                runChatPresentationFailureSeam('replace-applied', { key: step.key, root, existing });
+            }
+            for (let index = 0; index < units.length; index += 1) {
+                keyedChatReconcileFailure = { key: units[index].key, operation: 'move' };
+                const root = keyedRootForKey(units[index].key) || keyedChatReconcileState.roots.get(units[index].key);
+                if (!root) throw new Error(`Missing keyed root after reconcile: ${units[index].key}`);
+                const currentAtIndex = keyedRoots()[index] || null;
+                if (currentAtIndex !== root) {
+                    chatContainer.insertBefore(root, currentAtIndex);
+                    counts.move += 1;
+                    runChatPresentationFailureSeam('move-applied', { key: units[index].key, root, index });
+                }
+                keyedChatReconcileState.roots.set(units[index].key, root);
+            }
+            keyedChatReconcileFailure = null;
+            counts.reuse = steps.filter((entry) => entry.type === 'reuse').length;
+            keyedChatReconcileState = { sessionId: activeSessionId || '', items: nextItems, roots: keyedChatReconcileState.roots };
+            window.__ocKeyedChatLastReconcile = Object.freeze({ ...counts, unitCount: units.length });
+            if (ownsJournal) finalizeChatPresentationJournal(journal);
+            return counts;
+        } catch (error) {
+            const attemptedFailure = keyedChatReconcileFailure;
+            if (ownsJournal) abortChatPresentationJournal(journal);
+            if (error && (typeof error === 'object' || typeof error === 'function')) {
+                try {
+                    Object.defineProperty(error, '__ocChatReconcileFailure', {
+                        value: attemptedFailure, configurable: true
+                    });
+                } catch { /* exact attempted ownership remains best-effort on exotic throwables */ }
+            }
+            throw error;
         }
-        counts.reuse = steps.filter((entry) => entry.type === 'reuse').length;
-        keyedChatReconcileState = { sessionId: activeSessionId || '', items: nextItems, roots: keyedChatReconcileState.roots };
-        window.__ocKeyedChatLastReconcile = Object.freeze({ ...counts, unitCount: units.length });
-        return counts;
     }
 
-    rekeyKeyedChatPresentation = (oldKey, newKey, sessionId) => {
+    function applyKeyedChatPresentationAliasMigration(oldKey, newKey, sessionId) {
         if (!KEYED_CHAT_RECONCILE_ENABLED || keyedChatReconcileState.sessionId !== sessionId) return true;
         const oldRoot = keyedRootForKey(oldKey);
         const newRoot = keyedRootForKey(newKey);
@@ -8900,6 +13315,10 @@ function shouldHideDcpUiMessage(message) {
         if (sessionSearch.windowTargetKey === oldKey) sessionSearch.windowTargetKey = newKey;
         sessionSearch.fullMatchKeys = sessionSearch.fullMatchKeys.map((key) => key === oldKey ? newKey : key);
         return true;
+    }
+
+    rekeyKeyedChatPresentation = (oldKey, newKey, sessionId) => {
+        return applyKeyedChatPresentationAliasMigration(oldKey, newKey, sessionId);
     };
 
     let renderScheduled = false;
@@ -8935,54 +13354,547 @@ function shouldHideDcpUiMessage(message) {
         });
     }
 
-    function applyChatWindowOrWave2(session, units) {
+    function applyChatWindowOrWave2(session, units, transactionMode = 'normal') {
+        const publishRecovery = (status, reason, retryAttempted, retryPending) => {
+            const recovery = Object.freeze({
+                status,
+                reason,
+                retryAttempted,
+                retryPending,
+                boundedRootCount: Math.min(CHAT_WINDOW_MOUNT_LIMIT, keyedRoots().length)
+            });
+            window.__ocChatWindowRecovery = recovery;
+            vscode.postMessage({
+                type: 'ui-debug',
+                payload: ['[WV][CHAT_WINDOW_BOUNDED_RECOVERY]', `status=${status}`, `reason=${reason}`,
+                    `retryAttempted=${retryAttempted}`, `retryPending=${retryPending}`,
+                    `boundedRootCount=${recovery.boundedRootCount}`]
+            });
+        };
+        const acceptedSafeShellFamilies = new Set([
+            'message-user', 'message-assistant', 'message-tool-meta', 'message-subagent',
+            'change-list', 'segment', 'conflict', 'message-image', 'message-code',
+            'message-diff', 'message-table', 'message-markdown'
+        ]);
+        const truthfulSafeShellFamily = (unit) => {
+            if (!unit) return '';
+            const candidates = [];
+            if (unit.kind === 'segment' && unit.value?.segment) candidates.push('segment');
+            if (unit.kind === 'conflict' && Array.isArray(unit.value?.conflicts) && unit.value.conflicts.length) candidates.push('conflict');
+            const message = unit.value?.message;
+            if (!message) return candidates.length === 1 ? candidates[0] : '';
+            if (unit.kind === 'change-list') {
+                if (message.meta?.kind === 'changeList' && Array.isArray(message.meta?.files) && message.meta.files.length) candidates.push('change-list');
+                return candidates.length === 1 ? candidates[0] : '';
+            }
+            if (message.meta?.kind === 'undoSegmentPlaceholder' || message.id?.startsWith?.('system:undo-seg:')) candidates.push('segment');
+            if (Array.isArray(message.meta?.images) && message.meta.images.length) candidates.push('message-image');
+            if (message.meta?.isDiff === true) candidates.push('message-diff');
+            if (Array.isArray(message.meta?.subagents) && message.meta.subagents.length) candidates.push('message-subagent');
+            if (message.role === 'user') candidates.push('message-user');
+            const hasMetaKind = typeof message.meta?.kind === 'string' && message.meta.kind.trim().length > 0;
+            if ((message.role === 'tool' || message.role === 'system' || message.role === 'assistant' && hasMetaKind)
+                && !(Array.isArray(message.meta?.todos) && message.meta.todos.length)) candidates.push('message-tool-meta');
+            if (message.role === 'assistant' && message.meta?.isThinking !== true && !hasMetaKind
+                && !(Array.isArray(message.meta?.todos) && message.meta.todos.length)
+                && candidates.length === 0) {
+                const text = typeof message.text === 'string' ? message.text : '';
+                const shaped = [];
+                if (/(^|\n)\s{0,3}(```|~~~)/.test(text)) shaped.push('message-code');
+                if (/\|[^\n]*\|\s*\n\s*\|?\s*:?-{3,}/.test(text)) shaped.push('message-table');
+                if (/(^|\n)\s{0,3}(#{1,6}\s|[-*+]\s|>\s)|\[[^\]]+\]\([^)]+\)|\*\*[^*]+\*\*/.test(text)) shaped.push('message-markdown');
+                if (shaped.length === 0) shaped.push('message-assistant');
+                candidates.push(...shaped);
+            }
+            return candidates.length === 1 && acceptedSafeShellFamilies.has(candidates[0]) ? candidates[0] : '';
+        };
+        const consumeWindowUnavailableResult = (result) => {
+            if (result !== CHAT_WINDOW_TRANSACTION_UNAVAILABLE_RESULT && result !== CHAT_WINDOW_CANDIDATE_STALE_RESULT) return '';
+            const retained = keyedRoots().length > 0;
+            const reason = result === CHAT_WINDOW_CANDIDATE_STALE_RESULT ? 'candidate-owner-stale' : 'missing-begin-transaction';
+            publishRecovery(retained ? 'retained' : 'empty', reason, false, true);
+            return retained ? 'window-unavailable-retained' : 'window-unavailable-bootstrap-pending';
+        };
+        const planAcceptedOuterTransactionalBootstrap = (safeViewer) => {
+            const boundedUnits = units.slice(-CHAT_WINDOW_INITIAL_TAIL);
+            const requestedKeys = boundedUnits.map((unit) => unit.key);
+            const shellRequests = safeViewer
+                ? boundedUnits.map((unit) => {
+                    const family = truthfulSafeShellFamily(unit);
+                    return family ? { key: unit.key, mode: 'safe-shell', family } : null;
+                }).filter(Boolean)
+                : [];
+            const planContainment = window.__ocRendering?.planChatWindowContainment;
+            if (typeof planContainment !== 'function') return false;
+            const plan = planContainment({
+                requestedKeys,
+                visibleLoadedKeys: requestedKeys,
+                viewportKeys: requestedKeys,
+                coreKeys: [],
+                overscanKeys: [],
+                adapterSnapshotKeys: requestedKeys,
+                currentTurnAssistantKey: session?.currentTurnAssistantKey,
+                thinkingId: session?.thinkingId,
+                lastTurnUserId: session?.lastTurnUserId,
+                appendRootUserKey: session?.appendRootUserKey,
+                anchorKey: chatWindowState.anchorKey,
+                searchTargetKey: sessionSearch.windowTargetKey,
+                projectedStructuralRoots: projectChatWindowStructuralRoots(),
+                limits: { mounted: CHAT_WINDOW_MOUNT_LIMIT, directChildren: CHAT_WINDOW_DIRECT_CHILD_LIMIT },
+                shellRequests
+            });
+            if (!plan?.allowed || !Array.isArray(plan.acceptedKeys)) return false;
+            const unitByKey = new Map(boundedUnits.map((unit) => [unit.key, unit]));
+            const acceptedUnits = plan.acceptedKeys.map((key) => unitByKey.get(key)).filter(Boolean);
+            if (safeViewer && acceptedUnits.some((unit) => !plan.shellSelections?.[unit.key])) return false;
+            return applyAcceptedOuterTransactionalBootstrap(session, acceptedUnits, shellRequests, plan);
+        };
+
+        const applyTransactionalWindow = (shellRequests = [], transactionUnits = units) => {
+            const control = {};
+            const acceptedUnits = applyWindowedKeyedChatReconciliation(session, transactionUnits, shellRequests, control);
+            if (acceptedUnits === CHAT_WINDOW_TRANSACTION_UNAVAILABLE_RESULT || acceptedUnits === CHAT_WINDOW_CANDIDATE_STALE_RESULT) return acceptedUnits;
+            if (!control.correctedPlan) return { acceptedUnits, corrected: false, correctionFailed: false };
+            try {
+                const correctedUnits = applyWindowedKeyedChatReconciliation(session, transactionUnits, shellRequests, {
+                    acceptedPlanOverride: control.correctedPlan,
+                    skipCorrection: true
+                });
+                if (correctedUnits === CHAT_WINDOW_TRANSACTION_UNAVAILABLE_RESULT || correctedUnits === CHAT_WINDOW_CANDIDATE_STALE_RESULT) return correctedUnits;
+                return { acceptedUnits: correctedUnits, corrected: true, correctionFailed: false };
+            } catch {
+                return { acceptedUnits, corrected: false, correctionFailed: true };
+            }
+        };
+
+        const applyVirtualizedRollbackBaseline = () => {
+            const boundedUnits = units.slice(-CHAT_WINDOW_INITIAL_TAIL);
+            if (boundedUnits.length === 0) return false;
+            try {
+                const result = applyTransactionalWindow([], boundedUnits);
+                if (result === CHAT_WINDOW_TRANSACTION_UNAVAILABLE_RESULT || result === CHAT_WINDOW_CANDIDATE_STALE_RESULT) return result;
+                return !result.correctionFailed;
+            } catch {
+                return false;
+            }
+        };
+
+        const containmentPolicyEnabled = typeof CHAT_WINDOW_CONTAINMENT_POLICY_ENABLED === 'undefined'
+            || CHAT_WINDOW_CONTAINMENT_POLICY_ENABLED !== false;
+        if (!containmentPolicyEnabled) {
+            const result = applyVirtualizedRollbackBaseline();
+            const unavailableRoute = consumeWindowUnavailableResult(result);
+            if (unavailableRoute) return unavailableRoute;
+            if (result) return 'containment-policy-disabled-virtualized';
+            publishRecovery('retained', 'containment-policy-disabled-pending', false, true);
+            return 'containment-policy-disabled-virtualized-pending';
+        }
+        if (!TANSTACK_CHAT_WINDOW_ENABLED) {
+            const result = applyVirtualizedRollbackBaseline();
+            const unavailableRoute = consumeWindowUnavailableResult(result);
+            if (unavailableRoute) return unavailableRoute;
+            if (result) return 'outer-virtualized-baseline';
+            publishRecovery('retained', 'baseline-unavailable', false, true);
+            return 'outer-virtualized-baseline-pending';
+        }
         if (!isChatWindowAvailable()) {
-            if (chatWindowState.adapter || chatWindowState.localOlderSurface) destroyChatWindowAdapter('window-unavailable');
-            applyKeyedChatReconciliation(session, units);
-            return 'wave2-disabled';
+            if (keyedRoots().length > 0) {
+                publishRecovery('retained', 'adapter-unavailable', false, true);
+                return 'window-unavailable-retained';
+            }
+            try {
+                const result = planAcceptedOuterTransactionalBootstrap(true);
+                const unavailableRoute = consumeWindowUnavailableResult(result);
+                if (unavailableRoute) return unavailableRoute;
+                if (Array.isArray(result)) return 'window-unavailable-bootstrap';
+            } catch {
+                publishRecovery('empty', 'bootstrap-transaction-failed', false, true);
+                return 'window-unavailable-bootstrap-pending';
+            }
+            publishRecovery('empty', 'bootstrap-unavailable', false, true);
+            return 'window-unavailable-bootstrap-pending';
+        }
+        if (transactionMode === 'corruption-emergency') {
+            const boundedUnits = units.slice(-CHAT_WINDOW_INITIAL_TAIL);
+            const shellRequests = boundedUnits.map((unit) => {
+                const family = truthfulSafeShellFamily(unit);
+                return family ? { key: unit.key, mode: 'safe-shell', family } : null;
+            }).filter(Boolean);
+            if (boundedUnits.length === 0 || shellRequests.length !== boundedUnits.length) {
+                publishRecovery('retained', 'emergency-shell-denied', false, true);
+                return 'window-corruption-emergency-pending';
+            }
+            try {
+                const result = applyTransactionalWindow(shellRequests, boundedUnits);
+                const unavailableRoute = consumeWindowUnavailableResult(result);
+                if (unavailableRoute) return unavailableRoute;
+                if (result.correctionFailed) {
+                    publishRecovery('retained', 'emergency-correction-failed', false, true);
+                    return 'window-corruption-emergency-pending';
+                }
+                publishRecovery('emergency', 'classified-corruption', false, false);
+                return 'window-corruption-emergency';
+            } catch {
+                publishRecovery('retained', 'emergency-transaction-failed', false, true);
+                return 'window-corruption-emergency-pending';
+            }
         }
         try {
-            applyWindowedKeyedChatReconciliation(session, units);
+            const result = applyTransactionalWindow();
+            const unavailableRoute = consumeWindowUnavailableResult(result);
+            if (unavailableRoute) return unavailableRoute;
+            if (result.correctionFailed) {
+                publishRecovery('retained', 'correction-failed', false, true);
+                return 'window-correction-retained';
+            }
+            window.__ocChatWindowRecovery = Object.freeze({
+                status: 'healthy', reason: 'none', retryAttempted: false, retryPending: false,
+                boundedRootCount: Math.min(CHAT_WINDOW_MOUNT_LIMIT, keyedRoots().length)
+            });
             return 'window';
         } catch (windowError) {
-            disableChatWindowForSession('adapter-fail-closed', windowError);
-            applyKeyedChatReconciliation(session, units);
-            return 'wave2-fail-closed';
+            const recoveryEnabled = typeof CHAT_WINDOW_RECOVERY_ENABLED === 'undefined'
+                || CHAT_WINDOW_RECOVERY_ENABLED !== false;
+            if (!recoveryEnabled) {
+                publishRecovery('retained', 'recovery-disabled', false, true);
+                return 'window-recovery-disabled-retained';
+            }
+            const failure = windowError?.__ocChatReconcileFailure || null;
+            const failedUnit = failure?.key ? units.find((unit) => unit.key === failure.key) : null;
+            const family = truthfulSafeShellFamily(failedUnit);
+            if (failedUnit && family && (failure.operation === 'create' || failure.operation === 'replace' || failure.operation === 'presentation')) {
+                const shellRequest = { key: failedUnit.key, mode: 'safe-shell', family };
+                try {
+                    const retryResult = applyTransactionalWindow([shellRequest]);
+                    const unavailableRoute = consumeWindowUnavailableResult(retryResult);
+                    if (unavailableRoute) return unavailableRoute;
+                    if (retryResult.correctionFailed) {
+                        publishRecovery('recovered', 'safe-shell-correction-failed', true, true);
+                        return 'window-recovered-correction-retained';
+                    }
+                    publishRecovery('recovered', 'safe-shell', true, false);
+                    return 'window-recovered';
+                } catch { /* the new retry transaction restores exact C0 */ }
+            }
+            publishRecovery('retained', family ? 'retry-failed' : 'no-truthful-family', Boolean(family), true);
+            return 'window-recovery-pending';
         }
     }
 
+    const CHAT_WINDOW_RAW_AUDIT_ACCEPTED_ROUTES = Object.freeze(new Set([
+        'containment-policy-disabled-virtualized',
+        'outer-virtualized-baseline',
+        'window-unavailable-bootstrap',
+        'window',
+        'window-recovered'
+    ]));
+
+    function captureChatWindowRawIntegrityAudit() {
+        const roots = keyedRoots();
+        const keyCounts = new Map();
+        let duplicateKeyCount = 0;
+        for (const root of roots) {
+            const key = root?.dataset?.renderUnitKey;
+            if (!key) duplicateKeyCount += 1;
+            else {
+                const count = (keyCounts.get(key) || 0) + 1;
+                keyCounts.set(key, count);
+                if (count > 1) duplicateKeyCount += 1;
+            }
+        }
+        const structuralRoots = getChatStructuralIntegrityRoots();
+        const unclassifiedStructuralRootCount = structuralRoots.filter((root) => root.classified !== true).length;
+        const directChildCount = Number(chatContainer?.childElementCount || 0);
+        const expectedKeys = keyedChatReconcileState.items.map((item) => item.key)
+            .filter((key) => typeof key === 'string' && key.length > 0);
+        const rootMapKeys = Array.from(keyedChatReconcileState.roots.keys())
+            .filter((key) => typeof key === 'string' && key.length > 0);
+        const actualKeys = roots.map((root) => root?.dataset?.renderUnitKey)
+            .filter((key) => typeof key === 'string' && key.length > 0);
+        const expectedSet = new Set(expectedKeys);
+        const actualSet = new Set(actualKeys);
+        const corruptionSamples = [];
+        for (const count of keyCounts.values()) if (count > 1) {
+            corruptionSamples.push(Object.freeze({ code: 'duplicate-keyed-root', expected: 1, actual: count }));
+        }
+        for (const key of expectedSet) if (!actualSet.has(key)) {
+            corruptionSamples.push(Object.freeze({ code: 'missing-accepted-keyed-root', expected: true, actual: false }));
+        }
+        for (const key of actualSet) if (!expectedSet.has(key)) {
+            corruptionSamples.push(Object.freeze({ code: 'unexpected-keyed-root', expected: false, actual: true }));
+        }
+        if (unclassifiedStructuralRootCount > 0) {
+            corruptionSamples.push(Object.freeze({
+                code: 'unclassified-direct-root', expected: 0, actual: unclassifiedStructuralRootCount
+            }));
+        }
+        const mappedKeyByRoot = new Map();
+        for (const [key, root] of keyedChatReconcileState.roots.entries()) {
+            if (root && !mappedKeyByRoot.has(root)) mappedKeyByRoot.set(root, key);
+        }
+        const mappedKeysInDomOrder = roots.map((root, index) => mappedKeyByRoot.get(root) || `__unmapped_root_${index}`);
+        for (const key of rootMapKeys) if (!mappedKeysInDomOrder.includes(key)) mappedKeysInDomOrder.push(key);
+        const acceptedDomOrderMismatch = expectedKeys.length !== actualKeys.length
+            || expectedKeys.some((key, index) => actualKeys[index] !== key);
+        const rootBindingMismatch = actualKeys.length !== mappedKeysInDomOrder.length
+            || actualKeys.some((key, index) => mappedKeysInDomOrder[index] !== key);
+        if (acceptedDomOrderMismatch || rootBindingMismatch) {
+            corruptionSamples.push(Object.freeze({
+                code: 'root-map-dom-mismatch',
+                expected: Object.freeze([...(acceptedDomOrderMismatch ? expectedKeys : actualKeys)]),
+                actual: Object.freeze([...(acceptedDomOrderMismatch ? actualKeys : mappedKeysInDomOrder)])
+            }));
+        }
+        if (chatWindowState.adapter) {
+            for (const structuralKey of ['window:top-spacer', 'window:bottom-spacer']) {
+                const actual = Array.from(chatContainer.children)
+                    .filter((root) => root?.dataset?.chatStructuralKey === structuralKey).length;
+                if (actual !== 1) corruptionSamples.push(Object.freeze({
+                    code: 'active-spacer-missing-or-duplicated', expected: 1, actual
+                }));
+            }
+            const adapterGeneration = Number(chatWindowState.adapterGeneration);
+            const adapterSessionMismatch = chatWindowState.sessionId !== (activeSessionId || '__no_session__');
+            if (Number.isSafeInteger(adapterGeneration) && adapterGeneration >= 0
+                && (adapterSessionMismatch || adapterGeneration !== chatWindowGeneration)) {
+                const actualGeneration = adapterGeneration === chatWindowGeneration
+                    ? chatWindowGeneration === Number.MAX_SAFE_INTEGER ? chatWindowGeneration - 1 : chatWindowGeneration + 1
+                    : adapterGeneration;
+                corruptionSamples.push(Object.freeze({
+                    code: 'adapter-session-generation-mismatch',
+                    expected: chatWindowGeneration, actual: actualGeneration
+                }));
+            }
+        }
+        const owner = Object.freeze({ sessionId: activeSessionId || '__no_session__', generation: chatWindowGeneration });
+        const audit = Object.freeze({
+            sessionId: owner.sessionId,
+            generation: owner.generation,
+            mountedRootCount: Math.min(1000000000, roots.length),
+            directChildCount: Math.min(1000000000, Math.max(0, directChildCount)),
+            duplicateKeyCount: Math.min(1000000000, duplicateKeyCount),
+            unclassifiedStructuralRootCount: Math.min(1000000000, unclassifiedStructuralRootCount),
+            corruptionSamples: Object.freeze(corruptionSamples),
+            anomaly: corruptionSamples.length > 0
+        });
+        if (audit.anomaly) consumeChatWindowIntegrityAudit(owner, audit);
+        return audit;
+    }
+
+    function createChatWindowEmergencyDiagnostic(owner, codes) {
+        const root = document.createElement('div');
+        root.className = 'message system error';
+        root.dataset.chatStructuralKey = 'window:corruption-emergency';
+        root.dataset.chatStructuralOwner = `${owner.sessionId}:${owner.generation}`;
+        root.setAttribute('role', 'alert');
+        root.setAttribute('aria-live', 'assertive');
+        const message = document.createElement('p');
+        message.textContent = 'The bounded chat presentation failed an integrity check. A guarded recovery view is active.';
+        const details = document.createElement('details');
+        const summary = document.createElement('summary');
+        summary.textContent = 'Operator diagnostics';
+        const diagnostics = document.createElement('code');
+        diagnostics.textContent = codes.join(', ');
+        details.appendChild(summary);
+        details.appendChild(diagnostics);
+        const retry = document.createElement('button');
+        retry.type = 'button';
+        retry.className = 'safe-shell-action';
+        retry.dataset.safeShellRole = 'retry-corruption';
+        retry.textContent = 'Retry bounded chat rendering';
+        retry.setAttribute('aria-label', 'Retry bounded chat rendering');
+        retry.addEventListener('click', () => retryChatWindowEmergency(owner, root));
+        root.appendChild(message);
+        root.appendChild(details);
+        root.appendChild(retry);
+        return root;
+    }
+
+    function retryChatWindowEmergency(owner, root) {
+        if (owner.sessionId !== (activeSessionId || '__no_session__') || owner.generation !== chatWindowGeneration
+            || chatWindowEmergencyState.status !== 'active'
+            || chatWindowEmergencyState.sessionId !== owner.sessionId
+            || chatWindowEmergencyState.generation !== owner.generation
+            || chatWindowEmergencyState.root !== root
+            || !root?.isConnected || root.parentElement !== chatContainer) return false;
+        if (typeof resetChatWindowAdaptiveShadow === 'function') resetChatWindowAdaptiveShadow('emergency-retry');
+        root.remove();
+        chatStructuralRootReservations.delete(root);
+        chatWindowEmergencyState = Object.freeze({ status: 'idle', sessionId: '', generation: -1, root: null, codes: [] });
+        window.__ocChatWindowEmergency = chatWindowEmergencyState;
+        const consumed = Object.freeze({
+            status: 'consumed', sessionId: owner.sessionId, generation: owner.generation,
+            reason: 'classified-corruption-retry', rawIntegrity: null
+        });
+        chatWindowOuterRecovery = consumed;
+        window.__ocChatWindowOuterRecovery = consumed;
+        scheduleRenderFromState('chat-window-corruption-retry');
+        return true;
+    }
+
+    function enterChatWindowEmergency(owner, rawIntegrity, classifications) {
+        if (owner.sessionId !== (activeSessionId || '__no_session__') || owner.generation !== chatWindowGeneration) return false;
+        if (typeof resetChatWindowAdaptiveShadow === 'function') resetChatWindowAdaptiveShadow('emergency-entry');
+        const codes = classifications.map((classification) => classification.code);
+        const root = createChatWindowEmergencyDiagnostic(owner, codes);
+        chatStructuralRootReservations.add(root);
+        const session = getSessionOrNull(activeSessionId);
+        const boundedUnits = chatWindowState.allUnits.slice(-CHAT_WINDOW_INITIAL_TAIL);
+        const route = applyChatWindowOrWave2(session, boundedUnits, 'corruption-emergency');
+        if (route !== 'window-corruption-emergency'
+            || keyedRoots().length > CHAT_WINDOW_MOUNT_LIMIT
+            || chatContainer.childElementCount + 1 > CHAT_WINDOW_DIRECT_CHILD_LIMIT) {
+            chatStructuralRootReservations.delete(root);
+            root.remove?.();
+            return false;
+        }
+        if (chatWindowState.bottomSpacer?.parentElement === chatContainer) {
+            chatContainer.insertBefore(root, chatWindowState.bottomSpacer);
+        } else chatContainer.insertBefore(root, null);
+        chatStructuralRootReservations.delete(root);
+        chatWindowEmergencyState = Object.freeze({
+            status: 'active', sessionId: owner.sessionId, generation: owner.generation,
+            root, codes: Object.freeze([...codes])
+        });
+        window.__ocChatWindowEmergency = chatWindowEmergencyState;
+        const evidence = Object.freeze({
+            status: 'emergency', sessionId: owner.sessionId, generation: owner.generation,
+            reason: 'classified-corruption', rawIntegrity
+        });
+        chatWindowOuterRecovery = evidence;
+        window.__ocChatWindowOuterRecovery = evidence;
+        return true;
+    }
+
+    function consumeChatWindowIntegrityAudit(owner, rawIntegrity) {
+        if (!owner || owner.sessionId !== (activeSessionId || '__no_session__') || owner.generation !== chatWindowGeneration
+            || rawIntegrity?.sessionId !== owner.sessionId || rawIntegrity?.generation !== owner.generation) return false;
+        const samples = Array.isArray(rawIntegrity.corruptionSamples) ? rawIntegrity.corruptionSamples : [];
+        const classify = window.__ocRendering?.classifyChatWindowIntegrity;
+        if (samples.length !== 1 || typeof classify !== 'function') return false;
+        let classifications;
+        try {
+            classifications = samples.map((sample) => classify(sample));
+        } catch {
+            return false;
+        }
+        const closedCodes = new Set([
+            'duplicate-keyed-root', 'missing-accepted-keyed-root', 'unexpected-keyed-root',
+            'unclassified-direct-root', 'root-map-dom-mismatch',
+            'active-spacer-missing-or-duplicated', 'adapter-session-generation-mismatch'
+        ]);
+        if (classifications.length !== 1 || !classifications.every((classification, index) => classification?.corrupt === true
+            && closedCodes.has(classification.code) && classification.code === samples[index]?.code)) return false;
+        const pending = recordChatWindowOuterRecovery(owner, 'classified-corruption', rawIntegrity);
+        if (pending.status !== 'pending' || pending.sessionId !== owner.sessionId || pending.generation !== owner.generation
+            || pending.reason !== 'classified-corruption' || !CHAT_WINDOW_EMERGENCY_ENABLED) return false;
+        return enterChatWindowEmergency(owner, rawIntegrity, classifications);
+    }
+
+    function recordChatWindowOuterRecovery(owner, reason, rawIntegrity = null) {
+        if (reason === 'raw-integrity-anomaly'
+            && chatWindowOuterRecovery.sessionId === owner.sessionId
+            && chatWindowOuterRecovery.generation === owner.generation
+            && (chatWindowOuterRecovery.reason === 'classified-corruption'
+                || chatWindowOuterRecovery.status === 'emergency')) return chatWindowOuterRecovery;
+        const evidence = Object.freeze({
+            status: 'pending',
+            sessionId: owner.sessionId,
+            generation: owner.generation,
+            reason,
+            rawIntegrity: rawIntegrity ? Object.freeze({ ...rawIntegrity }) : null
+        });
+        chatWindowOuterRecovery = evidence;
+        window.__ocChatWindowOuterRecovery = evidence;
+        try {
+            const corruptionCodes = Array.isArray(rawIntegrity?.corruptionSamples)
+                ? rawIntegrity.corruptionSamples.map((sample) => sample?.code).filter(Boolean).join(',')
+                : '';
+            vscode.postMessage({
+                type: 'ui-debug',
+                payload: ['[WV][CHAT_WINDOW_OUTER_RECOVERY]', `reason=${reason}`,
+                    `generation=${owner.generation}`, `rawAnomaly=${rawIntegrity?.anomaly === true}`,
+                    `codes=${corruptionCodes || 'none'}`]
+            });
+        } catch { /* pending bounded ownership must not depend on diagnostics */ }
+        return evidence;
+    }
+
+    function completeChatWindowOuterRecovery(owner) {
+        if (owner.sessionId !== (activeSessionId || '__no_session__') || owner.generation !== chatWindowGeneration) return false;
+        if (chatWindowEmergencyState.status === 'active'
+            && chatWindowEmergencyState.sessionId === owner.sessionId
+            && chatWindowEmergencyState.generation === owner.generation) return true;
+        if (chatWindowEmergencyState.status === 'active'
+            && (chatWindowEmergencyState.sessionId !== owner.sessionId
+                || chatWindowEmergencyState.generation !== owner.generation)) {
+            chatWindowEmergencyState.root?.remove?.();
+            chatStructuralRootReservations.delete(chatWindowEmergencyState.root);
+            chatWindowEmergencyState = Object.freeze({ status: 'idle', sessionId: '', generation: -1, root: null, codes: [] });
+            window.__ocChatWindowEmergency = chatWindowEmergencyState;
+        }
+        const evidence = Object.freeze({
+            status: 'healthy', sessionId: owner.sessionId, generation: owner.generation,
+            reason: 'none', rawIntegrity: null
+        });
+        chatWindowOuterRecovery = evidence;
+        window.__ocChatWindowOuterRecovery = evidence;
+        return true;
+    }
+
     function renderFromState() {
-        if (!KEYED_CHAT_RECONCILE_ENABLED || !window.__ocRendering || keyedChatFailedSessionId === activeSessionId) {
-            renderFromStateLegacy();
+        const owner = Object.freeze({ sessionId: activeSessionId || '__no_session__', generation: chatWindowGeneration });
+        if (!KEYED_CHAT_RECONCILE_ENABLED || !window.__ocRendering) {
+            recordChatWindowOuterRecovery(owner, 'keyed-capability-unavailable');
             return;
         }
-        if (keyedChatFailedSessionId && keyedChatFailedSessionId !== activeSessionId) keyedChatFailedSessionId = '';
-        renderPendingCount();
-        if (!chatContainer) return;
-        const session = getSessionOrNull(activeSessionId);
+        if (keyedChatFailedSessionId) keyedChatFailedSessionId = '';
+        if (!chatContainer) {
+            recordChatWindowOuterRecovery(owner, 'chat-container-unavailable');
+            return;
+        }
+        let stage = 'projection';
         try {
+            renderPendingCount();
+            const session = getSessionOrNull(activeSessionId);
             const units = window.__ocRendering.deriveRenderUnits(buildKeyedRenderCandidates(session));
-            applyChatWindowOrWave2(session, units);
+            stage = 'transaction';
+            const chatWindowRoute = applyChatWindowOrWave2(session, units);
+            if (!CHAT_WINDOW_RAW_AUDIT_ACCEPTED_ROUTES.has(chatWindowRoute)) {
+                recordChatWindowOuterRecovery(owner, chatWindowRoute || 'window-route-unavailable');
+                return;
+            }
+            stage = 'raw-integrity';
+            const rawIntegrity = captureChatWindowRawIntegrityAudit();
+            if (rawIntegrity.anomaly) {
+                recordChatWindowOuterRecovery(owner, 'raw-integrity-anomaly', rawIntegrity);
+                return;
+            }
+            stage = 'background-indicator';
             if (session) {
                 countBackgroundIndicatorApplyResult(applyBackgroundSubagentIndicator(session), [`sessionId=${activeSessionId || 'null'}`, 'source=renderFromState-keyed']);
             }
             renderQuestionCardInTimeline();
+            stage = 'search-highlight';
             if (sessionSearch.mode === 'smart' && sessionSearch.smartMessageIds.length) {
                 applySmartSessionSearchResults(sessionSearch.smartMessageIds, { scroll: false });
             } else if (sessionSearch.open || sessionSearch.query) {
                 refreshSessionSearchHighlights({ jumpToFirst: false });
             }
+            stage = 'snapshot-diagnostic';
             if (shouldEmitSnapshotOnNextRender && activeSessionId) {
-                shouldEmitSnapshotOnNextRender = false;
                 vscode.postMessage({ type: 'ui-debug', payload: ['[WV][SNAPSHOT_ROUTE]', `sessionId=${activeSessionId}`, 'reason=drop-switch-readonly', `rendered=${units.length}`] });
+                shouldEmitSnapshotOnNextRender = false;
             }
+            stage = 'unclear-anchor';
             noteUnclearAnchorCoalescedRenderComplete(activeSessionId);
+            completeChatWindowOuterRecovery(owner);
         } catch (error) {
-            destroyChatWindowAdapter('keyed-reconcile-failure');
-            keyedChatReconcileState = { sessionId: '', items: [], roots: new Map() };
-            keyedChatFailedSessionId = activeSessionId || '__no_session__';
-            vscode.postMessage({ type: 'ui-debug', payload: ['[WV][KEYED_RECONCILE_FAIL_CLOSED]', `error=${String(error)}`] });
-            renderFromStateLegacy();
+            const attemptedFailure = error?.__ocChatReconcileFailure;
+            const reason = stage === 'transaction' && (attemptedFailure?.operation === 'create' || attemptedFailure?.operation === 'replace')
+                ? 'factory-or-reconcile-exception'
+                : `${stage}-exception`;
+            recordChatWindowOuterRecovery(owner, reason);
         }
     }
 
@@ -10829,7 +15741,7 @@ function appendMessageImages(parentEl, message) {
         });
     }
 
-    sendBtn.addEventListener('click', () => {
+    function handlePrimarySendClick() {
         if (appendInputMode) {
             if (!canSendAppendFromInput()) {
                 updateSendGate();
@@ -10987,6 +15899,10 @@ function appendMessageImages(parentEl, message) {
         const sentSession = getSessionState(activeSessionId);
         if (sentSession) sentSession.inputDraft = '';
         closeFileMentionList();
+    }
+
+    sendBtn.addEventListener('click', () => {
+        handlePrimarySendClick();
     });
 
     input.addEventListener('paste', handlePaste);
@@ -11118,7 +16034,9 @@ function appendMessageImages(parentEl, message) {
         sessionSearch.smartRequestId = '';
         sessionSearch.smartInFlight = false;
         sessionSearch.activeIndex = -1;
-        scheduleSessionSearchRefresh({ jumpToFirst: true });
+        sessionSearch.activeKeyIndex = -1;
+        sessionSearch.windowTargetKey = '';
+        scheduleSessionSearchRefresh({ jumpToFirst: false });
     });
 
     searchInput?.addEventListener('keydown', (event) => {
@@ -11159,7 +16077,9 @@ function appendMessageImages(parentEl, message) {
 
     newSessionBtn.addEventListener('click', () => {
         exitAppendInputMode({ restoreDraft: false });
+        transitionActiveSessionPresentationOwner(activeSessionId, '');
         activeSessionId = '';
+        pendingExplicitSessionSelectionId = '';
         baseSessionTitle = 'OpenCode: Chat';
         renderHeaderTitle();
         renderHeaderUsage();
@@ -11723,7 +16643,53 @@ function appendMessageImages(parentEl, message) {
         updateSendGate();
     }
 
-window.addEventListener('message', (event) => {
+    function handleSessionIdMessage(message) {
+        const route = resolveEventSessionId(message, 'sessionId');
+        const sessionId = route?.sessionId || null;
+        if (!sessionId) return;
+        const wasActiveSession = Boolean(activeSessionId && activeSessionId === sessionId);
+        const isExplicitSelectionTarget = Boolean(pendingExplicitSessionSelectionId && pendingExplicitSessionSelectionId === sessionId);
+        const isFirstBootstrap = !activeSessionId;
+        const shouldActivateSession = wasActiveSession || isExplicitSelectionTarget || isFirstBootstrap;
+        if (!shouldActivateSession) {
+            vscode.postMessage({
+                type: 'ui-debug',
+                payload: ['[WV][SESSION_SELECTION_PRESERVE]', 'event=sessionId', `sessionId=${sessionId}`, `activeSessionId=${activeSessionId || 'null'}`, `pendingExplicit=${pendingExplicitSessionSelectionId || 'null'}`]
+            });
+            logBackgroundStateUpdate(sessionId, 'sessionId', { extra: ['phase=selection-preserve'] });
+            refreshSendButtonState();
+            return;
+        }
+        const prevSessionId = activeSessionId;
+        transitionActiveSessionPresentationOwner(prevSessionId, sessionId);
+        activeSessionId = sessionId;
+        if (isExplicitSelectionTarget) {
+            pendingExplicitSessionSelectionId = '';
+        }
+        clearAppendInputForSessionChange(sessionId);
+        renderHeaderUsage();
+        if (prevSessionId && prevSessionId !== sessionId) {
+            clearQuestionOverlay('session-change');
+            clearPermissionOverlay('session-change');
+            closeStallCard();
+            setSystemNotice('');
+        }
+        if (isSwitchingSession) {
+            isSwitchingSession = false;
+            while (pendingUiPrompts.length) {
+                const prompt = pendingUiPrompts.shift();
+                applyPromptToSession(sessionId, prompt);
+                const session = getSessionState(sessionId);
+                const tmpKey = session?.thinkingId || null;
+                vscode.postMessage({ type: 'registerTmpKey', sessionId, tmpKey });
+            }
+            window.__oc?.renderFromState?.();
+            logSessionState(sessionId, 'flushPendingPrompts');
+        }
+        refreshSendButtonStateAfterSessionSwitch();
+    }
+
+ window.addEventListener('message', (event) => {
         const message = event.data || {};
         vscode.postMessage({
             type: 'ui-debug',
@@ -11855,6 +16821,7 @@ window.addEventListener('message', (event) => {
                 }
                 
                 if (!hydrated) {
+                    transitionActiveSessionPresentationOwner(activeSessionId, incomingSessionId || activeSessionId || '');
                     activeSessionId = incomingSessionId || activeSessionId || '';
                 }
                 modeSelect.value = selectedMode;
@@ -11918,18 +16885,16 @@ window.addEventListener('message', (event) => {
 
               const subagentStatusFields = [`agentSessionId=${route.agentSessionId || 'null'}`];
               const terminalStatusUpdate = isTerminalSubagentStatusUpdate(incomingAgents, doneJustNowCount);
-              const noClearAnchorReason = terminalStatusUpdate ? '' : getSubagentStatusNoClearAnchorReason(sessionId);
-              if (shouldCoalescePendingStatusOnlyUnclearAnchor(sessionId, 'subagentStatus', noClearAnchorReason, subagentStatusFields)) {
-                break;
-              }
               handleSubagentStatusPatchResult(
                 sessionId,
-                isUnclearAnchorCircuitBreakerOpen(sessionId, 'subagentStatus', 'unclear-anchor', subagentStatusFields)
-                  ? { applied: false, reason: 'unclear-anchor-circuit-breaker-open' }
-                  : applySubagentStatusLocalPatch(sessionId, { runningCount, finalizingCount, doneJustNowCount }),
+                applySubagentStatusLocalPatch(sessionId, { runningCount, finalizingCount, doneJustNowCount }),
                 'subagentStatus',
-                subagentStatusFields
+                subagentStatusFields,
+                { coalescedRender: true }
               );
+              scheduleCoalescedSessionMetadataRender(sessionId, 'subagentStatus-coalesced', {
+                immediate: terminalStatusUpdate
+              });
               break;
             }
             case 'backgroundActivityPulse': {
@@ -11955,7 +16920,9 @@ window.addEventListener('message', (event) => {
                   };
                 }
               }
-              renderIfActive(route.parentSessionId, 'subagentStateDelta', { extra: [`agentSessionId=${route.agentSessionId || 'null'}`] });
+              scheduleCoalescedSessionMetadataRender(route.parentSessionId, 'subagentStateDelta-coalesced', {
+                immediate: ['done', 'failed', 'cancelled'].includes(message.to)
+              });
               break;
             }
             case 'resetUiState': {
@@ -11970,6 +16937,7 @@ window.addEventListener('message', (event) => {
                     logSegmentState(activeSessionId, 'after-reset');
                     break;
                 }
+                transitionActiveSessionPresentationOwner(activeSessionId, incomingSessionId || activeSessionId || '');
                 activeSessionId = incomingSessionId || activeSessionId || '';
                 pendingContextItems = [];
                 pendingFileRefs = [];
@@ -12252,6 +17220,7 @@ window.addEventListener('message', (event) => {
 
                 try {
                     if (shouldActivateSession) {
+                        transitionActiveSessionPresentationOwner(activeSessionId, sessionId);
                         activeSessionId = sessionId;
                         if (isExplicitSelectionTarget) {
                             pendingExplicitSessionSelectionId = '';
@@ -12665,49 +17634,7 @@ window.addEventListener('message', (event) => {
                 break;
             }
             case 'sessionId': {
-                const route = resolveEventSessionId(message, 'sessionId');
-                const sessionId = route?.sessionId || null;
-                if (!sessionId) break;
-                const wasActiveSession = Boolean(activeSessionId && activeSessionId === sessionId);
-                const isExplicitSelectionTarget = Boolean(pendingExplicitSessionSelectionId && pendingExplicitSessionSelectionId === sessionId);
-                const isFirstBootstrap = !activeSessionId;
-                const shouldActivateSession = wasActiveSession || isExplicitSelectionTarget || isFirstBootstrap;
-                if (!shouldActivateSession) {
-                    vscode.postMessage({
-                        type: 'ui-debug',
-                        payload: ['[WV][SESSION_SELECTION_PRESERVE]', 'event=sessionId', `sessionId=${sessionId}`, `activeSessionId=${activeSessionId || 'null'}`, `pendingExplicit=${pendingExplicitSessionSelectionId || 'null'}`]
-                    });
-                    logBackgroundStateUpdate(sessionId, 'sessionId', { extra: ['phase=selection-preserve'] });
-                    refreshSendButtonState();
-                    break;
-                }
-                const prevSessionId = activeSessionId;
-                activeSessionId = sessionId;
-                if (isExplicitSelectionTarget) {
-                    pendingExplicitSessionSelectionId = '';
-                }
-                clearAppendInputForSessionChange(sessionId);
-                renderHeaderUsage();
-                if (prevSessionId && prevSessionId !== sessionId) {
-                    destroyChatWindowAdapter('session-switch');
-                    clearQuestionOverlay('session-change');
-                    clearPermissionOverlay('session-change');
-                    closeStallCard();
-                    setSystemNotice('');
-                }
-                if (isSwitchingSession) {
-                    isSwitchingSession = false;
-                    while (pendingUiPrompts.length) {
-                        const prompt = pendingUiPrompts.shift();
-                        applyPromptToSession(sessionId, prompt);
-                        const session = getSessionState(sessionId);
-                        const tmpKey = session?.thinkingId || null;
-                        vscode.postMessage({ type: 'registerTmpKey', sessionId, tmpKey });
-                    }
-                    window.__oc?.renderFromState?.();
-                    logSessionState(sessionId, 'flushPendingPrompts');
-                }
-                refreshSendButtonStateAfterSessionSwitch();
+                handleSessionIdMessage(message);
                 break;
             }
             case 'sessionUsage': {
@@ -13538,7 +18465,7 @@ window.addEventListener('message', (event) => {
                 if (!msg) break;
                 if (!msg.meta) msg.meta = {};
                 msg.meta.todos = todos;
-                renderIfActive(sessionId, 'todoUpdate', parentVisible ? { extra: [`agentSessionId=${route.agentSessionId || 'null'}`] } : undefined);
+                scheduleCoalescedSessionMetadataRender(sessionId, 'todoUpdate-coalesced');
                 break;
             }
             case 'messageAppend': {
@@ -14481,7 +19408,10 @@ window.addEventListener('message', (event) => {
                 break;
             }
             case 'newSession': {
-                activeSessionId = message.sessionId || '';
+                const nextSessionId = message.sessionId || '';
+                transitionActiveSessionPresentationOwner(activeSessionId, nextSessionId);
+                activeSessionId = nextSessionId;
+                pendingExplicitSessionSelectionId = '';
                 clearAppendInputForSessionChange(activeSessionId);
                 clearQuestionOverlay('new-session');
                 clearPermissionOverlay('new-session');
@@ -14564,6 +19494,296 @@ function postOpenGitDiff(filePath, sessionId, commitHead, commitBase) {
     });
 }
 
+function scanSafeShellConflictDiffPage(text, requestedPage, pageContract) {
+    const value = typeof text === 'string' ? text : '';
+    const maxCodeUnits = pageContract.maxCodeUnits;
+    const maxLines = pageContract.maxLines;
+    const page = Number.isFinite(requestedPage) && requestedPage > 0 ? Math.floor(requestedPage) : 1;
+    let currentPage = 1;
+    let currentPageCodeUnits = 0;
+    let currentPageLines = 1;
+    let newlineCount = 0;
+    let pageText = '';
+    for (let index = 0; index < value.length; index += 1) {
+        const character = value[index];
+        if (currentPageCodeUnits >= maxCodeUnits || (character === '\n' && currentPageLines >= maxLines)) {
+            currentPage += 1;
+            currentPageCodeUnits = 0;
+            currentPageLines = 1;
+        }
+        if (currentPage === page) pageText += character;
+        currentPageCodeUnits += 1;
+        if (character === '\n') {
+            currentPageLines += 1;
+            newlineCount += 1;
+        }
+    }
+    return {
+        pageText,
+        totalPages: value.length > 0 ? currentPage : 1,
+        codeUnitCount: value.length,
+        lineCount: value.length > 0 ? newlineCount + 1 : 0
+    };
+}
+
+function renderSafeShellConflictCard(payload, options, conflictOwner) {
+    const rendering = window.__ocRendering;
+    const selection = options?.presentationSelection;
+    if (!rendering || typeof rendering.getSafeShellSpec !== 'function') return null;
+    if (selection?.mode !== 'safe-shell' || selection?.family !== 'conflict') return null;
+    const conflicts = Array.isArray(payload?.conflicts) ? payload.conflicts : [];
+    if (conflicts.length === 0) return null;
+
+    const initialSpec = rendering.getSafeShellSpec({
+        mode: selection.mode,
+        family: selection.family,
+        page: 1,
+        contentPage: 1,
+        shape: { itemCount: conflicts.length, codeUnitCount: 0, lineCount: 0 }
+    });
+    const conflictsPerPage = initialSpec?.page?.primary?.limit;
+    if (!initialSpec?.allowed || initialSpec.shellSelected !== true || !initialSpec.page?.content || !Number.isFinite(conflictsPerPage)) return null;
+
+    const root = document.createElement('div');
+    root.className = 'conflict-card safe-shell';
+    root.dataset.safeShellFamily = initialSpec.family;
+    const generation = ++conflictShellPresentationGeneration;
+    root.dataset.safeShellGeneration = String(generation);
+    const ownership = {
+        sessionId: activeSessionId,
+        unitKey: typeof options?.unitKey === 'string' ? options.unitKey : '',
+        generation,
+        disposed: false,
+        frames: new Set(),
+        timers: new Set()
+    };
+    root._conflictShellOwnership = ownership;
+    const isCurrent = () => ownership.disposed !== true
+        && activeSessionId === ownership.sessionId
+        && root.dataset.renderUnitKey === ownership.unitKey
+        && root.dataset.safeShellGeneration === String(ownership.generation)
+        && root._conflictShellOwnership === ownership
+        && conflictCardEl === root
+        && root.isConnected;
+    root._safeShellDispose = () => {
+        if (ownership.disposed) return;
+        ownership.disposed = true;
+        for (const frame of ownership.frames) cancelAnimationFrame(frame);
+        for (const timer of ownership.timers) clearTimeout(timer);
+        ownership.frames.clear();
+        ownership.timers.clear();
+        if (conflictCardEl === root) conflictCardEl = null;
+    };
+
+    const deterministicKey = encodeURIComponent(ownership.unitKey).replace(/%/g, '-');
+    const viewerId = `safe-shell-conflict-viewer-${deterministicKey}-${generation}`;
+    let open = false;
+    let conflictPage = 1;
+    let selectedIndex = 0;
+    let diffPage = 1;
+
+    const existenceLabel = (value) => value === true ? 'exists' : value === false ? 'missing' : 'unavailable';
+    const pathOf = (item, index) => typeof item?.path === 'string' && item.path ? item.path : `Unavailable file ${index + 1}`;
+    const diffOf = (item) => typeof item?.diffText === 'string' ? item.diffText : '';
+    const scheduleFocus = (roleName) => {
+        let frame = null;
+        frame = requestAnimationFrame(() => {
+            ownership.frames.delete(frame);
+            if (!isCurrent()) return;
+            root.querySelector(`[data-safe-shell-role="${roleName}"]`)?.focus?.();
+        });
+        ownership.frames.add(frame);
+    };
+    const makeButton = (roleName, label, onClick) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'safe-shell-action';
+        button.dataset.safeShellRole = roleName;
+        button.textContent = label;
+        button.setAttribute('aria-label', label);
+        button.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (!button.isConnected || !isCurrent()) return;
+            onClick(button);
+        });
+        return button;
+    };
+    const decide = (decision) => {
+        root.remove();
+        if (conflictCardEl === root) conflictCardEl = null;
+        lastConflictPayload = null;
+        ownership.disposed = true;
+        for (const frame of ownership.frames) cancelAnimationFrame(frame);
+        for (const timer of ownership.timers) clearTimeout(timer);
+        ownership.frames.clear();
+        ownership.timers.clear();
+        vscode.postMessage({
+            type: 'conflictDecision',
+            decision,
+            sessionId: conflictOwner.sessionId,
+            operationId: conflictOwner.operationId,
+            conflictId: conflictOwner.conflictId,
+            kind: conflictOwner.kind,
+            source: conflictOwner.source,
+            startMessageId: conflictOwner.startMessageId,
+            endMessageId: conflictOwner.endMessageId,
+            noticeKey: conflictOwner.noticeKey
+        });
+    };
+
+    const render = () => {
+        const descriptor = rendering.getSafeShellSpec({
+            mode: selection.mode,
+            family: selection.family,
+            page: conflictPage,
+            contentPage: diffPage,
+            shape: { itemCount: conflicts.length, codeUnitCount: diffOf(conflicts[selectedIndex]).length, lineCount: 1 }
+        });
+        if (!descriptor?.allowed || descriptor.shellSelected !== true || !descriptor.page?.primary) return;
+        conflictPage = descriptor.page.primary.index;
+        const pageStart = descriptor.page.primary.start;
+        const pageEnd = Math.min(conflicts.length, pageStart + descriptor.page.primary.limit);
+        if (selectedIndex < pageStart || selectedIndex >= pageEnd) selectedIndex = pageStart;
+        const selected = conflicts[selectedIndex];
+        const selectedDiff = diffOf(selected);
+        let scan = scanSafeShellConflictDiffPage(selectedDiff, diffPage, initialSpec.page.content);
+        diffPage = Math.min(Math.max(1, diffPage), scan.totalPages);
+        if (diffPage !== 1) scan = scanSafeShellConflictDiffPage(selectedDiff, diffPage, initialSpec.page.content);
+
+        const heading = document.createElement('div');
+        heading.className = 'safe-shell-heading';
+        heading.textContent = descriptor.labels.title;
+
+        const status = document.createElement('div');
+        status.className = 'safe-shell-status';
+        status.dataset.safeShellRole = 'status';
+        status.id = `${viewerId}-status`;
+        status.setAttribute('role', 'status');
+        status.setAttribute('aria-live', 'polite');
+        status.textContent = open
+            ? `${conflicts.length} conflicts; showing conflicts ${pageStart + 1}–${pageEnd}; selected expected ${existenceLabel(selected?.expectedExists)}, current ${existenceLabel(selected?.currentExists)}; diff ${scan.codeUnitCount} code units across ${scan.lineCount} logical lines.`
+            : `${conflicts.length} conflicts; only conflicts ${pageStart + 1}–${pageEnd} are represented; selected expected ${existenceLabel(selected?.expectedExists)}, current ${existenceLabel(selected?.currentExists)}. Full diff omitted; open full for bounded paging.`;
+
+        const list = document.createElement('div');
+        list.className = 'safe-shell-conflict-list';
+        list.dataset.safeShellRole = 'conflict-list';
+        for (let index = pageStart; index < pageEnd; index += 1) {
+            const item = conflicts[index];
+            const label = `${index + 1}. ${pathOf(item, index)}; expected ${existenceLabel(item?.expectedExists)}; current ${existenceLabel(item?.currentExists)}`;
+            const conflictButton = makeButton(`conflict-${index}`, label, () => {
+                selectedIndex = index;
+                diffPage = 1;
+                render();
+                if (open) scheduleFocus('viewer');
+            });
+            conflictButton.setAttribute('aria-pressed', selectedIndex === index ? 'true' : 'false');
+            list.appendChild(conflictButton);
+        }
+
+        const viewerRegion = document.createElement('div');
+        viewerRegion.className = 'safe-shell-viewer-region';
+        viewerRegion.dataset.safeShellRole = 'viewer-region';
+        viewerRegion.id = viewerId;
+        viewerRegion.setAttribute('aria-describedby', status.id);
+        if (open) {
+            const conflictPageStatus = document.createElement('span');
+            conflictPageStatus.dataset.safeShellRole = 'conflict-page-status';
+            conflictPageStatus.setAttribute('role', 'status');
+            conflictPageStatus.textContent = `Conflicts ${pageStart + 1}–${pageEnd} of ${conflicts.length}`;
+            viewerRegion.appendChild(conflictPageStatus);
+            const viewer = document.createElement('pre');
+            viewer.className = 'safe-shell-viewer';
+            viewer.dataset.safeShellRole = 'viewer';
+            viewer.tabIndex = -1;
+            viewer.textContent = scan.pageText;
+            viewerRegion.appendChild(viewer);
+            const diffPageStatus = document.createElement('span');
+            diffPageStatus.dataset.safeShellRole = 'diff-page-status';
+            diffPageStatus.setAttribute('role', 'status');
+            diffPageStatus.textContent = `Diff page ${diffPage} of ${scan.totalPages}`;
+            viewerRegion.appendChild(diffPageStatus);
+        }
+
+        const actions = document.createElement('div');
+        actions.className = 'safe-shell-actions';
+        const labels = descriptor.labels.actions;
+        const openButton = makeButton('open-full', labels['open-full'], () => {
+            if (open) return;
+            open = true;
+            render();
+            scheduleFocus('viewer');
+        });
+        openButton.setAttribute('aria-controls', viewerId);
+        openButton.setAttribute('aria-expanded', open ? 'true' : 'false');
+        openButton.disabled = open;
+        actions.appendChild(openButton);
+        if (open) {
+            const previous = makeButton('previous', labels.previous, () => {
+                conflictPage = Math.max(1, conflictPage - 1);
+                diffPage = 1;
+                render();
+                scheduleFocus(`conflict-${Math.max(0, (conflictPage - 1) * conflictsPerPage)}`);
+            });
+            previous.disabled = descriptor.page.primary.hasPrevious !== true;
+            actions.appendChild(previous);
+            const next = makeButton('next', labels.next, () => {
+                conflictPage += 1;
+                diffPage = 1;
+                render();
+                scheduleFocus(`conflict-${(conflictPage - 1) * conflictsPerPage}`);
+            });
+            next.disabled = descriptor.page.primary.hasNext !== true;
+            actions.appendChild(next);
+            const diffPrevious = makeButton('diff-previous', 'Previous diff page', () => {
+                diffPage = Math.max(1, diffPage - 1);
+                render();
+                scheduleFocus('viewer');
+            });
+            diffPrevious.disabled = diffPage <= 1;
+            actions.appendChild(diffPrevious);
+            const diffNext = makeButton('diff-next', 'Next diff page', () => {
+                diffPage = Math.min(scan.totalPages, diffPage + 1);
+                render();
+                scheduleFocus('viewer');
+            });
+            diffNext.disabled = diffPage >= scan.totalPages;
+            actions.appendChild(diffNext);
+            actions.appendChild(makeButton('close', labels.close, () => {
+                open = false;
+                render();
+                if (isCurrent()) root.querySelector('[data-safe-shell-role="open-full"]')?.focus?.();
+            }));
+        }
+        actions.appendChild(makeButton('copy-full', labels['copy-full'], (button) => {
+            Promise.resolve(writeTextToClipboard(diffOf(conflicts[selectedIndex]))).then((copied) => {
+                if (!isCurrent()) return;
+                root.dataset.safeShellCopyState = copied ? 'copied' : 'failed';
+                button.textContent = copied ? 'Copied' : 'Copy failed';
+                const timer = setTimeout(() => {
+                    ownership.timers.delete(timer);
+                    if (!isCurrent()) return;
+                    delete root.dataset.safeShellCopyState;
+                    render();
+                }, copied ? 900 : 1200);
+                ownership.timers.add(timer);
+            });
+        }));
+        const openDiff = makeButton('open-diff', labels['open-diff'], () => {
+            const item = conflicts[selectedIndex];
+            if (typeof item?.path === 'string' && item.path) postOpenGitDiff(item.path, conflictOwner.sessionId);
+        });
+        openDiff.disabled = !(typeof selected?.path === 'string' && selected.path);
+        actions.appendChild(openDiff);
+        actions.appendChild(makeButton('skip', labels.skip, () => decide('skip')));
+        actions.appendChild(makeButton('override', labels.override, () => decide('override')));
+        root.replaceChildren(heading, status, list, viewerRegion, actions);
+    };
+
+    render();
+    return root;
+}
+
 function renderConflictCard(payload, options = {}) {
     const chatContainer = document.getElementById('chat');
     if (!payload || !Array.isArray(payload.conflicts) || !chatContainer) return;
@@ -14583,6 +19803,14 @@ function renderConflictCard(payload, options = {}) {
     });
     if (!options.detached && conflictCardEl && conflictCardEl.parentElement) {
         conflictCardEl.parentElement.removeChild(conflictCardEl);
+    }
+    const safeShellRoot = renderSafeShellConflictCard(payload, options, conflictOwner);
+    if (safeShellRoot) {
+        conflictCardEl = safeShellRoot;
+        if (options.detached) return safeShellRoot;
+        chatContainer.appendChild(safeShellRoot);
+        chatContainer.scrollTop = chatContainer.scrollHeight;
+        return safeShellRoot;
     }
     const container = document.createElement('div');
     container.className = 'conflict-card';

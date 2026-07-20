@@ -37,13 +37,14 @@ function run() {
 
   assertContains(webview, "reason !== 'unclear-anchor' || (source !== 'subagentStatus' && source !== 'backgroundActivityPulse')", 'coalescing limited to unclear-anchor status sources');
   assertContains(webview, "source !== 'subagentStatus' && source !== 'backgroundActivityPulse'", 'source gating includes both status sources');
-  assertContains(webview, 'getSubagentStatusNoClearAnchorReason(sessionId)', 'subagent status uses no-clear-anchor prediction');
   assertContains(webview, 'getBackgroundSubagentIndicatorNoClearAnchorReason(session)', 'background pulse uses no-clear-anchor prediction');
   assertContains(webview, 'isTerminalSubagentStatusUpdate(incomingAgents, doneJustNowCount)', 'terminal subagent status transitions bypass coalescing');
-  assertContains(webview, "terminalStatusUpdate ? '' : getSubagentStatusNoClearAnchorReason(sessionId)", 'terminal status is not treated as unclear-anchor coalescing candidate');
+  assertContains(webview, 'SESSION_METADATA_RENDER_INTERVAL_MS = 250', 'subagent metadata refresh has a bounded interval');
+  assertContains(webview, "scheduleCoalescedSessionMetadataRender(sessionId, 'subagentStatus-coalesced'", 'subagent status uses the metadata coalescer');
+  assertContains(webview, 'immediate: terminalStatusUpdate', 'terminal subagent status flushes immediately');
+  assertContains(webview, '{ coalescedRender: true }', 'local patch failures defer to the owned metadata render');
 
   assertContains(webview, 'isUnclearAnchorCircuitBreakerCurrentlyOpen(sessionId, source, reason)', 'coalescing checks existing Wave2 breaker without scheduling it');
-  assertContains(webview, "isUnclearAnchorCircuitBreakerOpen(sessionId, 'subagentStatus', 'unclear-anchor', subagentStatusFields)", 'existing subagent breaker path remains in use');
   assertContains(webview, "isUnclearAnchorCircuitBreakerOpen(sessionId, source, 'unclear-anchor', ['phase=arm-show'])", 'existing background breaker path remains in use');
   assertContains(webview, "handleBackgroundIndicatorPatchResult(sessionId, applyBackgroundSubagentIndicator(latest), source, ['phase=timer-expiry-hide'])", 'background timer expiry hide semantics are unchanged');
 
