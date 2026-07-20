@@ -769,6 +769,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private lastSnapshotPayloadBySession = new Map<string, any>();
     private lastEmittedChangeListHeadBySession = new Map<string, string>();
     private assistantTextBufferBySession = new Map<string, string>();
+    private pendingSnapshotUserTextBySession = new Map<string, string>();
     private attachmentCleanupTimer?: NodeJS.Timeout;
     private attachmentCleanupInFlight = false;
     private lastKnownModels: ModelInfo[] = [];
@@ -3768,6 +3769,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 this.uiDebugChannel.appendLine(
                     `[EXT][SNAPSHOT_ROUTE] reason=finalize-owned-skip source=finalize-extension sessionId=${sessionId} activeSessionId=${this.currentSessionId || 'null'} timelineCount=${timelineIds.length} messageCount=${canonicalMessages.length} userMessageId=${identity.userMessageId || 'null'} assistantMessageId=${identity.assistantMessageId || 'null'} webviewSnapshotTimelineIdsRequired=false detail=empty-canonical-export`
                 );
+                await this.writeFinalizeSnapshotFromPendingTurn(identity, title, 'empty-canonical-export');
                 return;
             }
             const snapshotTitle = typeof title === 'string' && title.trim()
@@ -3781,6 +3783,83 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         } catch (error) {
             this.uiDebugChannel.appendLine(
                 `[EXT][SNAPSHOT_ROUTE] reason=finalize-owned-error source=finalize-extension sessionId=${sessionId} activeSessionId=${this.currentSessionId || 'null'} userMessageId=${identity.userMessageId || 'null'} assistantMessageId=${identity.assistantMessageId || 'null'} webviewSnapshotTimelineIdsRequired=false err=${String(error)}`
+            );
+            await this.writeFinalizeSnapshotFromPendingTurn(identity, title, `canonical-export-error:${String(error)}`);
+        } finally {
+            this.pendingSnapshotUserTextBySession.delete(sessionId);
+            this.assistantTextBufferBySession.delete(sessionId);
+        }
+    }
+
+    private async writeFinalizeSnapshotFromPendingTurn(
+        identity: FinalizeTurnIdentity,
+        title: string | undefined,
+        trigger: string
+    ): Promise<void> {
+        const sessionId = identity.sessionId;
+        try {
+            const pendingLocalKey = identity.clientMessageId || this.pendingLocalKeyBySession.get(sessionId);
+            const mappedUserMessageId = pendingLocalKey ? this.clientMessageIdMap.get(pendingLocalKey) : undefined;
+            const userMessageId = [
+                identity.userMessageId,
+                identity.latestAppendUserMessageId,
+                mappedUserMessageId,
+                this.client.getCurrentTurnUserMsgId(sessionId)
+            ].find((id) => this.isResolvableMessageId(id));
+            const assistantMessageId = [
+                identity.assistantMessageId,
+                this.pendingAssistantMessageIdBySession.get(sessionId),
+                this.client.getTurnAssistantMsgId(sessionId)
+            ].find((id) => this.isResolvableMessageId(id));
+            const rawUserText = this.pendingSnapshotUserTextBySession.get(sessionId)
+                ?? (userMessageId ? this.rawUserTextByMsgId.get(userMessageId) : undefined)
+                ?? (pendingLocalKey ? this.rawUserTextByLocalKey.get(pendingLocalKey) : undefined)
+                ?? (pendingLocalKey ? this.draftByLocalKey.get(pendingLocalKey)?.text : undefined)
+                ?? '';
+            const userText = this.normalizeUserTextForSnapshot(rawUserText);
+            const assistantText = this.assistantTextBufferBySession.get(sessionId) || '';
+            const pendingMessages: SessionMessage[] = [];
+            if (userMessageId && userText && !this.isHiddenControlUserText(userText)) {
+                pendingMessages.push({
+                    role: 'user',
+                    id: userMessageId,
+                    text: userText,
+                    messageIndex: this.client.getMessageIndex(userMessageId, sessionId)
+                });
+            }
+            if (assistantMessageId && assistantText && !this.isHiddenControlAssistantText(assistantText)) {
+                pendingMessages.push({
+                    role: 'assistant',
+                    id: assistantMessageId,
+                    text: assistantText,
+                    messageIndex: this.client.getMessageIndex(assistantMessageId, sessionId)
+                });
+            }
+            if (!pendingMessages.length) {
+                this.uiDebugChannel.appendLine(
+                    `[EXT][SNAPSHOT_ROUTE] reason=finalize-fallback-skip source=pending-turn sessionId=${sessionId} trigger=${trigger} userMessageId=${userMessageId || 'null'} assistantMessageId=${assistantMessageId || 'null'} userTextLength=${userText.length} assistantTextLength=${assistantText.length} detail=no-canonical-visible-records`
+                );
+                return;
+            }
+            const existing = await this.readSnapshot(sessionId);
+            const existingMessages: SessionMessage[] = Array.isArray(existing?.obj?.sessionData?.messages)
+                ? existing.obj.sessionData.messages
+                : [];
+            const existingTimelineRaw = Array.isArray(existing?.obj?.sessionData?.meta?.timelineMessageIds)
+                ? existing.obj.sessionData.meta.timelineMessageIds
+                : existingMessages.map((message) => message.id);
+            const timelineIds = Array.from(new Set([
+                ...existingTimelineRaw.filter((id: unknown): id is string => typeof id === 'string' && Boolean(id)),
+                ...pendingMessages.map((message) => message.id).filter((id): id is string => typeof id === 'string' && Boolean(id))
+            ]));
+            const bytes = await this.appendSnapshotIncremental(sessionId, timelineIds, pendingMessages, title);
+            this.uiTimelineBySession.set(sessionId, timelineIds);
+            this.uiDebugChannel.appendLine(
+                `[EXT][SNAPSHOT_ROUTE] reason=finalize-fallback-write source=pending-turn sessionId=${sessionId} trigger=${trigger} timelineCount=${timelineIds.length} messageCount=${pendingMessages.length} userMessageId=${userMessageId || 'null'} assistantMessageId=${assistantMessageId || 'null'} bytes=${bytes}`
+            );
+        } catch (fallbackError) {
+            this.uiDebugChannel.appendLine(
+                `[EXT][SNAPSHOT_ROUTE] reason=finalize-fallback-error source=pending-turn sessionId=${sessionId} trigger=${trigger} err=${String(fallbackError)}`
             );
         }
     }
@@ -4871,6 +4950,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 ${attachmentLines.join('\n')}`
                                 : attachmentLines.join('\n'))
                             : userText;
+                        this.pendingSnapshotUserTextBySession.set(targetSessionId, displayText);
                         const pendingUserMessage: SessionMessage = {
                             role: 'user',
                             text: displayText,
@@ -10079,6 +10159,7 @@ ${attachmentLines.join('\n')}`
         const retainedPendingAssistantTmpKeyBySession = new Map<string, string>();
         const retainedPendingAssistantMessageIdBySession = new Map<string, string>();
         const retainedAssistantTextBufferBySession = new Map<string, string>();
+        const retainedPendingSnapshotUserTextBySession = new Map<string, string>();
         const retainedRawUserTextByLocalKey = new Map<string, string>();
         const retainedPendingAssistantTmpKeyByLocalKey = new Map<string, string>();
         const isRetainableTmpKey = (value: string | undefined): value is string => Boolean(value && (value.startsWith('tmp:') || value.startsWith('local-')));
@@ -10108,6 +10189,10 @@ ${attachmentLines.join('\n')}`
             if (assistantTextBuffer !== undefined) {
                 retainedAssistantTextBufferBySession.set(sessionId, assistantTextBuffer);
             }
+            const pendingSnapshotUserText = this.pendingSnapshotUserTextBySession.get(sessionId);
+            if (pendingSnapshotUserText !== undefined) {
+                retainedPendingSnapshotUserTextBySession.set(sessionId, pendingSnapshotUserText);
+            }
         }
         this.client.resetSessionState({ preserveInFlightSessionIds: retainedSendInFlightBySession });
         this.clientMessageIdMap.clear();
@@ -10124,6 +10209,7 @@ ${attachmentLines.join('\n')}`
         this.shownDiffKeysBySession.clear();
         this.uiTimelineBySession.clear();
         this.assistantTextBufferBySession.clear();
+        this.pendingSnapshotUserTextBySession.clear();
         this.pendingAssistantTmpKeyBySession.clear();
         this.pendingAssistantTmpKeyByLocalKey.clear();
         this.pendingLocalKeyBySession.clear();
@@ -10156,6 +10242,11 @@ ${attachmentLines.join('\n')}`
             const assistantTextBuffer = retainedAssistantTextBufferBySession.get(sessionId);
             if (assistantTextBuffer !== undefined) {
                 this.assistantTextBufferBySession.set(sessionId, assistantTextBuffer);
+                restored = true;
+            }
+            const pendingSnapshotUserText = retainedPendingSnapshotUserTextBySession.get(sessionId);
+            if (pendingSnapshotUserText !== undefined) {
+                this.pendingSnapshotUserTextBySession.set(sessionId, pendingSnapshotUserText);
                 restored = true;
             }
             if (restored) retainedProviderTurnBindingSessions += 1;

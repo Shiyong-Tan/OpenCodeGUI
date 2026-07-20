@@ -253,6 +253,63 @@ describe('W5A proven-new append candidates', () => {
 });
 
 describe('W5A snapshot export and finalize contracts', () => {
+    it('persists the current visible turn when canonical export fails', async () => {
+        const provider = createProvider();
+        const boundary = msg('msg_boundary', 2, 'assistant', 'snapshot final');
+        provider.readSnapshot = jest.fn().mockResolvedValue(snapshotOf([boundary]));
+        provider.writeSnapshotAtomic = jest.fn().mockResolvedValue(456);
+        provider.client.exportSession = jest.fn().mockRejectedValue(
+            new Error('Cannot create a string longer than 0x1fffffe8 characters'),
+        );
+        provider.client.getMessageIndex = jest.fn((id: string) => id === 'msg_user_new' ? 3 : 4);
+        provider.pendingSnapshotUserTextBySession.set('ses_delta', 'reload window 未显示历史记录');
+        provider.assistantTextBufferBySession.set('ses_delta', '这是本轮助手回答。');
+
+        await provider.writeFinalizeSnapshotFromCanonicalSession({
+            sessionId: 'ses_delta',
+            clientMessageId: 'local-new',
+            userMessageId: 'msg_user_new',
+            assistantMessageId: 'msg_assistant_new',
+        });
+
+        const written = provider.writeSnapshotAtomic.mock.calls[0][1].sessionData;
+        expect(written.meta.timelineMessageIds).toEqual([
+            'msg_boundary',
+            'msg_user_new',
+            'msg_assistant_new',
+        ]);
+        expect(written.messages).toEqual([
+            boundary,
+            msg('msg_user_new', 3, 'user', 'reload window 未显示历史记录'),
+            msg('msg_assistant_new', 4, 'assistant', '这是本轮助手回答。'),
+        ]);
+        expect(provider.uiDebugChannel.appendLine).toHaveBeenCalledWith(
+            expect.stringContaining('reason=finalize-fallback-write'),
+        );
+        expect(provider.pendingSnapshotUserTextBySession.has('ses_delta')).toBe(false);
+        expect(provider.assistantTextBufferBySession.has('ses_delta')).toBe(false);
+    });
+
+    it('uses the pending display text so attachment-only turns survive export failure', async () => {
+        const provider = createProvider();
+        provider.readSnapshot = jest.fn().mockResolvedValue(undefined);
+        provider.writeSnapshotAtomic = jest.fn().mockResolvedValue(99);
+        provider.client.exportSession = jest.fn().mockRejectedValue(new Error('export unavailable'));
+        provider.client.getMessageIndex = jest.fn().mockReturnValue(1);
+        provider.pendingSnapshotUserTextBySession.set('ses_delta', '📄 report.txt');
+
+        await provider.writeFinalizeSnapshotFromCanonicalSession({
+            sessionId: 'ses_delta',
+            userMessageId: 'msg_attachment_user',
+        });
+
+        const written = provider.writeSnapshotAtomic.mock.calls[0][1].sessionData;
+        expect(written.meta.timelineMessageIds).toEqual(['msg_attachment_user']);
+        expect(written.messages).toEqual([
+            msg('msg_attachment_user', 1, 'user', '📄 report.txt'),
+        ]);
+    });
+
     it('appendSnapshotIncremental preserves existing same-ID fields/order and appends a proven canonical ID', async () => {
         const provider = createProvider();
         const baseA = { ...msg('msg_a', 1, 'user', 'snapshot user'), meta: { stable: 'a' }, future: 'keep-a' };

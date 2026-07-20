@@ -590,6 +590,7 @@ describe('append runtime isolation', () => {
         provider.pendingAssistantTmpKeyBySession.set('ses_keep', 'tmp:assistant-keep');
         provider.pendingAssistantMessageIdBySession.set('ses_keep', 'msg_assistant_keep');
         provider.assistantTextBufferBySession.set('ses_keep', 'stream text');
+        provider.pendingSnapshotUserTextBySession.set('ses_keep', 'visible prompt');
         provider.rawUserTextByLocalKey.set('local-user-keep', 'raw prompt');
         provider.pendingAssistantTmpKeyByLocalKey.set('local-user-keep', 'tmp:assistant-keep');
         provider.appendSubmitInFlightBySession.add('ses_keep');
@@ -601,6 +602,7 @@ describe('append runtime isolation', () => {
         provider.pendingAssistantTmpKeyBySession.set('ses_drop', 'tmp:assistant-drop');
         provider.pendingAssistantMessageIdBySession.set('ses_drop', 'msg_assistant_drop');
         provider.assistantTextBufferBySession.set('ses_drop', 'drop stream');
+        provider.pendingSnapshotUserTextBySession.set('ses_drop', 'drop visible prompt');
         provider.rawUserTextByLocalKey.set('local-user-drop', 'drop prompt');
         provider.pendingAssistantTmpKeyByLocalKey.set('local-user-drop', 'tmp:assistant-drop');
 
@@ -615,6 +617,7 @@ describe('append runtime isolation', () => {
         expect(provider.pendingAssistantTmpKeyBySession.get('ses_keep')).toBe('tmp:assistant-keep');
         expect(provider.pendingAssistantMessageIdBySession.get('ses_keep')).toBe('msg_assistant_keep');
         expect(provider.assistantTextBufferBySession.get('ses_keep')).toBe('stream text');
+        expect(provider.pendingSnapshotUserTextBySession.get('ses_keep')).toBe('visible prompt');
         expect(provider.rawUserTextByLocalKey.get('local-user-keep')).toBe('raw prompt');
         expect(provider.pendingAssistantTmpKeyByLocalKey.get('local-user-keep')).toBe('tmp:assistant-keep');
 
@@ -622,6 +625,7 @@ describe('append runtime isolation', () => {
         expect(provider.pendingAssistantTmpKeyBySession.has('ses_drop')).toBe(false);
         expect(provider.pendingAssistantMessageIdBySession.has('ses_drop')).toBe(false);
         expect(provider.assistantTextBufferBySession.has('ses_drop')).toBe(false);
+        expect(provider.pendingSnapshotUserTextBySession.has('ses_drop')).toBe(false);
         expect(provider.rawUserTextByLocalKey.has('local-user-drop')).toBe(false);
         expect(provider.pendingAssistantTmpKeyByLocalKey.has('local-user-drop')).toBe(false);
         expect(provider.appendSubmitInFlightBySession.has('ses_keep')).toBe(false);
