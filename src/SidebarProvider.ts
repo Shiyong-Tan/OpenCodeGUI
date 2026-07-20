@@ -1076,9 +1076,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 if (this.currentSessionId !== sessionId || this.sessionSelectionEpoch !== selectionEpoch) return skip('stale-after-snapshot-format');
                 baseTitle = snapshotFormatted.title || baseTitle;
                 baseMessages = snapshotFormatted.messages;
-                snapshotTimelineIds = Array.isArray(snap.obj.sessionData?.meta?.timelineMessageIds)
-                    ? (snap.obj.sessionData.meta.timelineMessageIds as string[]).filter((id): id is string => typeof id === 'string' && Boolean(id))
-                    : this.collectVisibleSnapshotMessages(baseMessages).map((message) => (typeof message?.id === 'string' ? message.id : '')).filter((id): id is string => Boolean(id));
+                snapshotTimelineIds = this.getSnapshotTimelineIds(snap.obj.sessionData, baseMessages);
             }
         } catch (error) {
             this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.liveTurnHistory.snapshotFailed | sessionId=${sessionId} | panelId=${panelId} | webviewInstanceId=${webviewInstanceId} | selectionEpoch=${selectionEpoch} | reason=${String(error)} | postedSessionData=false | reload=false | recreate=false | sessionMutation=false`);
@@ -1282,9 +1280,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 if (!isStillValid()) return { ok: false, reason: 'stale-before-snapshot-post' };
                 baseTitle = snapshotFormatted.title || baseTitle;
                 baseMessages = snapshotFormatted.messages;
-                snapshotTimelineIds = Array.isArray(snap.obj.sessionData?.meta?.timelineMessageIds)
-                    ? (snap.obj.sessionData.meta.timelineMessageIds as string[]).filter((id): id is string => typeof id === 'string' && Boolean(id))
-                    : this.collectVisibleSnapshotMessages(baseMessages).map((message) => (typeof message?.id === 'string' ? message.id : '')).filter((id): id is string => Boolean(id));
+                snapshotTimelineIds = this.getSnapshotTimelineIds(snap.obj.sessionData, baseMessages);
                 webview.postMessage({
                     type: 'sessionData',
                     sessionId,
@@ -2151,9 +2147,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 if (!isStillActive()) return { ok: false, reason: 'soft-rescue-aborted-stale-token' };
                 baseTitle = snapshotFormatted.title || baseTitle;
                 baseMessages = snapshotFormatted.messages;
-                snapshotTimelineIds = Array.isArray(snap.obj.sessionData?.meta?.timelineMessageIds)
-                    ? (snap.obj.sessionData.meta.timelineMessageIds as string[]).filter((id): id is string => typeof id === 'string' && Boolean(id))
-                    : this.collectVisibleSnapshotMessages(baseMessages).map((message) => (typeof message?.id === 'string' ? message.id : '')).filter((id): id is string => Boolean(id));
+                snapshotTimelineIds = this.getSnapshotTimelineIds(snap.obj.sessionData, baseMessages);
                 const snapshotPayload = {
                     type: 'sessionData',
                     sessionId,
@@ -3257,6 +3251,21 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return visibleMessages;
     }
 
+    private getSnapshotTimelineIds(sessionData: any, formattedMessages: SessionMessage[]): string[] {
+        const explicitIds = Array.isArray(sessionData?.meta?.timelineMessageIds)
+            ? (sessionData.meta.timelineMessageIds as unknown[])
+                .filter((id): id is string => typeof id === 'string' && Boolean(id))
+            : [];
+        if (explicitIds.length > 0) {
+            return Array.from(new Set(explicitIds));
+        }
+        return Array.from(new Set(
+            this.collectVisibleSnapshotMessages(formattedMessages)
+                .map((message) => (typeof message?.id === 'string' ? message.id : ''))
+                .filter((id): id is string => Boolean(id))
+        ));
+    }
+
     private computeRecentVisibleAppend(snapshotTimelineIdSet: Set<string>, recentFormattedMessages: SessionMessage[]): string[] {
         const newIds: string[] = [];
         const seenNewIds = new Set<string>();
@@ -3326,12 +3335,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const message = recentList[i];
             if (!message || typeof message.id !== 'string' || !message.id) return { proven: false, suffix: [] };
             if (typeof message.messageIndex !== 'number' || !Number.isFinite(message.messageIndex)) return { proven: false, suffix: [] };
-            if (previousIndex !== null && message.messageIndex < previousIndex) return { proven: false, suffix: [] };
-            previousIndex = message.messageIndex;
             const id = message.id;
             if (id.startsWith('local-') || id.startsWith('tmp:')) continue;
             if (snapshotTimelineIdSet.has(id)) continue;
             if (seen.has(id)) continue;
+            if (previousIndex !== null && message.messageIndex <= previousIndex) return { proven: false, suffix: [] };
+            previousIndex = message.messageIndex;
             const text = typeof message.text === 'string' ? message.text : '';
             if (message.role === 'user') {
                 const visibleText = this.normalizeUserTextForSnapshot(text);
@@ -3685,9 +3694,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             : [];
         const canonicalExistingMessages = this.canonicalizeSnapshotMessagesForCurrentOwner(sessionId, existingMessages, ownershipMap);
         const normalizedExisting = this.normalizeSnapshotStoredMessages(canonicalExistingMessages);
-        const existingTimelineRaw = Array.isArray(snapshotObj.sessionData.meta?.timelineMessageIds)
-            ? (snapshotObj.sessionData.meta.timelineMessageIds as string[])
-            : normalizedExisting.map((message) => message.id || '');
+        const existingTimelineRaw = this.getSnapshotTimelineIds(snapshotObj.sessionData, normalizedExisting);
         const existingTimeline = Array.from(new Set(existingTimelineRaw.filter((id): id is string => typeof id === 'string' && Boolean(id))));
         const existingIdSet = new Set(existingTimeline);
         const boundaryId = existingTimeline[existingTimeline.length - 1];
@@ -3845,9 +3852,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const existingMessages: SessionMessage[] = Array.isArray(existing?.obj?.sessionData?.messages)
                 ? existing.obj.sessionData.messages
                 : [];
-            const existingTimelineRaw = Array.isArray(existing?.obj?.sessionData?.meta?.timelineMessageIds)
-                ? existing.obj.sessionData.meta.timelineMessageIds
-                : existingMessages.map((message) => message.id);
+            const existingTimelineRaw = this.getSnapshotTimelineIds(existing?.obj?.sessionData, existingMessages);
             const timelineIds = Array.from(new Set([
                 ...existingTimelineRaw.filter((id: unknown): id is string => typeof id === 'string' && Boolean(id)),
                 ...pendingMessages.map((message) => message.id).filter((id): id is string => typeof id === 'string' && Boolean(id))
@@ -5696,6 +5701,7 @@ ${attachmentLines.join('\n')}`
                         let baseTitle = 'Session';
                         let baseMessages: SessionMessage[] = [];
                         let snapPayload: any = null;
+                        let snapshotTimelineIds: string[] = [];
 
                         const snapshotStart = Date.now();
                         try {
@@ -5709,6 +5715,7 @@ ${attachmentLines.join('\n')}`
                                 const snapshotMessages = snapshotFormatted.messages;
                                 baseTitle = snapshotFormatted.title || baseTitle;
                                 baseMessages = snapshotMessages;
+                                snapshotTimelineIds = this.getSnapshotTimelineIds(snapPayload, snapshotMessages);
                                 const payload = {
                                     type: 'sessionData',
                                     sessionId: targetSessionId,
@@ -5718,6 +5725,7 @@ ${attachmentLines.join('\n')}`
                                     meta: {
                                         ...(snapPayload.meta || {}),
                                         source: 'snapshot',
+                                        timelineMessageIds: snapshotTimelineIds,
                                         hydrationCoverage: 'deltaContinuityUnknown' as HydrationCoverage
                                     }
                                 };
@@ -5757,9 +5765,7 @@ ${attachmentLines.join('\n')}`
                                 baseTitle = formatted.title;
                             }
 
-                            const snapshotIds = Array.isArray(snapPayload?.meta?.timelineMessageIds)
-                                ? (snapPayload.meta.timelineMessageIds as string[]).filter((id): id is string => typeof id === 'string' && Boolean(id))
-                                : [];
+                            const snapshotIds = snapshotTimelineIds;
                             const snapshotIdSet = new Set<string>(snapshotIds);
                             const snapshotMaxMessageIndex = this.getMaxMessageIndex(baseMessages);
                             const continuity = this.classifyRecentAppendCandidates(snapshotIdSet, snapshotMaxMessageIndex, formatted.messages);
@@ -5853,9 +5859,7 @@ ${attachmentLines.join('\n')}`
 
                         const exportData = normalized.data;
                         const formattedRaw = this.formatSession(exportData);
-                        const snapshotIds = Array.isArray(snapPayload?.meta?.timelineMessageIds)
-                            ? (snapPayload.meta.timelineMessageIds as string[]).filter((id): id is string => typeof id === 'string' && Boolean(id))
-                            : [];
+                        const snapshotIds = snapshotTimelineIds;
                         const fullDelta = this.buildFullExportSnapshotDelta(baseMessages, snapshotIds, formattedRaw.messages);
                         const formatted = await this.injectChangeLists(targetSessionId, { title: formattedRaw.title, messages: fullDelta.messages });
 
@@ -7212,12 +7216,7 @@ ${attachmentLines.join('\n')}`
                                 });
                                 baseTitle = snapshotFormatted.title || baseTitle;
                                 baseMessages = snapshotFormatted.messages;
-                                snapshotTimelineIds = Array.isArray(snap.obj.sessionData?.meta?.timelineMessageIds)
-                                    ? (snap.obj.sessionData.meta.timelineMessageIds as string[])
-                                        .filter((id): id is string => typeof id === 'string' && Boolean(id))
-                                    : this.collectVisibleSnapshotMessages(baseMessages)
-                                        .map((message) => (typeof message?.id === 'string' ? message.id : ''))
-                                        .filter((id): id is string => Boolean(id));
+                                snapshotTimelineIds = this.getSnapshotTimelineIds(snap.obj.sessionData, baseMessages);
 
                                 const snapshotPayload = {
                                     type: 'sessionData',

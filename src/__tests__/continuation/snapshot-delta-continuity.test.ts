@@ -221,6 +221,17 @@ describe('W5A proven-new append candidates', () => {
         expect(candidates).toEqual([]);
     });
 
+    it('does not accept a different ID at the snapshot boundary index as newer', () => {
+        const provider = createProvider();
+        const candidates = provider.computeRecentAppendCandidates(
+            new Set(['msg_boundary']),
+            2,
+            [msg('msg_boundary', 2), msg('msg_not_newer', 2)],
+        );
+
+        expect(candidates).toEqual([]);
+    });
+
     it.each([
         ['missing', undefined],
         ['non-finite', Number.NaN],
@@ -253,6 +264,30 @@ describe('W5A proven-new append candidates', () => {
 });
 
 describe('W5A snapshot export and finalize contracts', () => {
+    it('derives a strict snapshot boundary when timeline metadata is empty', async () => {
+        const provider = createProvider();
+        const base = [
+            msg('msg_snapshot_user', 1, 'user', 'snapshot user'),
+            msg('msg_snapshot_assistant', 2, 'assistant', 'snapshot assistant'),
+        ];
+        provider.readSnapshot = jest.fn().mockResolvedValue(snapshotOf(base, []));
+        provider.writeSnapshotAtomic = jest.fn().mockResolvedValue(123);
+
+        await provider.appendSnapshotIncremental(
+            'ses_delta',
+            ['msg_snapshot_user', 'msg_snapshot_assistant', 'msg_new_user'],
+            [msg('msg_new_user', 3, 'user', 'new user')],
+        );
+
+        const written = provider.writeSnapshotAtomic.mock.calls[0][1].sessionData;
+        expect(written.meta.timelineMessageIds).toEqual([
+            'msg_snapshot_user',
+            'msg_snapshot_assistant',
+            'msg_new_user',
+        ]);
+        expect(written.messages).toEqual([...base, msg('msg_new_user', 3, 'user', 'new user')]);
+    });
+
     it('persists the current visible turn when canonical export fails', async () => {
         const provider = createProvider();
         const boundary = msg('msg_boundary', 2, 'assistant', 'snapshot final');
