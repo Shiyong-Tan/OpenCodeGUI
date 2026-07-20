@@ -162,17 +162,17 @@ export function recallSmartSearchCandidates(
 
 function clipContextText(text: string, focusSignals: string[] = []): string {
     const value = String(text || '');
-    if (value.length <= 1000) return value;
+    if (value.length <= 800) return value;
     const normalizedValue = value.normalize('NFKC').toLocaleLowerCase();
     const focusIndex = focusSignals
         .map((signal) => normalizedValue.indexOf(normalize(signal)))
         .find((index) => index >= 0);
     if (typeof focusIndex === 'number') {
-        const start = Math.max(0, focusIndex - 400);
-        const end = Math.min(value.length, start + 1000);
+        const start = Math.max(0, focusIndex - 320);
+        const end = Math.min(value.length, start + 800);
         return `${start > 0 ? '[... clipped ...]\n' : ''}${value.slice(start, end)}${end < value.length ? '\n[... clipped ...]' : ''}`;
     }
-    return `${value.slice(0, 600)}\n[... clipped ...]\n${value.slice(-300)}`;
+    return `${value.slice(0, 480)}\n[... clipped ...]\n${value.slice(-220)}`;
 }
 
 export function buildSmartSearchCandidateCorpus(
