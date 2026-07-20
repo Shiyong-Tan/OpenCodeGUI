@@ -7551,6 +7551,19 @@ export class OpenCodeClient {
                     }
                 }
                 const toolName = typeof part?.tool === 'string' ? part.tool : '';
+                if (sessionId && toolName && source !== 'resync' && !this.subagentToParentSessionMap.has(sessionId)) {
+                    events.push({
+                        type: 'tool',
+                        sessionId,
+                        tool: toolName,
+                        toolState: {
+                            status: toolStatus,
+                            input: part?.state?.input,
+                            output: part?.state?.output,
+                        },
+                        source,
+                    });
+                }
                 if (part?.state?.status === 'completed' && sessionId) {
                     if (['apply_patch', 'edit', 'write'].includes(toolName)) {
                         this.markTurnHasWrites(sessionId, `tool:${toolName}`);
@@ -7760,9 +7773,12 @@ export class OpenCodeClient {
                 this.logUiDebug(`EXT: session.error.resolve | sessionId=${sessionId} | error=${errorName || 'unknown'} | reason=session_error`);
                 this.resolveTurnFinal(sessionId, 'session-error');
             }
-            if (message) {
-                events.push({ type: 'error', text: message, sessionId: props?.sessionID, source });
-            }
+            events.push({
+                type: 'error',
+                text: message || errorName || 'Unknown session error',
+                sessionId: props?.sessionID || sessionId,
+                source
+            });
             return events;
         }
         return events;

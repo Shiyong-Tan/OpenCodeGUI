@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 const source = fs.readFileSync(path.join(process.cwd(), 'src', 'SidebarProvider.ts'), 'utf8');
+const clientSource = fs.readFileSync(path.join(process.cwd(), 'src', 'OpenCodeClient.ts'), 'utf8');
 
 function extractMethod(marker: string): string {
     const start = source.indexOf(marker);
@@ -40,10 +41,11 @@ describe('Smart Search snapshot agent contract', () => {
     test('always removes temporary sessions and locator files', () => {
         const run = extractMethod('private async runSmartSessionSearch(');
         expect(run).toMatch(/finally\s*\{/);
-        expect(run).toContain('await this.client.deleteSession(tempSession.id)');
         expect(run).toContain('await this.cleanupSmartSearchCorpus(corpusPath)');
-        expect(run).toContain('this.smartSearchTempSessionIds.delete(tempSession.id)');
-        expect(run).toContain('await this.persistSmartSearchTempSessions()');
+        const attempt = extractMethod('private async executeSmartSearchAgentAttempt(');
+        expect(attempt).toContain('await this.client.deleteSession(tempSessionId)');
+        expect(attempt).toContain('this.smartSearchTempSessionIds.delete(tempSessionId)');
+        expect(attempt).toContain('await this.persistSmartSearchTempSessions()');
 
         const dispose = extractMethod('public async dispose(');
         expect(dispose).toContain('const smartSearchSessions = [...this.smartSearchTempSessionIds]');
@@ -59,5 +61,23 @@ describe('Smart Search snapshot agent contract', () => {
         expect(picker).not.toContain("models.find((model) => model.fullId === this.selectedModel)");
         const run = extractMethod('private async runSmartSessionSearch(');
         expect(run).toContain("throw new Error('Smart search requires an available free model.')");
+    });
+
+    test('requires verifiable file tools, retries once, and surfaces model session errors', () => {
+        const run = extractMethod('private async runSmartSessionSearch(');
+        const attempt = extractMethod('private async executeSmartSearchAgentAttempt(');
+        expect(run).toContain('for (let attempt = 1; attempt <= 2; attempt += 1)');
+        expect(run).toContain('reason=no-effective-file-tool');
+        expect(attempt).toContain("if (event.type === 'error')");
+        expect(attempt).toContain('effectiveTools.size');
+        expect(attempt).toContain('EXT: smartSearch.tool');
+        expect(attempt).toContain('EXT: smartSearch.agent.output');
+        expect(clientSource).toContain("text: message || errorName || 'Unknown session error'");
+    });
+
+    test('keeps temporary search events out of the ordinary Webview chat pipeline', () => {
+        const handler = extractMethod('private async handleChatEvent(');
+        expect(handler).toMatch(/smartSearchTempSessionIds\.has\(event\.sessionId\)[\s\S]*return;/);
+        expect(clientSource).toContain("type: 'tool',");
     });
 });

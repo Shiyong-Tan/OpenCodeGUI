@@ -8012,6 +8012,9 @@ ${attachmentLines.join('\n')}`
     }
 
     private async handleChatEvent(event: ChatEvent, webview: vscode.Webview): Promise<void> {
+        if (event.sessionId && this.smartSearchTempSessionIds.has(event.sessionId)) {
+            return;
+        }
         // Handle todoUpdate event for main session or parent-mapped subagent todos.
         if (event.type === 'todoUpdate' && (this.isUserOwnedSession(event.sessionId || '') || event.displayTarget === 'parent')) {
             webview.postMessage({
@@ -8887,7 +8890,7 @@ ${attachmentLines.join('\n')}`
                 })
                 .map((entry) => fs.promises.rm(pathModule.join(dir, entry.name), { force: true })));
             const remaining = await fs.promises.readdir(dir);
-            if (remaining.length === 0) await fs.promises.rm(dir, { recursive: false, force: true });
+            if (remaining.length === 0) await fs.promises.rmdir(dir);
         } catch {
             // No stale search corpus exists.
         }
@@ -8935,7 +8938,7 @@ ${attachmentLines.join('\n')}`
         await fs.promises.rm(resolved, { force: true });
         try {
             const remaining = await fs.promises.readdir(corpusDir);
-            if (remaining.length === 0) await fs.promises.rm(corpusDir, { recursive: false, force: true });
+            if (remaining.length === 0) await fs.promises.rmdir(corpusDir);
         } catch {
             // Another search may have removed or reused the directory.
         }
@@ -9008,43 +9011,62 @@ ${attachmentLines.join('\n')}`
         return fallback;
     }
 
-    private async runSmartSessionSearch(sessionId: string, query: string, messages: SmartSearchMessage[]): Promise<{ messageIds: string[]; modelId: string }> {
-        const validIds = new Set(messages.map((item) => item.id).filter((id) => typeof id === 'string' && id.length > 0));
-        if (!query.trim() || !validIds.size) {
-            return { messageIds: [], modelId: '' };
-        }
-        const model = await this.pickSmartSearchModel();
-        if (!model) throw new Error('Smart search requires an available free model.');
-        let corpusPath = '';
-        let tempSession: { id: string } | undefined;
-        let assistantText = '';
+    private summarizeSmartSearchToolInput(input: unknown): string {
+        let text = '';
         try {
-            corpusPath = await this.writeSmartSearchCorpus(messages);
-            tempSession = await this.client.createSession();
-            const tempSessionId = tempSession.id;
-            this.smartSearchTempSessionIds.add(tempSessionId);
-            await this.persistSmartSearchTempSessions();
-            const snapshotPath = /^[A-Za-z0-9_-]+$/.test(sessionId || '')
-                && fs.existsSync(this.getSnapshotFile(sessionId))
-                ? this.getSnapshotFile(sessionId)
-                : undefined;
-            const prompt = this.buildSmartSearchPrompt(query.trim(), corpusPath, snapshotPath);
-            this.uiDebugChannel.appendLine(
-                `EXT: smartSearch.agent.start | sessionId=${sessionId || 'null'} | model=${model.fullId} | locatorCount=${validIds.size} | snapshot=${String(Boolean(snapshotPath))}`
-            );
-            const tempLocalKey = `smart-search-${Date.now()}`;
+            text = typeof input === 'string' ? input : JSON.stringify(input ?? {});
+        } catch {
+            text = String(input ?? '');
+        }
+        return text.replace(/\s+/g, ' ').slice(0, 360);
+    }
+
+    private isEffectiveSmartSearchTool(tool: string, input: unknown): boolean {
+        const name = String(tool || '').toLowerCase();
+        if (/read|grep|search|find|glob/.test(name)) return true;
+        if (!/bash|shell|powershell|terminal/.test(name)) return false;
+        const detail = this.summarizeSmartSearchToolInput(input).toLowerCase();
+        return /(?:^|\s)(?:rg|grep|findstr|find|type)(?:\s|$)|get-content|select-string/.test(detail);
+    }
+
+    private async executeSmartSearchAgentAttempt(model: ModelInfo, prompt: string, attempt: number): Promise<{
+        assistantText: string;
+        effectiveToolCalls: number;
+    }> {
+        const tempSession = await this.client.createSession();
+        const tempSessionId = tempSession.id;
+        this.smartSearchTempSessionIds.add(tempSessionId);
+        await this.persistSmartSearchTempSessions();
+        let assistantText = '';
+        let searchError = '';
+        const effectiveTools = new Set<string>();
+        try {
+            const tempLocalKey = `smart-search-${Date.now()}-${attempt}`;
             this.client.startTurnWithOp(tempSessionId, tempLocalKey, tempLocalKey);
             const task = this.client.chat(
                 prompt,
-                {
-                    model: model?.fullId,
-                    sessionId: tempSessionId,
-                    mode: 'plan'
-                },
+                { model: model.fullId, sessionId: tempSessionId, mode: 'plan' },
                 (event) => {
                     if (event.sessionId !== tempSessionId) return;
                     if (event.type === 'text' && typeof event.text === 'string') {
                         assistantText += event.text;
+                        return;
+                    }
+                    if (event.type === 'error') {
+                        searchError = event.text || 'Unknown Smart Search session error';
+                        return;
+                    }
+                    if (event.type !== 'tool' || !event.tool) return;
+                    const status = event.toolState?.status || 'unknown';
+                    const inputSummary = this.summarizeSmartSearchToolInput(event.toolState?.input);
+                    const outputSize = typeof event.toolState?.output === 'string'
+                        ? event.toolState.output.length
+                        : 0;
+                    this.uiDebugChannel.appendLine(
+                        `EXT: smartSearch.tool | attempt=${attempt} | sessionId=${tempSessionId} | tool=${event.tool} | status=${status} | input=${inputSummary || 'none'} | outputChars=${outputSize}`
+                    );
+                    if (status === 'completed' && this.isEffectiveSmartSearchTool(event.tool, event.toolState?.input)) {
+                        effectiveTools.add(`${event.tool}|${inputSummary}`);
                     }
                 }
             );
@@ -9052,6 +9074,7 @@ ${attachmentLines.join('\n')}`
                 task,
                 new Promise((_, reject) => setTimeout(() => reject(new Error('Smart search timed out.')), 90000))
             ]);
+            if (searchError) throw new Error(`Smart Search model session failed: ${searchError}`);
             if (!assistantText.trim()) {
                 const exported = await this.client.listSessionMessages(tempSessionId);
                 const assistant = [...exported].reverse().find((item: any) => item?.role === 'assistant');
@@ -9061,33 +9084,73 @@ ${attachmentLines.join('\n')}`
                         ? assistant.parts.map((part: any) => typeof part?.text === 'string' ? part.text : '').join('\n')
                         : '';
             }
-            return {
-                messageIds: this.parseSmartSearchMessageIds(assistantText, validIds),
-                modelId: model?.fullId || 'default'
-            };
+            const rawSummary = assistantText.replace(/\s+/g, ' ').slice(-1200);
+            this.uiDebugChannel.appendLine(
+                `EXT: smartSearch.agent.output | attempt=${attempt} | sessionId=${tempSessionId} | effectiveTools=${effectiveTools.size} | chars=${assistantText.length} | raw=${rawSummary || 'empty'}`
+            );
+            return { assistantText, effectiveToolCalls: effectiveTools.size };
         } catch (error) {
-            if (tempSession?.id) {
-                try {
-                    await this.client.abortSession(tempSession.id);
-                } catch {
-                    // Best effort cleanup before deleting the temporary session.
-                }
+            try {
+                await this.client.abortSession(tempSessionId);
+            } catch {
+                // Best effort cleanup before deleting the temporary session.
             }
             throw error;
         } finally {
-            if (tempSession?.id) {
-                this.client.finishTurn(tempSession.id);
-                let deleted = false;
+            this.client.finishTurn(tempSessionId);
+            let deleted = false;
+            try {
+                await this.client.deleteSession(tempSessionId);
+                deleted = true;
+            } catch (error) {
+                this.uiDebugChannel.appendLine(`EXT: smartSearch.cleanup.fail | sessionId=${tempSessionId} | err=${String(error)}`);
+            } finally {
+                if (deleted) this.smartSearchTempSessionIds.delete(tempSessionId);
+                await this.persistSmartSearchTempSessions();
+            }
+        }
+    }
+
+    private async runSmartSessionSearch(sessionId: string, query: string, messages: SmartSearchMessage[]): Promise<{ messageIds: string[]; modelId: string }> {
+        const validIds = new Set(messages.map((item) => item.id).filter((id) => typeof id === 'string' && id.length > 0));
+        if (!query.trim() || !validIds.size) return { messageIds: [], modelId: '' };
+        const model = await this.pickSmartSearchModel();
+        if (!model) throw new Error('Smart search requires an available free model.');
+        let corpusPath = '';
+        try {
+            corpusPath = await this.writeSmartSearchCorpus(messages);
+            const snapshotPath = /^[A-Za-z0-9_-]+$/.test(sessionId || '')
+                && fs.existsSync(this.getSnapshotFile(sessionId))
+                ? this.getSnapshotFile(sessionId)
+                : undefined;
+            const basePrompt = this.buildSmartSearchPrompt(query.trim(), corpusPath, snapshotPath);
+            this.uiDebugChannel.appendLine(
+                `EXT: smartSearch.agent.start | sessionId=${sessionId || 'null'} | model=${model.fullId} | locatorCount=${validIds.size} | snapshot=${String(Boolean(snapshotPath))}`
+            );
+            let lastError: unknown;
+            for (let attempt = 1; attempt <= 2; attempt += 1) {
+                const prompt = attempt === 1
+                    ? basePrompt
+                    : `${basePrompt}\n\nRETRY REQUIREMENT: The previous attempt failed or did not perform a verifiable file search. You MUST use file search/read tools before answering.`;
                 try {
-                    await this.client.deleteSession(tempSession.id);
-                    deleted = true;
+                    const result = await this.executeSmartSearchAgentAttempt(model, prompt, attempt);
+                    if (result.effectiveToolCalls === 0) {
+                        lastError = new Error('Smart Search model returned without inspecting the session files.');
+                        this.uiDebugChannel.appendLine(`EXT: smartSearch.retry | attempt=${attempt} | reason=no-effective-file-tool`);
+                        continue;
+                    }
+                    const messageIds = this.parseSmartSearchMessageIds(result.assistantText, validIds);
+                    this.uiDebugChannel.appendLine(
+                        `EXT: smartSearch.result | attempt=${attempt} | accepted=${messageIds.length} | ids=${messageIds.join(',') || 'none'}`
+                    );
+                    return { messageIds, modelId: model.fullId };
                 } catch (error) {
-                    this.uiDebugChannel.appendLine(`EXT: smartSearch.cleanup.fail | sessionId=${tempSession.id} | err=${String(error)}`);
-                } finally {
-                    if (deleted) this.smartSearchTempSessionIds.delete(tempSession.id);
-                    await this.persistSmartSearchTempSessions();
+                    lastError = error;
+                    this.uiDebugChannel.appendLine(`EXT: smartSearch.retry | attempt=${attempt} | reason=agent-error | err=${String(error)}`);
                 }
             }
+            throw lastError instanceof Error ? lastError : new Error('Smart Search failed after retry.');
+        } finally {
             if (corpusPath) {
                 try {
                     await this.cleanupSmartSearchCorpus(corpusPath);
