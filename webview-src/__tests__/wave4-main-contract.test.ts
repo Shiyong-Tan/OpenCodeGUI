@@ -393,6 +393,7 @@ describe('Wave 4 main-script local older contract', () => {
         allUnits: [{ key: 'old-key' }],
         adapter: { scrollToKey: () => { calls += 1; return calls >= 3; } },
       },
+      sessionSearch: { windowTargetKey: 'old-key' },
       keyedRootForKey: () => null,
       vscode: { postMessage: (message: unknown) => diagnostics.push(message) },
     });
@@ -404,6 +405,7 @@ describe('Wave 4 main-script local older contract', () => {
     expect((context as any).tryPendingChatWindowScroll('third')).toBe(true);
     expect((context as any).chatWindowState.pendingScrollKey).toBe('');
     expect((context as any).chatWindowState.pendingScrollAttempts).toBe(0);
+    expect((context as any).sessionSearch.windowTargetKey).toBe('');
     expect(diagnostics.some((message: any) => message.payload?.[0] === '[WV][CHAT_WINDOW_SEARCH_PENDING_CLEAR]')).toBe(true);
 
     (context as any).chatWindowState.pendingScrollKey = 'old-key';

@@ -548,34 +548,29 @@ function createSingleAdapter(
     }
     const start = Math.max(0, range.startIndex - rangePolicy.beforeReserve);
     const end = Math.min(range.count - 1, range.endIndex + rangePolicy.afterReserve);
-    const requiredIndexes: number[] = [];
-    const indexes = new Set<number>();
-    for (let index = start; index <= end; index += 1) {
-      requiredIndexes.push(index);
-      indexes.add(index);
+    const center = Math.floor((range.startIndex + range.endIndex) / 2);
+    let windowStart = start;
+    let windowEnd = end;
+    if (windowEnd - windowStart + 1 > maxMounted) {
+      windowStart = Math.max(0, Math.min(range.count - maxMounted, center - Math.floor(maxMounted / 2)));
+      windowEnd = Math.min(range.count - 1, windowStart + maxMounted - 1);
     }
-    for (const key of keepMountedKeys) {
-      const index = indexForKey(key);
-      if (index >= 0 && index < range.count) indexes.add(index);
+    const pinnedIndexes = keepMountedKeys
+      .map(indexForKey)
+      .filter((index) => index >= 0 && index < range.count)
+      .sort((a, b) => {
+        const distanceA = a < windowStart ? windowStart - a : a > windowEnd ? a - windowEnd : 0;
+        const distanceB = b < windowStart ? windowStart - b : b > windowEnd ? b - windowEnd : 0;
+        return distanceA - distanceB || a - b;
+      });
+    for (const index of pinnedIndexes) {
+      const expandedStart = Math.min(windowStart, index);
+      const expandedEnd = Math.max(windowEnd, index);
+      if (expandedEnd - expandedStart + 1 > maxMounted) continue;
+      windowStart = expandedStart;
+      windowEnd = expandedEnd;
     }
-    let ordered = [...indexes].sort((a, b) => a - b);
-    if (ordered.length > maxMounted) {
-      const center = Math.floor((range.startIndex + range.endIndex) / 2);
-      const required = new Set(requiredIndexes);
-      const retainedRequired = requiredIndexes.length <= maxMounted
-        ? requiredIndexes
-        : [...requiredIndexes]
-          .sort((a, b) => Math.abs(a - center) - Math.abs(b - center) || a - b)
-          .slice(0, maxMounted);
-      const optionalCapacity = Math.max(0, maxMounted - retainedRequired.length);
-      const optional = ordered
-        .filter((index) => !required.has(index))
-        .sort((a, b) => Math.abs(a - center) - Math.abs(b - center) || a - b)
-        .slice(0, optionalCapacity);
-      ordered = [...retainedRequired, ...optional]
-        .sort((a, b) => a - b);
-    }
-    return ordered;
+    return Array.from({ length: windowEnd - windowStart + 1 }, (_, offset) => windowStart + offset);
   };
 
   const publishRange = (expectedGeneration = generation) => {

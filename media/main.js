@@ -7069,6 +7069,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function handleChatContainerScroll() {
         if (!chatWindowState.programmaticScroll) {
+            chatWindowState.userScrollActiveUntil = Date.now() + 180;
             autoScrollPinnedToBottom = isNearBottom(chatContainer);
             if (!autoScrollPinnedToBottom) captureChatWindowAnchor();
         }
@@ -9645,7 +9646,7 @@ function shouldHideDcpUiMessage(message) {
     const chatWindowState = {
         sessionId: '', adapter: null, snapshot: null, allUnits: [], mountedKeys: new Set(),
         topSpacer: null, bottomSpacer: null, anchorKey: '', visualOffset: 0,
-        programmaticScroll: false, activityBelow: false, rendering: false,
+        programmaticScroll: false, userScrollActiveUntil: 0, activityBelow: false, rendering: false,
         pendingRangeRender: false, failedSessionId: '', localOlderSurface: null,
         localOlderObserver: null, localOlderObserverArmed: true, pendingScrollKey: '',
         pendingScrollAttempts: 0, localHistoryPresentation: null, acknowledgedRawSnapshot: null
@@ -12138,11 +12139,15 @@ function shouldHideDcpUiMessage(message) {
     }
 
     function clearPendingChatWindowScroll(reason) {
-        if (chatWindowState.pendingScrollKey) {
-            vscode.postMessage({ type: 'ui-debug', payload: ['[WV][CHAT_WINDOW_SEARCH_PENDING_CLEAR]', `reason=${reason}`, `key=${chatWindowState.pendingScrollKey}`, `attempts=${chatWindowState.pendingScrollAttempts}`] });
+        const targetKey = chatWindowState.pendingScrollKey;
+        if (targetKey) {
+            vscode.postMessage({ type: 'ui-debug', payload: ['[WV][CHAT_WINDOW_SEARCH_PENDING_CLEAR]', `reason=${reason}`, `key=${targetKey}`, `attempts=${chatWindowState.pendingScrollAttempts}`] });
         }
         chatWindowState.pendingScrollKey = '';
         chatWindowState.pendingScrollAttempts = 0;
+        if (targetKey && sessionSearch.windowTargetKey === targetKey) {
+            sessionSearch.windowTargetKey = '';
+        }
     }
 
     function tryPendingChatWindowScroll(reason) {
@@ -12180,7 +12185,8 @@ function shouldHideDcpUiMessage(message) {
     }
 
     function restoreChatWindowAnchor() {
-        if (!chatWindowState.anchorKey || autoScrollPinnedToBottom || !chatWindowState.snapshot) return;
+        if (!chatWindowState.anchorKey || autoScrollPinnedToBottom || !chatWindowState.snapshot
+            || Date.now() < chatWindowState.userScrollActiveUntil) return;
         const item = chatWindowState.snapshot.items.find((entry) => entry.key === chatWindowState.anchorKey);
         if (!item) return;
         const rendering = window.__ocRendering;

@@ -838,7 +838,10 @@ describe('Wave 3 TanStack adapter contract', () => {
     expect(transaction?.finalizeCommit()).toBe(false);
     expect(changes).toHaveLength(1);
     expect((changes[0] as any).items.length).toBeLessThanOrEqual(140);
-    expect(adapter.getRange().items.map((item) => item.key)).toEqual(expect.arrayContaining(['key-0', 'candidate-1001']));
+    const committedItems = adapter.getRange().items;
+    expect(committedItems.map((item) => item.key)).toContain('candidate-1001');
+    expect(committedItems.map((item) => item.key)).not.toContain('key-0');
+    expect(committedItems.every((item, index, items) => index === 0 || item.index === items[index - 1].index + 1)).toBe(true);
     expect(constructions[0].destroyed).toBe(true);
     expect(constructions[1].destroyed).toBe(false);
   });
@@ -1344,7 +1347,7 @@ describe('Wave 3 TanStack adapter contract', () => {
     expect(adapter.getRange().items).toHaveLength(32); // visible 12 + 20 overscan; initial force is one-shot
   });
 
-  test('updates count/keys without recreation, caps custom anchor/tail extraction, and scrolls by key', () => {
+  test('updates count/keys without recreation, keeps extraction contiguous, and scrolls by key', () => {
     const { adapter, keys, constructions } = createHarness();
     adapter.getRange();
     adapter.update({
@@ -1356,7 +1359,9 @@ describe('Wave 3 TanStack adapter contract', () => {
     const range = adapter.getRange();
     expect(constructions).toHaveLength(1);
     expect(range.items.length).toBeLessThanOrEqual(140);
-    expect(range.items.map((item) => item.key)).toEqual(expect.arrayContaining(['key-0', 'key-1001']));
+    expect(range.items.map((item) => item.key)).toContain('key-1001');
+    expect(range.items.map((item) => item.key)).not.toContain('key-0');
+    expect(range.items.every((item, index, items) => index === 0 || item.index === items[index - 1].index + 1)).toBe(true);
     expect(adapter.scrollToKey('key-0', { align: 'center' })).toBe(true);
     expect(constructions[0].scrollCalls.at(-1)).toEqual([0, { align: 'center', behavior: 'auto' }]);
     expect(adapter.scrollToKey('missing')).toBe(false);
