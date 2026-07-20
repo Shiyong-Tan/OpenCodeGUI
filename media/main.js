@@ -18347,9 +18347,8 @@ function appendMessageImages(parentEl, message) {
                     }
                 }
                 handleChatDone(sessionId, message);
-                window.__oc?.renderFromState?.();
-                scrollToBottom();
-                setBusy(false);
+                const rendered = renderIfActive(sessionId, 'addResponse', { scroll: true, scrollFallback: scrollToBottom });
+                if (rendered) setBusy(false);
                 logSessionState(sessionId, 'addResponse');
                 break;
             }
@@ -18374,7 +18373,7 @@ function appendMessageImages(parentEl, message) {
                     text: message.value || 'Failed to attach image.',
                     meta: {}
                 });
-                window.__oc?.renderFromState?.();
+                renderIfActive(sessionId, 'attachmentError');
                 break;
             }
             case 'permissionPrompt': {
@@ -18557,92 +18556,6 @@ function appendMessageImages(parentEl, message) {
                 }
                 break;
             }
-            case 'attachmentAdded': {
-                attachments.push({
-                    id: message.id,
-                    name: message.name,
-                    filePath: message.filePath,
-                    dataUrl: message.dataUrl,
-                    mime: message.mime
-                });
-                renderAttachments();
-                break;
-            }
-            case 'attachmentError': {
-                const sessionId = getEventSessionId(message, 'attachmentError');
-                if (!sessionId) break;
-                const session = getSessionState(sessionId, true);
-                upsertMessage(session, {
-                    id: `system:${Date.now()}`,
-                    role: 'system',
-                    text: message.value || 'Failed to attach image.',
-                    meta: {}
-                });
-                window.__oc?.renderFromState?.();
-                break;
-            }
-            case 'permissionPrompt': {
-                const route = resolveEventSessionId(message, 'permissionPrompt');
-                if (!route) break;
-                const sessionId = route.sessionId;
-                const session = getSessionState(sessionId, true);
-                upsertMessage(session, {
-                    id: `system:${Date.now()}`,
-                    role: 'system',
-                    text: `Permission required. Check OpenCode output: ${message.value}`,
-                    meta: {}
-                });
-                renderIfActive(sessionId, 'permissionPrompt');
-                break;
-            }
-            case 'diffChunk': {
-                const route = resolveContentEventRoute(message, 'diffChunk');
-                if (!route) break;
-                const sessionId = route.sessionId;
-                const session = getSessionState(sessionId, true);
-                retainAgentLaneParentAssociation(session, route);
-                if (!shouldRenderDiffChunk(session, message)) {
-                    break;
-                }
-                upsertMessage(session, {
-                    id: `diff:${Date.now()}`,
-                    role: 'system',
-                    text: message.value || '',
-                    meta: { isDiff: true, diffText: message.value || '' }
-                });
-                renderIfActive(sessionId, 'diffChunk', { scroll: true });
-                break;
-            }
-            case 'messageAppend': {
-                const route = resolveContentEventRoute(message, 'messageAppend');
-                if (!route) break;
-                const sessionId = route.sessionId;
-                const session = getSessionState(sessionId, true);
-                retainAgentLaneParentAssociation(session, route);
-                if (message.message && message.message.role === 'user' && isHiddenControlUserText(message.message.text || '')) {
-                    if (typeof message.message.id === 'string' && message.message.id.length) {
-                        session.hiddenControlUserIds.add(message.message.id);
-                    }
-                    break;
-                }
-                if (message.message && message.message.role === 'assistant' && isHiddenControlAssistantText(message.message.text || '')) {
-                    break;
-                }
-                if (message.message && message.message.role === 'assistant'
-                    && shouldDropHiddenControlAssistant(session, message.message, 'messageAppend', message.message.id)) {
-                    break;
-                }
-                if (message.message && message.message.id) {
-                    upsertMessage(session, {
-                        id: message.message.id,
-                        role: message.message.role || 'assistant',
-                        text: message.message.text || '',
-                        meta: {}
-                    });
-                    renderIfActive(sessionId, 'messageAppend', { scroll: true });
-                }
-                break;
-            }
             case 'revertedSegment': {
                 vscode.postMessage({
                     type: 'ui-debug',
@@ -18795,7 +18708,7 @@ function appendMessageImages(parentEl, message) {
                             type: 'ui-debug',
                             payload: ['[WV][SEG_UPSERT_SKIP]', `noticeKey=${upsertNoticeKey}`, 'reason=undo-not-applied']
                         });
-                        window.__oc?.renderFromState?.();
+                        renderIfActive(sessionId, 'revertedSegment:notApplied');
                         logSessionState(sessionId, 'revertedSegment.notApplied');
                         break;
                     }
@@ -19122,7 +19035,7 @@ function appendMessageImages(parentEl, message) {
                             `placeholderId=${placeholderId}`,
                             `timelineSize=${session.timeline.length}`]
                     });
-                    window.__oc?.renderFromState?.();
+                    renderIfActive(sessionId, 'revertedSegment:placeholder');
                     vscode.postMessage({
                         type: 'ui-debug',
                         payload: ['[WV][REVERTED_HANDLER]', 'entering-apply',
@@ -19154,8 +19067,7 @@ function appendMessageImages(parentEl, message) {
                             `segmentsCount=${session.segmentsByNoticeKey.size}`,
                             `hiddenSetSize=${session.hiddenSet.size}`]
                     });
-                    window.__oc?.renderFromState?.();
-                    scrollToBottom();
+                    renderIfActive(sessionId, 'revertedSegment', { scroll: true, scrollFallback: scrollToBottom });
                     logSessionState(sessionId, 'revertedSegment');
                 } else {
                     postRevertedReturn('missing-segPayload', sessionId, derivedNoticeKey, false, null);
@@ -19264,8 +19176,7 @@ function appendMessageImages(parentEl, message) {
 
                 if (message.segment) {
                     applyRevertedSegmentPayload(sessionId, message.segment, noticeKey);
-                    window.__oc?.renderFromState?.();
-                    scrollToBottom();
+                    renderIfActive(sessionId, 'revertedSegmentDiscarded', { scroll: true, scrollFallback: scrollToBottom });
                     logSessionState(sessionId, 'revertedSegmentDiscarded');
                 }
                 break;
@@ -19378,8 +19289,7 @@ function appendMessageImages(parentEl, message) {
                 });
                 
                 // Trigger re-render
-                window.__oc?.renderFromState?.();
-                scrollToBottom();
+                renderIfActive(sessionId, 'restoredSegment', { scroll: true, scrollFallback: scrollToBottom });
                 break;
             }
             case 'revertedSegmentState': {
@@ -19410,8 +19320,7 @@ function appendMessageImages(parentEl, message) {
 
                 if (message.segment) {
                     applyRevertedSegmentPayload(sessionId, message.segment);
-                    window.__oc?.renderFromState?.();
-                    scrollToBottom();
+                    renderIfActive(sessionId, 'revertedSegmentState', { scroll: true, scrollFallback: scrollToBottom });
                     logSessionState(sessionId, 'revertedSegmentState');
                 }
                 break;
@@ -19484,7 +19393,7 @@ function appendMessageImages(parentEl, message) {
                 if (!sessionId) break;
                 const reason = typeof message.reason === 'string' && message.reason ? message.reason : 'file-change-detected';
                 discardAllSegments(sessionId, reason, selectedMode || 'unknown');
-                window.__oc?.renderFromState?.();
+                renderIfActive(sessionId, 'segmentRestoreLock');
                 break;
             }
             case 'error': {
@@ -19497,8 +19406,7 @@ function appendMessageImages(parentEl, message) {
                     text: message.value || 'An error occurred.',
                     meta: {}
                 });
-                window.__oc?.renderFromState?.();
-                scrollToBottom();
+                renderIfActive(sessionId, 'error', { scroll: true, scrollFallback: scrollToBottom });
                 break;
             }
             case 'removeMessage': {
@@ -19510,8 +19418,7 @@ function appendMessageImages(parentEl, message) {
                 if (typeof messageId === 'string' && messageId.length) {
                     removeMessageFromSession(session, messageId);
                 }
-                window.__oc?.renderFromState?.();
-                scrollToBottom();
+                renderIfActive(sessionId, 'removeMessage', { scroll: true, scrollFallback: scrollToBottom });
                 break;
             }
             default: {

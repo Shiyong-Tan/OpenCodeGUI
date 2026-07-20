@@ -18,6 +18,29 @@ function extractFunction(marker: string): string {
 }
 
 describe('Wave 4 main-script local older contract', () => {
+  test('event dispatcher has one authoritative branch for each state-mutating event', () => {
+    for (const type of ['attachmentAdded', 'attachmentError', 'permissionPrompt', 'diffChunk', 'messageAppend']) {
+      expect(source.match(new RegExp(`case '${type}':`, 'g')) || []).toHaveLength(1);
+    }
+    const appendStart = source.indexOf("case 'messageAppend':");
+    const appendEnd = source.indexOf("case 'revertedSegment':", appendStart);
+    const appendBranch = source.slice(appendStart, appendEnd);
+    expect(appendBranch).toContain('session?.canceledActiveTurn');
+    expect(appendBranch).toContain('session?.turnFullyFinalized === true');
+  });
+
+  test('session-scoped background events cannot render or scroll the active virtual window', () => {
+    for (const type of ['addResponse', 'attachmentError', 'revertedSegmentDiscarded', 'restoredSegment',
+      'revertedSegmentState', 'segmentRestoreLock', 'error', 'removeMessage']) {
+      const start = source.indexOf(`case '${type}':`);
+      const nextCase = source.indexOf("\n            case '", start + 1);
+      const branch = source.slice(start, nextCase);
+      expect(start).toBeGreaterThanOrEqual(0);
+      expect(branch).toContain('renderIfActive(sessionId,');
+      expect(branch).not.toContain('window.__oc?.renderFromState?.()');
+    }
+  });
+
   test('owns one accessible structural root, a persistent button fallback, and optional observer', () => {
     expect(source).toContain('const CHAT_LOCAL_OLDER_BATCH = 40;');
     expect(source).toContain("classifyChatStructuralSurface(surface, 'window:local-older'");
