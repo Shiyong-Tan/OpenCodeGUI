@@ -134,6 +134,40 @@ describe('Wave 4 main-script local older contract', () => {
     expect(next.disabled).toBe(false);
   });
 
+  test('smart search count and navigation use global ids rather than mounted DOM hits', () => {
+    const jumps: string[] = [];
+    const count = { textContent: '', classList: { toggle: () => undefined } };
+    const prev = { disabled: true };
+    const next = { disabled: true };
+    const smart = { disabled: false, textContent: '', classList: { toggle: () => undefined } };
+    const elements: Record<string, any> = {
+      'session-search-count': count, 'session-search-prev': prev,
+      'session-search-next': next, 'session-search-smart': smart,
+    };
+    const context = vm.createContext({
+      document: { getElementById: (id: string) => elements[id] || null },
+      sessionSearch: {
+        mode: 'smart', query: 'related request', smartInFlight: false,
+        smartMessageIds: ['old-unmounted', 'middle-unmounted', 'recent-mounted'],
+        activeIndex: 0, matches: [{ dataset: { messageId: 'recent-mounted' } }],
+        fullMatchKeys: [], activeKeyIndex: -1, windowTargetKey: '',
+      },
+      ensureChatWindowKeyMounted: (key: string) => { jumps.push(key); return true; },
+      keyedRootForSearchKey: () => null,
+      applySmartSessionSearchResults: () => undefined,
+    });
+    vm.runInContext(`${extractFunction('function getSessionSearchElements(')}\n${extractFunction('function updateSessionSearchControls(')}\n${extractFunction('function goToSessionSearchMatch(')}; globalThis.update = updateSessionSearchControls; globalThis.go = goToSessionSearchMatch;`, context);
+
+    (context as any).update();
+    expect(count.textContent).toBe('1/3');
+    (context as any).go(1);
+    (context as any).go(1);
+    expect(jumps).toEqual(['middle-unmounted', 'recent-mounted']);
+    expect(count.textContent).toBe('3/3');
+    expect(prev.disabled).toBe(false);
+    expect(next.disabled).toBe(false);
+  });
+
   test('global text results retain one navigation location per canonical unit', () => {
     const context = vm.createContext({
       activeSessionId: 'session-a',

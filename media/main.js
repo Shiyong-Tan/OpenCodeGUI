@@ -6519,7 +6519,7 @@ function clearSessionSearchHighlights() {
 function updateSessionSearchControls() {
     const { count, prev, next, smart } = getSessionSearchElements();
     const textMode = sessionSearch.mode === 'text';
-    const total = textMode ? sessionSearch.fullMatchKeys.length : sessionSearch.matches.length;
+    const total = textMode ? sessionSearch.fullMatchKeys.length : sessionSearch.smartMessageIds.length;
     const activeIndex = textMode ? sessionSearch.activeKeyIndex : sessionSearch.activeIndex;
     const current = total > 0 && activeIndex >= 0 ? activeIndex + 1 : 0;
     const hasQuery = Boolean(String(sessionSearch.query || '').trim());
@@ -6539,12 +6539,21 @@ function updateSessionSearchControls() {
 
 function updateActiveSessionSearchHit({ scroll = false } = {}) {
     const total = sessionSearch.matches.length;
+    const smartMode = sessionSearch.mode === 'smart';
+    const activeSmartId = smartMode && sessionSearch.activeIndex >= 0
+        ? sessionSearch.smartMessageIds[sessionSearch.activeIndex]
+        : '';
+    const matchKey = (match) => match?.dataset?.renderUnitKey || match?.dataset?.messageId || match?.dataset?.segmentKey || '';
     for (let i = 0; i < total; i++) {
-        sessionSearch.matches[i].classList.toggle('active', i === sessionSearch.activeIndex);
+        sessionSearch.matches[i].classList.toggle('active', smartMode
+            ? matchKey(sessionSearch.matches[i]) === activeSmartId
+            : i === sessionSearch.activeIndex);
     }
     updateSessionSearchControls();
     if (!scroll || total === 0 || sessionSearch.activeIndex < 0) return;
-    const active = sessionSearch.matches[sessionSearch.activeIndex];
+    const active = smartMode
+        ? sessionSearch.matches.find((match) => matchKey(match) === activeSmartId)
+        : sessionSearch.matches[sessionSearch.activeIndex];
     active?.scrollIntoView?.({ block: 'center', inline: 'nearest', behavior: 'auto' });
 }
 
@@ -6883,6 +6892,18 @@ function goToSessionSearchMatch(delta) {
         syncActiveTextSearchDomHit({ scroll: true });
         return;
     }
+    if (sessionSearch.mode === 'smart' && sessionSearch.smartMessageIds.length) {
+        const totalIds = sessionSearch.smartMessageIds.length;
+        sessionSearch.activeIndex = (sessionSearch.activeIndex + delta + totalIds) % totalIds;
+        const targetKey = sessionSearch.smartMessageIds[sessionSearch.activeIndex];
+        sessionSearch.windowTargetKey = targetKey;
+        if (!keyedRootForSearchKey(targetKey) && ensureChatWindowKeyMounted(targetKey, 'search')) {
+            updateSessionSearchControls();
+            return;
+        }
+        applySmartSessionSearchResults(sessionSearch.smartMessageIds, { scroll: true });
+        return;
+    }
     const total = sessionSearch.matches.length;
     if (!total) return;
     sessionSearch.activeIndex = (sessionSearch.activeIndex + delta + total) % total;
@@ -6952,10 +6973,16 @@ function applySmartSessionSearchResults(messageIds, { scroll = true } = {}) {
     const previousIndex = sessionSearch.activeIndex;
     clearSessionSearchHighlights();
     sessionSearch.mode = 'smart';
-    sessionSearch.smartMessageIds = Array.isArray(messageIds) ? messageIds.filter((id) => typeof id === 'string' && id) : [];
-    const requestedKey = sessionSearch.smartMessageIds[Math.max(previousIndex, 0)] || sessionSearch.smartMessageIds[0] || '';
+    sessionSearch.smartMessageIds = Array.isArray(messageIds)
+        ? Array.from(new Set(messageIds.filter((id) => typeof id === 'string' && id)))
+        : [];
+    sessionSearch.activeIndex = sessionSearch.smartMessageIds.length
+        ? Math.min(Math.max(previousIndex, 0), sessionSearch.smartMessageIds.length - 1)
+        : -1;
+    const requestedKey = sessionSearch.activeIndex >= 0 ? sessionSearch.smartMessageIds[sessionSearch.activeIndex] : '';
     if (requestedKey && !keyedRootForSearchKey(requestedKey) && ensureChatWindowKeyMounted(requestedKey, 'search')) {
         sessionSearch.windowTargetKey = requestedKey;
+        updateSessionSearchControls();
         return;
     }
     sessionSearch.matches = [];
@@ -6971,9 +6998,6 @@ function applySmartSessionSearchResults(messageIds, { scroll = true } = {}) {
         el.classList.add('session-search-semantic-hit');
         sessionSearch.matches.push(el);
     }
-    sessionSearch.activeIndex = sessionSearch.matches.length
-        ? Math.min(Math.max(previousIndex, 0), sessionSearch.matches.length - 1)
-        : -1;
     updateActiveSessionSearchHit({ scroll });
 }
 
@@ -7073,6 +7097,11 @@ document.addEventListener('DOMContentLoaded', () => {
         const hasScrollableDistance = chatContainer.scrollHeight > chatContainer.clientHeight + AUTO_SCROLL_BOTTOM_THRESHOLD_PX;
         chatJumpBottomBtn.classList.toggle('hidden', !hasScrollableDistance || isNearBottom(chatContainer));
     }
+
+    chatJumpBottomBtn?.addEventListener('click', () => {
+        chatJumpBottomBtn.classList.add('hidden');
+        scrollToBottom(true);
+    });
 
     function handleChatContainerScroll() {
         if (!chatWindowState.programmaticScroll) {
@@ -9646,10 +9675,6 @@ function shouldHideDcpUiMessage(message) {
             writable: false
         });
     }
-    chatJumpBottomBtn?.addEventListener('click', () => {
-        chatJumpBottomBtn.classList.add('hidden');
-        scrollToBottom(true);
-    });
     let chatWindowAcceptedPlanRevision = 0;
     let chatWindowPlanCorrection = { sessionId: '', generation: -1, planRevision: -1 };
     const chatLocalHistoryController = window.__ocRendering?.createLocalHistoryPresentationController?.({

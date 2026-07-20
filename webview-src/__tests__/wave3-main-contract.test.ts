@@ -664,12 +664,17 @@ describe('B4S-R3 recovered anonymous owner behavior matrices', () => {
     for (const key of ['primarySend', 'chatScroll', 'aliasMigration'] as const) {
       const recovered = normalizeRelocatedBody(recoveredBodies[key]);
       const named = normalizeRelocatedBody(namedBodies[key]);
-      expect(named).toBe(recovered);
+      const reviewedCore = key === 'chatScroll'
+        ? named
+          .replace('    chatWindowState.userScrollActiveUntil = Date.now() + 180;\n', '')
+          .replace('updateChatJumpBottomButton();\n', '')
+        : named;
+      expect(reviewedCore).toBe(recovered);
       hashes[key] = sourceHash(named);
     }
     expect(hashes).toEqual({
       primarySend: '07055fcfd53bb336cbb82f742475f19dbd9392ea9efd809679dd2b5016c02b18',
-      chatScroll: 'e038125d4bf073302c649836a608ef6bd87f7a24b2b79520065ec90f80874109',
+      chatScroll: '7f8e2785b6c6d6b78e929ad9f8fe4b0b7e07c1e906f6a3aca3b3682fa09fcb7b',
       aliasMigration: '6b108292ce3305c164a1bec10689b6fdcdd06cd310cc921ef5bee351f028a2ff',
     });
   });
@@ -695,14 +700,15 @@ describe('B4S-R3 recovered anonymous owner behavior matrices', () => {
         chatWindowState: { programmaticScroll }, autoScrollPinnedToBottom: false, chatContainer: {},
         isNearBottom: () => { trace.push('isNearBottom'); return nearBottom; },
         captureChatWindowAnchor: () => trace.push('captureAnchor'),
+        updateChatJumpBottomButton: () => trace.push('updateJumpBottom'),
         hideQuoteSelectionButton: () => trace.push('hideQuote'),
       });
       const returned = context.__owner();
       return { trace, returned, pinned: context.autoScrollPinnedToBottom };
     };
-    expect(run(true, false)).toEqual({ trace: ['hideQuote'], returned: undefined, pinned: false });
-    expect(run(false, true)).toEqual({ trace: ['isNearBottom', 'hideQuote'], returned: undefined, pinned: true });
-    expect(run(false, false)).toEqual({ trace: ['isNearBottom', 'captureAnchor', 'hideQuote'], returned: undefined, pinned: false });
+    expect(run(true, false)).toEqual({ trace: ['updateJumpBottom', 'hideQuote'], returned: undefined, pinned: false });
+    expect(run(false, true)).toEqual({ trace: ['isNearBottom', 'updateJumpBottom', 'hideQuote'], returned: undefined, pinned: true });
+    expect(run(false, false)).toEqual({ trace: ['isNearBottom', 'captureAnchor', 'updateJumpBottom', 'hideQuote'], returned: undefined, pinned: false });
     expect(source.match(/chatContainer\.addEventListener\('scroll'[\s\S]*?\}, \{ passive: true \}\);/g) || []).toHaveLength(1);
     expect(ownerSlices.chatScroll).not.toContain('scheduleRenderFromState');
   });
@@ -924,7 +930,7 @@ describe('B4S-E4 named owner mutation rejection', () => {
     if (!/rekeyKeyedChatPresentation = \(oldKey, newKey, sessionId\) => \{\s*return applyKeyedChatPresentationAliasMigration\(oldKey, newKey, sessionId\);\s*\};/.test(candidate)) errors.push('assignment:alias-boolean');
     const frozen = [
       ['body:primary', 'function handlePrimarySendClick()', 'a0bb89397aa6485dd33161caf3ff4ca6de14b3a616f03b6259683fb4143c05c7'],
-      ['body:scroll', 'function handleChatContainerScroll()', 'e6a7942c8f45d2b90699bc908b19a5d949cd7d69b89457fbb2cc9ba64f355241'],
+      ['body:scroll', 'function handleChatContainerScroll()', '1f0f8b57e4dd9c38d549b10ae98ed9341f0c8b2cae99ee2077914eecf0bbda4f'],
       ['body:alias', 'function applyKeyedChatPresentationAliasMigration(', '88cf3b9f39f17f1c4df3caa8c37b11a1d956ee7e01ac2e962fff2e62f51e3d86'],
     ];
     for (const [label, marker, hash] of frozen) if (sourceHash(extractCandidateBlock(candidate, marker)) !== hash) errors.push(label);
@@ -4077,6 +4083,8 @@ describe('A2.4D journaled keyed and structural transaction', () => {
       updateChatWindowSpacers: () => calls.push('spacers'),
       vscode: { postMessage: () => calls.push('message') },
       autoScrollPinnedToBottom: false, scrollToBottom: () => calls.push('scroll'),
+      requestAnimationFrame: (callback: () => void) => callback(),
+      updateChatJumpBottomButton: () => undefined,
       restoreChatWindowAnchor: () => calls.push('anchor'),
       chatLocalHistoryController: { complete: () => calls.push('local-complete') },
       destroyChatLocalOlderSurface: () => calls.push('local-destroy'),

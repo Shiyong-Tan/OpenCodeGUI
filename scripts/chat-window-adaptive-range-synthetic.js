@@ -395,6 +395,7 @@ function runScrollOwner(callbacks = 1) {
   const context = {
     chatWindowState: { programmaticScroll: false }, autoScrollPinnedToBottom: false, chatContainer: {},
     isNearBottom: () => { nearCalls += 1; return true; }, captureChatWindowAnchor: () => undefined,
+    updateChatJumpBottomButton: () => undefined,
     hideQuoteSelectionButton: () => { hideCalls += 1; },
   };
   const owner = executeCurrentMainFunctions([`function ${WORKFLOW_OWNER_NAMES.scroll}(`], context)[WORKFLOW_OWNER_NAMES.scroll];
@@ -411,6 +412,7 @@ function runSessionOwner() {
     vscode: { postMessage: (message) => calls.push(`post:${message.type}`) },
     logBackgroundStateUpdate: () => calls.push('background'), refreshSendButtonState: () => calls.push('refresh'),
     clearAppendInputForSessionChange: () => calls.push('append-clear'), renderHeaderUsage: () => calls.push('header'),
+    transitionActiveSessionPresentationOwner: () => calls.push('transition'),
     destroyChatWindowAdapter: () => calls.push('destroy'), clearQuestionOverlay: () => calls.push('question'),
     clearPermissionOverlay: () => calls.push('permission'), closeStallCard: () => calls.push('stall'),
     setSystemNotice: () => calls.push('notice'), applyPromptToSession: () => calls.push('prompt'),
