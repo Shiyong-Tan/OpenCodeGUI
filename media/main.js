@@ -6204,6 +6204,8 @@ function renderAssistantMarkdown(content, message) {
     const signature = `${linkifyRefs ? '1' : '0'}:${text}`;
     if (message && message._renderSignature === signature && typeof message._renderHtml === 'string') {
         content.innerHTML = message._renderHtml;
+        resetCachedCodeBlockCopyEnhancements(content);
+        enhanceCodeBlocksWithCopyButtons(content);
         return;
     }
     renderMarkdownInto(content, text, { linkifyRefs });
@@ -6289,56 +6291,59 @@ function enhanceCodeBlocksWithCopyButtons(root) {
     if (root.closest && root.closest('.conflict-card')) return;
     const richEnhancementStartedAt = typeof startChatRenderPhase === 'function' ? startChatRenderPhase() : null;
 
-    const assistantRoot = root.closest ? root.closest('.message.bot') : null;
-    const containers = assistantRoot
-        ? [assistantRoot]
-        : Array.from(root.querySelectorAll('.message.bot'));
+    for (const pre of root.querySelectorAll('pre')) {
+        if (pre.closest && pre.closest('.conflict-card')) continue;
+        if (pre.dataset.hasCopyBtn === '1') continue;
+        const code = pre.querySelector('code');
+        if (!code) continue;
+        pre.dataset.hasCopyBtn = '1';
 
-    for (const container of containers) {
-        const contentRoot = container.querySelector('.message-content') || container;
-        for (const pre of contentRoot.querySelectorAll('pre')) {
-            if (pre.dataset.hasCopyBtn === '1') continue;
-            const code = pre.querySelector('code');
-            if (!code) continue;
-            pre.dataset.hasCopyBtn = '1';
-
-            let wrapper = pre.parentElement;
-            if (!wrapper || !wrapper.classList.contains('code-block-wrap')) {
-                wrapper = document.createElement('div');
-                wrapper.className = 'code-block-wrap';
-                pre.parentElement?.insertBefore(wrapper, pre);
-                wrapper.appendChild(pre);
-            }
-
-            const btn = document.createElement('button');
-            btn.type = 'button';
-            btn.className = 'code-copy-btn';
-            btn.textContent = 'Copy';
-            btn.addEventListener('click', async (event) => {
-                event.stopPropagation();
-                const text = code.innerText || '';
-                if (!text) return;
-                const copied = await writeTextToClipboard(text);
-                const prev = 'Copy';
-                if (btn._copyResetTimer) {
-                    clearTimeout(btn._copyResetTimer);
-                }
-                if (copied) {
-                    btn.textContent = 'Copied!';
-                    btn._copyResetTimer = setTimeout(() => {
-                        btn.textContent = prev;
-                    }, 800);
-                } else {
-                    btn.textContent = 'Failed';
-                    btn._copyResetTimer = setTimeout(() => {
-                        btn.textContent = prev;
-                    }, 1200);
-                }
-            });
-            wrapper.appendChild(btn);
+        let wrapper = pre.parentElement;
+        if (!wrapper || !wrapper.classList.contains('code-block-wrap')) {
+            wrapper = document.createElement('div');
+            wrapper.className = 'code-block-wrap';
+            pre.parentElement?.insertBefore(wrapper, pre);
+            wrapper.appendChild(pre);
         }
+
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'code-copy-btn';
+        btn.textContent = 'Copy';
+        btn.addEventListener('click', async (event) => {
+            event.stopPropagation();
+            const text = code.innerText || '';
+            if (!text) return;
+            const copied = await writeTextToClipboard(text);
+            const prev = 'Copy';
+            if (btn._copyResetTimer) {
+                clearTimeout(btn._copyResetTimer);
+            }
+            if (copied) {
+                btn.textContent = 'Copied!';
+                btn._copyResetTimer = setTimeout(() => {
+                    btn.textContent = prev;
+                }, 800);
+            } else {
+                btn.textContent = 'Failed';
+                btn._copyResetTimer = setTimeout(() => {
+                    btn.textContent = prev;
+                }, 1200);
+            }
+        });
+        wrapper.appendChild(btn);
     }
     if (typeof finishChatRenderPhase === 'function') finishChatRenderPhase('richEnhancement', richEnhancementStartedAt);
+}
+
+function resetCachedCodeBlockCopyEnhancements(root) {
+    if (!root || typeof root.querySelectorAll !== 'function') return;
+    for (const button of root.querySelectorAll('.code-copy-btn')) {
+        button.remove();
+    }
+    for (const pre of root.querySelectorAll('pre[data-has-copy-btn="1"]')) {
+        delete pre.dataset.hasCopyBtn;
+    }
 }
 
 function escapeSystemReminderTags(text) {
