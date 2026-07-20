@@ -6076,21 +6076,27 @@ ${attachmentLines.join('\n')}`
                             const canonicalMessageIds = Array.isArray(segment.messageIds)
                                 ? segment.messageIds.filter((id) => typeof id === 'string' && id.startsWith('msg_'))
                                 : [];
-                            const uiRange = this.resolveUndoUiVisibleRange(data, resolvedMessageId, canonicalMessageIds, extAnchorIndex);
+                            const observedUiRange = this.resolveUndoUiVisibleRange(data, resolvedMessageId, [], extAnchorIndex);
+                            const appliedMessageIds = canonicalMessageIds.length
+                                ? canonicalMessageIds
+                                : observedUiRange.messageIds;
+                            const appliedRangeSource = canonicalMessageIds.length
+                                ? 'extension-canonical'
+                                : observedUiRange.source;
                             const uiSegment = {
                                 ...segment,
-                                endMessageId: uiRange.messageIds[uiRange.messageIds.length - 1] || segment.endMessageId,
-                                messageIds: uiRange.messageIds
+                                endMessageId: appliedMessageIds[appliedMessageIds.length - 1] || segment.endMessageId,
+                                messageIds: appliedMessageIds
                             };
-                            this.uiDebugChannel.appendLine(`[EXT][UNDO_RANGE] source=${uiRange.source} sessionId=${finalSessionId || 'null'} opId=${operationId || 'null'} uiAnchorIndex=${uiRange.uiAnchorIndex} extAnchorIndex=${uiRange.extAnchorIndex} messageIds=${uiRange.messageIds.length}`);
-                            if (uiRange.uiAnchorIndex >= 0 && uiRange.extAnchorIndex >= 0 && uiRange.uiAnchorIndex !== uiRange.extAnchorIndex) {
-                                this.uiDebugChannel.appendLine(`[EXT][UNDO_RANGE_MISMATCH] sessionId=${finalSessionId || 'null'} opId=${operationId || 'null'} uiAnchorIndex=${uiRange.uiAnchorIndex} extAnchorIndex=${uiRange.extAnchorIndex} messageIds=${uiRange.messageIds.length}`);
+                            this.uiDebugChannel.appendLine(`[EXT][UNDO_RANGE] source=${appliedRangeSource} sessionId=${finalSessionId || 'null'} opId=${operationId || 'null'} uiAnchorIndex=${observedUiRange.uiAnchorIndex} extAnchorIndex=${observedUiRange.extAnchorIndex} messageIds=${appliedMessageIds.length} uiMessageIds=${observedUiRange.messageIds.length}`);
+                            if (observedUiRange.uiAnchorIndex >= 0 && observedUiRange.extAnchorIndex >= 0 && observedUiRange.uiAnchorIndex !== observedUiRange.extAnchorIndex) {
+                                this.uiDebugChannel.appendLine(`[EXT][UNDO_RANGE_MISMATCH] sessionId=${finalSessionId || 'null'} opId=${operationId || 'null'} uiAnchorIndex=${observedUiRange.uiAnchorIndex} extAnchorIndex=${observedUiRange.extAnchorIndex} messageIds=${appliedMessageIds.length} uiMessageIds=${observedUiRange.messageIds.length}`);
                             }
-                            this.uiDebugChannel.appendLine(`[EXT][UNDO_TX] type=revertedSegment sessionId=${finalSessionId || 'null'} anchorMsgId=${segment.startMessageId} endMsgId=${uiSegment.endMessageId} applied=true opId=${operationId || 'null'} messageIds=${uiRange.messageIds.length}`);
+                            this.uiDebugChannel.appendLine(`[EXT][UNDO_TX] type=revertedSegment sessionId=${finalSessionId || 'null'} anchorMsgId=${segment.startMessageId} endMsgId=${uiSegment.endMessageId} applied=true opId=${operationId || 'null'} messageIds=${appliedMessageIds.length}`);
                             liveWebview.postMessage({
                                 type: 'revertedSegment',
                                 conflicts: result.conflicts || [],
-                                messageIds: uiRange.messageIds,
+                                messageIds: appliedMessageIds,
                                 segment: {
                                     isActive: uiSegment.isActive,
                                     startMessageId: uiSegment.startMessageId,

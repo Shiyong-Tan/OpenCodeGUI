@@ -103,6 +103,7 @@ function attachWebview(provider: any): { postMessage: jest.Mock; receive: (data:
         webview,
         visible: true,
         onDidChangeVisibility: (_callback: () => void) => ({ dispose: jest.fn() }),
+        onDidDispose: (_callback: () => void) => ({ dispose: jest.fn() }),
     } as any);
     if (!receive) throw new Error('webview receive callback was not registered');
     return { postMessage: webview.postMessage, receive };
@@ -143,9 +144,18 @@ describe('SidebarProvider undoToMessage owner routing', () => {
         }));
     });
 
-    it('prefers valid WebView-visible range when extension canonical anchor index differs', async () => {
+    it('keeps the applied canonical range when the WebView-visible range is shorter', async () => {
         const provider = createProvider();
-        provider.client.getUndoRangeForAnchor.mockReturnValue({ startIndex: 0, endIndex: 1 });
+        provider.client.getUndoRangeForAnchor.mockReturnValue({ startIndex: 2, endIndex: 10 });
+        provider.client.getRevertedSegment.mockReturnValue({
+            isActive: true,
+            startMessageId: 'msg_anchor',
+            startMessageIndex: 2,
+            endMessageId: 'msg_merged_tail',
+            endMessageIndex: 10,
+            collapsed: true,
+            messageIds: ['msg_anchor', 'msg_ui_tail', 'msg_folded_anchor', 'msg_merged_tail'],
+        });
         const { postMessage, receive } = attachWebview(provider);
 
         await receive({
@@ -162,20 +172,21 @@ describe('SidebarProvider undoToMessage owner routing', () => {
             type: 'revertedSegment',
             sessionId: 'ses_A_payload',
             operationId: 'op_ui_range',
-            messageIds: ['msg_anchor', 'msg_ui_tail'],
+            messageIds: ['msg_anchor', 'msg_ui_tail', 'msg_folded_anchor', 'msg_merged_tail'],
             segment: expect.objectContaining({
-                endMessageId: 'msg_ui_tail',
-                messageIds: ['msg_anchor', 'msg_ui_tail'],
+                endMessageId: 'msg_merged_tail',
+                messageIds: ['msg_anchor', 'msg_ui_tail', 'msg_folded_anchor', 'msg_merged_tail'],
             }),
         }));
         expect(provider.persistRevertedSegment).toHaveBeenCalledWith(
             'ses_A_payload',
-            expect.objectContaining({ messageIds: ['msg_anchor', 'msg_ui_tail'] }),
+            expect.objectContaining({ messageIds: ['msg_anchor', 'msg_ui_tail', 'msg_folded_anchor', 'msg_merged_tail'] }),
             expect.any(Array),
             false
         );
-        expect(provider.uiDebugChannel.appendLine).toHaveBeenCalledWith(expect.stringContaining('[EXT][UNDO_RANGE] source=webview-visible'));
-        expect(provider.uiDebugChannel.appendLine).toHaveBeenCalledWith(expect.stringContaining('uiAnchorIndex=3 extAnchorIndex=0'));
+        expect(provider.uiDebugChannel.appendLine).toHaveBeenCalledWith(expect.stringContaining('[EXT][UNDO_RANGE] source=extension-canonical'));
+        expect(provider.uiDebugChannel.appendLine).toHaveBeenCalledWith(expect.stringContaining('messageIds=4 uiMessageIds=2'));
+        expect(provider.uiDebugChannel.appendLine).toHaveBeenCalledWith(expect.stringContaining('uiAnchorIndex=3 extAnchorIndex=2'));
         expect(provider.uiDebugChannel.appendLine).toHaveBeenCalledWith(expect.stringContaining('[EXT][UNDO_RANGE_MISMATCH]'));
     });
 
@@ -202,7 +213,41 @@ describe('SidebarProvider undoToMessage owner routing', () => {
                 messageIds: ['msg_anchor', 'msg_tail'],
             }),
         }));
-        expect(provider.uiDebugChannel.appendLine).toHaveBeenCalledWith(expect.stringContaining('[EXT][UNDO_RANGE] source=fallback'));
+        expect(provider.uiDebugChannel.appendLine).toHaveBeenCalledWith(expect.stringContaining('[EXT][UNDO_RANGE] source=extension-canonical'));
+    });
+
+    it('uses the WebView range only when the applied segment has no canonical members', async () => {
+        const provider = createProvider();
+        provider.client.getRevertedSegment.mockReturnValue({
+            isActive: true,
+            startMessageId: 'msg_anchor',
+            startMessageIndex: 1,
+            endMessageId: 'msg_anchor',
+            endMessageIndex: 1,
+            collapsed: true,
+            messageIds: [],
+        });
+        const { postMessage, receive } = attachWebview(provider);
+
+        await receive({
+            type: 'undoToMessage',
+            sessionId: 'ses_A_payload',
+            messageId: 'msg_anchor',
+            operationId: 'op_missing_canonical',
+            visibleMessageIds: ['msg_pre', 'msg_anchor', 'msg_ui_tail'],
+            anchorIndex: 1,
+            forwardMessageIdsFromAnchor: ['msg_anchor', 'msg_ui_tail'],
+        });
+
+        expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+            type: 'revertedSegment',
+            messageIds: ['msg_anchor', 'msg_ui_tail'],
+            segment: expect.objectContaining({
+                endMessageId: 'msg_ui_tail',
+                messageIds: ['msg_anchor', 'msg_ui_tail'],
+            }),
+        }));
+        expect(provider.uiDebugChannel.appendLine).toHaveBeenCalledWith(expect.stringContaining('[EXT][UNDO_RANGE] source=webview-visible'));
     });
 
     it('retains WebView-visible order for undo conflict override retry', async () => {
