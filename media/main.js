@@ -6888,6 +6888,14 @@ document.addEventListener('DOMContentLoaded', () => {
     if (typeof buildComposerSubmission !== 'function') {
         throw new Error('Composer submission builder is unavailable');
     }
+    const createClipboardAttachmentController = window.__ocFeatures?.createClipboardAttachmentController;
+    if (typeof createClipboardAttachmentController !== 'function') {
+        throw new Error('Clipboard attachment controller is unavailable');
+    }
+    const clipboardAttachmentController = createClipboardAttachmentController({
+        createFileReader: () => new FileReader(),
+        postMessage: (message) => vscode.postMessage(message)
+    });
     const usageEl = document.getElementById('header-usage');
     const usageFillEl = document.getElementById('header-usage-fill');
     const usageLabelEl = document.getElementById('header-usage-label');
@@ -14341,25 +14349,6 @@ function shouldHideDcpUiMessage(message) {
         panelBackdrop.classList.add('hidden');
     }
 
-    function handlePaste(e) {
-        const items = e.clipboardData?.items || [];
-        for (const item of items) {
-            if (item.type && item.type.startsWith('image/')) {
-                const file = item.getAsFile();
-                if (!file) continue;
-                const reader = new FileReader();
-                reader.onload = () => {
-                    vscode.postMessage({
-                        type: 'clipboardImage',
-                        dataUrl: reader.result,
-                        mime: file.type
-                    });
-                };
-                reader.readAsDataURL(file);
-            }
-        }
-    }
-
 function applyPromptToSession(sessionId, payload) {
     const session = getSessionState(sessionId, true);
     session.cancelledTurn = false;
@@ -15153,7 +15142,7 @@ function appendMessageImages(parentEl, message) {
         handlePrimarySendClick();
     });
 
-    input.addEventListener('paste', handlePaste);
+    input.addEventListener('paste', (event) => clipboardAttachmentController.handlePaste(event));
     input.addEventListener('input', () => {
         const session = getSessionState(activeSessionId);
         if (appendInputMode && appendInputMode.sessionId === activeSessionId) {
