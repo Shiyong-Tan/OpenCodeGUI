@@ -206,6 +206,23 @@ describe('undo segment placeholder presentation revisions', () => {
     });
     expect(context.invalidate('missing')).toBe(false);
   });
+
+  test('toggle resolves the live hydrated segment instead of mutating a stale render closure', () => {
+    const toggle = extractFunction('function toggleUndoSegmentPlaceholder(');
+    const staleSegment = { collapsed: true };
+    const liveSegment = { collapsed: true };
+    const session = { segmentsByNoticeKey: new Map([['system:undo:msg-a', liveSegment]]) };
+    const context = vm.createContext({
+      getSessionState: (sessionId: string) => sessionId === 'session-a' ? session : null,
+    });
+    vm.runInContext(`${toggle}; globalThis.toggle = toggleUndoSegmentPlaceholder;`, context);
+
+    const result = context.toggle('session-a', 'system:undo:msg-a');
+    expect(result).toBe(liveSegment);
+    expect(liveSegment.collapsed).toBe(false);
+    expect(staleSegment.collapsed).toBe(true);
+    expect(context.toggle('session-a', 'missing')).toBeNull();
+  });
 });
 
 function extractCaseBlock(startMarker: string, endMarker: string): string {

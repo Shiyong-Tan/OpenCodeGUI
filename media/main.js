@@ -5087,6 +5087,15 @@ function handleToggleSegment(sessionId, segmentId) {
     assertInvariants(sessionId, 'toggleSegment');
 }
 
+function toggleUndoSegmentPlaceholder(sessionId, noticeKey) {
+    const session = getSessionState(sessionId);
+    if (!session || !noticeKey) return null;
+    const segment = session.segmentsByNoticeKey.get(noticeKey);
+    if (!segment) return null;
+    segment.collapsed = !segment.collapsed;
+    return segment;
+}
+
 const FILE_REF_RE = /([A-Za-z0-9_./-]+\.[A-Za-z0-9]+):(\d{1,6})(?::(\d{1,6}))?/g;
 const FILE_REF_CODE_RE = /([A-Za-z0-9_./-]+\.[A-Za-z0-9]+):(\d{1,6})(?::(\d{1,6}))?/g;
 const FILE_REF_QUICK_RE = /([A-Za-z0-9_./-]+\.[A-Za-z0-9]+):(\d{1,6})(?::(\d{1,6}))?/;
@@ -7995,12 +8004,12 @@ function renderMessageElement(message, renderedSet) {
             toggleBtn.className = 'reverted-segment-btn secondary';
             toggleBtn.textContent = collapsed ? 'Expand' : 'Collapse';
             toggleBtn.addEventListener('click', () => {
-                if (!segment) return;
-                segment.collapsed = !segment.collapsed;
+                const liveSegment = toggleUndoSegmentPlaceholder(activeSessionId, noticeKey);
+                if (!liveSegment) return;
                 const invalidated = invalidateKeyedChatUnitPresentation(message.id);
                 vscode.postMessage({
                     type: 'ui-debug',
-                    payload: ['[WV][SEG_TOGGLE]', `noticeKey=${noticeKey || 'null'}`, `collapsed=${segment.collapsed}`, `invalidated=${invalidated}`]
+                    payload: ['[WV][SEG_TOGGLE]', `noticeKey=${noticeKey || 'null'}`, `collapsed=${liveSegment.collapsed}`, `invalidated=${invalidated}`]
                 });
                 window.__oc?.renderFromState?.();
             });
