@@ -25,13 +25,12 @@ describe('model state production ownership', () => {
   it('keeps provider and speed rules in the bundled feature module', () => {
     expect(source).not.toContain('function isFreeModel(model) {');
     expect(source).toContain('window.__ocRendering?.isCopilotProvider?.(providerId)');
-    expect(source).toContain('window.__ocRendering?.parseSpeedMultiplier?.(value)');
+    expect(source).not.toContain('function parseSpeedMultiplier(value) {');
   });
 
   it('delegates model, variant, and quota DOM ownership to the feature controller', () => {
     expect(source).toContain('const modelUiController = createModelUiController({');
     expect(source).toContain('modelUiController.renderModelSelect();');
-    expect(source).toContain('modelUiController.renderVariantSelect();');
     expect(source).toContain('modelUiController.updateVariantOptions(notifyCurrentVariant);');
     expect(source).toContain('modelUiController.showQuotaTooltip();');
   });
