@@ -5,6 +5,7 @@ import { createContextTokenUiController, deriveContextTokenPresentation } from '
 import { createFileMentionController, findActiveFileMention, normalizeFileRef } from './composer/file-mention-controller';
 import { buildComposerSubmission } from './composer/submission';
 import { createClipboardAttachmentController, getClipboardImageItems } from './composer/clipboard-controller';
+import { createComposerInputController, decideComposerInputKeyAction } from './composer/input-controller';
 import { createHeaderUiController } from './header/header-controller';
 import { createHeaderState, recomputeSessionUsage } from './header/header-state';
 import { createModelUiController } from './models/model-controller';
@@ -27,6 +28,8 @@ const facade = Object.freeze({
   buildComposerSubmission,
   createClipboardAttachmentController,
   getClipboardImageItems,
+  createComposerInputController,
+  decideComposerInputKeyAction,
   createHeaderState,
   recomputeSessionUsage,
   createHeaderUiController,
