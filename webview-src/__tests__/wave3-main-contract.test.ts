@@ -10,10 +10,11 @@ import { decideChatWindowAdaptivePolicy } from '../rendering/chat-window-adaptiv
 
 const { createAtomicScenarioExecutor, createRealTransactionHarness } = require('../../scripts/chat-window-adaptive-range-harness.js');
 
-const source = fs.readFileSync(path.join(process.cwd(), 'media', 'main.js'), 'utf8');
-const recoveredSource = fs.readFileSync(path.join(process.cwd(), '.opencode', 'attachments',
-  '2026-07-16-wave-b4s-recovered-reviewed', 'media-main.js'), 'utf8');
-const wave3TestSource = fs.readFileSync(__filename, 'utf8');
+const readNormalizedSource = (filePath: string) => fs.readFileSync(filePath, 'utf8').replace(/\r\n/g, '\n');
+const source = readNormalizedSource(path.join(process.cwd(), 'media', 'main.js'));
+const recoveredSource = readNormalizedSource(path.join(process.cwd(), '.opencode', 'attachments',
+  '2026-07-16-wave-b4s-recovered-reviewed', 'media-main.js'));
+const wave3TestSource = readNormalizedSource(__filename);
 const b4ScriptPath = path.join(process.cwd(), 'scripts', 'chat-window-adaptive-range-synthetic.js');
 const b4EvidencePath = 'C:\\Users\\tan_s\\AppData\\Local\\Temp\\opencode\\wave-b4-adaptive-range-evidence.json';
 
@@ -1583,7 +1584,7 @@ describe('B4-RED-0 authenticity gap proof (intentional RED)', () => {
     throw new Error(`unclosed production function ${name}`);
   };
   const independentlyComputedHashes = () => {
-    const mainSource = fs.readFileSync(path.join(process.cwd(), 'media', 'main.js'), 'utf8');
+    const mainSource = readNormalizedSource(path.join(process.cwd(), 'media', 'main.js'));
     return Object.fromEntries(requiredProductionFunctions.map((name) => [name,
       crypto.createHash('sha256').update(extractDurable(mainSource, name).replace(/\r\n/g, '\n')).digest('hex'),
     ]));
@@ -2372,7 +2373,7 @@ describe('A2.4D journaled keyed and structural transaction', () => {
       expect(fs.existsSync(helperPath)).toBe(true);
       if (!fs.existsSync(helperPath)) return;
 
-      const helperSource = fs.readFileSync(helperPath, 'utf8');
+      const helperSource = readNormalizedSource(helperPath);
       const beforeGlobals = new Set(Object.getOwnPropertyNames(globalThis));
       const beforeArgv = [...process.argv];
       const first = require(helperPath);
@@ -3073,7 +3074,7 @@ describe('A2.4D journaled keyed and structural transaction', () => {
       }
     }
     expect(constructed).toBe(9 * 8);
-    const helperSource = fs.readFileSync(path.join(process.cwd(), 'scripts', 'chat-window-adaptive-range-harness.js'), 'utf8');
+    const helperSource = readNormalizedSource(path.join(process.cwd(), 'scripts', 'chat-window-adaptive-range-harness.js'));
     for (const consumerOwned of [
       'search-unmounted', 'append-active', 'undo-reverted', 'change-list', 'subagent', 'session-switch',
       "'trace'", "'smoke'", 'deferredPending', 'reduceExternalOutcome', '125', '63',
