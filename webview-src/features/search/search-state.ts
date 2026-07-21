@@ -169,6 +169,11 @@ export function createSessionSearchState() {
       windowTargetKey = activeIndex >= 0 ? smartMessageIds[activeIndex] : '';
       return true;
     },
+    acceptSmartSearchResponse(requestId: string): boolean {
+      if (!requestId || requestId !== smartRequestId) return false;
+      smartInFlight = false;
+      return true;
+    },
     failSmartSearch(requestId: string): boolean {
       if (!requestId || requestId !== smartRequestId) return false;
       mode = 'smart';

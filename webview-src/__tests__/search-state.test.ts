@@ -27,6 +27,21 @@ describe('session search state', () => {
     expect(state.navigate(1)).toEqual({ mode: 'smart', index: 1, total: 2, targetKey: 'm3' });
   });
 
+  it('accepts only the active Smart Search response or error', () => {
+    const state = createSessionSearchState();
+    state.setTextQuery('query');
+    state.beginSmartSearch('current');
+    expect(state.acceptSmartSearchResponse('stale')).toBe(false);
+    expect(state.snapshot().smartInFlight).toBe(true);
+    expect(state.acceptSmartSearchResponse('current')).toBe(true);
+    expect(state.snapshot().smartInFlight).toBe(false);
+
+    state.beginSmartSearch('next');
+    expect(state.failSmartSearch('stale')).toBe(false);
+    expect(state.failSmartSearch('next')).toBe(true);
+    expect(state.snapshot()).toMatchObject({ mode: 'smart', smartInFlight: false, smartMessageIds: [], activeIndex: -1 });
+  });
+
   it('rekeys both result sets and the virtualization target without changing order', () => {
     const state = createSessionSearchState();
     state.setTextQuery('q');

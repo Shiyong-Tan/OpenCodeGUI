@@ -15846,18 +15846,14 @@ function appendMessageImages(parentEl, message) {
 
         switch (message.type) {
             case 'smartSessionSearchResult': {
-                if (message.requestId !== sessionSearch.smartRequestId) break;
-                sessionSearch.smartInFlight = false;
+                if (!sessionSearch.acceptSmartSearchResponse(message.requestId)) break;
                 applySmartSessionSearchResults(message.messageIds || []);
                 updateSessionSearchControls();
                 break;
             }
             case 'smartSessionSearchError': {
-                if (message.requestId !== sessionSearch.smartRequestId) break;
-                sessionSearch.smartInFlight = false;
-                sessionSearch.mode = 'smart';
+                if (!sessionSearch.failSmartSearch(message.requestId)) break;
                 sessionSearch.matches = [];
-                sessionSearch.activeIndex = -1;
                 updateSessionSearchControls();
                 break;
             }
