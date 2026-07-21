@@ -14,6 +14,7 @@ import { createModelUiController } from '../features/models/model-controller';
 import { createAttachmentState, isImageAttachment } from '../features/composer/attachment-state';
 import { createAttachmentUiController, deriveAttachmentPresentation } from '../features/composer/attachment-controller';
 import { createHeaderState, recomputeSessionUsage } from '../features/header/header-state';
+import { createHeaderUiController } from '../features/header/header-controller';
 
 export const RENDERING_FACADE_VERSION = 1 as const;
 
@@ -61,6 +62,7 @@ const facade = Object.freeze(Object.defineProperties(facadeBase, {
   deriveAttachmentPresentation: hiddenCapability(deriveAttachmentPresentation),
   createHeaderState: hiddenCapability(createHeaderState),
   recomputeSessionUsage: hiddenCapability(recomputeSessionUsage),
+  createHeaderUiController: hiddenCapability(createHeaderUiController),
 })) as typeof facadeBase
   & { readonly getSafeShellSpec: typeof getSafeShellSpec }
   & { readonly planChatWindowContainment: typeof planChatWindowContainment }
@@ -78,7 +80,8 @@ const facade = Object.freeze(Object.defineProperties(facadeBase, {
   & { readonly createAttachmentUiController: typeof createAttachmentUiController }
   & { readonly deriveAttachmentPresentation: typeof deriveAttachmentPresentation }
   & { readonly createHeaderState: typeof createHeaderState }
-  & { readonly recomputeSessionUsage: typeof recomputeSessionUsage };
+  & { readonly recomputeSessionUsage: typeof recomputeSessionUsage }
+  & { readonly createHeaderUiController: typeof createHeaderUiController };
 
 declare global {
   interface Window {
