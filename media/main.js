@@ -3387,6 +3387,41 @@ function materializeInjectedChangeLists(session, rawSessionMessages, source = 's
     return stats;
 }
 
+function buildAnchoredPresentationTimeline(session) {
+    const timeline = Array.isArray(session?.timeline) ? session.timeline : [];
+    if (!session || timeline.length === 0) return timeline.slice();
+    const timelineIds = new Set(timeline);
+    const changeListsByAnchor = new Map();
+    const baseTimeline = [];
+    for (const id of timeline) {
+        const message = session.messagesById?.get?.(id);
+        if (!isChangeListSessionMessage(message)) {
+            baseTimeline.push(id);
+            continue;
+        }
+        const explicitAnchorId = typeof message.meta?.stableAnchorMessageId === 'string' && message.meta.stableAnchorMessageId.length
+            ? message.meta.stableAnchorMessageId
+            : (typeof message.meta?.anchorMessageId === 'string' ? message.meta.anchorMessageId : '');
+        const anchorId = explicitAnchorId
+            ? (toStableMessageKey(session, explicitAnchorId) || explicitAnchorId)
+            : '';
+        if (!anchorId || anchorId === id || !timelineIds.has(anchorId) || !session.messagesById.has(anchorId)) {
+            baseTimeline.push(id);
+            continue;
+        }
+        if (!changeListsByAnchor.has(anchorId)) changeListsByAnchor.set(anchorId, []);
+        changeListsByAnchor.get(anchorId).push(id);
+    }
+    if (changeListsByAnchor.size === 0) return baseTimeline;
+    const projected = [];
+    for (const id of baseTimeline) {
+        projected.push(id);
+        const anchored = changeListsByAnchor.get(id);
+        if (anchored) projected.push(...anchored);
+    }
+    return projected;
+}
+
 /**
  * CORE SEGMENT FUNCTIONS (V2 - Simplified)
  * Segments are pure render-layer constructs that NEVER modify timeline
@@ -10183,7 +10218,7 @@ function shouldHideDcpUiMessage(message) {
     }
 
     function buildKeyedRenderCandidates(session) {
-        const timeline = Array.isArray(session?.timeline) ? session.timeline : [];
+        const timeline = buildAnchoredPresentationTimeline(session);
         if (!session || timeline.length === 0) {
             const loadingHistory = isActiveSessionHistoryLoading();
             return [{
@@ -11945,10 +11980,15 @@ function shouldHideDcpUiMessage(message) {
         chatWindowState.anchorKey = '';
         chatWindowState.visualOffset = 0;
         chatWindowState.userScrollActiveUntil = 0;
-        chatWindowState.programmaticScroll = false;
         chatWindowState.activityBelow = false;
         autoScrollPinnedToBottom = true;
+        chatWindowState.programmaticScroll = true;
         if (chatContainer) chatContainer.scrollTop = 0;
+        if (typeof requestAnimationFrame === 'function') {
+            requestAnimationFrame(() => { chatWindowState.programmaticScroll = false; });
+        } else {
+            chatWindowState.programmaticScroll = false;
+        }
         chatLocalHistoryController?.complete?.(ownedSessionId);
         destroyChatLocalOlderSurface();
         chatWindowState.topSpacer?.remove?.();
@@ -12449,6 +12489,7 @@ function shouldHideDcpUiMessage(message) {
                         && snapshot.items.every((item) => chatWindowState.mountedKeys.has(item.key));
                     if (sameMountedRange && chatWindowState.topSpacer && chatWindowState.bottomSpacer) {
                         updateChatWindowSpacers(snapshot);
+                        if (autoScrollPinnedToBottom) scrollToBottom(true);
                         return;
                     }
                     if (chatWindowState.rendering && chatWindowState.pendingScrollKey) {
@@ -13915,7 +13956,7 @@ function shouldHideDcpUiMessage(message) {
             }
         }
 
-        const timeline = Array.isArray(session.timeline) ? session.timeline : [];
+        const timeline = buildAnchoredPresentationTimeline(session);
         const segments = Array.from(session.segmentsByNoticeKey.values());
         const derivedHiddenSet = session.hiddenSet; // Already computed by rebuildHiddenSetFromTimeline
         const appendChildPresentationIndex = buildAppendChildPresentationIndex(session);

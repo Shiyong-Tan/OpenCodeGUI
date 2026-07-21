@@ -1284,6 +1284,7 @@ describe('UI log regression repairs', () => {
       activeSessionId: 'session-a',
       hydratedSessions: new Set(),
       getSessionState: () => session,
+      buildAnchoredPresentationTimeline: (value: any) => Array.isArray(value?.timeline) ? value.timeline.slice() : [],
     });
     expect(context.buildKeyedRenderCandidates(session)).toEqual([{
       key: 'history-loading:session-a', kind: 'greeting', value: { text: 'Loading history ...' },
@@ -2081,6 +2082,7 @@ describe('Wave 3 extracted runtime coordinator', () => {
       isChatWindowAvailable: () => true,
       sessionSearch: { windowTargetKey: '' },
       autoScrollPinnedToBottom: false,
+      requestAnimationFrame: (callback: () => void) => callback(),
       scheduleRenderFromState: (reason: string) => calls.push(reason),
       Set,
     });
@@ -2136,6 +2138,28 @@ describe('Wave 3 extracted runtime coordinator', () => {
       alreadyTimeline: 1, insertedAfter: 2, materialized: 1, skippedMissingAnchor: 1,
     }));
     expect(diagnostics.at(-1)).toEqual(expect.arrayContaining(['skippedMissingAnchor=1']));
+  });
+
+  test('presentation projection repairs a changelist that was moved away from its explicit anchor', () => {
+    const project = extractFunction('function buildAnchoredPresentationTimeline(');
+    const context = vm.createContext({
+      isChangeListSessionMessage: (item: any) => item?.meta?.kind === 'changeList',
+      toStableMessageKey: (_session: any, id: string) => id,
+      Map, Set,
+    });
+    vm.runInContext(`${project}; globalThis.project = buildAnchoredPresentationTimeline;`, context);
+    const messagesById = new Map([
+      ['assistant-a', { id: 'assistant-a', role: 'assistant' }],
+      ['assistant-b', { id: 'assistant-b', role: 'assistant' }],
+      ['change-a', {
+        id: 'change-a', role: 'system',
+        meta: { kind: 'changeList', files: ['src/a.ts'], stableAnchorMessageId: 'assistant-a' },
+      }],
+    ]);
+
+    expect(Array.from(context.project({
+      timeline: ['assistant-a', 'assistant-b', 'change-a'], messagesById,
+    }))).toEqual(['assistant-a', 'change-a', 'assistant-b']);
   });
 });
 
@@ -4616,6 +4640,30 @@ describe('A2.4D journaled keyed and structural transaction', () => {
     expect(harness.calls.filter((entry: string) => entry === 'schedule')).toHaveLength(schedulesBefore);
     expect(harness.chatWindowState.pendingRangeRender).toBe(false);
     expect(harness.chatWindowState.snapshot).toBe(acknowledged);
+  });
+
+  test('CF3 same mounted range re-pins after spacer growth changes the scroll height', () => {
+    const harness = candidateStagingHarness();
+    harness.context.prepareUnpublishedChatWindowTransaction({}, harness.units, [], null);
+    const items = [
+      { key: 'unit-98', index: 98, start: 0, end: 50, size: 50 },
+      { key: 'unit-99', index: 99, start: 50, end: 100, size: 50 },
+    ];
+    harness.chatWindowState.mountedKeys = new Set(items.map((item) => item.key));
+    harness.chatWindowState.topSpacer = {};
+    harness.chatWindowState.bottomSpacer = {};
+    harness.chatWindowState.acknowledgedRawSnapshot = {
+      items: items.map((item) => ({ ...item })), totalSize: 100,
+    };
+    harness.context.autoScrollPinnedToBottom = true;
+    const spacersBefore = harness.calls.filter((entry: string) => entry === 'spacers').length;
+    const scrollsBefore = harness.calls.filter((entry: string) => entry === 'scroll').length;
+
+    harness.callbacks.onRangeChange({ items, totalSize: 120 });
+
+    expect(harness.calls.filter((entry: string) => entry === 'spacers')).toHaveLength(spacersBefore + 1);
+    expect(harness.calls.filter((entry: string) => entry === 'scroll')).toHaveLength(scrollsBefore + 1);
+    expect(harness.calls).not.toContain('schedule');
   });
 
   test('CF2 accepted rollback restores the prior acknowledged raw snapshot and never acknowledges a failed attempt', () => {
