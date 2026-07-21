@@ -49,6 +49,7 @@ export function createSessionSearchState() {
   let fullMatchKeys: string[] = [];
   let activeKeyIndex = -1;
   let windowTargetKey = '';
+  let matches: unknown[] = [];
 
   const snapshot = (): SessionSearchSnapshot => Object.freeze({
     open,
@@ -76,13 +77,36 @@ export function createSessionSearchState() {
   };
 
   return {
+    get open(): boolean { return open; },
+    set open(value: boolean) { open = Boolean(value); },
+    get query(): string { return query; },
+    set query(value: string) { query = typeof value === 'string' ? value : ''; },
+    get mode(): SessionSearchMode { return mode; },
+    set mode(value: SessionSearchMode) { mode = value === 'smart' ? 'smart' : 'text'; },
+    get activeIndex(): number { return activeIndex; },
+    set activeIndex(value: number) { activeIndex = Number.isSafeInteger(value) ? value : -1; },
+    get smartMessageIds(): string[] { return smartMessageIds; },
+    set smartMessageIds(value: string[]) { smartMessageIds = uniqueKeys(value); },
+    get smartRequestId(): string { return smartRequestId; },
+    set smartRequestId(value: string) { smartRequestId = typeof value === 'string' ? value : ''; },
+    get smartInFlight(): boolean { return smartInFlight; },
+    set smartInFlight(value: boolean) { smartInFlight = Boolean(value); },
+    get fullMatchKeys(): string[] { return fullMatchKeys; },
+    set fullMatchKeys(value: string[]) { fullMatchKeys = uniqueKeys(value); },
+    get activeKeyIndex(): number { return activeKeyIndex; },
+    set activeKeyIndex(value: number) { activeKeyIndex = Number.isSafeInteger(value) ? value : -1; },
+    get windowTargetKey(): string { return windowTargetKey; },
+    set windowTargetKey(value: string) { windowTargetKey = typeof value === 'string' ? value : ''; },
+    get matches(): unknown[] { return matches; },
+    set matches(value: unknown[]) { matches = Array.isArray(value) ? value : []; },
     snapshot,
-    open(): void {
+    openSearch(): void {
       open = true;
     },
-    close(): void {
+    closeSearch(): void {
       open = false;
       reset();
+      matches = [];
     },
     setTextQuery(value: unknown): void {
       query = typeof value === 'string' ? value : '';

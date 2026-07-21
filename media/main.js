@@ -209,19 +209,11 @@ let questionOverlayState = null;
 let quoteSelectionButton = null;
 let quoteSelectionText = '';
 let sessionSearchDebounceTimer = null;
-let sessionSearch = {
-    open: false,
-    query: '',
-    mode: 'text',
-    matches: [],
-    activeIndex: -1,
-    smartMessageIds: [],
-    smartRequestId: '',
-    smartInFlight: false,
-    fullMatchKeys: [],
-    activeKeyIndex: -1,
-    windowTargetKey: ''
-};
+const createSessionSearchState = window.__ocFeatures?.createSessionSearchState;
+if (typeof createSessionSearchState !== 'function') {
+    throw new Error('Session search state is unavailable');
+}
+let sessionSearch = createSessionSearchState();
 const shownQuestionCallIds = new Set();
 const sentQuestionCallIds = new Set();
 const questionOverlayQueue = [];

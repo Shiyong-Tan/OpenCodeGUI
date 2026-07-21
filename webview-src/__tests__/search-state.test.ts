@@ -3,7 +3,7 @@ import { createSessionSearchState } from '../features/search/search-state';
 describe('session search state', () => {
   it('navigates the complete text result set independently of mounted DOM hits', () => {
     const state = createSessionSearchState();
-    state.open();
+    state.openSearch();
     state.setTextQuery('needle');
     state.setTextMatchKeys(['m1', 'm2', 'm3'], true);
 
@@ -38,10 +38,10 @@ describe('session search state', () => {
 
   it('closes to the same clean state used by a new search', () => {
     const state = createSessionSearchState();
-    state.open();
+    state.openSearch();
     state.setTextQuery('q');
     state.beginSmartSearch('req');
-    state.close();
+    state.closeSearch();
     expect(state.snapshot()).toEqual({
       open: false,
       query: '',
