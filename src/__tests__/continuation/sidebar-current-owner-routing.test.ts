@@ -245,9 +245,13 @@ describe('SidebarProvider Task 6 current-owner changelist routing', () => {
         );
         expect(changeListMessages.length).toBe(1);
         expect(changeListMessages[0].meta.commitHead).toBe('head4');
+        expect(changeListMessages[0].meta).toEqual(expect.objectContaining({
+            anchorMessageId: scenario.msgB,
+            stableAnchorMessageId: scenario.msgB,
+        }));
         const ownerIndex = result.messages.findIndex((m: any) => m.id === scenario.msgB);
         const clIndex = result.messages.findIndex((m: any) => m.id === 'system:changeList:head4');
-        expect(clIndex).toBeGreaterThan(ownerIndex);
+        expect(clIndex).toBe(ownerIndex + 1);
     });
 
     it('injectChangeLists deduplicates when multiple records share the same resolved current owner', async () => {

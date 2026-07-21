@@ -3307,21 +3307,13 @@ function isChangeListSessionMessage(item) {
 
 function materializeInjectedChangeLists(session, rawSessionMessages, source = 'sessionData') {
     if (!session || !Array.isArray(rawSessionMessages) || !rawSessionMessages.length) {
-        return { seen: 0, alreadyTimeline: 0, materialized: 0, insertedAfter: 0, appended: 0, skippedNoFiles: 0 };
+        return { seen: 0, alreadyTimeline: 0, materialized: 0, insertedAfter: 0, skippedMissingAnchor: 0, skippedNoFiles: 0 };
     }
 
-    const stats = { seen: 0, alreadyTimeline: 0, materialized: 0, insertedAfter: 0, appended: 0, skippedNoFiles: 0 };
-    const findNearestPriorTimelineId = (index) => {
-        for (let i = index - 1; i >= 0; i--) {
-            const priorId = rawSessionMessages[i]?.id;
-            if (typeof priorId !== 'string' || !priorId.length) continue;
-            const stablePriorId = toStableMessageKey(session, priorId) || priorId;
-            if (session.timeline.includes(stablePriorId)) return stablePriorId;
-        }
-        return '';
-    };
+    const stats = { seen: 0, alreadyTimeline: 0, materialized: 0, insertedAfter: 0, skippedMissingAnchor: 0, skippedNoFiles: 0 };
+    const insertionTailByAnchor = new Map();
 
-    rawSessionMessages.forEach((item, index) => {
+    rawSessionMessages.forEach((item) => {
         if (!isChangeListSessionMessage(item)) return;
         stats.seen++;
         const id = item.id;
@@ -3349,25 +3341,32 @@ function materializeInjectedChangeLists(session, rawSessionMessages, source = 's
         };
         session.messagesById.set(id, message);
 
-        if (session.timeline.includes(id)) {
+        const alreadyInTimeline = session.timeline.includes(id);
+        if (alreadyInTimeline) {
             stats.alreadyTimeline++;
-            return;
         }
 
-        const anchorId = typeof message.meta?.stableAnchorMessageId === 'string' && session.timeline.includes(message.meta.stableAnchorMessageId)
+        const explicitAnchorId = typeof message.meta?.stableAnchorMessageId === 'string' && message.meta.stableAnchorMessageId.length
             ? message.meta.stableAnchorMessageId
-            : (typeof message.meta?.anchorMessageId === 'string'
-                ? (toStableMessageKey(session, message.meta.anchorMessageId) || message.meta.anchorMessageId)
-                : findNearestPriorTimelineId(index));
+            : (typeof message.meta?.anchorMessageId === 'string' ? message.meta.anchorMessageId : '');
+        const anchorId = explicitAnchorId
+            ? (toStableMessageKey(session, explicitAnchorId) || explicitAnchorId)
+            : '';
         if (anchorId && session.timeline.includes(anchorId)) {
-            const anchorIndex = session.timeline.indexOf(anchorId);
-            session.timeline.splice(anchorIndex + 1, 0, id);
+            session.timeline = session.timeline.filter((timelineId) => timelineId !== id);
+            const placementTailId = insertionTailByAnchor.get(anchorId) || anchorId;
+            const placementIndex = session.timeline.indexOf(placementTailId);
+            session.timeline.splice(placementIndex + 1, 0, id);
+            insertionTailByAnchor.set(anchorId, id);
             stats.insertedAfter++;
         } else {
-            session.timeline.push(id);
-            stats.appended++;
+            if (alreadyInTimeline) {
+                session.timeline = session.timeline.filter((timelineId) => timelineId !== id);
+            }
+            stats.skippedMissingAnchor++;
+            return;
         }
-        stats.materialized++;
+        if (!alreadyInTimeline) stats.materialized++;
     });
 
     if (stats.seen || stats.materialized) {
@@ -3379,7 +3378,7 @@ function materializeInjectedChangeLists(session, rawSessionMessages, source = 's
                 `alreadyTimeline=${stats.alreadyTimeline}`,
                 `materialized=${stats.materialized}`,
                 `insertedAfter=${stats.insertedAfter}`,
-                `appended=${stats.appended}`,
+                `skippedMissingAnchor=${stats.skippedMissingAnchor}`,
                 `skippedNoFiles=${stats.skippedNoFiles}`,
                 `timelineSize=${session.timeline.length}`]
         });
@@ -11943,6 +11942,13 @@ function shouldHideDcpUiMessage(message) {
         chatWindowState.pendingRangeRender = false;
         chatWindowState.pendingScrollKey = '';
         chatWindowState.pendingScrollAttempts = 0;
+        chatWindowState.anchorKey = '';
+        chatWindowState.visualOffset = 0;
+        chatWindowState.userScrollActiveUntil = 0;
+        chatWindowState.programmaticScroll = false;
+        chatWindowState.activityBelow = false;
+        autoScrollPinnedToBottom = true;
+        if (chatContainer) chatContainer.scrollTop = 0;
         chatLocalHistoryController?.complete?.(ownedSessionId);
         destroyChatLocalOlderSurface();
         chatWindowState.topSpacer?.remove?.();
@@ -12408,6 +12414,19 @@ function shouldHideDcpUiMessage(message) {
                         if (chatWindowState.rendering && chatWindowState.pendingScrollKey) {
                             chatWindowState.pendingRangeRender = true;
                         }
+                        return;
+                    }
+                    const pinnedContainedContraction = autoScrollPinnedToBottom
+                        && acknowledged
+                        && snapshot.totalSize === acknowledged.totalSize
+                        && snapshot.items.length > 0
+                        && snapshot.items.length < chatWindowState.mountedKeys.size
+                        && snapshot.items.every((item) => chatWindowState.mountedKeys.has(item.key));
+                    if (pinnedContainedContraction) {
+                        // A bottom-clamped viewport can alternate by one boundary item after DOM
+                        // measurement. Keep the already-mounted superset so that range callbacks
+                        // converge without a render/scroll feedback loop.
+                        chatWindowState.snapshot = acknowledged;
                         return;
                     }
                     const priorObservations = typeof chatWindowAdaptiveShadow !== 'undefined'

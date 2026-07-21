@@ -2069,13 +2069,14 @@ describe('Wave 3 extracted runtime coordinator', () => {
         adapter: { destroy: () => calls.push('destroy'), scrollToKey: () => true }, snapshot: {}, mountedKeys: new Set(['a']),
         sessionId: 'old', pendingRangeRender: true, topSpacer: { remove: () => calls.push('top') },
         bottomSpacer: { remove: () => calls.push('bottom') }, activityBelow: false, allUnits: [{ key: 'old-key' }],
-        localOlderSurface: null, localOlderObserver: null,
+        localOlderSurface: null, localOlderObserver: null, anchorKey: 'old-key', visualOffset: 37,
+        userScrollActiveUntil: 999999, programmaticScroll: true,
       },
       activeSessionId: 'old',
       chatLocalHistoryController: { complete: () => undefined, revealToKey: () => true },
       destroyChatLocalOlderSurface: () => undefined,
       tryPendingChatWindowScroll: () => { calls.push('pending-scroll'); return true; },
-      chatContainer: { classList },
+      chatContainer: { classList, scrollTop: 30486 },
       vscode: { postMessage: () => undefined },
       isChatWindowAvailable: () => true,
       sessionSearch: { windowTargetKey: '' },
@@ -2087,6 +2088,54 @@ describe('Wave 3 extracted runtime coordinator', () => {
     expect(calls).toContain('window-search');
     context.destroyChatWindowAdapter('session-switch');
     expect(calls).toEqual(expect.arrayContaining(['destroy', 'top', 'bottom', 'class:chat-window-active']));
+    expect(context.chatWindowState).toEqual(expect.objectContaining({
+      anchorKey: '', visualOffset: 0, userScrollActiveUntil: 0, programmaticScroll: false, activityBelow: false,
+    }));
+    expect(context.chatContainer.scrollTop).toBe(0);
+    expect(context.autoScrollPinnedToBottom).toBe(true);
+  });
+
+  test('hydrated change lists require and preserve their explicit anchor instead of guessing by raw position', () => {
+    const materialize = extractFunction('function materializeInjectedChangeLists(');
+    const diagnostics: string[][] = [];
+    const context = vm.createContext({
+      isChangeListSessionMessage: (item: any) => item?.meta?.kind === 'changeList',
+      toStableMessageKey: (_session: any, id: string) => id,
+      vscode: { postMessage: (message: any) => diagnostics.push(message.payload) },
+      Map, Set,
+    });
+    vm.runInContext(`${materialize}; globalThis.materialize = materializeInjectedChangeLists;`, context);
+    const session = {
+      timeline: ['anchor', 'tail', 'system:changeList:existing'],
+      messagesById: new Map([
+        ['anchor', { id: 'anchor', role: 'assistant' }],
+        ['tail', { id: 'tail', role: 'assistant' }],
+        ['system:changeList:existing', {
+          id: 'system:changeList:existing', role: 'system', text: '',
+          meta: { kind: 'changeList', files: ['src/old.ts'], stableAnchorMessageId: 'anchor' },
+        }],
+      ]),
+      nextOrder: 2,
+    };
+    const anchored = {
+      id: 'system:changeList:anchored', role: 'system', text: '',
+      meta: { kind: 'changeList', files: ['src/a.ts'], stableAnchorMessageId: 'anchor' },
+    };
+    const unanchored = {
+      id: 'system:changeList:unanchored', role: 'system', text: '',
+      meta: { kind: 'changeList', files: ['src/b.ts'] },
+    };
+    const existing = session.messagesById.get('system:changeList:existing');
+
+    const stats = context.materialize(session, [unanchored, existing, { id: 'tail' }, anchored], 'test');
+
+    expect(Array.from(session.timeline)).toEqual([
+      'anchor', 'system:changeList:existing', 'system:changeList:anchored', 'tail',
+    ]);
+    expect(stats).toEqual(expect.objectContaining({
+      alreadyTimeline: 1, insertedAfter: 2, materialized: 1, skippedMissingAnchor: 1,
+    }));
+    expect(diagnostics.at(-1)).toEqual(expect.arrayContaining(['skippedMissingAnchor=1']));
   });
 });
 
@@ -4544,6 +4593,29 @@ describe('A2.4D journaled keyed and structural transaction', () => {
 
     harness.context.destroyChatWindowAdapter('session-switch');
     expect(harness.chatWindowState.acknowledgedRawSnapshot).toBeNull();
+  });
+
+  test('CF3 pinned bottom keeps an already-mounted range superset instead of oscillating on contraction', () => {
+    const harness = candidateStagingHarness();
+    harness.context.prepareUnpublishedChatWindowTransaction({}, harness.units, [], null);
+    const mounted = Array.from({ length: 13 }, (_, index) => ({
+      key: `unit-${index}`, index, start: index * 50, end: (index + 1) * 50, size: 50,
+    }));
+    const acknowledged = Object.freeze({
+      items: Object.freeze(mounted.map((item) => Object.freeze({ ...item }))),
+      totalSize: 1074.8,
+    });
+    harness.chatWindowState.mountedKeys = new Set(mounted.map((item) => item.key));
+    harness.chatWindowState.acknowledgedRawSnapshot = acknowledged;
+    harness.chatWindowState.pendingRangeRender = false;
+    harness.context.autoScrollPinnedToBottom = true;
+    const schedulesBefore = harness.calls.filter((entry: string) => entry === 'schedule').length;
+
+    harness.callbacks.onRangeChange({ items: mounted.slice(1), totalSize: 1074.8 });
+
+    expect(harness.calls.filter((entry: string) => entry === 'schedule')).toHaveLength(schedulesBefore);
+    expect(harness.chatWindowState.pendingRangeRender).toBe(false);
+    expect(harness.chatWindowState.snapshot).toBe(acknowledged);
   });
 
   test('CF2 accepted rollback restores the prior acknowledged raw snapshot and never acknowledges a failed attempt', () => {

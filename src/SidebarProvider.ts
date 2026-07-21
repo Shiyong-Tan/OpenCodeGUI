@@ -3183,7 +3183,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             commitHead: bound.commitHead,
                             commitBase: bound.commitBase,
                             reverted: bound.reverted === true,
-                            statsByPath: bound.statsByPath || {}
+                            statsByPath: bound.statsByPath || {},
+                            anchorMessageId: bound.anchorMessageId,
+                            stableAnchorMessageId: bound.anchorMessageId
                         }
                     };
                 }
@@ -3212,7 +3214,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         commitHead: record.commitHead,
                         commitBase: record.commitBase,
                         reverted: record.reverted === true,
-                        statsByPath: record.statsByPath || {}
+                        statsByPath: record.statsByPath || {},
+                        anchorMessageId: record.anchorMessageId,
+                        stableAnchorMessageId: record.anchorMessageId
                     }
                 });
                 seenIds.add(record.id);
@@ -5643,7 +5647,7 @@ ${attachmentLines.join('\n')}`
                     this.resetWebviewLiveness('session-switch');
                     const selectionEpoch = ++this.sessionSelectionEpoch;
                     try {
-                        this.resetUiState();
+                        this.resetUiState(targetSessionId);
                         let sessionDataSent = false;
                         this.currentSessionId = targetSessionId;
                         this.trackUserOwnedSession(this.currentSessionId);
@@ -10264,10 +10268,10 @@ ${attachmentLines.join('\n')}`
         }
     }
 
-    private resetUiState(): void {
+    private resetUiState(sessionId?: string): void {
         this.resetSessionState();
         if (this._view) {
-            this._view.webview.postMessage({ type: 'resetUiState' });
+            this._view.webview.postMessage({ type: 'resetUiState', sessionId: sessionId || '' });
         }
     }
 
