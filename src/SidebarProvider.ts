@@ -1107,7 +1107,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 const fullExport = await this.client.exportSession(sessionId);
                 if (this.currentSessionId !== sessionId || this.sessionSelectionEpoch !== selectionEpoch) return skip('stale-after-full-repair');
                 const fullFormattedRaw = this.formatSession(fullExport);
-                const fullDelta = this.buildFullExportSnapshotDelta(baseMessages, snapshotTimelineIds, fullFormattedRaw.messages);
+                const repairRequiredMessageIds = await this.collectSnapshotRepairRequiredMessageIds(sessionId);
+                const fullDelta = this.buildFullExportSnapshotDelta(
+                    baseMessages, snapshotTimelineIds, fullFormattedRaw.messages, repairRequiredMessageIds
+                );
                 if (fullDelta.repairedSnapshot) {
                     await this.persistStructurallyRepairedSnapshot(
                         sessionId, fullFormattedRaw.title, fullDelta.messages, fullDelta.timelineMessageIds, []
@@ -1353,7 +1356,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const exportResult = await this.client.exportSession(sessionId);
             if (!isStillValid()) return { ok: false, reason: 'stale-before-full-post' };
             const formattedRaw = this.formatSession(exportResult);
-            const fullDelta = this.buildFullExportSnapshotDelta(baseMessages, snapshotTimelineIds, formattedRaw.messages);
+            const repairRequiredMessageIds = await this.collectSnapshotRepairRequiredMessageIds(sessionId);
+            const fullDelta = this.buildFullExportSnapshotDelta(
+                baseMessages, snapshotTimelineIds, formattedRaw.messages, repairRequiredMessageIds
+            );
             if (fullDelta.repairedSnapshot) {
                 await this.persistStructurallyRepairedSnapshot(
                     sessionId, formattedRaw.title, fullDelta.messages, fullDelta.timelineMessageIds, segments
@@ -2234,7 +2240,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const exportResult = await this.client.exportSession(sessionId);
             if (!isStillActive()) return { ok: false, reason: 'soft-rescue-aborted-stale-token' };
             const formattedRaw = this.formatSession(exportResult);
-            const fullDelta = this.buildFullExportSnapshotDelta(baseMessages, snapshotTimelineIds, formattedRaw.messages);
+            const repairRequiredMessageIds = await this.collectSnapshotRepairRequiredMessageIds(sessionId);
+            const fullDelta = this.buildFullExportSnapshotDelta(
+                baseMessages, snapshotTimelineIds, formattedRaw.messages, repairRequiredMessageIds
+            );
             if (fullDelta.repairedSnapshot) {
                 await this.persistStructurallyRepairedSnapshot(
                     sessionId, formattedRaw.title, fullDelta.messages, fullDelta.timelineMessageIds, segments
@@ -3389,7 +3398,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private buildFullExportSnapshotDelta(
         existingSnapshotRecords: SessionMessage[],
         snapshotTimelineIds: string[],
-        fullExportRecords: SessionMessage[]
+        fullExportRecords: SessionMessage[],
+        repairRequiredMessageIds: string[] = []
     ): { proven: boolean; messages: SessionMessage[]; timelineMessageIds: string[]; repairedSnapshot?: boolean } {
         if (snapshotTimelineIds.length === 0) {
             const messages = this.buildImmutableSnapshotWithProvenSuffix([], fullExportRecords);
@@ -3411,9 +3421,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 .map((message) => typeof message?.id === 'string' ? message.id : '')
                 .filter((id): id is string => id.startsWith('msg_'))
         );
-        const missingSnapshotMessageIds = snapshotTimelineIds.filter((id) => (
-            id.startsWith('msg_') && !storedMessageIds.has(id)
-        ));
+        const visibleRepairIds = Array.from(new Set([
+            ...snapshotTimelineIds,
+            ...repairRequiredMessageIds
+        ].filter((id) => typeof id === 'string' && id.startsWith('msg_'))));
+        const missingSnapshotMessageIds = visibleRepairIds.filter((id) => !storedMessageIds.has(id));
         if (missingSnapshotMessageIds.length > 0) {
             const fullById = new Map(
                 fullExportRecords
@@ -3421,13 +3433,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     .map((message) => [message.id as string, message] as const)
             );
             if (missingSnapshotMessageIds.every((id) => fullById.has(id))) {
+                const boundaryIndex = boundaryIndexes[0];
+                const visibleRepairIdSet = new Set(visibleRepairIds);
+                const suffixIds = fullExportRecords
+                    .slice(boundaryIndex + 1)
+                    .map((message) => typeof message?.id === 'string' ? message.id : '')
+                    .filter((id): id is string => id.startsWith('msg_'));
+                const allowedVisibleIds = new Set([...visibleRepairIdSet, ...suffixIds]);
                 const existingById = new Map(
                     existingSnapshotRecords
                         .filter((message) => typeof message?.id === 'string' && message.id.startsWith('msg_'))
                         .map((message) => [message.id as string, message] as const)
                 );
                 const repairedMessages = fullExportRecords
-                    .filter((message) => typeof message?.id === 'string' && message.id.startsWith('msg_'))
+                    .filter((message) => typeof message?.id === 'string' && allowedVisibleIds.has(message.id))
                     .map((message) => {
                         const existing = existingById.get(message.id as string);
                         if (!existing) return message;
@@ -3462,6 +3481,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             messages,
             timelineMessageIds: [...snapshotTimelineIds, ...Array.from(new Set(suffixIds))]
         };
+    }
+
+    private async collectSnapshotRepairRequiredMessageIds(sessionId: string): Promise<string[]> {
+        const [records, map] = await Promise.all([
+            this.readChangeLists(sessionId),
+            this.readPersistedSessionMap(sessionId)
+        ]);
+        return Array.from(new Set(records
+            .map((record) => this.resolvePersistedVisibleOwnerMessageId(map, record.anchorMessageId || null))
+            .filter((id): id is string => typeof id === 'string' && id.startsWith('msg_'))));
     }
 
     private async persistStructurallyRepairedSnapshot(
@@ -5961,7 +5990,10 @@ ${attachmentLines.join('\n')}`
                         const exportData = normalized.data;
                         const formattedRaw = this.formatSession(exportData);
                         const snapshotIds = snapshotTimelineIds;
-                        const fullDelta = this.buildFullExportSnapshotDelta(baseMessages, snapshotIds, formattedRaw.messages);
+                        const repairRequiredMessageIds = await this.collectSnapshotRepairRequiredMessageIds(targetSessionId);
+                        const fullDelta = this.buildFullExportSnapshotDelta(
+                            baseMessages, snapshotIds, formattedRaw.messages, repairRequiredMessageIds
+                        );
                         if (fullDelta.repairedSnapshot) {
                             await this.persistStructurallyRepairedSnapshot(
                                 targetSessionId, formattedRaw.title, fullDelta.messages, fullDelta.timelineMessageIds, segments
@@ -7393,7 +7425,10 @@ ${attachmentLines.join('\n')}`
                                 const fullExport = await this.client.exportSession(recentSessionId);
                                 if (!isRecentHydrationCurrent()) throw new Error('stale-after-full-repair');
                                 const fullFormatted = this.formatSession(fullExport);
-                                const fullDelta = this.buildFullExportSnapshotDelta(baseMessages, snapshotTimelineIds, fullFormatted.messages);
+                                const repairRequiredMessageIds = await this.collectSnapshotRepairRequiredMessageIds(recentSessionId);
+                                const fullDelta = this.buildFullExportSnapshotDelta(
+                                    baseMessages, snapshotTimelineIds, fullFormatted.messages, repairRequiredMessageIds
+                                );
                                 if (fullDelta.repairedSnapshot) {
                                     await this.persistStructurallyRepairedSnapshot(
                                         recentSessionId, fullFormatted.title, fullDelta.messages, fullDelta.timelineMessageIds, segments
