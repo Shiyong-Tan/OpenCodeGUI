@@ -253,8 +253,7 @@ let appendHoverActiveKey = null;
 let appendHoverHideTimer = null;
 let inputDefaultPlaceholder = 'Ask anything...';
 const pendingUiPrompts = [];
-let pendingContextItems = [];
-let pendingFileRefs = [];
+let composerContextStateController = null;
 let sendBlockedNotice = '';
 let systemNoticeText = '';
 let headerStateController = null;
@@ -6193,6 +6192,16 @@ function getHeaderStateController() {
     }
     headerStateController = factory('OpenCode: Chat');
     return headerStateController;
+}
+
+function getComposerContextStateController() {
+    if (composerContextStateController) return composerContextStateController;
+    const factory = window.__ocFeatures?.createComposerContextState;
+    if (typeof factory !== 'function') {
+        throw new Error('Composer context state controller is unavailable');
+    }
+    composerContextStateController = factory();
+    return composerContextStateController;
 }
 
 function isCopilotProvider(providerId) {
@@ -14298,7 +14307,8 @@ function shouldHideDcpUiMessage(message) {
             inputTokenList.appendChild(chip);
             return;
         }
-        for (const item of pendingContextItems) {
+        const contextState = getComposerContextStateController();
+        for (const item of contextState.getContextItems()) {
             if (!item || !item.displayText) continue;
             const chip = document.createElement('span');
             chip.className = 'input-token context-token';
@@ -14317,14 +14327,13 @@ function shouldHideDcpUiMessage(message) {
             removeBtn.addEventListener('click', (event) => {
                 event.preventDefault();
                 event.stopPropagation();
-                pendingContextItems = pendingContextItems.filter((entry) => entry !== item);
-                renderContextTokens();
+                if (contextState.removeContext(item)) renderContextTokens();
             });
             chip.appendChild(removeBtn);
 
             inputTokenList.appendChild(chip);
         }
-        for (const item of pendingFileRefs) {
+        for (const item of contextState.getFileRefs()) {
             if (!item || !item.path) continue;
             const chip = document.createElement('span');
             chip.className = 'input-token file-token';
@@ -14343,8 +14352,7 @@ function shouldHideDcpUiMessage(message) {
             removeBtn.addEventListener('click', (event) => {
                 event.preventDefault();
                 event.stopPropagation();
-                pendingFileRefs = pendingFileRefs.filter((entry) => entry.path !== item.path);
-                renderContextTokens();
+                if (contextState.removeFileRef(item.path)) renderContextTokens();
             });
             chip.appendChild(removeBtn);
 
@@ -14353,9 +14361,7 @@ function shouldHideDcpUiMessage(message) {
     }
 
     function addContextItem(displayText, payload) {
-        if (!displayText || !payload || typeof payload.text !== 'string') return;
-        pendingContextItems.push({ displayText, ...payload });
-        renderContextTokens();
+        if (getComposerContextStateController().addContext(displayText, payload)) renderContextTokens();
     }
 
     const fileMentionState = {
@@ -14380,11 +14386,7 @@ function shouldHideDcpUiMessage(message) {
     function addFileRef(file) {
         const normalized = normalizeFileRef(file);
         if (!normalized) return;
-        if (pendingFileRefs.some((item) => item.path === normalized.path)) {
-            renderContextTokens();
-            return;
-        }
-        pendingFileRefs.push(normalized);
+        getComposerContextStateController().addFileRef(normalized);
         renderContextTokens();
     }
 
@@ -15245,17 +15247,15 @@ function appendMessageImages(parentEl, message) {
         });
         // applyTurnStartFreeze removed - segments no longer have freeze state
         const text = input.value.trim();
-        const hasContext = pendingContextItems.length > 0;
-        const hasFileRefs = pendingFileRefs.length > 0;
+        const contextState = getComposerContextStateController();
+        const hasContext = contextState.hasContext();
+        const hasFileRefs = contextState.hasFileRefs();
         const attachmentState = getAttachmentStateController();
         if ((!text && !attachmentState.hasItems() && !hasContext && !hasFileRefs) || isActiveSessionBusy()) return;
 
         const hasNonImage = attachmentState.hasNonImage();
         const fallbackText = hasNonImage ? 'Attachment added.' : 'Image attached.';
-        const contextDisplay = [
-            ...pendingContextItems.map((item) => item.displayText).filter(Boolean),
-            ...pendingFileRefs.map((item) => item?.path ? `@${item.path}` : '').filter(Boolean)
-        ].join(' ');
+        const contextDisplay = contextState.getDisplayPrefix();
         const baseText = contextDisplay
             ? (text ? `${contextDisplay}\n${text}` : contextDisplay)
             : text;
@@ -15264,16 +15264,8 @@ function appendMessageImages(parentEl, message) {
         const opId = `op-${Date.now()}-${messageCounter}`;
         const messageImages = attachmentState.getMessageImages();
         const attachmentsPayload = attachmentState.getPayload();
-        const contextPayload = pendingContextItems.map((item) => ({
-            displayText: item.displayText,
-            text: item.text,
-            source: item.source,
-            filePath: item.filePath,
-            range: item.range
-        }));
-        const filesPayload = pendingFileRefs
-            .map((item) => item?.path)
-            .filter((value) => typeof value === 'string' && value.length > 0);
+        const contextPayload = contextState.getContextPayload();
+        const filesPayload = contextState.getFilesPayload();
 
         const sendingSessionId = activeSessionId || '';
         setBusy(true, sendingSessionId);
@@ -15338,8 +15330,7 @@ function appendMessageImages(parentEl, message) {
         });
         attachmentState.clear();
         renderAttachments();
-        pendingContextItems = [];
-        pendingFileRefs = [];
+        contextState.clear();
         renderContextTokens();
         input.value = '';
         const sentSession = getSessionState(activeSessionId);
@@ -15531,8 +15522,7 @@ function appendMessageImages(parentEl, message) {
         refreshSendButtonState();
         getAttachmentStateController().clear();
         renderAttachments();
-        pendingContextItems = [];
-        pendingFileRefs = [];
+        getComposerContextStateController().clear();
         renderContextTokens();
         closeFileMentionList();
         isSwitchingSession = true;
@@ -16387,8 +16377,7 @@ function appendMessageImages(parentEl, message) {
                 }
                 transitionActiveSessionPresentationOwner(activeSessionId, incomingSessionId || activeSessionId || '');
                 activeSessionId = incomingSessionId || activeSessionId || '';
-                pendingContextItems = [];
-                pendingFileRefs = [];
+                getComposerContextStateController().clear();
                 renderContextTokens();
                 closeFileMentionList();
                 window.__oc?.renderFromState?.();
