@@ -634,7 +634,7 @@ function run() {
   assertFunctionHash(recoveredSource, "case 'sessionId':", '351876861f7dfcd8e32bee1a1412b224ad057d3ef1488383af93362d24c29e31');
   assertFunctionHash(recoveredSource, 'rekeyKeyedChatPresentation = (oldKey, newKey, sessionId) =>', '091cfc9cdfd26c13527c4aeaef6b6e0aa60205d29592479aee99c0f641fcc9c3');
   assertFunctionHash(source, 'function handlePrimarySendClick()', 'a0bb89397aa6485dd33161caf3ff4ca6de14b3a616f03b6259683fb4143c05c7');
-  assertFunctionHash(source, 'function handleChatContainerScroll()', 'e6a7942c8f45d2b90699bc908b19a5d949cd7d69b89457fbb2cc9ba64f355241');
+  assertFunctionHash(source, 'function handleChatContainerScroll()', '1f0f8b57e4dd9c38d549b10ae98ed9341f0c8b2cae99ee2077914eecf0bbda4f');
   const sessionHandler = extractFunction(source, 'function handleSessionIdMessage(');
   const sessionOwnerTransition = extractFunction(source, 'function transitionActiveSessionPresentationOwner(');
   assert(sessionOwnerTransition.includes("destroyChatWindowAdapter('session-switch')"),
