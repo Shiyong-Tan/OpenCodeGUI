@@ -13,6 +13,8 @@ import {
     parseSmartSearchExpansion,
     recallSmartSearchCandidates
 } from './smartSearchRetrieval';
+import { AttachmentStorageService } from './attachments/AttachmentStorageService';
+import type { AttachmentPayload, SavedAttachment } from './attachments/AttachmentStorageService';
 
 type SessionMessage = {
     role: 'user' | 'assistant' | 'system';
@@ -81,25 +83,10 @@ type PersistedRevertedSegment = {
     updatedAt: number;
 };
 
-type AttachmentPayload = {
-    filename?: string;
-    mime?: string;
-    dataBase64?: string;
-    tempPath?: string;
-};
-
 type SmartSearchMessage = {
     id: string;
     role: string;
     text: string;
-};
-
-type SavedAttachment = {
-    token: string;
-    filename: string;
-    mime: string;
-    sizeBytes: number;
-    relPath: string;
 };
 
 type FinalizeTurnIdentity = {
@@ -765,13 +752,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private pendingBaselineFailed = false;
     private serverStatus: 'connected' | 'reconnecting' | 'error' = 'connected';
     private readonly repoManager: GitRepoManager;
+    private readonly attachmentStorage: AttachmentStorageService;
     private uiTimelineBySession = new Map<string, string[]>();
     private lastSnapshotPayloadBySession = new Map<string, any>();
     private lastEmittedChangeListHeadBySession = new Map<string, string>();
     private assistantTextBufferBySession = new Map<string, string>();
     private pendingSnapshotUserTextBySession = new Map<string, string>();
-    private attachmentCleanupTimer?: NodeJS.Timeout;
-    private attachmentCleanupInFlight = false;
     private lastKnownModels: ModelInfo[] = [];
     private smartSearchTempSessionIds = new Set<string>();
     private modelQuotaInFlight?: Promise<void>;
@@ -4188,7 +4174,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private async getWorkspaceReferenceMime(absPath: string, name: string): Promise<string | undefined> {
-        const mime = this.getMimeFromName(name);
+        const mime = this.attachmentStorage.getMimeFromName(name);
         if (mime !== 'application/octet-stream') {
             return mime;
         }
@@ -4666,6 +4652,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.client.setStorage(this._context.globalState);
         this.uiDebugChannel = vscode.window.createOutputChannel('OpenCode UI Debug');
         this.client.setUiDebugChannel(this.uiDebugChannel);
+        this.attachmentStorage = new AttachmentStorageService({
+            globalStoragePath: this._context.globalStoragePath,
+            getWorkspaceRootPath: () => this.getWorkspaceRootPath(),
+            log: (message) => this.uiDebugChannel.appendLine(message)
+        });
         this.userOwnedSessionsLoaded = this.loadUserOwnedSessions();
         this.client.setServerStatusHandler((status, reason) => {
             this.sendServerStatus(status, reason);
@@ -4687,8 +4678,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.repoManager = new GitRepoManager(workspaceRoot, (message) => this.uiDebugChannel.appendLine(message));
         void this.initGitUndo();
         void this.ensureGitignoreIgnoresOpencode();
-        this.scheduleAttachmentCleanup('activate');
-        this.startAttachmentCleanupTimer();
+        this.attachmentStorage.scheduleCleanup('activate');
+        this.attachmentStorage.startCleanupTimer();
         void this.cleanupOrphanSmartSearchSessions();
         void this.cleanupStaleSmartSearchCorpora();
 
@@ -5072,11 +5063,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         this.clientMessageIdMap.set(clientMessageId, clientMessageId);
 
                         const attachmentNames = attachments.map((item) => {
-                            if (item?.filename) return this.sanitizeFilename(item.filename);
+                            if (item?.filename) return this.attachmentStorage.sanitizeFilename(item.filename);
                             if (item?.tempPath) return pathModule.basename(item.tempPath);
                             return 'attachment';
                         });
-                        const fileNames = attachmentNames.filter((name: string) => !this.isImageFileName(name));
+                        const fileNames = attachmentNames.filter((name: string) => !this.attachmentStorage.isImageFileName(name));
                         const attachmentLines = fileNames.map((name: string) => `📄 ${name}`);
                         const displayText = attachmentLines.length
                             ? (userText
@@ -5115,7 +5106,7 @@ ${attachmentLines.join('\n')}`
                         } else if (targetSessionId) {
                             for (const attachment of attachments) {
                                 try {
-                                    const saved = await this.saveAttachment(targetSessionId, attachment, reqId);
+                                    const saved = await this.attachmentStorage.saveAttachment(targetSessionId, attachment, reqId);
                                     if (saved) {
                                         savedAttachments.push(saved);
                                     }
@@ -5124,7 +5115,7 @@ ${attachmentLines.join('\n')}`
                                 }
                             }
                         if (savedAttachments.length) {
-                            const manifest = this.buildAttachmentManifest(savedAttachments);
+                            const manifest = this.attachmentStorage.buildAttachmentManifest(savedAttachments);
                             modelText = modelText ? `${modelText}\n\n${manifest}` : manifest;
                         }
                         const contextBlock = this.buildContextBlock(contextItems);
@@ -6046,7 +6037,7 @@ ${attachmentLines.join('\n')}`
                 case "clipboardImage": {
                     if (!data.dataUrl || !data.mime) return;
                     try {
-                        const saved = await this.saveClipboardImage(data.dataUrl, data.mime);
+                        const saved = await this.attachmentStorage.saveClipboardImage(data.dataUrl, data.mime);
                         activeWebview.postMessage({
                             type: 'attachmentAdded',
                             id: saved.id,
@@ -6074,9 +6065,9 @@ ${attachmentLines.join('\n')}`
                         for (const uri of picks) {
                             const filePath = uri.fsPath;
                             const name = pathModule.basename(filePath);
-                            const mime = this.getImageMimeFromName(name) || 'application/octet-stream';
+                            const mime = this.attachmentStorage.getImageMimeFromName(name) || 'application/octet-stream';
                             let dataUrl: string | undefined;
-                            if (this.isImageFileName(name)) {
+                            if (this.attachmentStorage.isImageFileName(name)) {
                                 try {
                                     const buffer = await fs.promises.readFile(filePath);
                                     dataUrl = `data:${mime};base64,${buffer.toString('base64')}`;
@@ -7930,91 +7921,15 @@ ${attachmentLines.join('\n')}`
     }
 
     private scheduleAttachmentCleanup(reason: 'activate' | 'timer' | 'manual'): void {
-        setTimeout(() => {
-            void this.runAttachmentCleanup(reason);
-        }, 0);
+        this.attachmentStorage.scheduleCleanup(reason);
     }
 
     private startAttachmentCleanupTimer(): void {
-        if (this.attachmentCleanupTimer) return;
-        const intervalMs = 6 * 60 * 60 * 1000;
-        this.attachmentCleanupTimer = setInterval(() => {
-            void this.runAttachmentCleanup('timer');
-        }, intervalMs);
+        this.attachmentStorage.startCleanupTimer();
     }
 
     private async runAttachmentCleanup(reason: 'activate' | 'timer' | 'manual'): Promise<void> {
-        if (this.attachmentCleanupInFlight) {
-            this.uiDebugChannel.appendLine(`EXT: attach.cleanup.skip | reason=in-flight | trigger=${reason}`);
-            return;
-        }
-        const attachmentsRoot = this.getAttachmentsRootPath();
-        if (!attachmentsRoot || !fs.existsSync(attachmentsRoot)) {
-            this.uiDebugChannel.appendLine(`EXT: attach.cleanup.skip | reason=missing-root | trigger=${reason}`);
-            return;
-        }
-        this.attachmentCleanupInFlight = true;
-        try {
-            const ttlMs = 7 * 24 * 60 * 60 * 1000;
-            const now = Date.now();
-            const sizeCap = 2 * 1024 * 1024 * 1024;
-            const sizeTarget = Math.floor(1.8 * 1024 * 1024 * 1024);
-            const files: Array<{ path: string; size: number; mtimeMs: number }> = [];
-
-            const walk = async (dir: string): Promise<void> => {
-                const entries = await fs.promises.readdir(dir, { withFileTypes: true });
-                for (const entry of entries) {
-                    const fullPath = pathModule.join(dir, entry.name);
-                    if (entry.isDirectory()) {
-                        await walk(fullPath);
-                        continue;
-                    }
-                    if (!entry.isFile()) continue;
-                    try {
-                        const stat = await fs.promises.stat(fullPath);
-                        files.push({ path: fullPath, size: stat.size, mtimeMs: stat.mtimeMs });
-                    } catch {
-                        // ignore
-                    }
-                }
-            };
-
-            await walk(attachmentsRoot);
-            const beforeBytes = files.reduce((sum, file) => sum + file.size, 0);
-            let deletedFiles = 0;
-
-            for (const file of files) {
-                if (now - file.mtimeMs < ttlMs) continue;
-                try {
-                    await fs.promises.unlink(file.path);
-                    deletedFiles += 1;
-                } catch {
-                    // ignore
-                }
-            }
-
-            let remainingFiles = files.filter((file) => fs.existsSync(file.path));
-            let totalBytes = remainingFiles.reduce((sum, file) => sum + file.size, 0);
-            if (totalBytes > sizeCap) {
-                remainingFiles = remainingFiles.sort((a, b) => a.mtimeMs - b.mtimeMs);
-                for (const file of remainingFiles) {
-                    if (totalBytes <= sizeTarget) break;
-                    try {
-                        await fs.promises.unlink(file.path);
-                        deletedFiles += 1;
-                        totalBytes -= file.size;
-                    } catch {
-                        // ignore
-                    }
-                }
-            }
-
-            this.uiDebugChannel.appendLine(`EXT: attach.cleanup | reason=${reason} | ttlDays=7 | beforeBytes=${beforeBytes} | afterBytes=${totalBytes} | deletedFiles=${deletedFiles}`);
-        } catch (error) {
-            this.uiDebugChannel.appendLine(`EXT: attach.cleanup.error | reason=${reason} | err=${String(error)}`);
-        } finally {
-            this.attachmentCleanupInFlight = false;
-        }
+        await this.attachmentStorage.runCleanup(reason);
     }
 
     public requestAttachmentCleanup(reason: 'manual'): void {
@@ -9550,7 +9465,7 @@ ${attachmentLines.join('\n')}`
         }
 
         try {
-            const attachmentsRoot = this.getAttachmentsRootPath();
+            const attachmentsRoot = this.attachmentStorage.getAttachmentsRootPath();
             if (attachmentsRoot) {
                 await this.rmPathIfExists(pathModule.join(attachmentsRoot, sessionId));
             }
@@ -9636,10 +9551,7 @@ ${attachmentLines.join('\n')}`
     }
 
     public async dispose(): Promise<void> {
-        if (this.attachmentCleanupTimer) {
-            clearInterval(this.attachmentCleanupTimer);
-            this.attachmentCleanupTimer = undefined;
-        }
+        this.attachmentStorage.dispose();
         if (this.subagentRetentionTimer) {
             clearTimeout(this.subagentRetentionTimer);
             this.subagentRetentionTimer = undefined;
