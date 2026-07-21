@@ -8,22 +8,11 @@ import { GitRepoManager } from './undo/GitRepoManager';
 import { runGit } from './undo/GitRunner';
 import { GitRepoRef, SessionMap } from './undo/types';
 import { resolveCurrentVisibleOwnerMsgId, resolveSessionOwnership } from './undo/ownershipResolver';
-import {
-    buildSmartSearchCandidateCorpus,
-    parseSmartSearchExpansion,
-    recallSmartSearchCandidates
-} from './smartSearchRetrieval';
 import { AttachmentStorageService } from './attachments/AttachmentStorageService';
 import type { AttachmentPayload, SavedAttachment } from './attachments/AttachmentStorageService';
 import { SmartSearchSessionRegistry } from './search/SmartSearchSessionRegistry';
-import {
-    buildSmartSearchExpansionPrompt,
-    buildSmartSearchRerankPrompt,
-    isEffectiveSmartSearchTool,
-    isExplicitEmptySmartSearchResult,
-    parseSmartSearchMessageIds,
-    summarizeSmartSearchToolInput
-} from './search/SmartSearchProtocol';
+import { SmartSearchService } from './search/SmartSearchService';
+import type { SmartSearchMessage } from './search/SmartSearchService';
 
 type SessionMessage = {
     role: 'user' | 'assistant' | 'system';
@@ -90,12 +79,6 @@ type PersistedRevertedSegment = {
     conflicts: ConflictDetail[];
     discarded?: boolean;
     updatedAt: number;
-};
-
-type SmartSearchMessage = {
-    id: string;
-    role: string;
-    text: string;
 };
 
 type FinalizeTurnIdentity = {
@@ -762,6 +745,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private readonly repoManager: GitRepoManager;
     private readonly attachmentStorage: AttachmentStorageService;
     private readonly smartSearchSessions: SmartSearchSessionRegistry;
+    private readonly smartSearch: SmartSearchService;
     private uiTimelineBySession = new Map<string, string[]>();
     private lastSnapshotPayloadBySession = new Map<string, any>();
     private lastEmittedChangeListHeadBySession = new Map<string, string>();
@@ -4671,6 +4655,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             getCorpusDir: () => pathModule.join(this.getOpencodeDataDir(), 'smartSearch'),
             log: (message) => this.uiDebugChannel.appendLine(message)
         });
+        this.smartSearch = new SmartSearchService({
+            client: this.client,
+            sessions: this.smartSearchSessions,
+            getCachedModels: () => this.lastKnownModels,
+            setCachedModels: (models) => { this.lastKnownModels = models; },
+            getSelectedModel: () => this.selectedModel,
+            log: (message) => this.uiDebugChannel.appendLine(message)
+        });
         this.userOwnedSessionsLoaded = this.loadUserOwnedSessions();
         this.client.setServerStatusHandler((status, reason) => {
             this.sendServerStatus(status, reason);
@@ -5470,7 +5462,7 @@ ${attachmentLines.join('\n')}`
                         : [];
                     const liveWebview = this._view?.webview || activeWebview;
                     try {
-                        const result = await this.runSmartSessionSearch(
+                        const result = await this.smartSearch.run(
                             typeof data.sessionId === 'string' ? data.sessionId : this.currentSessionId,
                             query,
                             messages
@@ -8703,179 +8695,6 @@ ${attachmentLines.join('\n')}`
             this.postAddResponse(webview, `Failed to refresh models: ${error}`);
         }
         return [];
-    }
-
-    private async pickSmartSearchModel(): Promise<ModelInfo | undefined> {
-        let models = this.lastKnownModels;
-        if (!Array.isArray(models) || !models.length) {
-            try {
-                models = await this.client.listModels();
-                if (models.length) {
-                    this.lastKnownModels = models;
-                }
-            } catch (error) {
-                this.uiDebugChannel.appendLine(`EXT: smartSearch.models.fail | err=${String(error)}`);
-                models = [];
-            }
-        }
-        const preferred = this.client.pickFreeModel(models, this.selectedModel);
-        if (preferred?.fullId === this.selectedModel) return preferred;
-        const freeModels = models.filter((candidate) =>
-            this.client.pickFreeModel(models, candidate.fullId)?.fullId === candidate.fullId
-        );
-        return freeModels
-            .sort((a, b) => (b.contextLimit || 0) - (a.contextLimit || 0))[0]
-            || preferred
-            || undefined;
-    }
-
-    private async executeSmartSearchAgentAttempt(model: ModelInfo, prompt: string, attempt: number, stage = 'rerank', timeoutMs = 90000): Promise<{
-        assistantText: string;
-        effectiveToolCalls: number;
-    }> {
-        const tempSession = await this.client.createSession();
-        const tempSessionId = tempSession.id;
-        await this.smartSearchSessions.track(tempSessionId);
-        let assistantText = '';
-        let searchError = '';
-        const effectiveTools = new Set<string>();
-        try {
-            const tempLocalKey = `smart-search-${Date.now()}-${attempt}`;
-            this.client.startTurnWithOp(tempSessionId, tempLocalKey, tempLocalKey);
-            const task = this.client.chat(
-                prompt,
-                { model: model.fullId, sessionId: tempSessionId, mode: 'plan' },
-                (event) => {
-                    if (event.sessionId !== tempSessionId) return;
-                    if (event.type === 'text' && typeof event.text === 'string') {
-                        assistantText += event.text;
-                        return;
-                    }
-                    if (event.type === 'error') {
-                        searchError = event.text || 'Unknown Smart Search session error';
-                        return;
-                    }
-                    if (event.type !== 'tool' || !event.tool) return;
-                    const status = event.toolState?.status || 'unknown';
-                    const inputSummary = summarizeSmartSearchToolInput(event.toolState?.input);
-                    const outputSize = typeof event.toolState?.output === 'string'
-                        ? event.toolState.output.length
-                        : 0;
-                    this.uiDebugChannel.appendLine(
-                        `EXT: smartSearch.tool | stage=${stage} | attempt=${attempt} | sessionId=${tempSessionId} | tool=${event.tool} | status=${status} | input=${inputSummary || 'none'} | outputChars=${outputSize}`
-                    );
-                    if (status === 'completed' && isEffectiveSmartSearchTool(event.tool, event.toolState?.input)) {
-                        effectiveTools.add(`${event.tool}|${inputSummary}`);
-                    }
-                }
-            );
-            await Promise.race([
-                task,
-                new Promise((_, reject) => setTimeout(() => reject(new Error(`Smart search ${stage} timed out.`)), timeoutMs))
-            ]);
-            if (searchError) throw new Error(`Smart Search model session failed: ${searchError}`);
-            if (!assistantText.trim()) {
-                const exported = await this.client.listSessionMessages(tempSessionId);
-                const assistant = [...exported].reverse().find((item: any) => item?.role === 'assistant');
-                assistantText = typeof assistant?.text === 'string'
-                    ? assistant.text
-                    : Array.isArray(assistant?.parts)
-                        ? assistant.parts.map((part: any) => typeof part?.text === 'string' ? part.text : '').join('\n')
-                        : '';
-            }
-            const rawSummary = assistantText.replace(/\s+/g, ' ').slice(-1200);
-            this.uiDebugChannel.appendLine(
-                `EXT: smartSearch.agent.output | stage=${stage} | attempt=${attempt} | sessionId=${tempSessionId} | effectiveTools=${effectiveTools.size} | chars=${assistantText.length} | raw=${rawSummary || 'empty'}`
-            );
-            return { assistantText, effectiveToolCalls: effectiveTools.size };
-        } catch (error) {
-            try {
-                await this.client.abortSession(tempSessionId);
-            } catch {
-                // Best effort cleanup before deleting the temporary session.
-            }
-            throw error;
-        } finally {
-            this.client.finishTurn(tempSessionId);
-            let deleted = false;
-            try {
-                await this.client.deleteSession(tempSessionId);
-                deleted = true;
-            } catch (error) {
-                this.uiDebugChannel.appendLine(`EXT: smartSearch.cleanup.fail | sessionId=${tempSessionId} | err=${String(error)}`);
-            } finally {
-                if (deleted) await this.smartSearchSessions.release(tempSessionId);
-            }
-        }
-    }
-
-    private async runSmartSessionSearch(sessionId: string, query: string, messages: SmartSearchMessage[]): Promise<{ messageIds: string[]; modelId: string }> {
-        const validIds = new Set(messages.map((item) => item.id).filter((id) => typeof id === 'string' && id.length > 0));
-        if (!query.trim() || !validIds.size) return { messageIds: [], modelId: '' };
-        const model = await this.pickSmartSearchModel();
-        if (!model) throw new Error('Smart search requires an available free model.');
-        let expansion = parseSmartSearchExpansion('', query.trim());
-        try {
-            const expansionResult = await this.executeSmartSearchAgentAttempt(
-                model,
-                buildSmartSearchExpansionPrompt(query.trim()),
-                1,
-                'expand',
-                45000
-            );
-            expansion = parseSmartSearchExpansion(expansionResult.assistantText, query.trim());
-        } catch (error) {
-            this.uiDebugChannel.appendLine(`EXT: smartSearch.expansion.fallback | err=${String(error)}`);
-        }
-        const recall = recallSmartSearchCandidates(messages, expansion, 32);
-        const candidateCorpus = buildSmartSearchCandidateCorpus(messages, recall.candidates, 2);
-        const candidateIds = new Set<string>();
-        for (const row of recall.candidates) {
-            for (let index = Math.max(0, row.index - 2); index <= Math.min(messages.length - 1, row.index + 2); index += 1) {
-                if (messages[index]?.id) candidateIds.add(messages[index].id);
-            }
-        }
-        const signalSummary = [...expansion.phrases, ...expansion.terms].slice(0, 28).join(' | ');
-        const basePrompt = buildSmartSearchRerankPrompt(query.trim(), candidateCorpus, recall.lowConfidence, signalSummary);
-        this.uiDebugChannel.appendLine(
-            `EXT: smartSearch.agent.start | sessionId=${sessionId || 'null'} | model=${model.fullId} | locatorCount=${validIds.size} | candidates=${recall.candidates.length} | candidateIds=${candidateIds.size} | positive=${recall.positiveCount} | lowConfidence=${String(recall.lowConfidence)} | embeddedChars=${candidateCorpus.length}`
-        );
-        let lastError: unknown;
-        for (let attempt = 1; attempt <= 2; attempt += 1) {
-            const prompt = attempt === 1
-                ? basePrompt
-                : `${basePrompt}\n\nRETRY REQUIREMENT: Your previous answer contained no valid result id. Copy ids exactly from the embedded context. Do not describe or simulate tool calls.`;
-            try {
-                const result = await this.executeSmartSearchAgentAttempt(model, prompt, attempt, 'rerank');
-                const messageIds = parseSmartSearchMessageIds(result.assistantText, candidateIds);
-                this.uiDebugChannel.appendLine(
-                    `EXT: smartSearch.result | attempt=${attempt} | accepted=${messageIds.length} | ids=${messageIds.join(',') || 'none'}`
-                );
-                if (messageIds.length) {
-                    return { messageIds, modelId: model.fullId };
-                }
-                if (isExplicitEmptySmartSearchResult(result.assistantText)) {
-                    this.uiDebugChannel.appendLine(`EXT: smartSearch.empty | attempt=${attempt} | reason=explicit-model-result`);
-                    return { messageIds: [], modelId: model.fullId };
-                }
-                lastError = new Error('Smart Search model returned no valid embedded message id.');
-                this.uiDebugChannel.appendLine(`EXT: smartSearch.retry | attempt=${attempt} | reason=no-valid-message-id`);
-            } catch (error) {
-                lastError = error;
-                this.uiDebugChannel.appendLine(`EXT: smartSearch.retry | attempt=${attempt} | reason=agent-error | err=${String(error)}`);
-            }
-        }
-        const fallbackIds = recall.candidates
-            .filter((candidate) => candidate.score > 0)
-            .slice(0, 8)
-            .map((candidate) => candidate.id);
-        if (fallbackIds.length) {
-            this.uiDebugChannel.appendLine(
-                `EXT: smartSearch.fallback | reason=model-invalid | results=${fallbackIds.length} | ids=${fallbackIds.join(',')}`
-            );
-            return { messageIds: fallbackIds, modelId: model.fullId };
-        }
-        throw lastError instanceof Error ? lastError : new Error('Smart Search failed after retry.');
     }
 
     private parseModelRef(model?: string): { providerID: string; modelID: string } | undefined {
