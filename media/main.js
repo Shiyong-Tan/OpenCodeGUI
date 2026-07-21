@@ -257,12 +257,9 @@ let pendingContextItems = [];
 let pendingFileRefs = [];
 let sendBlockedNotice = '';
 let systemNoticeText = '';
-let baseSessionTitle = 'OpenCode: Chat';
-let headerStatusText = '';
-const sessionUsageById = new Map();
+let headerStateController = null;
+let headerUiController = null;
 let textMeasureCanvas = null;
-let usageCompactHoverActive = false;
-const compactionRunningBySession = new Set();
 let subagentIntervals = new Map();
 let subagentCardsContainer = null;
 let autoScrollPinnedToBottom = true;
@@ -279,23 +276,13 @@ const BASELINE_PREPARING_MAX_MS = 45000;
 function isCompactDisabledForSession(sessionId) {
     if (!sessionId) return true;
     if (isBusy) return true;
-    if (compactionRunningBySession.has(sessionId)) return true;
+    if (getHeaderStateController().isCompacting(sessionId)) return true;
     const session = getSessionState(sessionId);
     return isSendBlockedByPendingState(session);
 }
 
 function renderHeaderTitle() {
-    const titleEl = document.getElementById('session-title');
-    if (!titleEl) return;
-    titleEl.textContent = headerStatusText || baseSessionTitle;
-}
-
-function clampPercent(value) {
-    const n = Number(value);
-    if (!Number.isFinite(n)) return 0;
-    if (n < 0) return 0;
-    if (n > 100) return 100;
-    return n;
+    headerUiController?.renderTitle();
 }
 
 function getSelectedModelContextLimit() {
@@ -303,106 +290,16 @@ function getSelectedModelContextLimit() {
 }
 
 function recomputeSessionUsageFromMessages(session) {
-    if (!session || !session.messagesById) return null;
-    const assistants = [];
-    for (const message of session.messagesById.values()) {
-        if (!message || message.role !== 'assistant') continue;
-        const meta = message.meta || {};
-        assistants.push({
-            tokens: meta.tokens || null,
-            cost: meta.cost,
-            timeCreated: Number(meta.timeCreated || 0),
-            timeCompleted: Number(meta.timeCompleted || 0)
-        });
-    }
-    assistants.sort((a, b) => a.timeCreated - b.timeCreated);
-
-    let cost = 0;
-    let input = 0;
-    let output = 0;
-    let reasoning = 0;
-    let cacheRead = 0;
-    let cacheWrite = 0;
-    let contextUsed = 0;
-
-    for (const info of assistants) {
-        const c = Number(info.cost);
-        if (Number.isFinite(c)) cost += c;
-        const usage = info.tokens || {};
-        if (!usage) continue;
-
-        const uInput = Number(usage.input || 0);
-        const uOutput = Number(usage.output || 0);
-        const uReasoning = Number(usage.reasoning || 0);
-        const uCacheRead = Number((usage.cache && usage.cache.read) || 0);
-        const uCacheWrite = Number((usage.cache && usage.cache.write) || 0);
-        if (uInput + uOutput + uReasoning + uCacheRead + uCacheWrite <= 0) continue;
-
-        contextUsed = uInput + uCacheRead + uCacheWrite + uOutput;
-        input += uInput;
-        output += uOutput;
-        reasoning += uReasoning;
-        cacheRead += uCacheRead;
-        cacheWrite += uCacheWrite;
-    }
-
-    const tokens = input + cacheRead + cacheWrite + output + reasoning;
-    return { used: contextUsed, tokens, amount: cost };
+    if (!session?.messagesById) return null;
+    return window.__ocRendering?.recomputeSessionUsage?.(session.messagesById.values()) || null;
 }
 
 function renderHeaderUsage() {
-    const usageEl = document.getElementById('header-usage');
-    const fillEl = document.getElementById('header-usage-fill');
-    const labelEl = document.getElementById('header-usage-label');
-    if (!usageEl || !fillEl || !labelEl) return;
-    const sid = activeSessionId || '';
-    let usage = sid ? sessionUsageById.get(sid) : null;
-    const contextLimit = getSelectedModelContextLimit();
-    if (usage && Number(usage.size) <= 0 && contextLimit > 0) {
-        usage = { ...usage, size: contextLimit };
-        sessionUsageById.set(sid, usage);
-    }
-    if ((!usage || !Number.isFinite(Number(usage.size)) || Number(usage.size) <= 0) && sid) {
-        const session = getSessionState(sid);
-        const recomputed = recomputeSessionUsageFromMessages(session);
-        if (recomputed && contextLimit > 0) {
-            usage = { used: recomputed.used, size: contextLimit, amount: recomputed.amount };
-        }
-    }
-    if (!usage || Number(usage.size) <= 0) {
-        usageEl.classList.add('hidden');
-        usageCompactHoverActive = false;
-        return;
-    }
-    const isCompactionRunning = activeSessionId && compactionRunningBySession.has(activeSessionId);
-    const isCompactDisabled = isCompactDisabledForSession(sid);
-    usageEl.disabled = isCompactDisabled;
-    usageEl.title = isCompactDisabled ? COMPACTION_ACTIVE_SESSION_NOTICE : '';
-    const pct = clampPercent((usage.used / usage.size) * 100);
-    usageEl.classList.toggle('usage-high', pct >= 50 && !isCompactionRunning && !usageCompactHoverActive);
-    if (isCompactionRunning) {
-        usageEl.classList.add('usage-compact-mode');
-        usageEl.classList.add('usage-compact-running');
-        fillEl.style.width = '100%';
-        labelEl.textContent = 'Running';
-    } else if (usageCompactHoverActive) {
-        usageEl.classList.add('usage-compact-mode');
-        usageEl.classList.remove('usage-compact-running');
-        fillEl.style.width = '100%';
-        labelEl.textContent = 'Compact';
-    } else {
-        usageEl.classList.remove('usage-compact-mode');
-        usageEl.classList.remove('usage-compact-running');
-        fillEl.style.width = `${pct}%`;
-        labelEl.textContent = `${Math.round(pct)}%`;
-    }
-    usageEl.classList.remove('hidden');
+    headerUiController?.renderUsage();
 }
 
 function setHeaderWaitingState(waiting) {
-    const titleEl = document.getElementById('session-title');
-    if (!titleEl) return;
-    titleEl.classList.toggle('is-waiting', Boolean(waiting));
+    getHeaderStateController().setWaiting(waiting);
 }
 
 function measureTextWidth(text, font) {
@@ -538,9 +435,9 @@ function syncModeControlWidth(selectEl, modeItems, selectedMode) {
 function setSendBlockedNotice(text) {
     sendBlockedNotice = typeof text === 'string' ? text : '';
     if (baselinePreparing) {
-        headerStatusText = BASELINE_PREPARING_NOTICE;
+        getHeaderStateController().setStatusText(BASELINE_PREPARING_NOTICE);
     } else {
-        headerStatusText = sendBlockedNotice ? 'Waiting for previous response...' : '';
+        getHeaderStateController().setStatusText(sendBlockedNotice ? 'Waiting for previous response...' : '');
     }
     setHeaderWaitingState(Boolean(sendBlockedNotice) || baselinePreparing);
     renderHeaderTitle();
@@ -2680,7 +2577,7 @@ function updateSendGate() {
         return;
     }
     const session = getSessionState(activeSessionId);
-    const compactionRunning = Boolean(activeSessionId && compactionRunningBySession.has(activeSessionId));
+    const compactionRunning = Boolean(activeSessionId && getHeaderStateController().isCompacting(activeSessionId));
     if (compactionRunning) {
         sendBtn.disabled = true;
         sendBtn.title = COMPACTION_RUNNING_NOTICE;
@@ -6288,6 +6185,16 @@ function getAttachmentStateController() {
     return attachmentStateController;
 }
 
+function getHeaderStateController() {
+    if (headerStateController) return headerStateController;
+    const factory = window.__ocRendering?.createHeaderState;
+    if (typeof factory !== 'function') {
+        throw new Error('Header state controller is unavailable');
+    }
+    headerStateController = factory('OpenCode: Chat');
+    return headerStateController;
+}
+
 function isCopilotProvider(providerId) {
     return window.__ocRendering?.isCopilotProvider?.(providerId) === true;
 }
@@ -6944,27 +6851,37 @@ document.addEventListener('DOMContentLoaded', () => {
         document,
         listElement: attachmentList
     });
-    baseSessionTitle = sessionTitle?.textContent || 'OpenCode: Chat';
+    const usageEl = document.getElementById('header-usage');
+    const usageFillEl = document.getElementById('header-usage-fill');
+    const usageLabelEl = document.getElementById('header-usage-label');
+    const createHeaderUiController = window.__ocRendering?.createHeaderUiController;
+    if (
+        typeof createHeaderUiController !== 'function'
+        || !sessionTitle
+        || !usageEl
+        || !usageFillEl
+        || !usageLabelEl
+    ) {
+        throw new Error('Header UI controller is unavailable');
+    }
+    const headerState = getHeaderStateController();
+    headerState.setBaseTitle(sessionTitle.textContent || 'OpenCode: Chat');
+    headerUiController = createHeaderUiController({
+        state: headerState,
+        titleElement: sessionTitle,
+        usageElement: usageEl,
+        usageFillElement: usageFillEl,
+        usageLabelElement: usageLabelEl,
+        getActiveSessionId: () => activeSessionId || '',
+        getContextLimit: getSelectedModelContextLimit,
+        getRecomputedUsage: (sessionId) => recomputeSessionUsageFromMessages(getSessionState(sessionId)),
+        isCompactDisabled: isCompactDisabledForSession,
+        compactDisabledTitle: COMPACTION_ACTIVE_SESSION_NOTICE,
+        onCompact: (sessionId) => vscode.postMessage({ type: 'compactSession', sessionId })
+    });
+    headerUiController.install();
     renderHeaderTitle();
     renderHeaderUsage();
-
-    const usageEl = document.getElementById('header-usage');
-    if (usageEl) {
-        usageEl.addEventListener('mouseenter', () => {
-            usageCompactHoverActive = true;
-            renderHeaderUsage();
-        });
-        usageEl.addEventListener('mouseleave', () => {
-            usageCompactHoverActive = false;
-            renderHeaderUsage();
-        });
-        usageEl.addEventListener('click', () => {
-            if (!usageCompactHoverActive) return;
-            if (isCompactDisabledForSession(activeSessionId || '')) return;
-            if (!activeSessionId) return;
-            vscode.postMessage({ type: 'compactSession', sessionId: activeSessionId });
-        });
-    }
 
     function updateChatJumpBottomButton() {
         if (!chatJumpBottomBtn || !chatContainer) return;
@@ -15608,7 +15525,7 @@ function appendMessageImages(parentEl, message) {
         transitionActiveSessionPresentationOwner(activeSessionId, '');
         activeSessionId = '';
         pendingExplicitSessionSelectionId = '';
-        baseSessionTitle = 'OpenCode: Chat';
+        getHeaderStateController().setBaseTitle('OpenCode: Chat');
         renderHeaderTitle();
         renderHeaderUsage();
         refreshSendButtonState();
@@ -15957,8 +15874,8 @@ function appendMessageImages(parentEl, message) {
             renderHeaderUsage();
             updateUndoStatusDisplay(sessionId);
         }
-        if (message.title && !baseSessionTitle) {
-            baseSessionTitle = message.title;
+        if (message.title && !getHeaderStateController().getBaseTitle()) {
+            getHeaderStateController().setBaseTitle(message.title);
             renderHeaderTitle();
         }
 
@@ -16760,7 +16677,7 @@ function appendMessageImages(parentEl, message) {
                             pendingExplicitSessionSelectionId = '';
                         }
                         clearAppendInputForSessionChange(sessionId);
-                        baseSessionTitle = message.title || 'OpenCode: Chat';
+                        getHeaderStateController().setBaseTitle(message.title || 'OpenCode: Chat');
                         renderHeaderTitle();
                         renderHeaderUsage();
                         updateUndoStatusDisplay(sessionId);
@@ -17177,7 +17094,7 @@ function appendMessageImages(parentEl, message) {
                 const used = Number(message?.used);
                 const size = Number(message?.size);
                 const amount = Number(message?.amount);
-                sessionUsageById.set(sessionId, {
+                getHeaderStateController().setUsage(sessionId, {
                     used: Number.isFinite(used) ? used : 0,
                     size: Number.isFinite(size) ? size : 0,
                     amount: Number.isFinite(amount) ? amount : 0
@@ -17191,24 +17108,7 @@ function appendMessageImages(parentEl, message) {
                 const sessionId = getEventSessionId(message, 'compactionState');
                 if (!sessionId) break;
                 const running = Boolean(message?.running);
-                if (running) {
-                    compactionRunningBySession.add(sessionId);
-                } else {
-                    compactionRunningBySession.delete(sessionId);
-                    const prev = sessionUsageById.get(sessionId);
-                    if (prev) {
-                        sessionUsageById.set(sessionId, {
-                            used: 0,
-                            size: Number(prev.size) > 0 ? Number(prev.size) : getSelectedModelContextLimit(),
-                            amount: Number(prev.amount) || 0
-                        });
-                    } else {
-                        const fallbackSize = getSelectedModelContextLimit();
-                        if (fallbackSize > 0) {
-                            sessionUsageById.set(sessionId, { used: 0, size: fallbackSize, amount: 0 });
-                        }
-                    }
-                }
+                getHeaderStateController().setCompactionState(sessionId, running, getSelectedModelContextLimit());
                 if (sessionId === activeSessionId) {
                     renderHeaderUsage();
                     updateSendGate();
@@ -18860,7 +18760,7 @@ function appendMessageImages(parentEl, message) {
                 clearAppendInputForSessionChange(activeSessionId);
                 clearQuestionOverlay('new-session');
                 clearPermissionOverlay('new-session');
-                baseSessionTitle = 'OpenCode: Chat';
+                getHeaderStateController().setBaseTitle('OpenCode: Chat');
                 renderHeaderTitle();
                 renderHeaderUsage();
                 isSwitchingSession = true;

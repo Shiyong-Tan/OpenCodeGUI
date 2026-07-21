@@ -20,6 +20,7 @@ export type HeaderState = {
   setBaseTitle(title: string): void;
   setStatusText(text: string): void;
   setWaiting(waiting: boolean): void;
+  getBaseTitle(): string;
   getDisplayTitle(): string;
   isWaiting(): boolean;
   setUsage(sessionId: string, usage: Partial<SessionUsage>): void;
@@ -128,6 +129,7 @@ export function createHeaderState(initialTitle = 'OpenCode: Chat'): HeaderState 
     setBaseTitle: (title) => { baseTitle = title; },
     setStatusText: (text) => { statusText = text; },
     setWaiting: (value) => { waiting = Boolean(value); },
+    getBaseTitle: () => baseTitle,
     getDisplayTitle: () => statusText || baseTitle,
     isWaiting: () => waiting,
     setUsage: (sessionId, usage) => {
