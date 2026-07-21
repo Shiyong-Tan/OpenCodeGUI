@@ -15,11 +15,15 @@ describe('composer context production ownership', () => {
     expect(source).toContain('composerContextStateController = factory();');
     expect(source).toContain('getComposerContextStateController().addContext(displayText, payload)');
     expect(source).toContain('getComposerContextStateController().addFileRef(normalized);');
-    expect(source).toContain('contextState.removeContext(item)');
-    expect(source).toContain('contextState.removeFileRef(item.path)');
     expect(source).toContain('contextState.getDisplayPrefix();');
     expect(source).toContain('contextState.getContextPayload();');
     expect(source).toContain('contextState.getFilesPayload();');
     expect(source).toContain('contextState.clear();');
+  });
+
+  it('delegates token DOM and removal interaction to the composer controller', () => {
+    expect(source).toContain('const contextTokenUiController = createContextTokenUiController({');
+    expect(source).toContain('contextTokenUiController.render();');
+    expect(source).not.toContain("chip.className = 'input-token context-token';");
   });
 });

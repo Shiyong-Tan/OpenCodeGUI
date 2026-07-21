@@ -6860,6 +6860,17 @@ document.addEventListener('DOMContentLoaded', () => {
         document,
         listElement: attachmentList
     });
+    const createContextTokenUiController = window.__ocFeatures?.createContextTokenUiController;
+    if (typeof createContextTokenUiController !== 'function' || !inputTokenList) {
+        throw new Error('Composer context token controller is unavailable');
+    }
+    const contextTokenUiController = createContextTokenUiController({
+        state: getComposerContextStateController(),
+        document,
+        listElement: inputTokenList,
+        isAppendActive: () => Boolean(appendInputMode && appendInputMode.sessionId === activeSessionId),
+        exitAppend: () => exitAppendInputMode({ restoreDraft: true })
+    });
     const usageEl = document.getElementById('header-usage');
     const usageFillEl = document.getElementById('header-usage-fill');
     const usageLabelEl = document.getElementById('header-usage-label');
@@ -14281,83 +14292,7 @@ function shouldHideDcpUiMessage(message) {
     }
 
     function renderContextTokens() {
-        if (!inputTokenList) return;
-        inputTokenList.innerHTML = '';
-        if (appendInputMode && appendInputMode.sessionId === activeSessionId) {
-            const chip = document.createElement('span');
-            chip.className = 'input-token append-token';
-
-            const label = document.createElement('span');
-            label.className = 'input-token-label';
-            label.textContent = 'Append';
-            chip.appendChild(label);
-
-            const removeBtn = document.createElement('button');
-            removeBtn.type = 'button';
-            removeBtn.className = 'input-token-remove';
-            removeBtn.title = 'Exit append mode';
-            removeBtn.setAttribute('aria-label', 'Exit append mode');
-            removeBtn.textContent = '\u00D7';
-            removeBtn.addEventListener('click', (event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                exitAppendInputMode({ restoreDraft: true });
-            });
-            chip.appendChild(removeBtn);
-            inputTokenList.appendChild(chip);
-            return;
-        }
-        const contextState = getComposerContextStateController();
-        for (const item of contextState.getContextItems()) {
-            if (!item || !item.displayText) continue;
-            const chip = document.createElement('span');
-            chip.className = 'input-token context-token';
-
-            const label = document.createElement('span');
-            label.className = 'input-token-label';
-            label.textContent = item.displayText;
-            chip.appendChild(label);
-
-            const removeBtn = document.createElement('button');
-            removeBtn.type = 'button';
-            removeBtn.className = 'input-token-remove';
-            removeBtn.title = 'Remove context';
-            removeBtn.setAttribute('aria-label', `Remove ${item.displayText}`);
-            removeBtn.textContent = '\u00D7';
-            removeBtn.addEventListener('click', (event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                if (contextState.removeContext(item)) renderContextTokens();
-            });
-            chip.appendChild(removeBtn);
-
-            inputTokenList.appendChild(chip);
-        }
-        for (const item of contextState.getFileRefs()) {
-            if (!item || !item.path) continue;
-            const chip = document.createElement('span');
-            chip.className = 'input-token file-token';
-
-            const label = document.createElement('span');
-            label.className = 'input-token-label';
-            label.textContent = `@${item.path}`;
-            chip.appendChild(label);
-
-            const removeBtn = document.createElement('button');
-            removeBtn.type = 'button';
-            removeBtn.className = 'input-token-remove';
-            removeBtn.title = 'Remove file reference';
-            removeBtn.setAttribute('aria-label', `Remove ${item.path}`);
-            removeBtn.textContent = '\u00D7';
-            removeBtn.addEventListener('click', (event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                if (contextState.removeFileRef(item.path)) renderContextTokens();
-            });
-            chip.appendChild(removeBtn);
-
-            inputTokenList.appendChild(chip);
-        }
+        contextTokenUiController.render();
     }
 
     function addContextItem(displayText, payload) {
