@@ -24,4 +24,12 @@ describe('SidebarProvider attachment storage integration', () => {
     expect(source).not.toContain('private attachmentCleanupTimer?:');
     expect(source).not.toContain('private attachmentCleanupInFlight =');
   });
+
+  it('does not retain legacy attachment storage implementations', () => {
+    expect(source).not.toContain('private async saveClipboardImage(');
+    expect(source).not.toContain('private async saveAttachment(');
+    expect(source).not.toContain('private getMimeFromName(');
+    expect(source).not.toContain('private buildAttachmentManifest(');
+    expect(source).not.toContain('private async runAttachmentCleanup(');
+  });
 });
