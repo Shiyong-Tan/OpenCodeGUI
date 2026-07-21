@@ -1,6 +1,7 @@
 import { createAttachmentUiController, deriveAttachmentPresentation } from './composer/attachment-controller';
 import { createAttachmentState, isImageAttachment } from './composer/attachment-state';
 import { createComposerContextState } from './composer/context-state';
+import { createContextTokenUiController, deriveContextTokenPresentation } from './composer/context-controller';
 import { createHeaderUiController } from './header/header-controller';
 import { createHeaderState, recomputeSessionUsage } from './header/header-state';
 import { createModelUiController } from './models/model-controller';
@@ -15,6 +16,8 @@ const facade = Object.freeze({
   createAttachmentUiController,
   deriveAttachmentPresentation,
   createComposerContextState,
+  createContextTokenUiController,
+  deriveContextTokenPresentation,
   createHeaderState,
   recomputeSessionUsage,
   createHeaderUiController,
