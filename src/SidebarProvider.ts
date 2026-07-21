@@ -3182,8 +3182,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             scope: 'turn',
                             commitHead: bound.commitHead,
                             commitBase: bound.commitBase,
-                            anchorMessageId: bound.anchorMessageId,
-                            stableAnchorMessageId: bound.anchorMessageId,
                             reverted: bound.reverted === true,
                             statsByPath: bound.statsByPath || {}
                         }
@@ -3213,8 +3211,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         scope: 'turn',
                         commitHead: record.commitHead,
                         commitBase: record.commitBase,
-                        anchorMessageId: record.anchorMessageId,
-                        stableAnchorMessageId: record.anchorMessageId,
                         reverted: record.reverted === true,
                         statsByPath: record.statsByPath || {}
                     }
