@@ -10,6 +10,7 @@ import { createTanStackVirtualAdapter } from './tanstack-virtual-adapter';
 import { createLocalHistoryPresentationController, deriveLocalOlderPresentation, normalizeHydrationCoverage } from './local-history-window';
 import { createMarkdownController } from './markdown-controller';
 import { createModelState, isCopilotProvider, isFreeModel, normalizeResetText, parseSpeedMultiplier } from '../features/models/model-state';
+import { createModelUiController } from '../features/models/model-controller';
 
 export const RENDERING_FACADE_VERSION = 1 as const;
 
@@ -50,6 +51,7 @@ const facade = Object.freeze(Object.defineProperties(facadeBase, {
   isFreeModel: hiddenCapability(isFreeModel),
   normalizeResetText: hiddenCapability(normalizeResetText),
   parseSpeedMultiplier: hiddenCapability(parseSpeedMultiplier),
+  createModelUiController: hiddenCapability(createModelUiController),
 })) as typeof facadeBase
   & { readonly getSafeShellSpec: typeof getSafeShellSpec }
   & { readonly planChatWindowContainment: typeof planChatWindowContainment }
@@ -60,7 +62,8 @@ const facade = Object.freeze(Object.defineProperties(facadeBase, {
   & { readonly isCopilotProvider: typeof isCopilotProvider }
   & { readonly isFreeModel: typeof isFreeModel }
   & { readonly normalizeResetText: typeof normalizeResetText }
-  & { readonly parseSpeedMultiplier: typeof parseSpeedMultiplier };
+  & { readonly parseSpeedMultiplier: typeof parseSpeedMultiplier }
+  & { readonly createModelUiController: typeof createModelUiController };
 
 declare global {
   interface Window {

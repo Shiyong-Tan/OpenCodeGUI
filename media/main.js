@@ -195,8 +195,6 @@ let isBusy = false;
 let busySessionId = '';
 let attachments = [];
 let messageCounter = 0;
-let collapsedProviders = new Set();
-let modelDropdownOutsideHandler = null;
 let modelStateController = null;
 let simpleDropdownHandlers = new Map();
 const subagentTextExpandedByKey = new Map();
@@ -249,7 +247,6 @@ let sendBtn = null;
 let sendButtonEl = null;
 let sendButtonSendIconHtml = '';
 let sendButtonStopIconHtml = '';
-let quotaTooltipEl = null;
 let inputEl = null;
 let appendInputMode = null;
 let appendHoverActiveKey = null;
@@ -6916,6 +6913,23 @@ document.addEventListener('DOMContentLoaded', () => {
     const panelBackdrop = document.getElementById('panel-backdrop');
     const refreshSessionsBtn = document.getElementById('refresh-sessions');
     const closeSessionsBtn = document.getElementById('close-sessions');
+    const createModelUiController = window.__ocRendering?.createModelUiController;
+    if (typeof createModelUiController !== 'function') {
+        throw new Error('Model UI controller is unavailable');
+    }
+    const modelUiController = createModelUiController({
+        state: getModelStateController(),
+        document,
+        window,
+        modelSelect,
+        variantSelect,
+        sendButton: sendBtn,
+        postMessage: (message) => vscode.postMessage(message),
+        renderSimpleSelect,
+        computePanelWidth: computeModelPanelWidthPx,
+        getChevronSvg,
+        isBusy: isActiveSessionBusy
+    });
     baseSessionTitle = sessionTitle?.textContent || 'OpenCode: Chat';
     renderHeaderTitle();
     renderHeaderUsage();
@@ -7372,102 +7386,19 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function ensureQuotaTooltip() {
-        if (quotaTooltipEl) return;
-
-        const div = document.createElement('div');
-        div.className = 'quota-tooltip hidden';
-        document.body.appendChild(div);
-        quotaTooltipEl = div;
+        modelUiController.ensureQuotaTooltip();
     }
 
     function updateSendQuotaVisual() {
-        if (!sendBtn) return;
-        const activeBusy = isActiveSessionBusy();
-        const modelState = getModelStateController();
-        const quota = modelState.getQuota();
-        const visual = modelState.deriveQuotaVisual(activeBusy);
-        if (!visual.visible) {
-            sendBtn.classList.remove('has-quota');
-            sendBtn.style.removeProperty('--quota-remaining-deg');
-            sendBtn.style.removeProperty('--quota-remaining-color');
-            sendBtn.style.removeProperty('--quota-used-color');
-            vscode.postMessage({
-                type: 'ui-debug',
-                payload: [
-                    'quota.render.skip',
-                    `busy=${String(activeBusy)}`,
-                    `summary=${quota?.summaryRemainingPercent ?? 'null'}`
-                ]
-            });
-            return;
-        }
-        const { remaining, used, remainingDeg, usedDeg, severity } = visual;
-        let centerColor = 'var(--vscode-button-background)';
-        if (severity === 'danger') {
-            sendBtn.style.setProperty('--quota-remaining-color', 'var(--quota-danger)');
-            sendBtn.style.setProperty('--quota-used-color', 'var(--quota-danger)');
-            centerColor = 'var(--quota-danger)';
-        } else if (severity === 'warning') {
-            sendBtn.style.setProperty('--quota-remaining-color', 'var(--quota-warning)');
-            sendBtn.style.setProperty('--quota-used-color', 'var(--quota-warning-light)');
-            centerColor = 'var(--quota-warning)';
-        } else {
-            sendBtn.style.removeProperty('--quota-remaining-color');
-            sendBtn.style.removeProperty('--quota-used-color');
-        }
-        sendBtn.style.setProperty('--quota-used-deg', `${usedDeg}deg`);
-        sendBtn.style.setProperty('--quota-remaining-deg', `${remainingDeg}deg`);
-        sendBtn.style.setProperty('--quota-center-color', centerColor);
-        sendBtn.classList.add('has-quota');
-        vscode.postMessage({
-            type: 'ui-debug',
-            payload: [
-                'quota.render.ok',
-                `remaining=${remaining}`,
-                `used=${used}`,
-                `hasQuota=${sendBtn.classList.contains('has-quota')}`
-            ]
-        });
+        modelUiController.updateSendQuotaVisual();
     }
 
     function showQuotaTooltip() {
-        if (!sendBtn || !quotaTooltipEl || isActiveSessionBusy()) return;
-        const quota = getModelStateController().getQuota();
-        const rows = quota && Array.isArray(quota.rows) ? quota.rows : [];
-        const body = rows.length
-            ? rows.map((row) => {
-                const reset = window.__ocRendering?.normalizeResetText?.(row.resetText) || '';
-                return `<div class="quota-tooltip-row"><span class="quota-col-label">${row.label}</span><span class="quota-col-pct">${row.remainingPercent}%</span><span class="quota-col-reset">${reset}</span></div>`;
-            }).join('')
-            : '<div class="quota-tooltip-row">Quota unavailable</div>';
-        quotaTooltipEl.innerHTML = `
-            <div class="quota-tooltip-header">
-                <span class="quota-tooltip-title"><span class="quota-title-icon">\u25D4</span>Rate limits remaining</span>
-            </div>
-            ${body}
-        `;
-        const rect = sendBtn.getBoundingClientRect();
-        quotaTooltipEl.classList.remove('hidden');
-        quotaTooltipEl.style.visibility = 'hidden';
-        const width = quotaTooltipEl.offsetWidth || 196;
-        const height = quotaTooltipEl.offsetHeight || 80;
-        const left = Math.min(window.innerWidth - width - 8, Math.max(8, rect.right - width));
-        quotaTooltipEl.style.left = `${left}px`;
-        quotaTooltipEl.style.top = `${Math.max(8, rect.top - height - 8)}px`;
-        quotaTooltipEl.style.visibility = 'visible';
-        vscode.postMessage({
-            type: 'ui-debug',
-            payload: [
-                'quota.tooltip.show',
-                `rows=${rows.length}`,
-                `busy=${String(isActiveSessionBusy())}`
-            ]
-        });
+        modelUiController.showQuotaTooltip();
     }
 
     function hideQuotaTooltip() {
-        if (!quotaTooltipEl) return;
-        quotaTooltipEl.classList.add('hidden');
+        modelUiController.hideQuotaTooltip();
     }
 
     function setServerStatus(status, reason) {
@@ -14123,6 +14054,8 @@ function shouldHideDcpUiMessage(message) {
     window.__oc.isRenderPending = () => renderScheduled;
 
     function renderModelSelect() {
+        modelUiController.renderModelSelect();
+        return;
         const modelState = getModelStateController();
         const selectedModel = modelState.getSelectedModel();
         vscode.postMessage({
@@ -14357,6 +14290,8 @@ function shouldHideDcpUiMessage(message) {
     }
 
     function renderVariantSelect() {
+        modelUiController.renderVariantSelect();
+        return;
         renderSimpleSelect(variantSelect, {
             getValue: () => getModelStateController().getSelectedVariant(),
             onSelect: (value) => {
@@ -14476,6 +14411,8 @@ function shouldHideDcpUiMessage(message) {
     }
 
     function updateVariantOptions(notifyCurrentVariant = false) {
+        modelUiController.updateVariantOptions(notifyCurrentVariant);
+        return;
         const modelState = getModelStateController();
         const models = modelState.getModels();
         const selectedModel = modelState.getSelectedModel();
@@ -15944,8 +15881,7 @@ function appendMessageImages(parentEl, message) {
     });
 
     modelSelect.addEventListener('change', (e) => {
-        const selection = getModelStateController().selectModel(e.target.value);
-        updateVariantOptions(selection.variantChanged);
+        const selection = modelUiController.selectModel(e.target.value);
         renderHeaderUsage();
         if (activeSessionId) {
             // agent timeout notice removed
@@ -15962,7 +15898,7 @@ function appendMessageImages(parentEl, message) {
     });
 
     variantSelect.addEventListener('change', (e) => {
-        const selection = getModelStateController().selectVariant(e.target.value);
+        const selection = modelUiController.selectVariant(e.target.value);
         vscode.postMessage({ type: 'setVariant', value: selection.selectedVariant });
     });
 
@@ -16690,9 +16626,8 @@ function appendMessageImages(parentEl, message) {
                 break;
             }
             case 'modelQuota': {
-                const modelState = getModelStateController();
-                modelState.setQuota(message.quota || null);
-                const quota = modelState.getQuota();
+                modelUiController.setQuota(message.quota || null);
+                const quota = modelUiController.state.getQuota();
                 vscode.postMessage({
                     type: 'ui-debug',
                     payload: [
@@ -16723,13 +16658,12 @@ function appendMessageImages(parentEl, message) {
                     });
                 }
                 logSegmentState(activeSessionId, 'before-init');
-                const modelState = getModelStateController();
-                const modelSelection = modelState.setCatalog(
+                const modelSelection = modelUiController.setCatalog(
                     message.models,
                     message.selectedModel || undefined,
                     message.selectedVariant || ''
                 );
-                const models = modelState.getModels();
+                const models = modelUiController.state.getModels();
                 sessions = Array.isArray(message.sessions) ? message.sessions : [];
                 // Deduplicate modes and keep OMO-family agents in one contiguous block.
                 const rawModes = Array.isArray(message.modes)
@@ -16903,11 +16837,10 @@ function appendMessageImages(parentEl, message) {
                 break;
             }
             case 'models': {
-                const modelState = getModelStateController();
-                const selection = modelState.setCatalog(
+                const selection = modelUiController.setCatalog(
                     message.models,
-                    modelState.getSelectedModel(),
-                    modelState.getSelectedVariant()
+                    modelUiController.state.getSelectedModel(),
+                    modelUiController.state.getSelectedVariant()
                 );
                 renderModelSelect();
                 updateVariantOptions(selection.variantChanged);
@@ -18081,12 +18014,11 @@ function appendMessageImages(parentEl, message) {
                     renderAttachments();
                 }
                 if (typeof draft.model === 'string') {
-                    const selection = getModelStateController().selectModel(draft.model);
+                    const selection = modelUiController.selectModel(draft.model);
                     modelSelect.value = selection.selectedModel;
-                    updateVariantOptions(selection.variantChanged);
                 }
                 if (typeof draft.variant === 'string') {
-                    const selection = getModelStateController().selectVariant(draft.variant);
+                    const selection = modelUiController.selectVariant(draft.variant);
                     variantSelect.value = selection.selectedVariant;
                 }
                 if (typeof draft.mode === 'string') {

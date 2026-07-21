@@ -14,17 +14,25 @@ describe('model state production ownership', () => {
 
   it('routes initialization, catalog refresh, selection, and quota through the model state facade', () => {
     expect(source).toContain('modelStateController = factory();');
-    expect(source).toContain('const modelSelection = modelState.setCatalog(');
+    expect(source).toContain('const modelSelection = modelUiController.setCatalog(');
     expect(source).toContain("case 'models': {");
-    expect(source).toContain('const selection = modelState.setCatalog(');
-    expect(source).toContain('const selection = getModelStateController().selectModel(e.target.value);');
-    expect(source).toContain('modelState.setQuota(message.quota || null);');
-    expect(source).toContain('const visual = modelState.deriveQuotaVisual(activeBusy);');
+    expect(source).toContain('const selection = modelUiController.setCatalog(');
+    expect(source).toContain('const selection = modelUiController.selectModel(e.target.value);');
+    expect(source).toContain('modelUiController.setQuota(message.quota || null);');
+    expect(source).toContain('modelUiController.updateSendQuotaVisual();');
   });
 
   it('keeps provider and speed rules in the bundled feature module', () => {
     expect(source).not.toContain('function isFreeModel(model) {');
     expect(source).toContain('window.__ocRendering?.isCopilotProvider?.(providerId)');
     expect(source).toContain('window.__ocRendering?.parseSpeedMultiplier?.(value)');
+  });
+
+  it('delegates model, variant, and quota DOM ownership to the feature controller', () => {
+    expect(source).toContain('const modelUiController = createModelUiController({');
+    expect(source).toContain('modelUiController.renderModelSelect();');
+    expect(source).toContain('modelUiController.renderVariantSelect();');
+    expect(source).toContain('modelUiController.updateVariantOptions(notifyCurrentVariant);');
+    expect(source).toContain('modelUiController.showQuotaTooltip();');
   });
 });
