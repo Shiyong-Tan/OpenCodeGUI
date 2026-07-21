@@ -4,7 +4,6 @@ import * as net from 'net';
 import * as https from 'https';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import * as os from 'os';
 import * as vscode from 'vscode';
 import { GitUndoEngine } from './undo/GitUndoEngine';
 import { normalizeTouchedFiles } from './undo/GitPathUtils';
@@ -19,7 +18,7 @@ import {
     parseCopilotMultiplierHtml
 } from './copilotSpeedMapping';
 import { ModelQuotaService } from './models/ModelQuotaService';
-import type { ModelInfo, ModelQuota, ModelQuotaRow } from './models/types';
+import type { ModelInfo, ModelQuota } from './models/types';
 export type { ModelInfo, ModelQuota, ModelQuotaRow } from './models/types';
 
 export type AgentInfo = {
@@ -419,11 +418,6 @@ type ServerConn = {
     lock: ServerLock;
 };
 
-type AntigravityOAuthConstants = {
-    clientId: string;
-    clientSecret: string;
-};
-
 type PendingMainFinalGate = {
     messageId: string;
     messageIndex: number;
@@ -565,11 +559,8 @@ export class OpenCodeClient {
     private turnResyncEpochBySession = new Map<string, number>();
     private toolRunningByMessageId = new Map<string, number>();
     private toolStatusBySession = new Map<string, Map<string, string>>();
-    private modelQuotaInFlight = new Map<string, Promise<ModelQuota | null>>();
-    private modelQuotaCache = new Map<string, { ts: number; quota: ModelQuota | null }>();
     private copilotSpeedMultiplierCache?: CopilotSpeedMultiplierCache;
     private copilotSpeedMultiplierRefreshInFlight?: Promise<CopilotSpeedMultiplierCache>;
-    private antigravityOAuthConstantsPromise?: Promise<AntigravityOAuthConstants | null>;
     private resyncInFlightBySession = new Map<string, Promise<void>>();
     private resyncCooldownUntilBySession = new Map<string, number>();
     private finalMetaSeenKeysBySession = new Map<string, Set<string>>();
@@ -618,7 +609,6 @@ export class OpenCodeClient {
     private readonly autoResumeStallMs = 100000;
     private readonly autoResumeWarnMs = 180000;
     private readonly toolRunningAutoResumeMs = 180000;
-    private readonly quotaCacheTtlMs = 15000;
     private readonly assistantTextCacheMax = 4000;
     private serverStatus: ServerStatus = 'connected';
     private serverStatusHandler?: (status: ServerStatus, reason?: string) => void;
@@ -6165,325 +6155,6 @@ export class OpenCodeClient {
             if (status === 'pending' || status === 'running') return true;
         }
         return false;
-    }
-
-    private getOpencodeDataDirCandidates(): string[] {
-        const env = process.env;
-        const home = os.homedir();
-        const dataBase = (env.XDG_DATA_HOME && env.XDG_DATA_HOME.trim()) || path.join(home, '.local', 'share');
-        const dirs = [path.join(dataBase, 'opencode')];
-        if (process.platform === 'win32') {
-            const appData = (env.APPDATA && env.APPDATA.trim()) || path.join(home, 'AppData', 'Roaming');
-            const localAppData = (env.LOCALAPPDATA && env.LOCALAPPDATA.trim()) || path.join(home, 'AppData', 'Local');
-            dirs.push(path.join(appData, 'opencode'));
-            dirs.push(path.join(localAppData, 'opencode'));
-        }
-        return Array.from(new Set(dirs));
-    }
-
-    private async readAuthJson(): Promise<any | null> {
-        const candidates = this.getOpencodeDataDirCandidates().map((dir) => path.join(dir, 'auth.json'));
-        for (const candidate of candidates) {
-            try {
-                const raw = await fs.promises.readFile(candidate, 'utf8');
-                return JSON.parse(raw);
-            } catch {
-                continue;
-            }
-        }
-        return null;
-    }
-
-    private async httpsJson(url: string, options: { method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<any> {
-        const method = options.method || 'GET';
-        return new Promise((resolve, reject) => {
-            const req = https.request(url, { method, headers: options.headers }, (res) => {
-                const chunks: Buffer[] = [];
-                res.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-                res.on('end', () => {
-                    const raw = Buffer.concat(chunks).toString('utf8');
-                    if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
-                        reject(new Error(`HTTP ${res.statusCode} ${res.statusMessage || ''}`.trim()));
-                        return;
-                    }
-                    try {
-                        resolve(JSON.parse(raw));
-                    } catch (error) {
-                        reject(new Error(`Failed to parse JSON: ${String(error)}`));
-                    }
-                });
-            });
-            req.on('error', reject);
-            if (options.body) {
-                req.write(options.body);
-            }
-            req.end();
-        });
-    }
-
-    private formatReset(resetAt?: number, resetAfterSeconds?: number): string | undefined {
-        if (typeof resetAt === 'number' && Number.isFinite(resetAt) && resetAt > 0) {
-            const dt = new Date(resetAt * 1000);
-            const now = Date.now();
-            if (dt.getTime() - now < 24 * 60 * 60 * 1000) {
-                return `resets at ${dt.toLocaleTimeString()}`;
-            }
-            return `resets on ${dt.toLocaleDateString()}`;
-        }
-        if (typeof resetAfterSeconds === 'number' && Number.isFinite(resetAfterSeconds) && resetAfterSeconds > 0) {
-            const minutes = Math.round(resetAfterSeconds / 60);
-            if (minutes >= 60) {
-                const hours = Math.floor(minutes / 60);
-                const rem = minutes % 60;
-                return rem ? `resets in ${hours}h ${rem}m` : `resets in ${hours}h`;
-            }
-            return `resets in ${minutes}m`;
-        }
-        return undefined;
-    }
-
-    private formatQuotaWindowLabel(limitWindowSeconds?: number): string | undefined {
-        if (typeof limitWindowSeconds !== 'number' || !Number.isFinite(limitWindowSeconds) || limitWindowSeconds <= 0) {
-            return undefined;
-        }
-        const hours = limitWindowSeconds / 3600;
-        if (hours <= 6) return '5h';
-        if (hours < 24) return `${Math.round(hours)}h`;
-        const days = hours / 24;
-        if (days <= 7) return 'Weekly';
-        return `${Math.round(days)}d`;
-    }
-
-    private async fetchOpenAIQuota(): Promise<ModelQuota | null> {
-        const auth = await this.readAuthJson();
-        const openai = auth?.openai || auth?.codex || auth?.chatgpt || auth?.opencode;
-        const access = openai?.access;
-        if (!access) return null;
-        const headers: Record<string, string> = {
-            Authorization: `Bearer ${access}`,
-            'User-Agent': 'OpenCode-Quota/1.0'
-        };
-        if (openai?.accountId) {
-            headers['ChatGPT-Account-Id'] = openai.accountId;
-        }
-        let data: any;
-        try {
-            data = await this.httpsJson('https://chatgpt.com/backend-api/wham/usage', { headers });
-        } catch {
-            return null;
-        }
-        const rate = data?.rate_limit || {};
-        const primary = rate?.primary_window || {};
-        const secondary = rate?.secondary_window || {};
-        const primaryRemain = typeof primary.used_percent === 'number' ? Math.max(0, 100 - primary.used_percent) : null;
-        const secondaryRemain = typeof secondary.used_percent === 'number' ? Math.max(0, 100 - secondary.used_percent) : null;
-        const rows: ModelQuotaRow[] = [];
-        if (primaryRemain !== null) {
-            rows.push({
-                label: this.formatQuotaWindowLabel(primary.limit_window_seconds) || 'Usage',
-                remainingPercent: Math.round(primaryRemain),
-                resetText: this.formatReset(primary.reset_at, primary.reset_after_seconds)
-            });
-        }
-        if (secondaryRemain !== null) {
-            rows.push({
-                label: this.formatQuotaWindowLabel(secondary.limit_window_seconds) || 'Usage',
-                remainingPercent: Math.round(secondaryRemain),
-                resetText: this.formatReset(secondary.reset_at, secondary.reset_after_seconds)
-            });
-        }
-        if (!rows.length) return null;
-        const summary = Math.min(...rows.map((r) => r.remainingPercent));
-        return {
-            providerId: 'openai',
-            modelId: 'openai',
-            summaryRemainingPercent: summary,
-            rows,
-            fetchedAt: Date.now()
-        };
-    }
-
-    private async fetchCopilotQuota(): Promise<ModelQuota | null> {
-        const auth = await this.readAuthJson();
-        const copilot = auth?.['github-copilot'] || auth?.github;
-        const token = copilot?.access || copilot?.refresh;
-        if (!token) return null;
-        let data: any;
-        try {
-            data = await this.httpsJson('https://api.github.com/copilot_internal/user', {
-                headers: {
-                    Authorization: `Bearer ${token}`,
-                    Accept: 'application/json',
-                    'User-Agent': 'GitHubCopilotChat/0.35.0',
-                    'Editor-Version': 'vscode/1.107.0',
-                    'Editor-Plugin-Version': 'copilot-chat/0.35.0',
-                    'Copilot-Integration-Id': 'vscode-chat'
-                }
-            });
-        } catch {
-            return null;
-        }
-        const premium = data?.quota_snapshots?.premium_interactions;
-        if (!premium) return null;
-        const remaining = typeof premium.percent_remaining === 'number'
-            ? Math.max(0, Math.min(100, Math.round(premium.percent_remaining)))
-            : null;
-        if (remaining === null) return null;
-        return {
-            providerId: 'github-copilot',
-            modelId: 'copilot',
-            summaryRemainingPercent: remaining,
-            rows: [{
-                label: 'Monthly',
-                remainingPercent: remaining,
-                resetText: data?.quota_reset_date ? `resets on ${new Date(data.quota_reset_date).toLocaleDateString()}` : undefined
-            }],
-            fetchedAt: Date.now()
-        };
-    }
-
-    private async fetchAntigravityQuota(modelFullId: string): Promise<ModelQuota | null> {
-        const env = process.env;
-        const home = os.homedir();
-        const configBase = (env.XDG_CONFIG_HOME && env.XDG_CONFIG_HOME.trim()) || path.join(home, '.config');
-        const candidates = [path.join(configBase, 'opencode', 'antigravity-accounts.json')];
-        if (process.platform === 'win32') {
-            const appData = (env.APPDATA && env.APPDATA.trim()) || path.join(home, 'AppData', 'Roaming');
-            candidates.push(path.join(appData, 'opencode', 'antigravity-accounts.json'));
-        }
-        let accounts: any = null;
-        for (const candidate of candidates) {
-            try {
-                const raw = await fs.promises.readFile(candidate, 'utf8');
-                accounts = JSON.parse(raw);
-                break;
-            } catch {
-                continue;
-            }
-        }
-        const account = accounts?.accounts?.[accounts.activeIndex ?? 0];
-        const refresh = account?.refreshToken;
-        if (!refresh) return null;
-
-        const oauth = await this.getAntigravityOAuthConstants();
-        if (!oauth) {
-            this.logUiDebug('EXT: quota.antigravity.skip | reason=missing-oauth-constants');
-            return null;
-        }
-
-        let tokenData: any;
-        try {
-            tokenData = await this.httpsJson('https://oauth2.googleapis.com/token', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: new URLSearchParams({
-                    client_id: oauth.clientId,
-                    client_secret: oauth.clientSecret,
-                    refresh_token: refresh,
-                    grant_type: 'refresh_token'
-                }).toString()
-            });
-        } catch {
-            return null;
-        }
-        const accessToken = tokenData?.access_token;
-        if (!accessToken) return null;
-
-        const headers: Record<string, string> = {
-            'Content-Type': 'application/json',
-            'User-Agent': 'antigravity/1.11.5 windows/amd64',
-            'X-Goog-Api-Client': 'google-cloud-sdk vscode_cloudshelleditor/0.1',
-            'Client-Metadata': '{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}',
-            Authorization: `Bearer ${accessToken}`
-        };
-        const endpoints = [
-            'https://daily-cloudcode-pa.sandbox.googleapis.com',
-            'https://autopush-cloudcode-pa.sandbox.googleapis.com',
-            'https://cloudcode-pa.googleapis.com'
-        ];
-        let models: any = null;
-        for (const endpoint of endpoints) {
-            try {
-                const json = await this.httpsJson(`${endpoint}/v1internal:fetchAvailableModels`, {
-                    method: 'POST',
-                    headers,
-                    body: JSON.stringify(account?.projectId ? { project: account.projectId } : {})
-                });
-                models = json?.models || null;
-                if (models) break;
-            } catch {
-                continue;
-            }
-        }
-        if (!models) return null;
-        const target = modelFullId.toLowerCase();
-        let best: { label: string; remainingFraction: number; resetTime?: string } | null = null;
-        for (const key of Object.keys(models)) {
-            const info = models[key];
-            const quota = info?.quotaInfo;
-            if (!quota || typeof quota.remainingFraction !== 'number') continue;
-            const label = (info.displayName || info.model || key || '').toString();
-            const labelKey = label.toLowerCase();
-            const modelKey = (info.model || key || '').toString().toLowerCase();
-            if (target.includes(labelKey) || target.includes(modelKey)) {
-                best = { label, remainingFraction: quota.remainingFraction, resetTime: quota.resetTime };
-                break;
-            }
-            if (!best) {
-                best = { label, remainingFraction: quota.remainingFraction, resetTime: quota.resetTime };
-            }
-        }
-        if (!best) return null;
-        const remaining = Math.round(best.remainingFraction * 100);
-        return {
-            providerId: 'google-antigravity',
-            modelId: modelFullId,
-            summaryRemainingPercent: remaining,
-            rows: [{
-                label: best.label,
-                remainingPercent: remaining,
-                resetText: best.resetTime ? `resets on ${new Date(best.resetTime).toLocaleDateString()}` : undefined
-            }],
-            fetchedAt: Date.now()
-        };
-    }
-
-    private async getAntigravityOAuthConstants(): Promise<AntigravityOAuthConstants | null> {
-        if (!this.antigravityOAuthConstantsPromise) {
-            this.antigravityOAuthConstantsPromise = this.resolveAntigravityOAuthConstants();
-        }
-        return this.antigravityOAuthConstantsPromise;
-    }
-
-    private async resolveAntigravityOAuthConstants(): Promise<AntigravityOAuthConstants | null> {
-        try {
-            const loaded = require('opencode-antigravity-auth/dist/src/constants.js') as Record<string, unknown>;
-            const clientId = typeof loaded.ANTIGRAVITY_CLIENT_ID === 'string' ? loaded.ANTIGRAVITY_CLIENT_ID.trim() : '';
-            const clientSecret = typeof loaded.ANTIGRAVITY_CLIENT_SECRET === 'string' ? loaded.ANTIGRAVITY_CLIENT_SECRET.trim() : '';
-            if (clientId && clientSecret) {
-                this.logUiDebug('EXT: quota.antigravity.auth-source | source=opencode-antigravity-auth');
-                return { clientId, clientSecret };
-            }
-        } catch {
-            // Fallback to env vars only when runtime package is unavailable.
-        }
-
-        const env = process.env;
-        const clientId = String(
-            env.ANTIGRAVITY_CLIENT_ID
-            || env.OPENCODE_ANTIGRAVITY_CLIENT_ID
-            || ''
-        ).trim();
-        const clientSecret = String(
-            env.ANTIGRAVITY_CLIENT_SECRET
-            || env.OPENCODE_ANTIGRAVITY_CLIENT_SECRET
-            || ''
-        ).trim();
-        if (clientId && clientSecret) {
-            this.logUiDebug('EXT: quota.antigravity.auth-source | source=env');
-            return { clientId, clientSecret };
-        }
-        return null;
     }
 
     public async fetchModelQuota(model: ModelInfo): Promise<ModelQuota | null> {
