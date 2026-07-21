@@ -11943,6 +11943,13 @@ function shouldHideDcpUiMessage(message) {
         chatWindowState.pendingRangeRender = false;
         chatWindowState.pendingScrollKey = '';
         chatWindowState.pendingScrollAttempts = 0;
+        chatWindowState.anchorKey = '';
+        chatWindowState.visualOffset = 0;
+        chatWindowState.userScrollActiveUntil = 0;
+        chatWindowState.programmaticScroll = false;
+        chatWindowState.activityBelow = false;
+        autoScrollPinnedToBottom = true;
+        if (chatContainer) chatContainer.scrollTop = 0;
         chatLocalHistoryController?.complete?.(ownedSessionId);
         destroyChatLocalOlderSurface();
         chatWindowState.topSpacer?.remove?.();
@@ -12408,6 +12415,19 @@ function shouldHideDcpUiMessage(message) {
                         if (chatWindowState.rendering && chatWindowState.pendingScrollKey) {
                             chatWindowState.pendingRangeRender = true;
                         }
+                        return;
+                    }
+                    const pinnedContainedContraction = autoScrollPinnedToBottom
+                        && acknowledged
+                        && snapshot.totalSize === acknowledged.totalSize
+                        && snapshot.items.length > 0
+                        && snapshot.items.length < chatWindowState.mountedKeys.size
+                        && snapshot.items.every((item) => chatWindowState.mountedKeys.has(item.key));
+                    if (pinnedContainedContraction) {
+                        // A bottom-clamped viewport can alternate by one boundary item after DOM
+                        // measurement. Keep the already-mounted superset so that range callbacks
+                        // converge without a render/scroll feedback loop.
+                        chatWindowState.snapshot = acknowledged;
                         return;
                     }
                     const priorObservations = typeof chatWindowAdaptiveShadow !== 'undefined'

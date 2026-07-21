@@ -192,6 +192,7 @@ describe('Wave 4A hydration coverage', () => {
     expect(softRescue).toMatch(/fullDelta\.proven[\s\S]*\? 'authoritativeHistoryComplete'[\s\S]*: 'deltaContinuityUnknown'/);
 
     const selectSession = extractProviderRange('case "selectSession"', 'case "clipboardImage"');
+    expect(selectSession).toContain('this.resetUiState(targetSessionId);');
     expect(selectSession).toMatch(/snapshotIds\.length > 0 && !continuity\.proven[\s\S]*repair-disabled-safe-snapshot[\s\S]*throw new Error\('snapshot-boundary-unproven'\)/);
     expect(selectSession).toMatch(/snapshotIds\.length > 0[\s\S]*\? 'authoritativeHistoryComplete'[\s\S]*: 'deltaContinuityUnknown'/);
     expect(selectSession).toMatch(/fullDelta\.proven[\s\S]*\? 'authoritativeHistoryComplete'[\s\S]*: 'deltaContinuityUnknown'/);
