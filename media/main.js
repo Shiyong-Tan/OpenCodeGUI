@@ -6896,6 +6896,45 @@ document.addEventListener('DOMContentLoaded', () => {
         createFileReader: () => new FileReader(),
         postMessage: (message) => vscode.postMessage(message)
     });
+    const createComposerInputController = window.__ocFeatures?.createComposerInputController;
+    if (typeof createComposerInputController !== 'function') {
+        throw new Error('Composer input controller is unavailable');
+    }
+    const composerInputController = createComposerInputController({
+        document,
+        input,
+        fileMention: fileMentionController,
+        clipboard: clipboardAttachmentController,
+        isAppendActive: () => Boolean(appendInputMode),
+        isAppendDraftActive: () => Boolean(appendInputMode && appendInputMode.sessionId === activeSessionId),
+        onAppendDraft: (value) => {
+            const session = getSessionState(activeSessionId);
+            if (!session || !appendInputMode) return;
+            if (!(session.appendComposerDrafts instanceof Map)) {
+                session.appendComposerDrafts = new Map();
+            }
+            session.appendComposerDrafts.set(appendInputMode.rootUserKey, value);
+        },
+        onRegularDraft: (value) => {
+            const session = getSessionState(activeSessionId);
+            if (session) session.inputDraft = value;
+        },
+        onExitAppend: () => exitAppendInputMode({ restoreDraft: true }),
+        onCycleMode: () => {
+            const modeItems = ['plan', 'build'].filter((mode) => Array.isArray(modes) ? modes.includes(mode) : true);
+            const currentIndex = modeItems.indexOf(modeSelect.value);
+            const nextIndex = currentIndex >= 0 ? ((currentIndex + 1) % modeItems.length) : 0;
+            const nextMode = modeItems[nextIndex] || 'plan';
+            modeSelect.value = nextMode;
+            selectedMode = nextMode;
+            applyModeStyles(selectedMode);
+            renderModeSelect();
+            vscode.postMessage({ type: 'ui-debug', payload: ['[TAB_SWITCH_MODE]', `to=${selectedMode}`, `displayValue=${modeSelect.value}`] });
+            vscode.postMessage({ type: 'setMode', value: selectedMode });
+        },
+        onSend: () => sendBtn.click(),
+        onAppendInputChanged: updateSendGate
+    });
     const usageEl = document.getElementById('header-usage');
     const usageFillEl = document.getElementById('header-usage-fill');
     const usageLabelEl = document.getElementById('header-usage-label');
@@ -14328,10 +14367,6 @@ function shouldHideDcpUiMessage(message) {
         fileMentionController.close();
     }
 
-    function scheduleFileMentionUpdate() {
-        fileMentionController.schedule();
-    }
-
     function openSessionPanel() {
         sessionPanel.classList.add('open');
         panelBackdrop.classList.add('open');
@@ -15138,36 +15173,11 @@ function appendMessageImages(parentEl, message) {
         closeFileMentionList();
     }
 
+    composerInputController.install();
     sendBtn.addEventListener('click', () => {
         handlePrimarySendClick();
     });
 
-    input.addEventListener('paste', (event) => clipboardAttachmentController.handlePaste(event));
-    input.addEventListener('input', () => {
-        const session = getSessionState(activeSessionId);
-        if (appendInputMode && appendInputMode.sessionId === activeSessionId) {
-            if (session) {
-                if (!(session.appendComposerDrafts instanceof Map)) {
-                    session.appendComposerDrafts = new Map();
-                }
-                session.appendComposerDrafts.set(appendInputMode.rootUserKey, input.value);
-            }
-            closeFileMentionList();
-            updateSendGate();
-            return;
-        }
-        if (session) {
-            session.inputDraft = input.value;
-        }
-        scheduleFileMentionUpdate();
-    });
-    input.addEventListener('click', () => {
-        if (appendInputMode) {
-            closeFileMentionList();
-            return;
-        }
-        scheduleFileMentionUpdate();
-    });
     document.addEventListener('mousedown', (event) => {
         const target = event.target;
         if (!(target instanceof Node)) return;
@@ -15177,36 +15187,6 @@ function appendMessageImages(parentEl, message) {
         }
         if (target === input || fileMentionList?.contains(target)) return;
         closeFileMentionList();
-    });
-
-    input.addEventListener('keydown', (e) => {
-        if (fileMentionController.handleKeydown(e)) return;
-        if (appendInputMode && e.key === 'Escape') {
-            e.preventDefault();
-            exitAppendInputMode({ restoreDraft: true });
-            return;
-        }
-        if (appendInputMode && e.key === 'Tab') {
-            return;
-        }
-        if (e.key === 'Tab' && document.activeElement === input) {
-            e.preventDefault();
-            const modeItems = ['plan', 'build'].filter((mode) => Array.isArray(modes) ? modes.includes(mode) : true);
-            const currentIndex = modeItems.indexOf(modeSelect.value);
-            const nextIndex = currentIndex >= 0 ? ((currentIndex + 1) % modeItems.length) : 0;
-            const nextMode = modeItems[nextIndex] || 'plan';
-            modeSelect.value = nextMode;
-            selectedMode = nextMode;
-            applyModeStyles(selectedMode);
-            renderModeSelect();
-            vscode.postMessage({ type: 'ui-debug', payload: ['[TAB_SWITCH_MODE]', `to=${selectedMode}`, `displayValue=${modeSelect.value}`] });
-            vscode.postMessage({ type: 'setMode', value: selectedMode });
-            return;
-        }
-        if (e.key === 'Enter' && !e.shiftKey) {
-            e.preventDefault();
-            sendBtn.click();
-        }
     });
 
     modelSelect.addEventListener('change', (e) => {

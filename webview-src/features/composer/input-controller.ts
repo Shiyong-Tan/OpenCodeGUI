@@ -23,6 +23,7 @@ export function createComposerInputController(options: {
   };
   clipboard: { handlePaste(event: ClipboardEvent): void };
   isAppendActive(): boolean;
+  isAppendDraftActive(): boolean;
   onAppendDraft(value: string): void;
   onRegularDraft(value: string): void;
   onExitAppend(): void;
@@ -33,7 +34,7 @@ export function createComposerInputController(options: {
   const install = (): void => {
     options.input.addEventListener('paste', (event) => options.clipboard.handlePaste(event));
     options.input.addEventListener('input', () => {
-      if (options.isAppendActive()) {
+      if (options.isAppendDraftActive()) {
         options.onAppendDraft(options.input.value);
         options.fileMention.close();
         options.onAppendInputChanged();
