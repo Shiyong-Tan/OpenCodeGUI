@@ -11946,10 +11946,15 @@ function shouldHideDcpUiMessage(message) {
         chatWindowState.anchorKey = '';
         chatWindowState.visualOffset = 0;
         chatWindowState.userScrollActiveUntil = 0;
-        chatWindowState.programmaticScroll = false;
         chatWindowState.activityBelow = false;
         autoScrollPinnedToBottom = true;
+        chatWindowState.programmaticScroll = true;
         if (chatContainer) chatContainer.scrollTop = 0;
+        if (typeof requestAnimationFrame === 'function') {
+            requestAnimationFrame(() => { chatWindowState.programmaticScroll = false; });
+        } else {
+            chatWindowState.programmaticScroll = false;
+        }
         chatLocalHistoryController?.complete?.(ownedSessionId);
         destroyChatLocalOlderSurface();
         chatWindowState.topSpacer?.remove?.();
@@ -12450,6 +12455,7 @@ function shouldHideDcpUiMessage(message) {
                         && snapshot.items.every((item) => chatWindowState.mountedKeys.has(item.key));
                     if (sameMountedRange && chatWindowState.topSpacer && chatWindowState.bottomSpacer) {
                         updateChatWindowSpacers(snapshot);
+                        if (autoScrollPinnedToBottom) scrollToBottom(true);
                         return;
                     }
                     if (chatWindowState.rendering && chatWindowState.pendingScrollKey) {

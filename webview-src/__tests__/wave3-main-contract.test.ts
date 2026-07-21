@@ -2080,6 +2080,7 @@ describe('Wave 3 extracted runtime coordinator', () => {
       isChatWindowAvailable: () => true,
       sessionSearch: { windowTargetKey: '' },
       autoScrollPinnedToBottom: false,
+      requestAnimationFrame: (callback: () => void) => callback(),
       scheduleRenderFromState: (reason: string) => calls.push(reason),
       Set,
     });
@@ -4572,6 +4573,30 @@ describe('A2.4D journaled keyed and structural transaction', () => {
     expect(harness.calls.filter((entry: string) => entry === 'schedule')).toHaveLength(schedulesBefore);
     expect(harness.chatWindowState.pendingRangeRender).toBe(false);
     expect(harness.chatWindowState.snapshot).toBe(acknowledged);
+  });
+
+  test('CF3 same mounted range re-pins after spacer growth changes the scroll height', () => {
+    const harness = candidateStagingHarness();
+    harness.context.prepareUnpublishedChatWindowTransaction({}, harness.units, [], null);
+    const items = [
+      { key: 'unit-98', index: 98, start: 0, end: 50, size: 50 },
+      { key: 'unit-99', index: 99, start: 50, end: 100, size: 50 },
+    ];
+    harness.chatWindowState.mountedKeys = new Set(items.map((item) => item.key));
+    harness.chatWindowState.topSpacer = {};
+    harness.chatWindowState.bottomSpacer = {};
+    harness.chatWindowState.acknowledgedRawSnapshot = {
+      items: items.map((item) => ({ ...item })), totalSize: 100,
+    };
+    harness.context.autoScrollPinnedToBottom = true;
+    const spacersBefore = harness.calls.filter((entry: string) => entry === 'spacers').length;
+    const scrollsBefore = harness.calls.filter((entry: string) => entry === 'scroll').length;
+
+    harness.callbacks.onRangeChange({ items, totalSize: 120 });
+
+    expect(harness.calls.filter((entry: string) => entry === 'spacers')).toHaveLength(spacersBefore + 1);
+    expect(harness.calls.filter((entry: string) => entry === 'scroll')).toHaveLength(scrollsBefore + 1);
+    expect(harness.calls).not.toContain('schedule');
   });
 
   test('CF2 accepted rollback restores the prior acknowledged raw snapshot and never acknowledges a failed attempt', () => {
