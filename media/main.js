@@ -6884,6 +6884,10 @@ document.addEventListener('DOMContentLoaded', () => {
         postMessage: (message) => vscode.postMessage(message),
         onContextChanged: () => renderContextTokens()
     });
+    const buildComposerSubmission = window.__ocFeatures?.buildComposerSubmission;
+    if (typeof buildComposerSubmission !== 'function') {
+        throw new Error('Composer submission builder is unavailable');
+    }
     const usageEl = document.getElementById('header-usage');
     const usageFillEl = document.getElementById('header-usage-fill');
     const usageLabelEl = document.getElementById('header-usage-label');
@@ -15062,26 +15066,17 @@ function appendMessageImages(parentEl, message) {
             payload: ['[WV][TURN_START]', `isBusy=${isActiveSessionBusy()}`, `willFreezeSegments=${willFreezeSegments}`]
         });
         // applyTurnStartFreeze removed - segments no longer have freeze state
-        const text = input.value.trim();
         const contextState = getComposerContextStateController();
-        const hasContext = contextState.hasContext();
-        const hasFileRefs = contextState.hasFileRefs();
         const attachmentState = getAttachmentStateController();
-        if ((!text && !attachmentState.hasItems() && !hasContext && !hasFileRefs) || isActiveSessionBusy()) return;
-
-        const hasNonImage = attachmentState.hasNonImage();
-        const fallbackText = hasNonImage ? 'Attachment added.' : 'Image attached.';
-        const contextDisplay = contextState.getDisplayPrefix();
-        const baseText = contextDisplay
-            ? (text ? `${contextDisplay}\n${text}` : contextDisplay)
-            : text;
-        const messageText = baseText || fallbackText;
+        const submission = buildComposerSubmission({
+            text: input.value,
+            attachments: attachmentState,
+            context: contextState
+        });
+        if (!submission || isActiveSessionBusy()) return;
+        const { messageText, messageImages, attachmentsPayload, contextPayload, filesPayload } = submission;
         const clientMessageId = `local-${Date.now()}-${messageCounter++}`;
         const opId = `op-${Date.now()}-${messageCounter}`;
-        const messageImages = attachmentState.getMessageImages();
-        const attachmentsPayload = attachmentState.getPayload();
-        const contextPayload = contextState.getContextPayload();
-        const filesPayload = contextState.getFilesPayload();
 
         const sendingSessionId = activeSessionId || '';
         setBusy(true, sendingSessionId);
