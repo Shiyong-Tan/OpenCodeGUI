@@ -14,6 +14,15 @@ import { createSessionSearchState } from './search/search-state';
 import { collectBoundedSmartSearchText, createLinearSearchMatcher } from './search/search-text';
 import { createSessionSearchDomController, deriveSessionSearchControls } from './search/search-dom-controller';
 import { createSessionSearchInteractionController } from './search/search-interaction-controller';
+import {
+  cleanSearchSubagentTitle,
+  collectLoadedTextSearchKeys,
+  collectSmartSearchMessages,
+  formatSearchSubagentModel,
+  getLoadedSessionSearchText,
+  pickSearchAgentMode,
+  visitLoadedChatSearchChunks,
+} from './search/search-corpus';
 
 export const FEATURE_FACADE_VERSION = 1 as const;
 
@@ -49,6 +58,13 @@ const facade = Object.freeze({
   createSessionSearchDomController,
   deriveSessionSearchControls,
   createSessionSearchInteractionController,
+  cleanSearchSubagentTitle,
+  collectLoadedTextSearchKeys,
+  collectSmartSearchMessages,
+  formatSearchSubagentModel,
+  getLoadedSessionSearchText,
+  pickSearchAgentMode,
+  visitLoadedChatSearchChunks,
 });
 
 declare global {
