@@ -10106,6 +10106,26 @@ function shouldHideDcpUiMessage(message) {
         return entries;
     }
 
+    function getUndoSegmentPlaceholderPresentation(session, message) {
+        const isPlaceholder = message?.meta?.kind === 'undoSegmentPlaceholder'
+            || message?.id?.startsWith?.('system:undo-seg:');
+        if (!isPlaceholder) return null;
+        const noticeKey = message?.meta?.noticeKey || message?.id?.replace?.('system:undo-seg:', '') || '';
+        const segment = noticeKey ? session?.segmentsByNoticeKey?.get?.(noticeKey) : null;
+        if (!segment) return null;
+        return {
+            noticeKey,
+            collapsed: segment.collapsed !== false,
+            restoreAllowed: segment.restoreAllowed,
+            anchorMsgId: segment.anchorMsgId,
+            endMsgId: segment.endMsgId,
+            memberMsgIds: Array.isArray(segment.memberMsgIds)
+                ? segment.memberMsgIds
+                : Array.from(segment.memberIds || []),
+            mergedInvalidSegments: segment.mergedInvalidSegments || []
+        };
+    }
+
     function getKeyedUnitPresentation(session, unit) {
         if (unit.kind === 'greeting') {
             return {
@@ -10129,6 +10149,7 @@ function shouldHideDcpUiMessage(message) {
         return {
             sessionId: activeSessionId || '', key: unit.key, role: message?.role, text: message?.text,
             parentId: message?.parentId || message?.parentID, meta: message?.meta || {}, appendItems: getAppendItems(message),
+            undoSegment: getUndoSegmentPlaceholderPresentation(session, message),
             actions: {
                 canAppend: canAppendToMessage(session, message), canUndo: message?.role === 'user' && gitUndoEnabled,
                 busy: isBusy, appendHoverActive: appendHoverActiveKey === buildAppendHoverKey(activeSessionId, message?.id)

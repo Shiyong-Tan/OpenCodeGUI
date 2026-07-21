@@ -140,6 +140,50 @@ function extractFunction(marker: string): string {
   throw new Error(`Unclosed function ${marker}`);
 }
 
+describe('undo segment placeholder presentation revisions', () => {
+  test('expand and collapse change the keyed presentation fingerprint', () => {
+    const placeholderPresentation = extractFunction('function getUndoSegmentPlaceholderPresentation(');
+    const keyedPresentation = extractFunction('function getKeyedUnitPresentation(');
+    const segment = {
+      collapsed: true,
+      restoreAllowed: true,
+      anchorMsgId: 'msg-a',
+      endMsgId: 'msg-b',
+      memberMsgIds: ['msg-a', 'msg-b'],
+      mergedInvalidSegments: [],
+    };
+    const message = {
+      id: 'system:undo-seg:system:undo:msg-a',
+      role: 'system',
+      text: '',
+      meta: { kind: 'undoSegmentPlaceholder', noticeKey: 'system:undo:msg-a' },
+    };
+    const context = vm.createContext({
+      activeSessionId: 'session-a',
+      getAppendItems: () => [],
+      canAppendToMessage: () => false,
+      gitUndoEnabled: true,
+      isBusy: false,
+      appendHoverActiveKey: '',
+      buildAppendHoverKey: () => '',
+      shouldShowBackgroundSubagentIndicator: () => false,
+      getSubagentExpansionPresentation: () => [],
+      subagentTextExpandedByKey: new Map(),
+    });
+    vm.runInContext(`${placeholderPresentation}; ${keyedPresentation}; globalThis.present = getKeyedUnitPresentation;`, context);
+    const session = { segmentsByNoticeKey: new Map([['system:undo:msg-a', segment]]) };
+    const unit = { key: message.id, kind: 'message', value: { message } };
+
+    const collapsed = JSON.stringify(context.present(session, unit));
+    segment.collapsed = false;
+    const expanded = JSON.stringify(context.present(session, unit));
+
+    expect(collapsed).not.toBe(expanded);
+    expect(JSON.parse(collapsed).undoSegment.collapsed).toBe(true);
+    expect(JSON.parse(expanded).undoSegment.collapsed).toBe(false);
+  });
+});
+
 function extractCaseBlock(startMarker: string, endMarker: string): string {
   const start = source.indexOf(startMarker);
   const end = source.indexOf(endMarker, start + startMarker.length);
