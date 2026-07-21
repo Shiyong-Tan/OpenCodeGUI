@@ -3,6 +3,10 @@ import path from 'path';
 import { getSafeShellSpec } from '../rendering/safe-shell-spec';
 
 const source = fs.readFileSync(path.join(process.cwd(), 'media', 'main.js'), 'utf8').replace(/\r\n/g, '\n');
+const markdownControllerSource = fs.readFileSync(
+  path.join(process.cwd(), 'webview-src', 'rendering', 'markdown-controller.ts'),
+  'utf8',
+).replace(/\r\n/g, '\n');
 
 function extractFunction(marker: string): string {
   const start = source.indexOf(marker);
@@ -1999,6 +2003,7 @@ describe('A1S.11 explicit dormant message-table and message-markdown safe shell 
     expect(harness.document.activeElement).toBe(control(replacement, 'open-full'));
     renderAssistant(harness, { id: 'ordinary-rich-after-markdown', role: 'assistant', text: '**rich** <script>blocked</script>', meta: { isThinking: false } });
     expect(harness.calls.rich).toBe(2);
-    expect(source).toContain('element.innerHTML = purify.sanitize(raw');
+    expect(source).toContain('sanitizeHtml: (html, config) => purify.sanitize(html, config)');
+    expect(markdownControllerSource).toContain('element.innerHTML = dependencies.sanitizeHtml(raw');
   });
 });

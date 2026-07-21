@@ -6198,152 +6198,60 @@ function renderSafeShellMarkdownMessage(session, unit, presentationSelection) {
     return root;
 }
 
+let markdownController = null;
+
+function getMarkdownController() {
+    if (markdownController) return markdownController;
+    const createController = window.__ocRendering?.createMarkdownController;
+    if (typeof createController !== 'function') {
+        throw new Error('Markdown rendering controller is unavailable');
+    }
+    markdownController = createController({
+        document,
+        renderMarkdown: (text) => md.render(text),
+        sanitizeHtml: (html, config) => purify.sanitize(html, config),
+        normalizeMarkdown: (text) => normalizeLists(normalizeInlineMath(normalizeBlockMath(escapeSystemReminderTags(text)))),
+        wrapTables,
+        linkifyFileRefs,
+        highlightElement: (element) => {
+            if (window.hljs && typeof window.hljs.highlightElement === 'function') {
+                window.hljs.highlightElement(element);
+            }
+        },
+        writeClipboardText: (text) => {
+            if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') {
+                return Promise.reject(new Error('Clipboard API unavailable'));
+            }
+            return navigator.clipboard.writeText(text);
+        },
+        startRenderPhase: typeof startChatRenderPhase === 'function' ? startChatRenderPhase : undefined,
+        finishRenderPhase: typeof finishChatRenderPhase === 'function' ? finishChatRenderPhase : undefined
+    });
+    return markdownController;
+}
+
 function renderAssistantMarkdown(content, message) {
-    const text = typeof message?.text === 'string' ? message.text : '';
-    const linkifyRefs = shouldLinkifyAssistantMessage(message);
-    const signature = `${linkifyRefs ? '1' : '0'}:${text}`;
-    if (message && message._renderSignature === signature && typeof message._renderHtml === 'string') {
-        content.innerHTML = message._renderHtml;
-        resetCachedCodeBlockCopyEnhancements(content);
-        enhanceCodeBlocksWithCopyButtons(content);
-        return;
-    }
-    renderMarkdownInto(content, text, { linkifyRefs });
-    if (message && typeof message === 'object') {
-        message._renderSignature = signature;
-        message._renderHtml = content.innerHTML;
-    }
+    getMarkdownController().renderAssistantMarkdown(content, message, shouldLinkifyAssistantMessage(message));
 }
 
 function renderUserMarkdown(content, text) {
-    renderMarkdownInto(content, text || '', { linkifyRefs: false });
+    getMarkdownController().renderUserMarkdown(content, text);
 }
 
 function renderMarkdownInto(element, text, options = {}) {
-    const richEnhancementStartedAt = typeof startChatRenderPhase === 'function' ? startChatRenderPhase() : null;
-    delete element.dataset.linkified;
-    const unwrapped = escapeSystemReminderTags(text || '');
-    const normalized = normalizeLists(normalizeInlineMath(normalizeBlockMath(unwrapped)));
-    const raw = md.render(normalized);
-    element.innerHTML = purify.sanitize(raw, {
-        ALLOWED_TAGS: [
-            'a', 'p', 'br', 'strong', 'em', 'code', 'pre', 'ul', 'ol', 'li',
-            'blockquote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hr',
-            'table', 'thead', 'tbody', 'tr', 'th', 'td', 'span', 'section', 'eq', 'eqn',
-            'math', 'mrow', 'mi', 'mo', 'mn', 'msup', 'msub', 'mfrac', 'msqrt', 'mroot',
-            'mtable', 'mtr', 'mtd', 'mtext', 'mstyle', 'annotation', 'semantics'
-        ],
-        ALLOWED_ATTR: ['href', 'title', 'target', 'rel', 'class', 'role', 'aria-hidden', 'style', 'mathvariant', 'display', 'xmlns', 'encoding']
-    });
-    for (const link of element.querySelectorAll('a')) {
-        link.setAttribute('target', '_blank');
-        link.setAttribute('rel', 'noopener noreferrer');
-    }
-    if (window.hljs && typeof window.hljs.highlightElement === 'function') {
-        for (const block of element.querySelectorAll('pre code')) {
-            window.hljs.highlightElement(block);
-        }
-    }
-    wrapTables(element);
-    enhanceCodeBlocksWithCopyButtons(element);
-    if (options.linkifyRefs === true && element.dataset.linkified !== '1') {
-        linkifyFileRefs(element);
-        element.dataset.linkified = '1';
-    }
-    if (typeof finishChatRenderPhase === 'function') finishChatRenderPhase('richEnhancement', richEnhancementStartedAt);
+    getMarkdownController().renderMarkdownInto(element, text, options);
 }
 
-async function writeTextToClipboard(text) {
-    if (!text) return false;
-    let copied = false;
-    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-        try {
-            await navigator.clipboard.writeText(text);
-            copied = true;
-        } catch {
-            copied = false;
-        }
-    }
-    if (!copied) {
-        let textarea = null;
-        try {
-            textarea = document.createElement('textarea');
-            textarea.value = text;
-            textarea.setAttribute('readonly', '');
-            textarea.style.position = 'absolute';
-            textarea.style.left = '-9999px';
-            document.body.appendChild(textarea);
-            textarea.select();
-            copied = document.execCommand('copy');
-        } catch {
-            copied = false;
-        } finally {
-            if (textarea && textarea.parentNode) {
-                textarea.parentNode.removeChild(textarea);
-            }
-        }
-    }
-    return copied;
+function writeTextToClipboard(text) {
+    return getMarkdownController().writeTextToClipboard(text);
 }
 
 function enhanceCodeBlocksWithCopyButtons(root) {
-    if (!root || typeof root.querySelectorAll !== 'function') return;
-    if (root.closest && root.closest('.conflict-card')) return;
-    const richEnhancementStartedAt = typeof startChatRenderPhase === 'function' ? startChatRenderPhase() : null;
-
-    for (const pre of root.querySelectorAll('pre')) {
-        if (pre.closest && pre.closest('.conflict-card')) continue;
-        if (pre.dataset.hasCopyBtn === '1') continue;
-        const code = pre.querySelector('code');
-        if (!code) continue;
-        pre.dataset.hasCopyBtn = '1';
-
-        let wrapper = pre.parentElement;
-        if (!wrapper || !wrapper.classList.contains('code-block-wrap')) {
-            wrapper = document.createElement('div');
-            wrapper.className = 'code-block-wrap';
-            pre.parentElement?.insertBefore(wrapper, pre);
-            wrapper.appendChild(pre);
-        }
-
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'code-copy-btn';
-        btn.textContent = 'Copy';
-        btn.addEventListener('click', async (event) => {
-            event.stopPropagation();
-            const text = code.innerText || '';
-            if (!text) return;
-            const copied = await writeTextToClipboard(text);
-            const prev = 'Copy';
-            if (btn._copyResetTimer) {
-                clearTimeout(btn._copyResetTimer);
-            }
-            if (copied) {
-                btn.textContent = 'Copied!';
-                btn._copyResetTimer = setTimeout(() => {
-                    btn.textContent = prev;
-                }, 800);
-            } else {
-                btn.textContent = 'Failed';
-                btn._copyResetTimer = setTimeout(() => {
-                    btn.textContent = prev;
-                }, 1200);
-            }
-        });
-        wrapper.appendChild(btn);
-    }
-    if (typeof finishChatRenderPhase === 'function') finishChatRenderPhase('richEnhancement', richEnhancementStartedAt);
+    getMarkdownController().enhanceCodeBlocksWithCopyButtons(root);
 }
 
 function resetCachedCodeBlockCopyEnhancements(root) {
-    if (!root || typeof root.querySelectorAll !== 'function') return;
-    for (const button of root.querySelectorAll('.code-copy-btn')) {
-        button.remove();
-    }
-    for (const pre of root.querySelectorAll('pre[data-has-copy-btn="1"]')) {
-        delete pre.dataset.hasCopyBtn;
-    }
+    getMarkdownController().resetCachedCodeBlockCopyEnhancements(root);
 }
 
 function escapeSystemReminderTags(text) {
