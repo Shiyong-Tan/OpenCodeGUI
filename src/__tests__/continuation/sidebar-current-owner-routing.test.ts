@@ -245,6 +245,8 @@ describe('SidebarProvider Task 6 current-owner changelist routing', () => {
         );
         expect(changeListMessages.length).toBe(1);
         expect(changeListMessages[0].meta.commitHead).toBe('head4');
+        expect(changeListMessages[0].meta.anchorMessageId).toBe(scenario.msgB);
+        expect(changeListMessages[0].meta.stableAnchorMessageId).toBe(scenario.msgB);
         const ownerIndex = result.messages.findIndex((m: any) => m.id === scenario.msgB);
         const clIndex = result.messages.findIndex((m: any) => m.id === 'system:changeList:head4');
         expect(clIndex).toBeGreaterThan(ownerIndex);

@@ -3307,10 +3307,17 @@ function isChangeListSessionMessage(item) {
 
 function materializeInjectedChangeLists(session, rawSessionMessages, source = 'sessionData') {
     if (!session || !Array.isArray(rawSessionMessages) || !rawSessionMessages.length) {
-        return { seen: 0, alreadyTimeline: 0, materialized: 0, insertedAfter: 0, appended: 0, skippedNoFiles: 0 };
+        return {
+            seen: 0, alreadyTimeline: 0, materialized: 0, insertedAfter: 0, appended: 0, skippedNoFiles: 0,
+            explicitAnchor: 0, inferredAnchor: 0
+        };
     }
 
-    const stats = { seen: 0, alreadyTimeline: 0, materialized: 0, insertedAfter: 0, appended: 0, skippedNoFiles: 0 };
+    const stats = {
+        seen: 0, alreadyTimeline: 0, materialized: 0, insertedAfter: 0, appended: 0, skippedNoFiles: 0,
+        explicitAnchor: 0, inferredAnchor: 0
+    };
+    const insertionTailByAnchor = new Map();
     const findNearestPriorTimelineId = (index) => {
         for (let i = index - 1; i >= 0; i--) {
             const priorId = rawSessionMessages[i]?.id;
@@ -3354,14 +3361,21 @@ function materializeInjectedChangeLists(session, rawSessionMessages, source = 's
             return;
         }
 
-        const anchorId = typeof message.meta?.stableAnchorMessageId === 'string' && session.timeline.includes(message.meta.stableAnchorMessageId)
+        const explicitAnchorId = typeof message.meta?.stableAnchorMessageId === 'string'
             ? message.meta.stableAnchorMessageId
             : (typeof message.meta?.anchorMessageId === 'string'
                 ? (toStableMessageKey(session, message.meta.anchorMessageId) || message.meta.anchorMessageId)
-                : findNearestPriorTimelineId(index));
+                : '');
+        const anchorId = explicitAnchorId && session.timeline.includes(explicitAnchorId)
+            ? explicitAnchorId
+            : findNearestPriorTimelineId(index);
+        if (explicitAnchorId && anchorId === explicitAnchorId) stats.explicitAnchor++;
+        else if (anchorId) stats.inferredAnchor++;
         if (anchorId && session.timeline.includes(anchorId)) {
-            const anchorIndex = session.timeline.indexOf(anchorId);
+            const insertionTailId = insertionTailByAnchor.get(anchorId) || anchorId;
+            const anchorIndex = session.timeline.indexOf(insertionTailId);
             session.timeline.splice(anchorIndex + 1, 0, id);
+            insertionTailByAnchor.set(anchorId, id);
             stats.insertedAfter++;
         } else {
             session.timeline.push(id);
@@ -3380,6 +3394,8 @@ function materializeInjectedChangeLists(session, rawSessionMessages, source = 's
                 `materialized=${stats.materialized}`,
                 `insertedAfter=${stats.insertedAfter}`,
                 `appended=${stats.appended}`,
+                `explicitAnchor=${stats.explicitAnchor}`,
+                `inferredAnchor=${stats.inferredAnchor}`,
                 `skippedNoFiles=${stats.skippedNoFiles}`,
                 `timelineSize=${session.timeline.length}`]
         });
