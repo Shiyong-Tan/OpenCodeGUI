@@ -10263,6 +10263,68 @@ function shouldHideDcpUiMessage(message) {
         return candidates;
     }
 
+    const changeListOrderAuditBySession = new Map();
+    let changeListOrderAuditEmissions = 0;
+    function auditChangeListPresentationOrder(session, units) {
+        if (!session || !Array.isArray(units) || changeListOrderAuditEmissions >= 24) return;
+        const projectedTimeline = buildAnchoredPresentationTimeline(session);
+        const unitKeys = units.map((unit) => unit.key);
+        const mountedKeys = keyedRoots().map((root) => root.dataset.renderUnitKey).filter(Boolean);
+        const resolveAnchor = (message) => {
+            const explicit = typeof message?.meta?.stableAnchorMessageId === 'string' && message.meta.stableAnchorMessageId.length
+                ? message.meta.stableAnchorMessageId
+                : (typeof message?.meta?.anchorMessageId === 'string' ? message.meta.anchorMessageId : '');
+            return explicit ? (toStableMessageKey(session, explicit) || explicit) : '';
+        };
+        const followsAnchorGroup = (keys, changeListId, anchorId) => {
+            let index = keys.indexOf(changeListId);
+            if (index < 0) return 'absent';
+            while (index > 0) {
+                const priorId = keys[index - 1];
+                if (priorId === anchorId) return 'anchored';
+                const priorMessage = session.messagesById.get(priorId);
+                if (!isChangeListSessionMessage(priorMessage) || resolveAnchor(priorMessage) !== anchorId) break;
+                index--;
+            }
+            return keys.includes(anchorId) ? 'misplaced' : 'orphan';
+        };
+        const counts = {
+            total: 0, projectionMisplaced: 0, projectionOrphan: 0,
+            unitMisplaced: 0, unitOrphan: 0, mountedMisplaced: 0, mountedOrphan: 0
+        };
+        const samples = [];
+        for (const id of projectedTimeline) {
+            const message = session.messagesById.get(id);
+            if (!isChangeListSessionMessage(message)) continue;
+            counts.total++;
+            const anchorId = resolveAnchor(message);
+            const projection = followsAnchorGroup(projectedTimeline, id, anchorId);
+            const unit = followsAnchorGroup(unitKeys, id, anchorId);
+            const mounted = followsAnchorGroup(mountedKeys, id, anchorId);
+            if (projection === 'misplaced') counts.projectionMisplaced++;
+            if (projection === 'orphan') counts.projectionOrphan++;
+            if (unit === 'misplaced') counts.unitMisplaced++;
+            if (unit === 'orphan') counts.unitOrphan++;
+            if (mounted === 'misplaced') counts.mountedMisplaced++;
+            if (mounted === 'orphan') counts.mountedOrphan++;
+            if (samples.length < 6 && (projection === 'misplaced' || projection === 'orphan'
+                || unit === 'misplaced' || unit === 'orphan' || mounted === 'misplaced' || mounted === 'orphan')) {
+                samples.push(`${id}>${anchorId || 'none'}:p=${projection},u=${unit},m=${mounted}`);
+            }
+        }
+        const signature = JSON.stringify({ ...counts, mountedCount: mountedKeys.length, samples });
+        const sessionId = activeSessionId || '__no_session__';
+        if (changeListOrderAuditBySession.get(sessionId) === signature) return;
+        changeListOrderAuditBySession.set(sessionId, signature);
+        changeListOrderAuditEmissions++;
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: ['[WV][CHANGELIST_ORDER_AUDIT]', `sessionId=${sessionId}`,
+                ...Object.entries(counts).map(([key, value]) => `${key}=${value}`),
+                `mountedCount=${mountedKeys.length}`, `samples=${samples.join('|') || 'none'}`]
+        });
+    }
+
     let safeShellPresentationGeneration = 0;
     const safeShellMountOwnership = new WeakMap();
 
@@ -13887,6 +13949,9 @@ function shouldHideDcpUiMessage(message) {
             if (!CHAT_WINDOW_RAW_AUDIT_ACCEPTED_ROUTES.has(chatWindowRoute)) {
                 recordChatWindowOuterRecovery(owner, chatWindowRoute || 'window-route-unavailable');
                 return;
+            }
+            if (typeof auditChangeListPresentationOrder === 'function') {
+                auditChangeListPresentationOrder(session, units);
             }
             stage = 'raw-integrity';
             const rawIntegrity = captureChatWindowRawIntegrityAudit();
