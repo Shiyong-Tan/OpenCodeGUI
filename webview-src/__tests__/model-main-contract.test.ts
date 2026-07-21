@@ -24,7 +24,7 @@ describe('model state production ownership', () => {
 
   it('keeps provider and speed rules in the bundled feature module', () => {
     expect(source).not.toContain('function isFreeModel(model) {');
-    expect(source).toContain('window.__ocRendering?.isCopilotProvider?.(providerId)');
+    expect(source).toContain('window.__ocFeatures?.isCopilotProvider?.(providerId)');
     expect(source).not.toContain('function parseSpeedMultiplier(value) {');
   });
 

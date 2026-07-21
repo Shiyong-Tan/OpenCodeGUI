@@ -291,7 +291,7 @@ function getSelectedModelContextLimit() {
 
 function recomputeSessionUsageFromMessages(session) {
     if (!session?.messagesById) return null;
-    return window.__ocRendering?.recomputeSessionUsage?.(session.messagesById.values()) || null;
+    return window.__ocFeatures?.recomputeSessionUsage?.(session.messagesById.values()) || null;
 }
 
 function renderHeaderUsage() {
@@ -6167,7 +6167,7 @@ function resetCachedCodeBlockCopyEnhancements(root) {
 
 function getModelStateController() {
     if (modelStateController) return modelStateController;
-    const factory = window.__ocRendering?.createModelState;
+    const factory = window.__ocFeatures?.createModelState;
     if (typeof factory !== 'function') {
         throw new Error('Model state controller is unavailable');
     }
@@ -6177,7 +6177,7 @@ function getModelStateController() {
 
 function getAttachmentStateController() {
     if (attachmentStateController) return attachmentStateController;
-    const factory = window.__ocRendering?.createAttachmentState;
+    const factory = window.__ocFeatures?.createAttachmentState;
     if (typeof factory !== 'function') {
         throw new Error('Attachment state controller is unavailable');
     }
@@ -6187,7 +6187,7 @@ function getAttachmentStateController() {
 
 function getHeaderStateController() {
     if (headerStateController) return headerStateController;
-    const factory = window.__ocRendering?.createHeaderState;
+    const factory = window.__ocFeatures?.createHeaderState;
     if (typeof factory !== 'function') {
         throw new Error('Header state controller is unavailable');
     }
@@ -6196,7 +6196,7 @@ function getHeaderStateController() {
 }
 
 function isCopilotProvider(providerId) {
-    return window.__ocRendering?.isCopilotProvider?.(providerId) === true;
+    return window.__ocFeatures?.isCopilotProvider?.(providerId) === true;
 }
 
 function hashText(value) {
@@ -6825,7 +6825,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const panelBackdrop = document.getElementById('panel-backdrop');
     const refreshSessionsBtn = document.getElementById('refresh-sessions');
     const closeSessionsBtn = document.getElementById('close-sessions');
-    const createModelUiController = window.__ocRendering?.createModelUiController;
+    const createModelUiController = window.__ocFeatures?.createModelUiController;
     if (typeof createModelUiController !== 'function') {
         throw new Error('Model UI controller is unavailable');
     }
@@ -6842,7 +6842,7 @@ document.addEventListener('DOMContentLoaded', () => {
         getChevronSvg,
         isBusy: isActiveSessionBusy
     });
-    const createAttachmentUiController = window.__ocRendering?.createAttachmentUiController;
+    const createAttachmentUiController = window.__ocFeatures?.createAttachmentUiController;
     if (typeof createAttachmentUiController !== 'function') {
         throw new Error('Attachment UI controller is unavailable');
     }
@@ -6854,7 +6854,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const usageEl = document.getElementById('header-usage');
     const usageFillEl = document.getElementById('header-usage-fill');
     const usageLabelEl = document.getElementById('header-usage-label');
-    const createHeaderUiController = window.__ocRendering?.createHeaderUiController;
+    const createHeaderUiController = window.__ocFeatures?.createHeaderUiController;
     if (
         typeof createHeaderUiController !== 'function'
         || !sessionTitle
@@ -7382,7 +7382,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function isImageAttachment(item) {
-        return window.__ocRendering?.isImageAttachment?.(item) === true;
+        return window.__ocFeatures?.isImageAttachment?.(item) === true;
     }
 
     function getDisplayedAssistantCopyText(message) {

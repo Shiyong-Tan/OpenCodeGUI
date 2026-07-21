@@ -9,12 +9,6 @@ import { restoreKeyedScrollAnchor, restoreScrollAnchor } from './scroll-anchor-m
 import { createTanStackVirtualAdapter } from './tanstack-virtual-adapter';
 import { createLocalHistoryPresentationController, deriveLocalOlderPresentation, normalizeHydrationCoverage } from './local-history-window';
 import { createMarkdownController } from './markdown-controller';
-import { createModelState, isCopilotProvider, isFreeModel, normalizeResetText, parseSpeedMultiplier } from '../features/models/model-state';
-import { createModelUiController } from '../features/models/model-controller';
-import { createAttachmentState, isImageAttachment } from '../features/composer/attachment-state';
-import { createAttachmentUiController, deriveAttachmentPresentation } from '../features/composer/attachment-controller';
-import { createHeaderState, recomputeSessionUsage } from '../features/header/header-state';
-import { createHeaderUiController } from '../features/header/header-controller';
 
 export const RENDERING_FACADE_VERSION = 1 as const;
 
@@ -50,38 +44,12 @@ const facade = Object.freeze(Object.defineProperties(facadeBase, {
   classifyChatWindowIntegrity: hiddenCapability(classifyChatWindowIntegrity),
   decideChatWindowAdaptivePolicy: hiddenCapability(decideChatWindowAdaptivePolicy),
   createMarkdownController: hiddenCapability(createMarkdownController),
-  createModelState: hiddenCapability(createModelState),
-  isCopilotProvider: hiddenCapability(isCopilotProvider),
-  isFreeModel: hiddenCapability(isFreeModel),
-  normalizeResetText: hiddenCapability(normalizeResetText),
-  parseSpeedMultiplier: hiddenCapability(parseSpeedMultiplier),
-  createModelUiController: hiddenCapability(createModelUiController),
-  createAttachmentState: hiddenCapability(createAttachmentState),
-  isImageAttachment: hiddenCapability(isImageAttachment),
-  createAttachmentUiController: hiddenCapability(createAttachmentUiController),
-  deriveAttachmentPresentation: hiddenCapability(deriveAttachmentPresentation),
-  createHeaderState: hiddenCapability(createHeaderState),
-  recomputeSessionUsage: hiddenCapability(recomputeSessionUsage),
-  createHeaderUiController: hiddenCapability(createHeaderUiController),
 })) as typeof facadeBase
   & { readonly getSafeShellSpec: typeof getSafeShellSpec }
   & { readonly planChatWindowContainment: typeof planChatWindowContainment }
   & { readonly classifyChatWindowIntegrity: typeof classifyChatWindowIntegrity }
   & { readonly decideChatWindowAdaptivePolicy: typeof decideChatWindowAdaptivePolicy }
-  & { readonly createMarkdownController: typeof createMarkdownController }
-  & { readonly createModelState: typeof createModelState }
-  & { readonly isCopilotProvider: typeof isCopilotProvider }
-  & { readonly isFreeModel: typeof isFreeModel }
-  & { readonly normalizeResetText: typeof normalizeResetText }
-  & { readonly parseSpeedMultiplier: typeof parseSpeedMultiplier }
-  & { readonly createModelUiController: typeof createModelUiController }
-  & { readonly createAttachmentState: typeof createAttachmentState }
-  & { readonly isImageAttachment: typeof isImageAttachment }
-  & { readonly createAttachmentUiController: typeof createAttachmentUiController }
-  & { readonly deriveAttachmentPresentation: typeof deriveAttachmentPresentation }
-  & { readonly createHeaderState: typeof createHeaderState }
-  & { readonly recomputeSessionUsage: typeof recomputeSessionUsage }
-  & { readonly createHeaderUiController: typeof createHeaderUiController };
+  & { readonly createMarkdownController: typeof createMarkdownController };
 
 declare global {
   interface Window {
