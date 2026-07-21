@@ -10,6 +10,7 @@ import { createHeaderUiController } from './header/header-controller';
 import { createHeaderState, recomputeSessionUsage } from './header/header-state';
 import { createModelUiController } from './models/model-controller';
 import { createModelState, isCopilotProvider, isFreeModel, normalizeResetText, parseSpeedMultiplier } from './models/model-state';
+import { createSessionSearchState } from './search/search-state';
 
 export const FEATURE_FACADE_VERSION = 1 as const;
 
@@ -39,6 +40,7 @@ const facade = Object.freeze({
   normalizeResetText,
   parseSpeedMultiplier,
   createModelUiController,
+  createSessionSearchState,
 });
 
 declare global {
