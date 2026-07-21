@@ -264,6 +264,36 @@ describe('W5A proven-new append candidates', () => {
 });
 
 describe('W5A snapshot export and finalize contracts', () => {
+    it('rebuilds a structurally incomplete snapshot from full export in canonical message order', () => {
+        const provider = createProvider();
+        const existing = [
+            msg('msg_user_0', 0, 'user'),
+            msg('msg_user_1', 3, 'user'),
+            msg('msg_assistant_2', 8, 'assistant', 'snapshot second answer'),
+            msg('msg_user_2', 6, 'user'),
+        ];
+        const full = [
+            msg('msg_user_0', 0, 'user'),
+            msg('msg_assistant_0', 2, 'assistant'),
+            msg('msg_user_1', 3, 'user'),
+            msg('msg_assistant_1', 5, 'assistant'),
+            msg('msg_user_2', 6, 'user'),
+            msg('msg_assistant_2', 8, 'assistant', 'remote second answer'),
+        ];
+
+        const repaired = provider.buildFullExportSnapshotDelta(
+            existing,
+            ['msg_user_0', 'msg_assistant_0', 'msg_user_1', 'msg_assistant_2', 'msg_user_2'],
+            full,
+        );
+
+        expect(repaired.repairedSnapshot).toBe(true);
+        expect(repaired.proven).toBe(true);
+        expect(repaired.timelineMessageIds).toEqual(full.map((message) => message.id));
+        expect(repaired.messages.map((message: any) => message.id)).toEqual(full.map((message) => message.id));
+        expect(repaired.messages.at(-1).text).toBe('snapshot second answer');
+    });
+
     it('derives a strict snapshot boundary when timeline metadata is empty', async () => {
         const provider = createProvider();
         const base = [

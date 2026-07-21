@@ -60,6 +60,45 @@ afterEach(async () => {
 });
 
 describe('SidebarProvider Task 8 snapshot/reload current-owner semantics', () => {
+    it('does not collapse assistant messages from separate ordinary turns', async () => {
+        const provider = createProvider();
+        provider.readPersistedSessionMap = jest.fn().mockResolvedValue({
+            schemaVersion: 1,
+            sessionId: 'ses_task8',
+            entries: [
+                makeSessionEntry({ turnKey: 'local-turn-1', finalAssistantMsgId: 'msg_owner_a' }),
+                makeSessionEntry({ turnKey: 'local-turn-2', finalAssistantMsgId: 'msg_owner_b' }),
+            ],
+            continuation: {
+                currentOwnerMsgId: 'msg_owner_b',
+                predecessorOwnerMsgId: 'msg_owner_a',
+                continuationSequence: 3,
+            },
+        });
+
+        const payload = await provider.buildSnapshotSessionPayload({
+            type: 'sessionData',
+            sessionId: 'ses_task8',
+            title: 'Separate turns',
+            messages: [
+                { role: 'user', id: 'msg_user_1', text: 'first', messageIndex: 1 },
+                { role: 'assistant', id: 'msg_owner_a', text: 'first answer', messageIndex: 2, meta: { parentID: 'msg_user_1' } },
+                { role: 'user', id: 'msg_user_2', text: 'second', messageIndex: 3 },
+                { role: 'assistant', id: 'msg_owner_b', text: 'second answer', messageIndex: 4, meta: { parentID: 'msg_user_2' } },
+            ],
+            meta: {
+                timelineMessageIds: ['msg_user_1', 'msg_owner_a', 'msg_user_2', 'msg_owner_b'],
+            },
+        });
+
+        expect(payload.meta.timelineMessageIds).toEqual([
+            'msg_user_1', 'msg_owner_a', 'msg_user_2', 'msg_owner_b',
+        ]);
+        expect(payload.messages.map((message: any) => message.id)).toEqual([
+            'msg_user_1', 'msg_owner_a', 'msg_user_2', 'msg_owner_b',
+        ]);
+    });
+
     it('collapses persisted snapshot visibility from A -> B down to current owner B only', async () => {
         const provider = createProvider();
         const scenario = buildSuccessfulTakeoverScenario();

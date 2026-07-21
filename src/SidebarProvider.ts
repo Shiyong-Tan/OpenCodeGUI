@@ -1108,6 +1108,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 if (this.currentSessionId !== sessionId || this.sessionSelectionEpoch !== selectionEpoch) return skip('stale-after-full-repair');
                 const fullFormattedRaw = this.formatSession(fullExport);
                 const fullDelta = this.buildFullExportSnapshotDelta(baseMessages, snapshotTimelineIds, fullFormattedRaw.messages);
+                if (fullDelta.repairedSnapshot) {
+                    await this.persistStructurallyRepairedSnapshot(
+                        sessionId, fullFormattedRaw.title, fullDelta.messages, fullDelta.timelineMessageIds, []
+                    );
+                }
                 const fullFormatted = await this.injectChangeLists(sessionId, { title: fullFormattedRaw.title, messages: fullDelta.messages });
                 if (this.currentSessionId !== sessionId || this.sessionSelectionEpoch !== selectionEpoch) return skip('stale-after-full-repair-format');
                 baseMessages = fullFormatted.messages;
@@ -1349,6 +1354,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             if (!isStillValid()) return { ok: false, reason: 'stale-before-full-post' };
             const formattedRaw = this.formatSession(exportResult);
             const fullDelta = this.buildFullExportSnapshotDelta(baseMessages, snapshotTimelineIds, formattedRaw.messages);
+            if (fullDelta.repairedSnapshot) {
+                await this.persistStructurallyRepairedSnapshot(
+                    sessionId, formattedRaw.title, fullDelta.messages, fullDelta.timelineMessageIds, segments
+                );
+            }
             const formatted = await this.injectChangeLists(sessionId, {
                 title: formattedRaw.title,
                 messages: fullDelta.messages
@@ -2225,6 +2235,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             if (!isStillActive()) return { ok: false, reason: 'soft-rescue-aborted-stale-token' };
             const formattedRaw = this.formatSession(exportResult);
             const fullDelta = this.buildFullExportSnapshotDelta(baseMessages, snapshotTimelineIds, formattedRaw.messages);
+            if (fullDelta.repairedSnapshot) {
+                await this.persistStructurallyRepairedSnapshot(
+                    sessionId, formattedRaw.title, fullDelta.messages, fullDelta.timelineMessageIds, segments
+                );
+            }
             const formatted = await this.injectChangeLists(sessionId, { title: formattedRaw.title, messages: fullDelta.messages });
             if (!isStillActive()) return { ok: false, reason: 'soft-rescue-aborted-stale-token' };
             const fullPayload = {
@@ -2871,8 +2886,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             return fallbackMessageId;
         }
         const map = await this.readPersistedSessionMap(sessionId);
-        const resolved = resolveCurrentVisibleOwnerMsgId(map, fallbackMessageId || null);
+        const resolved = this.resolvePersistedVisibleOwnerMessageId(map, fallbackMessageId || null);
         return typeof resolved === 'string' ? resolved : fallbackMessageId;
+    }
+
+    private resolvePersistedVisibleOwnerMessageId(map: SessionMap | null, fallbackMessageId: string | null): string | null {
+        if (!fallbackMessageId) return null;
+        const currentOwnerMsgId = map?.continuation?.currentOwnerMsgId;
+        const hasContinuationChainIdentity = typeof map?.continuation?.chainId === 'string'
+            && map.continuation.chainId.length > 0;
+        const hasContinuationTurnEntry = Array.isArray(map?.entries)
+            && typeof currentOwnerMsgId === 'string'
+            && map.entries.some((entry) => {
+                const entryOwner = entry.finalAssistantMsgId || entry.assistantMsgId;
+                return entryOwner === currentOwnerMsgId
+                    && typeof entry.turnKey === 'string'
+                    && entry.turnKey.startsWith('cont:');
+            });
+        if (!hasContinuationChainIdentity && !hasContinuationTurnEntry) return fallbackMessageId;
+        return resolveCurrentVisibleOwnerMsgId(map, fallbackMessageId) || fallbackMessageId;
     }
 
     private canonicalizeSnapshotMessagesForCurrentOwner(
@@ -2886,7 +2918,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         for (const message of messages) {
             if (!message || typeof message.id !== 'string' || !message.id) continue;
             const role = message.role;
-            const resolvedMessageId = resolveCurrentVisibleOwnerMsgId(map, message.id) || message.id;
+            const resolvedMessageId = this.resolvePersistedVisibleOwnerMessageId(map, message.id) || message.id;
             if (role === 'assistant' && resolvedMessageId !== message.id) {
                 continue;
             }
@@ -2896,7 +2928,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     ? nextMessage.meta.assistantId
                     : undefined;
                 if (currentAssistantId) {
-                    const resolvedAssistantId = resolveCurrentVisibleOwnerMsgId(map, currentAssistantId) || currentAssistantId;
+                    const resolvedAssistantId = this.resolvePersistedVisibleOwnerMessageId(map, currentAssistantId) || currentAssistantId;
                     if (resolvedAssistantId !== currentAssistantId) {
                         nextMessage.meta = {
                             ...nextMessage.meta,
@@ -3119,7 +3151,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             for (const candidate of candidates) {
                 if (seen.has(candidate)) continue;
                 seen.add(candidate);
-                const resolved = resolveCurrentVisibleOwnerMsgId(ownershipMap, candidate) || candidate;
+                const resolved = this.resolvePersistedVisibleOwnerMessageId(ownershipMap, candidate) || candidate;
                 if (idSet.has(resolved)) return resolved;
                 if (idSet.has(candidate)) return candidate;
             }
@@ -3358,7 +3390,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         existingSnapshotRecords: SessionMessage[],
         snapshotTimelineIds: string[],
         fullExportRecords: SessionMessage[]
-    ): { proven: boolean; messages: SessionMessage[]; timelineMessageIds: string[] } {
+    ): { proven: boolean; messages: SessionMessage[]; timelineMessageIds: string[]; repairedSnapshot?: boolean } {
         if (snapshotTimelineIds.length === 0) {
             const messages = this.buildImmutableSnapshotWithProvenSuffix([], fullExportRecords);
             return {
@@ -3374,6 +3406,51 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         if (boundaryIndexes.length !== 1) {
             return { proven: false, messages: [...existingSnapshotRecords], timelineMessageIds: [...snapshotTimelineIds] };
         }
+        const storedMessageIds = new Set(
+            existingSnapshotRecords
+                .map((message) => typeof message?.id === 'string' ? message.id : '')
+                .filter((id): id is string => id.startsWith('msg_'))
+        );
+        const missingSnapshotMessageIds = snapshotTimelineIds.filter((id) => (
+            id.startsWith('msg_') && !storedMessageIds.has(id)
+        ));
+        if (missingSnapshotMessageIds.length > 0) {
+            const fullById = new Map(
+                fullExportRecords
+                    .filter((message) => typeof message?.id === 'string' && message.id.startsWith('msg_'))
+                    .map((message) => [message.id as string, message] as const)
+            );
+            if (missingSnapshotMessageIds.every((id) => fullById.has(id))) {
+                const existingById = new Map(
+                    existingSnapshotRecords
+                        .filter((message) => typeof message?.id === 'string' && message.id.startsWith('msg_'))
+                        .map((message) => [message.id as string, message] as const)
+                );
+                const repairedMessages = fullExportRecords
+                    .filter((message) => typeof message?.id === 'string' && message.id.startsWith('msg_'))
+                    .map((message) => {
+                        const existing = existingById.get(message.id as string);
+                        if (!existing) return message;
+                        return {
+                            ...message,
+                            ...existing,
+                            text: typeof existing.text === 'string' && existing.text.length ? existing.text : message.text,
+                            meta: {
+                                ...(message.meta || {}),
+                                ...(existing.meta || {})
+                            }
+                        };
+                    });
+                return {
+                    proven: true,
+                    messages: repairedMessages,
+                    timelineMessageIds: repairedMessages
+                        .map((message) => message.id || '')
+                        .filter((id): id is string => id.startsWith('msg_')),
+                    repairedSnapshot: true
+                };
+            }
+        }
         const suffix = fullExportRecords.slice(boundaryIndexes[0] + 1);
         const messages = this.buildImmutableSnapshotWithProvenSuffix(existingSnapshotRecords, suffix);
         const existingIds = new Set(snapshotTimelineIds);
@@ -3385,6 +3462,30 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             messages,
             timelineMessageIds: [...snapshotTimelineIds, ...Array.from(new Set(suffixIds))]
         };
+    }
+
+    private async persistStructurallyRepairedSnapshot(
+        sessionId: string,
+        title: string,
+        messages: SessionMessage[],
+        timelineMessageIds: string[],
+        segments: any[]
+    ): Promise<void> {
+        const sessionData = await this.buildSnapshotSessionPayload({
+            type: 'sessionData',
+            sessionId,
+            title,
+            messages,
+            segments,
+            meta: { timelineMessageIds }
+        });
+        const snapshotObj = { sessionId, exportedAt: Date.now(), sessionData };
+        const bytes = await this.writeSnapshotAtomic(sessionId, snapshotObj);
+        this.lastSnapshotPayloadBySession.set(sessionId, sessionData);
+        this.uiTimelineBySession.set(sessionId, timelineMessageIds);
+        this.uiDebugChannel.appendLine(
+            `[EXT][SNAP_REPAIR_WRITE] sessionId=${sessionId} timelineCount=${timelineMessageIds.length} messageCount=${messages.length} bytes=${bytes}`
+        );
     }
 
     private enforceUserAssistantPairs(messages: SessionMessage[]): SessionMessage[] {
@@ -5861,6 +5962,11 @@ ${attachmentLines.join('\n')}`
                         const formattedRaw = this.formatSession(exportData);
                         const snapshotIds = snapshotTimelineIds;
                         const fullDelta = this.buildFullExportSnapshotDelta(baseMessages, snapshotIds, formattedRaw.messages);
+                        if (fullDelta.repairedSnapshot) {
+                            await this.persistStructurallyRepairedSnapshot(
+                                targetSessionId, formattedRaw.title, fullDelta.messages, fullDelta.timelineMessageIds, segments
+                            );
+                        }
                         const formatted = await this.injectChangeLists(targetSessionId, { title: formattedRaw.title, messages: fullDelta.messages });
 
                         // this.uiDebugChannel.appendLine(
@@ -7288,6 +7394,11 @@ ${attachmentLines.join('\n')}`
                                 if (!isRecentHydrationCurrent()) throw new Error('stale-after-full-repair');
                                 const fullFormatted = this.formatSession(fullExport);
                                 const fullDelta = this.buildFullExportSnapshotDelta(baseMessages, snapshotTimelineIds, fullFormatted.messages);
+                                if (fullDelta.repairedSnapshot) {
+                                    await this.persistStructurallyRepairedSnapshot(
+                                        recentSessionId, fullFormatted.title, fullDelta.messages, fullDelta.timelineMessageIds, segments
+                                    );
+                                }
                                 const repaired = await this.injectChangeLists(recentSessionId, { title: fullFormatted.title, messages: fullDelta.messages });
                                 if (!isRecentHydrationCurrent()) throw new Error('stale-after-full-repair-format');
                                 mergedMessages = repaired.messages;
