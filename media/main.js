@@ -9698,6 +9698,10 @@ function shouldHideDcpUiMessage(message) {
     let chatWindowOuterRecovery = Object.freeze({
         status: 'idle', sessionId: '', generation: -1, reason: 'none', rawIntegrity: null
     });
+    let chatWindowEmergencyState = Object.freeze({
+        status: 'idle', sessionId: '', generation: -1, root: null, codes: []
+    });
+    window.__ocChatWindowEmergency = chatWindowEmergencyState;
 
     function boundedChatAdaptiveCount(value) {
         if (!Number.isFinite(value)) return 0;
@@ -13840,7 +13844,7 @@ function shouldHideDcpUiMessage(message) {
         return enterChatWindowEmergency(owner, rawIntegrity, classifications);
     }
 
-    function recordChatWindowOuterRecovery(owner, reason, rawIntegrity = null) {
+    function recordChatWindowOuterRecovery(owner, reason, rawIntegrity = null, error = null) {
         if (reason === 'raw-integrity-anomaly'
             && chatWindowOuterRecovery.sessionId === owner.sessionId
             && chatWindowOuterRecovery.generation === owner.generation
@@ -13859,11 +13863,14 @@ function shouldHideDcpUiMessage(message) {
             const corruptionCodes = Array.isArray(rawIntegrity?.corruptionSamples)
                 ? rawIntegrity.corruptionSamples.map((sample) => sample?.code).filter(Boolean).join(',')
                 : '';
+            const errorText = error
+                ? String(error?.stack || error?.message || error).split(/\r?\n/, 1)[0].slice(0, 500)
+                : '';
             vscode.postMessage({
                 type: 'ui-debug',
                 payload: ['[WV][CHAT_WINDOW_OUTER_RECOVERY]', `reason=${reason}`,
                     `generation=${owner.generation}`, `rawAnomaly=${rawIntegrity?.anomaly === true}`,
-                    `codes=${corruptionCodes || 'none'}`]
+                    `codes=${corruptionCodes || 'none'}`, `error=${errorText || 'none'}`]
             });
         } catch { /* pending bounded ownership must not depend on diagnostics */ }
         return evidence;
@@ -13943,7 +13950,7 @@ function shouldHideDcpUiMessage(message) {
             const reason = stage === 'transaction' && (attemptedFailure?.operation === 'create' || attemptedFailure?.operation === 'replace')
                 ? 'factory-or-reconcile-exception'
                 : `${stage}-exception`;
-            recordChatWindowOuterRecovery(owner, reason);
+            recordChatWindowOuterRecovery(owner, reason, null, error);
         }
     }
 
