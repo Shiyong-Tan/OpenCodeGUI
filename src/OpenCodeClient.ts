@@ -10,6 +10,14 @@ import { GitUndoEngine } from './undo/GitUndoEngine';
 import { normalizeTouchedFiles } from './undo/GitPathUtils';
 import { runGit } from './undo/GitRunner';
 import { GitCapabilities, FileChangeSpec } from './undo/types';
+import {
+    getCopilotSpeedMultiplierKeys,
+    getLocalCopilotSpeedMultiplierMap,
+    inferCopilotSpeedMultiplier,
+    isCopilotProviderId,
+    normalizeCopilotModelKey,
+    parseCopilotMultiplierHtml
+} from './copilotSpeedMapping';
 
 export type ModelInfo = {
     id: string;
@@ -1454,136 +1462,6 @@ export class OpenCodeClient {
         this.logUiDebug(`EXT: continuation.revive.fail | sessionId=${sessionId} | chainId=${chain.continuationChainId} | continuationCount=${chain.continuationCount} | state=sealed (retry-ready)`);
     }
 
-    private isCopilotProviderId(providerId: string | undefined, fullId: string | undefined): boolean {
-        const provider = (providerId || '').toLowerCase();
-        const full = (fullId || '').toLowerCase();
-        return provider.includes('copilot') || full.includes('copilot');
-    }
-
-    private normalizeCopilotModelKey(value: string): string {
-        return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
-    }
-
-    private getCopilotSpeedMultiplierKeys(model: ModelInfo): string[] {
-        const rawKeys = [
-            model.name,
-            model.fullId,
-            model.id
-        ]
-            .map((value) => this.normalizeCopilotModelKey(value))
-            .filter((value) => value.length > 0);
-        const keys = new Set<string>(rawKeys);
-
-        for (const key of rawKeys) {
-            const withoutPreview = key
-                .replace(/\s*\(preview\)\s*$/i, '')
-                .replace(/\s+preview\s*$/i, '')
-                .trim();
-            if (withoutPreview && withoutPreview !== key) {
-                keys.add(withoutPreview);
-            }
-        }
-
-        return [...keys];
-    }
-
-    private inferCopilotSpeedMultiplier(model: ModelInfo): string | undefined {
-        const fullId = String(model.fullId || '').toLowerCase();
-        const id = String(model.id || '').toLowerCase();
-        const name = String(model.name || '').toLowerCase();
-        const haystack = `${name} ${fullId} ${id}`;
-
-        if (haystack.includes('opus')) {
-            return '3x';
-        }
-        if (haystack.includes('gpt')) {
-            return '1x';
-        }
-        return undefined;
-    }
-
-    private getLocalCopilotSpeedMultiplierMap(): Map<string, string> {
-        return new Map<string, string>([
-            ['GPT-4.1', '0x'],
-            ['GPT-4o', '0x'],
-            ['Grok Code Fast 1', '0.25x'],
-            ['Raptor mini', '0x'],
-            ['Raptor mini (Preview)', '0x'],
-            ['Claude Haiku 4.5', '0.33x'],
-            ['Claude Opus 4.1', '3x'],
-            ['Claude Opus 4.5', '3x'],
-            ['Claude Opus 4.6', '3x'],
-            ['Claude Opus 4.6 (fast mode) (preview)', '30x'],
-            ['Claude Opus 4.7', '15x'],
-            ['Claude Sonnet 4', '1x'],
-            ['Claude Sonnet 4.5', '1x'],
-            ['Claude Sonnet 4.6', '1x'],
-            ['Gemini 2.5 Pro', '1x'],
-            ['Gemini 3 Flash', '0.33x'],
-            ['Gemini 3.1 Pro', '1x'],
-            ['GPT-5 mini', '0x'],
-            ['GPT-5.2', '1x'],
-            ['GPT-5.2-Codex', '1x'],
-            ['GPT-5.3-Codex', '1x'],
-            ['GPT-5.4', '1x'],
-            ['GPT-5.4 mini', '0.33x'],
-            ['GPT-5.4 nano', '0.25x'],
-            ['GPT-5.5', '7.5x'],
-            ['Goldeneye', '1x'],
-        ].map(([name, multiplier]) => [this.normalizeCopilotModelKey(name), multiplier]));
-    }
-
-    private decodeHtmlEntities(value: string): string {
-        return String(value || '')
-            .replace(/&nbsp;/gi, ' ')
-            .replace(/&amp;/gi, '&')
-            .replace(/&lt;/gi, '<')
-            .replace(/&gt;/gi, '>')
-            .replace(/&quot;/gi, '"')
-            .replace(/&#39;/gi, "'");
-    }
-
-    private stripHtmlTags(value: string): string {
-        return this.decodeHtmlEntities(
-            String(value || '')
-                .replace(/<a\b[^>]*href="#[^"]*"[^>]*>[\s\S]*?<\/a>/gi, ' ')
-                .replace(/<[^>]*>/g, ' ')
-        )
-            .replace(/\s+/g, ' ')
-            .trim();
-    }
-
-    private parseCopilotMultiplierHtml(html: string): Map<string, string> {
-        const multipliers = new Map<string, string>();
-        const sectionMatch = String(html || '').match(/<h2[^>]*>\s*Model multipliers\s*<\/h2>([\s\S]*?)(?:<h2[^>]*>|<\/main>|<\/article>|<\/body>|<\/html>)/i);
-        const section = sectionMatch ? sectionMatch[1] : html;
-        const rowMatches = section.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi);
-
-        for (const rowMatch of rowMatches) {
-            const rowHtml = rowMatch[1] || '';
-            const cellMatches = [...rowHtml.matchAll(/<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi)];
-            if (cellMatches.length < 2) continue;
-
-            const rawNameHtml = cellMatches[0]?.[1] || '';
-            const rawMultiplierHtml = cellMatches[1]?.[1] || '';
-            const rawName = this.stripHtmlTags(rawNameHtml)
-                .replace(/\s*\[\d+\]$/g, '')
-                .trim();
-            const rawMultiplier = this.stripHtmlTags(rawMultiplierHtml).toLowerCase();
-
-            if (!rawName || !rawMultiplier || rawName.toLowerCase() === 'model') continue;
-            if (rawMultiplier === 'not applicable') continue;
-
-            const numeric = rawMultiplier.replace(/x$/i, '').trim();
-            const parsed = Number(numeric);
-            if (!Number.isFinite(parsed)) continue;
-
-            multipliers.set(this.normalizeCopilotModelKey(rawName), `${numeric}x`);
-        }
-
-        return multipliers;
-    }
-
     private async fetchTextFromUrl(url: string, redirectCount = 0): Promise<string> {
         return new Promise((resolve, reject) => {
             const request = https.get(url, {
@@ -1658,7 +1536,7 @@ export class OpenCodeClient {
 
     private async fetchCopilotSpeedMultipliers(): Promise<CopilotSpeedMultiplierCache> {
         const html = await this.fetchTextFromUrl(COPILOT_MODEL_MULTIPLIERS_DOC_URL);
-        const parsed = this.parseCopilotMultiplierHtml(html);
+        const parsed = parseCopilotMultiplierHtml(html);
         if (!parsed.size) {
             throw new Error('No copilot speed multipliers parsed from docs page.');
         }
@@ -1692,7 +1570,7 @@ export class OpenCodeClient {
 
         return this.copilotSpeedMultiplierRefreshInFlight || {
             fetchedAt: now,
-            multipliers: Object.fromEntries(this.getLocalCopilotSpeedMultiplierMap().entries())
+            multipliers: Object.fromEntries(getLocalCopilotSpeedMultiplierMap().entries())
         };
     }
 
@@ -1710,7 +1588,7 @@ export class OpenCodeClient {
                 this.logUiDebug(`EXT: copilot.speed.fetch.fail | err=${String(error)}`);
                 return this.copilotSpeedMultiplierCache || {
                     fetchedAt: Date.now(),
-                    multipliers: Object.fromEntries(this.getLocalCopilotSpeedMultiplierMap().entries())
+                    multipliers: Object.fromEntries(getLocalCopilotSpeedMultiplierMap().entries())
                 };
             })
             .finally(() => {
@@ -1737,7 +1615,7 @@ export class OpenCodeClient {
             ? model.speedMultiplier.trim().toLowerCase()
             : '';
         if (speed !== '0x') return false;
-        return this.isCopilotProviderId(model.providerId, model.fullId);
+        return isCopilotProviderId(model.providerId, model.fullId);
     }
 
     private async pickStopContinuationFreeModel(): Promise<ModelInfo | null> {
@@ -9202,18 +9080,18 @@ export class OpenCodeClient {
         const remoteSpeedMap = await this.getCopilotSpeedMultiplierCache().then((cache) => {
             const map = new Map<string, string>();
             for (const [key, value] of Object.entries(cache.multipliers || {})) {
-                map.set(this.normalizeCopilotModelKey(key), value);
+                map.set(normalizeCopilotModelKey(key), value);
             }
             return map;
         });
-        const fallbackSpeedMap = this.getLocalCopilotSpeedMultiplierMap();
+        const fallbackSpeedMap = getLocalCopilotSpeedMultiplierMap();
 
         for (const model of models) {
-            const keys = this.getCopilotSpeedMultiplierKeys(model);
+            const keys = getCopilotSpeedMultiplierKeys(model);
             const speed =
                 keys.map((key) => remoteSpeedMap.get(key)).find((value) => typeof value === 'string' && value.length > 0) ||
                 keys.map((key) => fallbackSpeedMap.get(key)).find((value) => typeof value === 'string' && value.length > 0);
-            model.speedMultiplier = speed || this.inferCopilotSpeedMultiplier(model) || model.speedMultiplier;
+            model.speedMultiplier = speed || inferCopilotSpeedMultiplier(model) || model.speedMultiplier;
         }
     }
 

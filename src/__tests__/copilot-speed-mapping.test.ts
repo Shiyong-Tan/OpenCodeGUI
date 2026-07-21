@@ -17,6 +17,7 @@ jest.mock('vscode', () => ({
 }), { virtual: true });
 
 import { OpenCodeClient, ModelInfo } from '../OpenCodeClient';
+import { parseCopilotMultiplierHtml } from '../copilotSpeedMapping';
 
 describe('Copilot speed multiplier mapping', () => {
     it('keeps explicit matches and infers GPT/Opus fallback values for unmatched models', async () => {
@@ -76,7 +77,6 @@ describe('Copilot speed multiplier mapping', () => {
     });
 
     it('parses the official model multipliers table from docs html', () => {
-        const client = new OpenCodeClient() as any;
         const html = `
             <html>
                 <body>
@@ -111,7 +111,7 @@ describe('Copilot speed multiplier mapping', () => {
             </html>
         `;
 
-        const parsed: Map<string, string> = client.parseCopilotMultiplierHtml(html);
+        const parsed = parseCopilotMultiplierHtml(html);
         expect(parsed.get('claude haiku 4.5')).toBe('0.33x');
         expect(parsed.get('gpt-5.4 nano')).toBe('0.25x');
         expect(parsed.get('claude opus 4.6 (fast mode) (preview)')).toBe('30x');
