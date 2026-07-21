@@ -521,9 +521,8 @@ describe('B1-RED-1 dormant non-enumerable facade contract', () => {
       ...existingHiddenMembers,
       'decideChatWindowAdaptivePolicy',
       'createMarkdownController',
-      'createMessagePresentationController',
     ]);
-    for (const member of [...existingHiddenMembers, 'decideChatWindowAdaptivePolicy', 'createMarkdownController', 'createMessagePresentationController']) {
+    for (const member of [...existingHiddenMembers, 'decideChatWindowAdaptivePolicy', 'createMarkdownController']) {
       expect(Object.getOwnPropertyDescriptor(facade, member)).toMatchObject({
         value: expect.any(Function),
         enumerable: false,

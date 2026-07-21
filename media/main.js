@@ -6199,21 +6199,6 @@ function renderSafeShellMarkdownMessage(session, unit, presentationSelection) {
 }
 
 let markdownController = null;
-let messagePresentationController = null;
-
-function getMessagePresentationController() {
-    if (messagePresentationController) return messagePresentationController;
-    const createController = window.__ocRendering?.createMessagePresentationController;
-    if (typeof createController !== 'function') {
-        throw new Error('Message presentation controller is unavailable');
-    }
-    messagePresentationController = createController({
-        stripSystemInjections,
-        stripAttachmentManifest,
-        getAppendItems
-    });
-    return messagePresentationController;
-}
 
 function getMarkdownController() {
     if (markdownController) return markdownController;
@@ -7711,11 +7696,16 @@ document.addEventListener('DOMContentLoaded', () => {
     function renderNestedMessageElement(message) {
         const safeShellDiff = renderSafeShellDiffMessage(getSessionOrNull(activeSessionId), { key: keyedUnitKeyOverride, value: { message } }, keyedPresentationSelectionOverride);
         if (safeShellDiff) return safeShellDiff;
-        const presentation = getMessagePresentationController();
-        const contentPlan = presentation.resolveContent(message, true);
+        const messageType = message.role === 'assistant'
+            ? 'bot'
+            : message.role === 'user'
+                ? 'user'
+                : message.role;
 
         const div = document.createElement('div');
-        div.className = presentation.getBubbleClass(message, true);
+        const isUser = messageType === 'user';
+        const isSystem = messageType === 'system' || messageType === 'tool';
+        div.className = `message ${isUser ? 'user' : isSystem ? 'system' : 'bot'} nested-message`;
         if (message.meta?.isThinking === true) {
             div.classList.add('thinking');
         }
@@ -7723,18 +7713,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const content = document.createElement('div');
         content.className = 'message-content';
-        if (contentPlan.kind === 'diff') {
+        if (message.meta?.isDiff) {
             const pre = document.createElement('pre');
             const code = document.createElement('code');
-            code.textContent = contentPlan.text;
+            code.textContent = message.meta.diffText || message.text || '';
             pre.appendChild(code);
             content.appendChild(pre);
-        } else if (contentPlan.kind === 'assistant') {
-            renderAssistantMarkdown(content, contentPlan.message);
-        } else if (contentPlan.kind === 'user') {
-            renderUserMarkdown(content, contentPlan.text);
-        } else if (contentPlan.kind === 'plain') {
-            content.textContent = contentPlan.text;
+        } else if (message.role === 'assistant') {
+            renderAssistantMarkdown(content, message);
+        } else {
+            const rawText = message.text || '';
+            const trimmedText = isUser ? stripSystemInjections(rawText.replace(/^(\r?\n)+/, '')) : rawText;
+            if (isUser) {
+                renderUserMarkdown(content, trimmedText);
+            } else {
+                content.textContent = trimmedText;
+            }
         }
         div.appendChild(content);
         attachMessageCopyButton(div, message);
@@ -8056,11 +8050,16 @@ function renderMessageElement(message, renderedSet) {
             return;
         }
 
-        const presentation = getMessagePresentationController();
-        const contentPlan = presentation.resolveContent(message, false);
+        const messageType = message.role === 'assistant'
+            ? 'bot'
+            : message.role === 'user'
+                ? 'user'
+                : message.role;
 
         const div = document.createElement('div');
-        div.className = presentation.getBubbleClass(message, false);
+        const isUser = messageType === 'user';
+        const isSystem = messageType === 'system' || messageType === 'tool';
+        div.className = `message ${isUser ? 'user' : isSystem ? 'system' : 'bot'}`;
         if (message.meta?.isThinking === true) {
             div.classList.add('thinking');
             // Streaming animation lives on outer bubble (.streaming).
@@ -8071,43 +8070,71 @@ function renderMessageElement(message, renderedSet) {
 
         const content = document.createElement('div');
         content.className = 'message-content';
-        if (contentPlan.kind === 'diff') {
+        const raw = message.text || '';
+        if (message.meta?.isDiff) {
             const pre = document.createElement('pre');
             const code = document.createElement('code');
-            code.textContent = contentPlan.text;
+            code.textContent = message.meta.diffText || raw;
             pre.appendChild(code);
             content.appendChild(pre);
-        } else if (contentPlan.kind === 'assistant') {
-            renderAssistantMarkdown(content, contentPlan.message);
-        } else if (contentPlan.kind === 'skip') {
-            return;
-        } else if (contentPlan.kind === 'user') {
-            const mainText = document.createElement('div');
-            mainText.className = 'message-user-text';
-            renderUserMarkdown(mainText, contentPlan.text);
-            content.appendChild(mainText);
-            for (const item of contentPlan.appendItems) {
-                if (!item || typeof item.text !== 'string' || !item.text.trim()) continue;
-                const block = document.createElement('div');
-                block.className = 'append-message-block';
-                const divider = document.createElement('div');
-                divider.className = 'append-message-divider';
-                block.appendChild(divider);
-                const textEl = document.createElement('div');
-                textEl.className = 'append-message-text';
-                renderUserMarkdown(textEl, item.text);
-                block.appendChild(textEl);
-                const statusPresentation = presentation.getAppendStatus(item.status);
-                if (statusPresentation) {
-                    const status = document.createElement('div');
-                    status.className = statusPresentation.className;
-                    status.textContent = statusPresentation.text;
-                    block.appendChild(status);
+        } else if (message.role === 'assistant') {
+            // For completed main-agent messages, render only final text (last segment)
+            const isCompleted = message.meta?.isThinking !== true;
+            if (isCompleted && Array.isArray(message.meta?.textSegments) && message.meta.textSegments.length > 0) {
+                // Render only the last segment (final text)
+                const finalSegment = message.meta.textSegments[message.meta.textSegments.length - 1];
+                const finalText = typeof finalSegment === 'string' ? finalSegment.trim() : '';
+                if (finalText) {
+                    const tempMessage = { ...message, text: finalText };
+                    renderAssistantMarkdown(content, tempMessage);
+                } else {
+                    // Fallback to full text if final segment is empty
+                    renderAssistantMarkdown(content, message);
                 }
-                content.appendChild(block);
+            } else {
+                // Streaming or no segments: render full accumulated text
+                renderAssistantMarkdown(content, message);
             }
         } else {
-            content.textContent = contentPlan.text;
+            const sanitized = message.role === 'user' ? stripSystemInjections(stripAttachmentManifest(raw)) : raw;
+            if (message.role === 'user' && !sanitized.trim()) {
+                return;
+            }
+            if (message.role === 'user') {
+                const mainText = document.createElement('div');
+                mainText.className = 'message-user-text';
+                renderUserMarkdown(mainText, sanitized);
+                content.appendChild(mainText);
+                for (const item of getAppendItems(message)) {
+                    if (!item || typeof item.text !== 'string' || !item.text.trim()) continue;
+                    const block = document.createElement('div');
+                    block.className = 'append-message-block';
+                    const divider = document.createElement('div');
+                    divider.className = 'append-message-divider';
+                    block.appendChild(divider);
+                    const textEl = document.createElement('div');
+                    textEl.className = 'append-message-text';
+                    renderUserMarkdown(textEl, item.text);
+                    block.appendChild(textEl);
+                    if (item.status && item.status !== 'applied') {
+                        const status = document.createElement('div');
+                        status.className = `append-message-status append-${item.status}`;
+                        status.textContent = item.status === 'failed'
+                            ? 'Append failed'
+                            : item.status === 'rejected'
+                                ? 'Append unavailable'
+                                : item.status === 'seen'
+                                    ? 'Received'
+                                    : item.status === 'queued'
+                                        ? 'Queued'
+                                        : 'Sending...';
+                        block.appendChild(status);
+                    }
+                    content.appendChild(block);
+                }
+            } else {
+                content.textContent = sanitized;
+            }
         }
         div.appendChild(content);
         attachMessageCopyButton(div, message);

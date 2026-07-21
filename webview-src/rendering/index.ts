@@ -9,7 +9,6 @@ import { restoreKeyedScrollAnchor, restoreScrollAnchor } from './scroll-anchor-m
 import { createTanStackVirtualAdapter } from './tanstack-virtual-adapter';
 import { createLocalHistoryPresentationController, deriveLocalOlderPresentation, normalizeHydrationCoverage } from './local-history-window';
 import { createMarkdownController } from './markdown-controller';
-import { createMessagePresentationController } from './message-presentation';
 
 export const RENDERING_FACADE_VERSION = 1 as const;
 
@@ -45,14 +44,12 @@ const facade = Object.freeze(Object.defineProperties(facadeBase, {
   classifyChatWindowIntegrity: hiddenCapability(classifyChatWindowIntegrity),
   decideChatWindowAdaptivePolicy: hiddenCapability(decideChatWindowAdaptivePolicy),
   createMarkdownController: hiddenCapability(createMarkdownController),
-  createMessagePresentationController: hiddenCapability(createMessagePresentationController),
 })) as typeof facadeBase
   & { readonly getSafeShellSpec: typeof getSafeShellSpec }
   & { readonly planChatWindowContainment: typeof planChatWindowContainment }
   & { readonly classifyChatWindowIntegrity: typeof classifyChatWindowIntegrity }
   & { readonly decideChatWindowAdaptivePolicy: typeof decideChatWindowAdaptivePolicy }
-  & { readonly createMarkdownController: typeof createMarkdownController }
-  & { readonly createMessagePresentationController: typeof createMessagePresentationController };
+  & { readonly createMarkdownController: typeof createMarkdownController };
 
 declare global {
   interface Window {
