@@ -14,7 +14,6 @@ describe('composer attachment production ownership', () => {
     expect(source).toContain('attachmentStateController = factory();');
     expect(source).toContain('getAttachmentStateController().add({');
     expect(source).toContain('getAttachmentStateController().restoreFilePaths(draft.attachments);');
-    expect(source).toContain('attachmentState.removeById(item.id)');
     expect(source).toContain('attachmentState.clear();');
     expect(source).toContain('getAttachmentStateController().clear();');
   });
@@ -23,5 +22,11 @@ describe('composer attachment production ownership', () => {
     expect(source).toContain('attachmentState.getMessageImages();');
     expect(source).toContain('attachmentState.getPayload();');
     expect(source).toContain('attachmentState.hasNonImage();');
+  });
+
+  it('delegates attachment DOM ownership to the composer controller', () => {
+    expect(source).toContain('const attachmentUiController = createAttachmentUiController({');
+    expect(source).toContain('attachmentUiController.render();');
+    expect(source).not.toContain("entry.className = 'attachment-image-item';");
   });
 });

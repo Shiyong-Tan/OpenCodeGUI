@@ -6935,6 +6935,15 @@ document.addEventListener('DOMContentLoaded', () => {
         getChevronSvg,
         isBusy: isActiveSessionBusy
     });
+    const createAttachmentUiController = window.__ocRendering?.createAttachmentUiController;
+    if (typeof createAttachmentUiController !== 'function') {
+        throw new Error('Attachment UI controller is unavailable');
+    }
+    const attachmentUiController = createAttachmentUiController({
+        state: getAttachmentStateController(),
+        document,
+        listElement: attachmentList
+    });
     baseSessionTitle = sessionTitle?.textContent || 'OpenCode: Chat';
     renderHeaderTitle();
     renderHeaderUsage();
@@ -14342,86 +14351,7 @@ function shouldHideDcpUiMessage(message) {
     }
 
     function renderAttachments() {
-        attachmentList.innerHTML = '';
-        const attachmentState = getAttachmentStateController();
-        const attachmentItems = attachmentState.getItems();
-        const imageItems = attachmentItems.filter((item) => {
-            const name = typeof item?.name === 'string' ? item.name : '';
-            const mime = typeof item?.mime === 'string' ? item.mime : '';
-            return mime.startsWith('image/') || name.startsWith('img-');
-        });
-        const totalImages = imageItems.length;
-        let imageIndex = 0;
-
-        for (const item of attachmentItems) {
-            const name = typeof item?.name === 'string' ? item.name : '';
-            const mime = typeof item?.mime === 'string' ? item.mime : '';
-            const isImage = mime.startsWith('image/') || name.startsWith('img-');
-
-            if (isImage) {
-                imageIndex += 1;
-                const label = totalImages > 1 ? `image${imageIndex}` : 'image';
-                const entry = document.createElement('div');
-                entry.className = 'attachment-image-item';
-
-                const thumb = document.createElement('img');
-                thumb.className = 'attachment-image-thumb';
-                thumb.alt = label;
-                if (typeof item?.dataUrl === 'string' && item.dataUrl) {
-                    thumb.src = item.dataUrl;
-                }
-
-                const text = document.createElement('span');
-                text.className = 'attachment-image-label';
-                text.textContent = label;
-
-                const removeBtn = document.createElement('button');
-                removeBtn.type = 'button';
-                removeBtn.className = 'attachment-image-remove';
-                removeBtn.textContent = '\u00D7';
-                removeBtn.addEventListener('click', (event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    if (attachmentState.removeById(item.id)) {
-                        renderAttachments();
-                    }
-                });
-
-                entry.appendChild(thumb);
-                entry.appendChild(text);
-                entry.appendChild(removeBtn);
-                attachmentList.appendChild(entry);
-                continue;
-            }
-
-            const entry = document.createElement('div');
-            entry.className = 'attachment-image-item attachment-file-item';
-
-            const icon = document.createElement('span');
-            icon.className = 'attachment-file-icon';
-            icon.textContent = '\u{1F4C4}';
-
-            const text = document.createElement('span');
-            text.className = 'attachment-image-label';
-            text.textContent = name || 'Attachment';
-
-            const removeBtn = document.createElement('button');
-            removeBtn.type = 'button';
-            removeBtn.className = 'attachment-image-remove';
-            removeBtn.textContent = '\u00D7';
-            removeBtn.addEventListener('click', (event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                if (attachmentState.removeById(item.id)) {
-                    renderAttachments();
-                }
-            });
-
-            entry.appendChild(icon);
-            entry.appendChild(text);
-            entry.appendChild(removeBtn);
-            attachmentList.appendChild(entry);
-        }
+        attachmentUiController.render();
     }
 
     function renderContextTokens() {
