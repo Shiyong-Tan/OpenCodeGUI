@@ -9,6 +9,7 @@ import { restoreKeyedScrollAnchor, restoreScrollAnchor } from './scroll-anchor-m
 import { createTanStackVirtualAdapter } from './tanstack-virtual-adapter';
 import { createLocalHistoryPresentationController, deriveLocalOlderPresentation, normalizeHydrationCoverage } from './local-history-window';
 import { createMarkdownController } from './markdown-controller';
+import { createModelState, isCopilotProvider, isFreeModel, normalizeResetText, parseSpeedMultiplier } from '../features/models/model-state';
 
 export const RENDERING_FACADE_VERSION = 1 as const;
 
@@ -44,12 +45,22 @@ const facade = Object.freeze(Object.defineProperties(facadeBase, {
   classifyChatWindowIntegrity: hiddenCapability(classifyChatWindowIntegrity),
   decideChatWindowAdaptivePolicy: hiddenCapability(decideChatWindowAdaptivePolicy),
   createMarkdownController: hiddenCapability(createMarkdownController),
+  createModelState: hiddenCapability(createModelState),
+  isCopilotProvider: hiddenCapability(isCopilotProvider),
+  isFreeModel: hiddenCapability(isFreeModel),
+  normalizeResetText: hiddenCapability(normalizeResetText),
+  parseSpeedMultiplier: hiddenCapability(parseSpeedMultiplier),
 })) as typeof facadeBase
   & { readonly getSafeShellSpec: typeof getSafeShellSpec }
   & { readonly planChatWindowContainment: typeof planChatWindowContainment }
   & { readonly classifyChatWindowIntegrity: typeof classifyChatWindowIntegrity }
   & { readonly decideChatWindowAdaptivePolicy: typeof decideChatWindowAdaptivePolicy }
-  & { readonly createMarkdownController: typeof createMarkdownController };
+  & { readonly createMarkdownController: typeof createMarkdownController }
+  & { readonly createModelState: typeof createModelState }
+  & { readonly isCopilotProvider: typeof isCopilotProvider }
+  & { readonly isFreeModel: typeof isFreeModel }
+  & { readonly normalizeResetText: typeof normalizeResetText }
+  & { readonly parseSpeedMultiplier: typeof parseSpeedMultiplier };
 
 declare global {
   interface Window {
