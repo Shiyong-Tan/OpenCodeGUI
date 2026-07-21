@@ -15,6 +15,7 @@ import {
 } from './smartSearchRetrieval';
 import { AttachmentStorageService } from './attachments/AttachmentStorageService';
 import type { AttachmentPayload, SavedAttachment } from './attachments/AttachmentStorageService';
+import { SmartSearchSessionRegistry } from './search/SmartSearchSessionRegistry';
 
 type SessionMessage = {
     role: 'user' | 'assistant' | 'system';
@@ -736,7 +737,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private undoSegmentsBySession: Map<string, Map<string, SegmentState>> = new Map();
     private readonly UNDO_SEGMENTS_KEY = 'opencode.undoSegmentsBySession.v1';
     private readonly USER_OWNED_SESSIONS_KEY = 'opencode.userOwnedSessionIds.v1';
-    private readonly SMART_SEARCH_TEMP_SESSIONS_KEY = 'opencode.smartSearchTempSessionIds.v1';
     private pendingAssistantTmpKeyBySession = new Map<string, string>();
     private pendingAssistantTmpKeyByLocalKey = new Map<string, string>();
     private pendingLocalKeyBySession = new Map<string, string>();
@@ -753,13 +753,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private serverStatus: 'connected' | 'reconnecting' | 'error' = 'connected';
     private readonly repoManager: GitRepoManager;
     private readonly attachmentStorage: AttachmentStorageService;
+    private readonly smartSearchSessions: SmartSearchSessionRegistry;
     private uiTimelineBySession = new Map<string, string[]>();
     private lastSnapshotPayloadBySession = new Map<string, any>();
     private lastEmittedChangeListHeadBySession = new Map<string, string>();
     private assistantTextBufferBySession = new Map<string, string>();
     private pendingSnapshotUserTextBySession = new Map<string, string>();
     private lastKnownModels: ModelInfo[] = [];
-    private smartSearchTempSessionIds = new Set<string>();
     private modelQuotaInFlight?: Promise<void>;
     private workspaceSwitchInFlight = false;
     private currentWorkspaceKey = '';
@@ -4657,6 +4657,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             getWorkspaceRootPath: () => this.getWorkspaceRootPath(),
             log: (message) => this.uiDebugChannel.appendLine(message)
         });
+        this.smartSearchSessions = new SmartSearchSessionRegistry({
+            storage: this._context.globalState,
+            client: this.client,
+            getCorpusDir: () => pathModule.join(this.getOpencodeDataDir(), 'smartSearch'),
+            log: (message) => this.uiDebugChannel.appendLine(message)
+        });
         this.userOwnedSessionsLoaded = this.loadUserOwnedSessions();
         this.client.setServerStatusHandler((status, reason) => {
             this.sendServerStatus(status, reason);
@@ -4680,8 +4686,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         void this.ensureGitignoreIgnoresOpencode();
         this.attachmentStorage.scheduleCleanup('activate');
         this.attachmentStorage.startCleanupTimer();
-        void this.cleanupOrphanSmartSearchSessions();
-        void this.cleanupStaleSmartSearchCorpora();
+        void this.smartSearchSessions.cleanupOrphans();
+        void this.smartSearchSessions.cleanupStaleCorpora();
 
         try {
             const raw = this._context.globalState.get<string>(this.UNDO_SEGMENTS_KEY);
@@ -7882,7 +7888,7 @@ ${attachmentLines.join('\n')}`
     }
 
     private async handleChatEvent(event: ChatEvent, webview: vscode.Webview): Promise<void> {
-        if (event.sessionId && this.smartSearchTempSessionIds.has(event.sessionId)) {
+        if (this.smartSearchSessions.owns(event.sessionId)) {
             return;
         }
         // Handle todoUpdate event for main session or parent-mapped subagent todos.
@@ -8715,63 +8721,6 @@ ${attachmentLines.join('\n')}`
             || undefined;
     }
 
-    private getSmartSearchCorpusDir(): string {
-        return pathModule.join(this.getOpencodeDataDir(), 'smartSearch');
-    }
-
-    private async cleanupStaleSmartSearchCorpora(): Promise<void> {
-        const dir = this.getSmartSearchCorpusDir();
-        const createdBefore = Date.now();
-        try {
-            const entries = await fs.promises.readdir(dir, { withFileTypes: true });
-            await Promise.all(entries
-                .filter((entry) => {
-                    if (!entry.isFile()) return false;
-                    const match = /^search-(\d+)-[A-Za-z0-9-]+\.jsonl$/.exec(entry.name);
-                    return Boolean(match && Number(match[1]) < createdBefore);
-                })
-                .map((entry) => fs.promises.rm(pathModule.join(dir, entry.name), { force: true })));
-            const remaining = await fs.promises.readdir(dir);
-            if (remaining.length === 0) await fs.promises.rmdir(dir);
-        } catch {
-            // No stale search corpus exists.
-        }
-    }
-
-    private async persistSmartSearchTempSessions(): Promise<void> {
-        try {
-            await this._context.globalState.update(
-                this.SMART_SEARCH_TEMP_SESSIONS_KEY,
-                [...this.smartSearchTempSessionIds]
-            );
-        } catch (error) {
-            this.uiDebugChannel?.appendLine?.(`EXT: smartSearch.registry.persist.fail | err=${String(error)}`);
-        }
-    }
-
-    private async cleanupOrphanSmartSearchSessions(): Promise<void> {
-        const stored = this._context.globalState.get<unknown>(this.SMART_SEARCH_TEMP_SESSIONS_KEY);
-        const recorded = Array.isArray(stored)
-            ? stored.filter((item): item is string => typeof item === 'string' && Boolean(item))
-            : [];
-        if (recorded.length === 0) return;
-        for (const sessionId of recorded) {
-            if (!sessionId || this.smartSearchTempSessionIds.has(sessionId)) continue;
-            try {
-                await this.client.abortSession(sessionId);
-            } catch {
-                // The orphan may no longer be running.
-            }
-            try {
-                await this.client.deleteSession(sessionId);
-            } catch (error) {
-                this.smartSearchTempSessionIds.add(sessionId);
-                this.uiDebugChannel?.appendLine?.(`EXT: smartSearch.orphan.cleanup.fail | sessionId=${sessionId} | err=${String(error)}`);
-            }
-        }
-        await this.persistSmartSearchTempSessions();
-    }
-
     private buildSmartSearchExpansionPrompt(query: string): string {
         return [
             'Rewrite one chat-history search query into high-recall lexical search signals.',
@@ -8882,8 +8831,7 @@ ${attachmentLines.join('\n')}`
     }> {
         const tempSession = await this.client.createSession();
         const tempSessionId = tempSession.id;
-        this.smartSearchTempSessionIds.add(tempSessionId);
-        await this.persistSmartSearchTempSessions();
+        await this.smartSearchSessions.track(tempSessionId);
         let assistantText = '';
         let searchError = '';
         const effectiveTools = new Set<string>();
@@ -8952,8 +8900,7 @@ ${attachmentLines.join('\n')}`
             } catch (error) {
                 this.uiDebugChannel.appendLine(`EXT: smartSearch.cleanup.fail | sessionId=${tempSessionId} | err=${String(error)}`);
             } finally {
-                if (deleted) this.smartSearchTempSessionIds.delete(tempSessionId);
-                await this.persistSmartSearchTempSessions();
+                if (deleted) await this.smartSearchSessions.release(tempSessionId);
             }
         }
     }
@@ -9275,21 +9222,7 @@ ${attachmentLines.join('\n')}`
             clearTimeout(this.subagentRetentionTimer);
             this.subagentRetentionTimer = undefined;
         }
-        const smartSearchSessions = [...this.smartSearchTempSessionIds];
-        await Promise.all(smartSearchSessions.map(async (sessionId) => {
-            try {
-                await this.client.abortSession(sessionId);
-            } catch {
-                // The search may already have completed.
-            }
-            try {
-                await this.client.deleteSession(sessionId);
-                this.smartSearchTempSessionIds.delete(sessionId);
-            } catch (error) {
-                this.uiDebugChannel?.appendLine?.(`EXT: smartSearch.dispose.cleanup.fail | sessionId=${sessionId} | err=${String(error)}`);
-            }
-        }));
-        await this.persistSmartSearchTempSessions();
+        await this.smartSearchSessions.dispose();
         await this.client.dispose();
     }
 

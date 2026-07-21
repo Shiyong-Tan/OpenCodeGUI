@@ -3,6 +3,7 @@ import * as path from 'path';
 
 const source = fs.readFileSync(path.join(process.cwd(), 'src', 'SidebarProvider.ts'), 'utf8');
 const clientSource = fs.readFileSync(path.join(process.cwd(), 'src', 'OpenCodeClient.ts'), 'utf8');
+const registrySource = fs.readFileSync(path.join(process.cwd(), 'src', 'search', 'SmartSearchSessionRegistry.ts'), 'utf8');
 
 function extractMethod(marker: string): string {
     const start = source.indexOf(marker);
@@ -45,17 +46,16 @@ describe('Smart Search staged agent contract', () => {
     test('always removes temporary model sessions without creating per-search files', () => {
         const attempt = extractMethod('private async executeSmartSearchAgentAttempt(');
         expect(attempt).toContain('await this.client.deleteSession(tempSessionId)');
-        expect(attempt).toContain('this.smartSearchTempSessionIds.delete(tempSessionId)');
-        expect(attempt).toContain('await this.persistSmartSearchTempSessions()');
+        expect(attempt).toContain('await this.smartSearchSessions.track(tempSessionId)');
+        expect(attempt).toContain('await this.smartSearchSessions.release(tempSessionId)');
         expect(source).not.toContain('writeSmartSearchCandidateCorpus');
         expect(source).not.toContain('writeSmartSearchCorpus');
 
         const dispose = extractMethod('public async dispose(');
-        expect(dispose).toContain('const smartSearchSessions = [...this.smartSearchTempSessionIds]');
-        expect(dispose).toContain('await this.client.deleteSession(sessionId)');
-        const orphanCleanup = extractMethod('private async cleanupOrphanSmartSearchSessions(');
-        expect(orphanCleanup).toContain('await this.client.deleteSession(sessionId)');
-        expect(source).toContain('void this.cleanupOrphanSmartSearchSessions();');
+        expect(dispose).toContain('await this.smartSearchSessions.dispose();');
+        expect(registrySource).toContain('await this.options.client.deleteSession(sessionId)');
+        expect(registrySource).toContain('public async cleanupOrphans()');
+        expect(source).toContain('void this.smartSearchSessions.cleanupOrphans();');
     });
 
     test('uses only a free model and prefers the largest context when no free selection is active', () => {
@@ -88,7 +88,7 @@ describe('Smart Search staged agent contract', () => {
 
     test('keeps temporary search events out of the ordinary Webview chat pipeline', () => {
         const handler = extractMethod('private async handleChatEvent(');
-        expect(handler).toMatch(/smartSearchTempSessionIds\.has\(event\.sessionId\)[\s\S]*return;/);
+        expect(handler).toMatch(/smartSearchSessions\.owns\(event\.sessionId\)[\s\S]*return;/);
         expect(clientSource).toContain("type: 'tool',");
     });
 });
