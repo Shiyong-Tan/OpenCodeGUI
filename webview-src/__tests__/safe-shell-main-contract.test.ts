@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { getSafeShellSpec } from '../rendering/safe-shell-spec';
+import { collectBoundedSmartSearchText, createLinearSearchMatcher } from '../features/search/search-text';
 
 const source = fs.readFileSync(path.join(process.cwd(), 'media', 'main.js'), 'utf8').replace(/\r\n/g, '\n');
 const markdownControllerSource = fs.readFileSync(
@@ -993,7 +994,7 @@ describe('A1S.3 multiplexed tool/system/meta safe shell main contract', () => {
 
 describe('A1S.4P canonical subagent search projection', () => {
   function createSearchRuntime() {
-    return new Function(`
+    return new Function('window', `
       ${extractFunction('function pickMode(')}
       ${extractFunction('function cleanSubagentTitle(')}
       ${extractFunction('function formatSubagentModel(')}
@@ -1001,7 +1002,7 @@ describe('A1S.4P canonical subagent search projection', () => {
       ${extractFunction('function createLinearSearchMatcher(')}
       ${extractFunction('function collectBoundedSmartSearchText(')}
       return { visitLoadedChatSearchChunks, createLinearSearchMatcher, collectBoundedSmartSearchText };
-    `)() as any;
+    `)({ __ocFeatures: { createLinearSearchMatcher, collectBoundedSmartSearchText } }) as any;
   }
 
   test('A1S.4P-RED1 visits existing canonical values then exact safe subagent presentation values without hidden data', () => {
