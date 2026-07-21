@@ -193,7 +193,7 @@ let selectedMode = 'plan';
 let activeSessionId = '';
 let isBusy = false;
 let busySessionId = '';
-let attachments = [];
+let attachmentStateController = null;
 let messageCounter = 0;
 let modelStateController = null;
 let simpleDropdownHandlers = new Map();
@@ -6278,6 +6278,16 @@ function getModelStateController() {
     return modelStateController;
 }
 
+function getAttachmentStateController() {
+    if (attachmentStateController) return attachmentStateController;
+    const factory = window.__ocRendering?.createAttachmentState;
+    if (typeof factory !== 'function') {
+        throw new Error('Attachment state controller is unavailable');
+    }
+    attachmentStateController = factory();
+    return attachmentStateController;
+}
+
 function isCopilotProvider(providerId) {
     return window.__ocRendering?.isCopilotProvider?.(providerId) === true;
 }
@@ -7446,11 +7456,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function isImageAttachment(item) {
-        const mime = typeof item?.mime === 'string' ? item.mime : '';
-        if (mime.startsWith('image/')) return true;
-        const name = typeof item?.name === 'string' ? item.name : '';
-        const lower = name.toLowerCase();
-        return /\.(png|jpe?g|gif|webp|bmp|svg|tiff?|ico|heic)$/.test(lower);
+        return window.__ocRendering?.isImageAttachment?.(item) === true;
     }
 
     function getDisplayedAssistantCopyText(message) {
@@ -14337,7 +14343,9 @@ function shouldHideDcpUiMessage(message) {
 
     function renderAttachments() {
         attachmentList.innerHTML = '';
-        const imageItems = attachments.filter((item) => {
+        const attachmentState = getAttachmentStateController();
+        const attachmentItems = attachmentState.getItems();
+        const imageItems = attachmentItems.filter((item) => {
             const name = typeof item?.name === 'string' ? item.name : '';
             const mime = typeof item?.mime === 'string' ? item.mime : '';
             return mime.startsWith('image/') || name.startsWith('img-');
@@ -14345,7 +14353,7 @@ function shouldHideDcpUiMessage(message) {
         const totalImages = imageItems.length;
         let imageIndex = 0;
 
-        for (const item of attachments) {
+        for (const item of attachmentItems) {
             const name = typeof item?.name === 'string' ? item.name : '';
             const mime = typeof item?.mime === 'string' ? item.mime : '';
             const isImage = mime.startsWith('image/') || name.startsWith('img-');
@@ -14374,9 +14382,7 @@ function shouldHideDcpUiMessage(message) {
                 removeBtn.addEventListener('click', (event) => {
                     event.preventDefault();
                     event.stopPropagation();
-                    const idx = attachments.findIndex((entryItem) => entryItem.id === item.id);
-                    if (idx >= 0) {
-                        attachments.splice(idx, 1);
+                    if (attachmentState.removeById(item.id)) {
                         renderAttachments();
                     }
                 });
@@ -14406,9 +14412,7 @@ function shouldHideDcpUiMessage(message) {
             removeBtn.addEventListener('click', (event) => {
                 event.preventDefault();
                 event.stopPropagation();
-                const idx = attachments.findIndex((entryItem) => entryItem.id === item.id);
-                if (idx >= 0) {
-                    attachments.splice(idx, 1);
+                if (attachmentState.removeById(item.id)) {
                     renderAttachments();
                 }
             });
@@ -15396,9 +15400,10 @@ function appendMessageImages(parentEl, message) {
         const text = input.value.trim();
         const hasContext = pendingContextItems.length > 0;
         const hasFileRefs = pendingFileRefs.length > 0;
-        if ((!text && !attachments.length && !hasContext && !hasFileRefs) || isActiveSessionBusy()) return;
+        const attachmentState = getAttachmentStateController();
+        if ((!text && !attachmentState.hasItems() && !hasContext && !hasFileRefs) || isActiveSessionBusy()) return;
 
-        const hasNonImage = attachments.some((item) => !isImageAttachment(item));
+        const hasNonImage = attachmentState.hasNonImage();
         const fallbackText = hasNonImage ? 'Attachment added.' : 'Image attached.';
         const contextDisplay = [
             ...pendingContextItems.map((item) => item.displayText).filter(Boolean),
@@ -15410,22 +15415,8 @@ function appendMessageImages(parentEl, message) {
         const messageText = baseText || fallbackText;
         const clientMessageId = `local-${Date.now()}-${messageCounter++}`;
         const opId = `op-${Date.now()}-${messageCounter}`;
-        const messageImages = attachments
-            .map((item) => item.dataUrl)
-            .filter((value) => typeof value === 'string' && value.length > 0);
-        const attachmentsPayload = attachments.map((item) => {
-            const dataUrl = typeof item?.dataUrl === 'string' ? item.dataUrl : '';
-            const commaIndex = dataUrl.indexOf(',');
-            const dataBase64 = (dataUrl && dataUrl.startsWith('data:') && commaIndex !== -1)
-                ? dataUrl.slice(commaIndex + 1)
-                : undefined;
-            return {
-                filename: typeof item?.name === 'string' ? item.name : undefined,
-                mime: typeof item?.mime === 'string' ? item.mime : undefined,
-                dataBase64,
-                tempPath: typeof item?.filePath === 'string' ? item.filePath : undefined
-            };
-        });
+        const messageImages = attachmentState.getMessageImages();
+        const attachmentsPayload = attachmentState.getPayload();
         const contextPayload = pendingContextItems.map((item) => ({
             displayText: item.displayText,
             text: item.text,
@@ -15498,7 +15489,7 @@ function appendMessageImages(parentEl, message) {
             tmpKey,
             opId
         });
-        attachments = [];
+        attachmentState.clear();
         renderAttachments();
         pendingContextItems = [];
         pendingFileRefs = [];
@@ -15691,7 +15682,7 @@ function appendMessageImages(parentEl, message) {
         renderHeaderTitle();
         renderHeaderUsage();
         refreshSendButtonState();
-        attachments = [];
+        getAttachmentStateController().clear();
         renderAttachments();
         pendingContextItems = [];
         pendingFileRefs = [];
@@ -17731,7 +17722,7 @@ function appendMessageImages(parentEl, message) {
                     inputEl.value = draft.text;
                 }
                 if (Array.isArray(draft.attachments)) {
-                    attachments = draft.attachments.map((filePath) => ({ filePath }));
+                    getAttachmentStateController().restoreFilePaths(draft.attachments);
                     renderAttachments();
                 }
                 if (typeof draft.model === 'string') {
@@ -17920,7 +17911,7 @@ function appendMessageImages(parentEl, message) {
                 break;
             }
             case 'attachmentAdded': {
-                attachments.push({
+                getAttachmentStateController().add({
                     id: message.id,
                     name: message.name,
                     filePath: message.filePath,
