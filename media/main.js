@@ -6199,21 +6199,6 @@ function renderSafeShellMarkdownMessage(session, unit, presentationSelection) {
 }
 
 let markdownController = null;
-let messagePresentationController = null;
-
-function getMessagePresentationController() {
-    if (messagePresentationController) return messagePresentationController;
-    const createController = window.__ocRendering?.createMessagePresentationController;
-    if (typeof createController !== 'function') {
-        throw new Error('Message presentation controller is unavailable');
-    }
-    messagePresentationController = createController({
-        stripSystemInjections,
-        stripAttachmentManifest,
-        getAppendItems
-    });
-    return messagePresentationController;
-}
 
 function getMarkdownController() {
     if (markdownController) return markdownController;
@@ -6957,6 +6942,22 @@ function runSmartSessionSearch() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+    let messagePresentationController = null;
+
+    function getMessagePresentationController() {
+        if (messagePresentationController) return messagePresentationController;
+        const createController = window.__ocRendering?.createMessagePresentationController;
+        if (typeof createController !== 'function') {
+            throw new Error('Message presentation controller is unavailable');
+        }
+        messagePresentationController = createController({
+            stripSystemInjections,
+            stripAttachmentManifest,
+            getAppendItems
+        });
+        return messagePresentationController;
+    }
+
     emitCF3RangeDiagnosticMarker();
     sendBtn = document.getElementById('send-btn');
     const sendIcon = `
