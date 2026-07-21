@@ -13,6 +13,7 @@ import { createModelState, isCopilotProvider, isFreeModel, normalizeResetText, p
 import { createModelUiController } from '../features/models/model-controller';
 import { createAttachmentState, isImageAttachment } from '../features/composer/attachment-state';
 import { createAttachmentUiController, deriveAttachmentPresentation } from '../features/composer/attachment-controller';
+import { createHeaderState, recomputeSessionUsage } from '../features/header/header-state';
 
 export const RENDERING_FACADE_VERSION = 1 as const;
 
@@ -58,6 +59,8 @@ const facade = Object.freeze(Object.defineProperties(facadeBase, {
   isImageAttachment: hiddenCapability(isImageAttachment),
   createAttachmentUiController: hiddenCapability(createAttachmentUiController),
   deriveAttachmentPresentation: hiddenCapability(deriveAttachmentPresentation),
+  createHeaderState: hiddenCapability(createHeaderState),
+  recomputeSessionUsage: hiddenCapability(recomputeSessionUsage),
 })) as typeof facadeBase
   & { readonly getSafeShellSpec: typeof getSafeShellSpec }
   & { readonly planChatWindowContainment: typeof planChatWindowContainment }
@@ -73,7 +76,9 @@ const facade = Object.freeze(Object.defineProperties(facadeBase, {
   & { readonly createAttachmentState: typeof createAttachmentState }
   & { readonly isImageAttachment: typeof isImageAttachment }
   & { readonly createAttachmentUiController: typeof createAttachmentUiController }
-  & { readonly deriveAttachmentPresentation: typeof deriveAttachmentPresentation };
+  & { readonly deriveAttachmentPresentation: typeof deriveAttachmentPresentation }
+  & { readonly createHeaderState: typeof createHeaderState }
+  & { readonly recomputeSessionUsage: typeof recomputeSessionUsage };
 
 declare global {
   interface Window {
