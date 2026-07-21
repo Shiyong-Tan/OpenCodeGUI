@@ -12,6 +12,7 @@ import { createModelUiController } from './models/model-controller';
 import { createModelState, isCopilotProvider, isFreeModel, normalizeResetText, parseSpeedMultiplier } from './models/model-state';
 import { createSessionSearchState } from './search/search-state';
 import { collectBoundedSmartSearchText, createLinearSearchMatcher } from './search/search-text';
+import { createSessionSearchDomController, deriveSessionSearchControls } from './search/search-dom-controller';
 
 export const FEATURE_FACADE_VERSION = 1 as const;
 
@@ -44,6 +45,8 @@ const facade = Object.freeze({
   createSessionSearchState,
   collectBoundedSmartSearchText,
   createLinearSearchMatcher,
+  createSessionSearchDomController,
+  deriveSessionSearchControls,
 });
 
 declare global {

@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import vm from 'vm';
 import { createSessionSearchState } from '../features/search/search-state';
+import { createSessionSearchDomController } from '../features/search/search-dom-controller';
 
 const source = fs.readFileSync(path.join(process.cwd(), 'media', 'main.js'), 'utf8');
 const css = fs.readFileSync(path.join(process.cwd(), 'media', 'main.css'), 'utf8');
@@ -140,18 +141,21 @@ describe('Wave 4 main-script local older contract', () => {
       'session-search-count': count, 'session-search-prev': prev,
       'session-search-next': next, 'session-search-smart': smart,
     };
-    const context = vm.createContext({
-      document: { getElementById: (id: string) => elements[id] || null },
-      sessionSearch: {
-        mode: 'text', query: '灰屏', smartInFlight: false,
-        fullMatchKeys: Array.from({ length: 25 }, (_, index) => `key-${index}`), activeKeyIndex: 1,
-        matches: Array.from({ length: 8 }), activeIndex: 0,
-      },
+    const searchState = createSessionSearchState();
+    searchState.setTextQuery('灰屏');
+    searchState.setTextMatchKeys(Array.from({ length: 25 }, (_, index) => `key-${index}`), true);
+    searchState.navigate(1);
+    searchState.matches = Array.from({ length: 8 });
+    const sessionSearchDomController = createSessionSearchDomController({
+      document: { getElementById: (id: string) => elements[id] || null } as unknown as Document,
+      state: searchState,
+      onManualScroll: () => undefined,
     });
+    const context = vm.createContext({ sessionSearch: searchState, sessionSearchDomController });
     vm.runInContext(`${extractFunction('function getSessionSearchElements(')}\n${extractFunction('function updateSessionSearchControls(')}; globalThis.update = updateSessionSearchControls;`, context);
     (context as any).update();
     expect(count.textContent).toBe('2/25');
-    (context as any).sessionSearch.matches = Array.from({ length: 13 });
+    searchState.matches = Array.from({ length: 13 });
     (context as any).update();
     expect(count.textContent).toBe('2/25');
     expect(prev.disabled).toBe(false);
@@ -172,9 +176,14 @@ describe('Wave 4 main-script local older contract', () => {
     searchState.setTextQuery('related request');
     searchState.setSmartResults(['old-unmounted', 'middle-unmounted', 'recent-mounted']);
     searchState.matches = [{ dataset: { messageId: 'recent-mounted' } }];
+    const sessionSearchDomController = createSessionSearchDomController({
+      document: { getElementById: (id: string) => elements[id] || null } as unknown as Document,
+      state: searchState,
+      onManualScroll: () => undefined,
+    });
     const context = vm.createContext({
-      document: { getElementById: (id: string) => elements[id] || null },
       sessionSearch: searchState,
+      sessionSearchDomController,
       ensureChatWindowKeyMounted: (key: string) => { jumps.push(key); return true; },
       keyedRootForSearchKey: () => null,
       applySmartSessionSearchResults: () => undefined,
@@ -202,9 +211,10 @@ describe('Wave 4 main-script local older contract', () => {
     });
     vm.runInContext(`${extractFunction('function collectLoadedTextSearchKeys(')}; globalThis.collect = collectLoadedTextSearchKeys;`, context);
     expect((context as any).collect('灰屏')).toEqual(['message-a', 'message-b']);
-    expect(source).toContain("active?.scrollIntoView?.({ block: 'center', inline: 'nearest', behavior: 'auto' });");
+    expect(source).toContain('createSessionSearchDomController({');
     const syncOwner = extractFunction('function syncActiveTextSearchDomHit(');
-    expect(syncOwner).toContain('autoScrollPinnedToBottom = false;');
+    expect(source).toContain('onManualScroll: () => { autoScrollPinnedToBottom = false; }');
+    expect(syncOwner).toContain('sessionSearchDomController.syncActiveTextHit(options);');
     expect(syncOwner).not.toContain('chatWindowState');
     expect(extractFunction('function goToSessionSearchMatch('))
       .toContain("if (!keyedRootForSearchKey(targetKey) && ensureChatWindowKeyMounted(targetKey, 'search')) return;");
@@ -219,20 +229,7 @@ describe('Wave 4 main-script local older contract', () => {
     expect(inputOwner).toContain('scheduleSessionSearchRefresh({ jumpToFirst: false });');
     expect(inputOwner).not.toContain('jumpToFirst: true');
 
-    const updateCalls: boolean[] = [];
-    const mark = { dataset: { searchKey: 'message-a' } };
-    const context = vm.createContext({
-      sessionSearch: {
-        activeKeyIndex: 0, fullMatchKeys: ['message-a'], matches: [mark], activeIndex: -1,
-      },
-      autoScrollPinnedToBottom: true,
-      updateActiveSessionSearchHit: ({ scroll }: { scroll: boolean }) => updateCalls.push(scroll),
-    });
-    vm.runInContext(`${syncOwner}; globalThis.sync = syncActiveTextSearchDomHit;`, context);
-    (context as any).sync({ scroll: true });
-    expect((context as any).autoScrollPinnedToBottom).toBe(false);
-    expect((context as any).sessionSearch.activeIndex).toBe(0);
-    expect(updateCalls).toEqual([true]);
+    expect(syncOwner).toContain('sessionSearchDomController.syncActiveTextHit(options);');
   });
 
   test('observer requires false-to-true re-entry and static intersecting callbacks reveal one batch', () => {

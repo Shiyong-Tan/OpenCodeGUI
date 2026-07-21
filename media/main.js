@@ -214,6 +214,15 @@ if (typeof createSessionSearchState !== 'function') {
     throw new Error('Session search state is unavailable');
 }
 let sessionSearch = createSessionSearchState();
+const createSessionSearchDomController = window.__ocFeatures?.createSessionSearchDomController;
+if (typeof createSessionSearchDomController !== 'function') {
+    throw new Error('Session search DOM controller is unavailable');
+}
+const sessionSearchDomController = createSessionSearchDomController({
+    document,
+    state: sessionSearch,
+    onManualScroll: () => { autoScrollPinnedToBottom = false; }
+});
 const shownQuestionCallIds = new Set();
 const sentQuestionCallIds = new Set();
 const questionOverlayQueue = [];
@@ -6241,74 +6250,19 @@ function wrapTables(root) {
 }
 
 function getSessionSearchElements() {
-    return {
-        bar: document.getElementById('session-search-bar'),
-        input: document.getElementById('session-search-input'),
-        count: document.getElementById('session-search-count'),
-        smart: document.getElementById('session-search-smart'),
-        prev: document.getElementById('session-search-prev'),
-        next: document.getElementById('session-search-next')
-    };
+    return sessionSearchDomController.elements();
 }
 
 function clearSessionSearchHighlights() {
-    const marks = Array.from(document.querySelectorAll('mark.session-search-hit'));
-    const parents = new Set();
-    for (const mark of marks) {
-        const parent = mark.parentNode;
-        if (!parent) continue;
-        parents.add(parent);
-        parent.replaceChild(document.createTextNode(mark.textContent || ''), mark);
-    }
-    for (const parent of parents) {
-        if (typeof parent.normalize === 'function') parent.normalize();
-    }
-    const semanticHits = Array.from(document.querySelectorAll('.session-search-semantic-hit'));
-    for (const hit of semanticHits) {
-        hit.classList.remove('session-search-semantic-hit', 'active');
-    }
-    sessionSearch.matches = [];
+    sessionSearchDomController.clearHighlights();
 }
 
 function updateSessionSearchControls() {
-    const { count, prev, next, smart } = getSessionSearchElements();
-    const textMode = sessionSearch.mode === 'text';
-    const total = textMode ? sessionSearch.fullMatchKeys.length : sessionSearch.smartMessageIds.length;
-    const activeIndex = textMode ? sessionSearch.activeKeyIndex : sessionSearch.activeIndex;
-    const current = total > 0 && activeIndex >= 0 ? activeIndex + 1 : 0;
-    const hasQuery = Boolean(String(sessionSearch.query || '').trim());
-    if (count) {
-        count.textContent = sessionSearch.smartInFlight ? '' : (hasQuery ? `${current}/${total}` : '0/0');
-        count.classList.toggle('is-loading', sessionSearch.smartInFlight);
-        count.classList.toggle('no-results', !sessionSearch.smartInFlight && hasQuery && total === 0);
-    }
-    if (smart) {
-        smart.disabled = sessionSearch.smartInFlight || !hasQuery;
-        smart.classList.toggle('is-active', sessionSearch.mode === 'smart');
-        smart.textContent = sessionSearch.smartInFlight ? 'Smart...' : 'Smart';
-    }
-    if (prev) prev.disabled = total <= 1;
-    if (next) next.disabled = total <= 1;
+    sessionSearchDomController.updateControls();
 }
 
 function updateActiveSessionSearchHit({ scroll = false } = {}) {
-    const total = sessionSearch.matches.length;
-    const smartMode = sessionSearch.mode === 'smart';
-    const activeSmartId = smartMode && sessionSearch.activeIndex >= 0
-        ? sessionSearch.smartMessageIds[sessionSearch.activeIndex]
-        : '';
-    const matchKey = (match) => match?.dataset?.renderUnitKey || match?.dataset?.messageId || match?.dataset?.segmentKey || '';
-    for (let i = 0; i < total; i++) {
-        sessionSearch.matches[i].classList.toggle('active', smartMode
-            ? matchKey(sessionSearch.matches[i]) === activeSmartId
-            : i === sessionSearch.activeIndex);
-    }
-    updateSessionSearchControls();
-    if (!scroll || total === 0 || sessionSearch.activeIndex < 0) return;
-    const active = smartMode
-        ? sessionSearch.matches.find((match) => matchKey(match) === activeSmartId)
-        : sessionSearch.matches[sessionSearch.activeIndex];
-    active?.scrollIntoView?.({ block: 'center', inline: 'nearest', behavior: 'auto' });
+    sessionSearchDomController.updateActiveHit({ scroll });
 }
 
 function pickMode(agent) {
@@ -6460,64 +6414,19 @@ function ensureChatWindowKeyMounted(targetKey, reason = 'search') {
 }
 
 function keyedRootForSearchKey(key) {
-    const escaped = typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
-        ? CSS.escape(key)
-        : String(key).replace(/["\\]/g, '\\$&');
-    return document.querySelector(`[data-render-unit-key="${escaped}"], [data-message-id="${escaped}"], [data-segment-key="${escaped}"]`);
+    return sessionSearchDomController.keyedRoot(key);
 }
 
 function isSessionSearchTextNode(node, queryLower) {
-    const text = node?.nodeValue || '';
-    if (!text || !text.toLowerCase().includes(queryLower)) return false;
-    const parent = node.parentElement;
-    if (!parent) return false;
-    if (parent.closest('button, input, textarea, select, mark.session-search-hit')) return false;
-    if (parent.closest('.message-actions, .copy-btn, .message-copy-btn, .session-search-bar')) return false;
-    return true;
+    return sessionSearchDomController.isTextNode(node, queryLower);
 }
 
 function highlightSessionSearchTextNode(node, query, queryLower) {
-    const text = node.nodeValue || '';
-    const lower = text.toLowerCase();
-    const fragment = document.createDocumentFragment();
-    let cursor = 0;
-    let index = lower.indexOf(queryLower, cursor);
-    while (index !== -1) {
-        if (index > cursor) {
-            fragment.appendChild(document.createTextNode(text.slice(cursor, index)));
-        }
-        const mark = document.createElement('mark');
-        mark.className = 'session-search-hit';
-        mark.textContent = text.slice(index, index + query.length);
-        mark.dataset.searchIndex = String(sessionSearch.matches.length);
-        const owner = node.parentElement?.closest?.('[data-render-unit-key], [data-message-id], [data-segment-key]');
-        mark.dataset.searchKey = owner?.dataset?.renderUnitKey || owner?.dataset?.messageId || owner?.dataset?.segmentKey || '';
-        sessionSearch.matches.push(mark);
-        fragment.appendChild(mark);
-        cursor = index + query.length;
-        index = lower.indexOf(queryLower, cursor);
-    }
-    if (cursor < text.length) {
-        fragment.appendChild(document.createTextNode(text.slice(cursor)));
-    }
-    node.parentNode?.replaceChild(fragment, node);
+    sessionSearchDomController.highlightTextNode(node, query, queryLower);
 }
 
 function syncActiveTextSearchDomHit(options) {
-    const scroll = options?.scroll === true;
-    const activeKeyIndex = sessionSearch.activeKeyIndex;
-    const targetKey = activeKeyIndex >= 0 ? sessionSearch.fullMatchKeys[activeKeyIndex] : '';
-    let targetOccurrence = 0;
-    for (let index = 0; targetKey && index < activeKeyIndex; index += 1) {
-        if (sessionSearch.fullMatchKeys[index] === targetKey) targetOccurrence += 1;
-    }
-    const mountedForKey = sessionSearch.matches.filter((mark) => mark?.dataset?.searchKey === targetKey);
-    const target = mountedForKey[Math.min(targetOccurrence, Math.max(0, mountedForKey.length - 1))] || null;
-    sessionSearch.activeIndex = target ? sessionSearch.matches.indexOf(target) : -1;
-    if (scroll && target) {
-        autoScrollPinnedToBottom = false;
-    }
-    updateActiveSessionSearchHit({ scroll });
+    sessionSearchDomController.syncActiveTextHit(options);
 }
 
 function refreshSessionSearchHighlights({ jumpToFirst = false } = {}) {
