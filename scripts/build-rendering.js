@@ -23,17 +23,27 @@ const options = {
   logLevel: 'info',
 };
 
+const featureOptions = {
+  ...options,
+  entryPoints: [path.join(root, 'webview-src', 'features', 'index.ts')],
+  outfile: path.join(root, 'media', 'features.bundle.js'),
+};
+
 async function run() {
   if (watch) {
-    const context = await esbuild.context(options);
-    await context.watch();
-    console.log('Watching webview rendering seam...');
+    const [renderingContext, featureContext] = await Promise.all([
+      esbuild.context(options),
+      esbuild.context(featureOptions),
+    ]);
+    await Promise.all([renderingContext.watch(), featureContext.watch()]);
+    console.log('Watching webview rendering and feature seams...');
     return;
   }
   if (!development) {
     fs.rmSync(`${options.outfile}.map`, { force: true });
+    fs.rmSync(`${featureOptions.outfile}.map`, { force: true });
   }
-  await esbuild.build(options);
+  await Promise.all([esbuild.build(options), esbuild.build(featureOptions)]);
 }
 
 run().catch((error) => {

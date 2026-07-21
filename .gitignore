@@ -23,3 +23,5 @@ vitest.config.js.map
 # Generated webview rendering seam (built before packaging; never committed)
 media/rendering.bundle.js
 media/rendering.bundle.js.map
+media/features.bundle.js
+media/features.bundle.js.map

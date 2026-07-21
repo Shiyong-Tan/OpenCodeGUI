@@ -23,6 +23,7 @@ describe('Wave 1 build and package contracts', () => {
     const buildScript = read('scripts/build-rendering.js');
     expect(buildScript).toContain("format: 'iife'");
     expect(buildScript).toContain("outfile: path.join(root, 'media', 'rendering.bundle.js')");
+    expect(buildScript).toContain("outfile: path.join(root, 'media', 'features.bundle.js')");
     const watchAll = read('scripts/watch-all.js');
     expect(watchAll).toContain("'--watch', '-p', './'");
     expect(watchAll).toContain("path.join(root, 'scripts', 'build-rendering.js'), '--watch'");
@@ -39,16 +40,18 @@ describe('Wave 1 build and package contracts', () => {
 
   test('generated production bundle is ignored but package policy includes it and excludes source/map', () => {
     expect(read('.gitignore')).toContain('media/rendering.bundle.js');
+    expect(read('.gitignore')).toContain('media/features.bundle.js');
     const vscodeIgnore = read('.vscodeignore');
     expect(vscodeIgnore).toContain('webview-src/**');
     expect(vscodeIgnore).toContain('*.map');
     expect(vscodeIgnore).not.toContain('media/rendering.bundle.js');
   });
 
-  test('provider resolves and loads rendering bundle immediately before legacy main.js without CSP or nonce', () => {
+  test('provider resolves and loads rendering and feature bundles before legacy main.js without CSP or nonce', () => {
     const provider = read('src/SidebarProvider.ts');
     expect(provider).toContain('vscode.Uri.joinPath(this._extensionUri, "media", "rendering.bundle.js")');
-    expect(provider).toMatch(/<script src="\$\{renderingScriptUri\}"><\/script>\s*<script src="\$\{scriptUri\}"><\/script>/);
+    expect(provider).toContain('vscode.Uri.joinPath(this._extensionUri, "media", "features.bundle.js")');
+    expect(provider).toMatch(/<script src="\$\{renderingScriptUri\}"><\/script>\s*<script src="\$\{featureScriptUri\}"><\/script>\s*<script src="\$\{scriptUri\}"><\/script>/);
     expect(provider).not.toMatch(/Content-Security-Policy|nonce=/);
   });
 

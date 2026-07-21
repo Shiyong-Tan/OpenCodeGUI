@@ -111,7 +111,7 @@
     "watch:all": "node scripts/watch-all.js",
     "build:webview": "node scripts/build-rendering.js",
     "watch:webview": "node scripts/build-rendering.js --watch",
-    "check:webview": "npm run build:webview && node scripts/check-rendering-bundle.js",
+    "check:webview": "npm run build:webview && node scripts/check-rendering-bundle.js && node scripts/check-feature-bundle.js",
     "check:webview:determinism": "node scripts/check-rendering-determinism.js",
     "check:webview:package": "npm run build:webview && node scripts/check-rendering-package.js",
     "check:webview:sourcemap": "node scripts/check-rendering-source-map.js",

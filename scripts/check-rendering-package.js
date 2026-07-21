@@ -17,8 +17,11 @@ const files = result.stdout.split(/\r?\n/).map((file) => file.trim().replace(/\\
 if (!files.some((file) => file.endsWith('media/rendering.bundle.js'))) {
   throw new Error('VSIX package contents omit media/rendering.bundle.js');
 }
+if (!files.some((file) => file.endsWith('media/features.bundle.js'))) {
+  throw new Error('VSIX package contents omit media/features.bundle.js');
+}
 for (const file of files) {
-  if (file.includes('webview-src/') || file.endsWith('rendering.bundle.js.map')) {
+  if (file.includes('webview-src/') || file.endsWith('rendering.bundle.js.map') || file.endsWith('features.bundle.js.map')) {
     throw new Error(`Development-only file would be packaged: ${file}`);
   }
 }

@@ -10476,6 +10476,9 @@ ${attachmentLines.join('\n')}`
         const renderingScriptUri = webview.asWebviewUri(
             vscode.Uri.joinPath(this._extensionUri, "media", "rendering.bundle.js")
         );
+        const featureScriptUri = webview.asWebviewUri(
+            vscode.Uri.joinPath(this._extensionUri, "media", "features.bundle.js")
+        );
         const styleMainUri = webview.asWebviewUri(
             vscode.Uri.joinPath(this._extensionUri, "media", "main.css")
         );
@@ -10624,6 +10627,7 @@ ${attachmentLines.join('\n')}`
                 </div>
 
                 <script src="${renderingScriptUri}"></script>
+                <script src="${featureScriptUri}"></script>
                 <script src="${scriptUri}"></script>
             </body>
             </html>`;
