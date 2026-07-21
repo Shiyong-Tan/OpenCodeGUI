@@ -3,6 +3,7 @@ import { createAttachmentState, isImageAttachment } from './composer/attachment-
 import { createComposerContextState } from './composer/context-state';
 import { createContextTokenUiController, deriveContextTokenPresentation } from './composer/context-controller';
 import { createFileMentionController, findActiveFileMention, normalizeFileRef } from './composer/file-mention-controller';
+import { buildComposerSubmission } from './composer/submission';
 import { createHeaderUiController } from './header/header-controller';
 import { createHeaderState, recomputeSessionUsage } from './header/header-state';
 import { createModelUiController } from './models/model-controller';
@@ -22,6 +23,7 @@ const facade = Object.freeze({
   createFileMentionController,
   findActiveFileMention,
   normalizeFileRef,
+  buildComposerSubmission,
   createHeaderState,
   recomputeSessionUsage,
   createHeaderUiController,
