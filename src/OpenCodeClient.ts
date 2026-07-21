@@ -18,36 +18,15 @@ import {
     normalizeCopilotModelKey,
     parseCopilotMultiplierHtml
 } from './copilotSpeedMapping';
-
-export type ModelInfo = {
-    id: string;
-    providerId: string;
-    name: string;
-    fullId: string;
-    variants: string[];
-    speedMultiplier?: string;
-    contextLimit?: number;
-};
+import { ModelQuotaService } from './models/ModelQuotaService';
+import type { ModelInfo, ModelQuota, ModelQuotaRow } from './models/types';
+export type { ModelInfo, ModelQuota, ModelQuotaRow } from './models/types';
 
 export type AgentInfo = {
     id: string;
     mode: string;
     hidden: boolean;
     description?: string;
-};
-
-export type ModelQuotaRow = {
-    label: string;
-    remainingPercent: number;
-    resetText?: string;
-};
-
-export type ModelQuota = {
-    providerId: string;
-    modelId: string;
-    summaryRemainingPercent: number;
-    rows: ModelQuotaRow[];
-    fetchedAt: number;
 };
 
 type CopilotSpeedMultiplierCache = {
@@ -479,6 +458,7 @@ const COPILOT_SPEED_MULTIPLIER_CACHE_KEY = 'opencode.copilotSpeedMultiplierCache
 const COPILOT_SPEED_MULTIPLIER_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
 export class OpenCodeClient {
+    private readonly modelQuotaService: ModelQuotaService;
     public static outputChannel = vscode.window.createOutputChannel("OpenCode CLI");
     private currentChild?: cp.ChildProcess;
     private serverProcess?: cp.ChildProcess;
@@ -823,6 +803,7 @@ export class OpenCodeClient {
     }
 
     constructor() {
+        this.modelQuotaService = new ModelQuotaService({ log: (message) => this.logUiDebug(message) });
         this.workspaceRoot = this.resolveWorkspaceRoot();
         this.gitUndo = new GitUndoEngine(this.workspaceRoot, (message) => this.logUiDebug(message));
     }
@@ -6506,39 +6487,7 @@ export class OpenCodeClient {
     }
 
     public async fetchModelQuota(model: ModelInfo): Promise<ModelQuota | null> {
-        const key = model.fullId;
-        const cached = this.modelQuotaCache.get(key);
-        if (cached && Date.now() - cached.ts < this.quotaCacheTtlMs) {
-            return cached.quota;
-        }
-        const inflight = this.modelQuotaInFlight.get(key);
-        if (inflight) return inflight;
-        const task = (async () => {
-            let quota: ModelQuota | null = null;
-            const provider = (model.providerId || '').toLowerCase();
-            const fullId = (model.fullId || '').toLowerCase();
-            const isCopilot = provider.includes('github') || provider.includes('copilot') || fullId.includes('copilot');
-            const isOpenAI = provider.includes('openai') || provider.includes('chatgpt') ||
-                fullId.includes('openai') || fullId.includes('chatgpt');
-            if (isCopilot) {
-                quota = await this.fetchCopilotQuota();
-            } else if (isOpenAI) {
-                quota = await this.fetchOpenAIQuota();
-            } else if (provider.includes('antigravity') || provider.includes('google') || fullId.includes('antigravity') || fullId.includes('gemini')) {
-                quota = await this.fetchAntigravityQuota(model.fullId);
-            }
-            if (quota) {
-                quota = { ...quota, providerId: model.providerId, modelId: model.fullId };
-            }
-            this.modelQuotaCache.set(key, { ts: Date.now(), quota });
-            return quota;
-        })();
-        this.modelQuotaInFlight.set(key, task);
-        try {
-            return await task;
-        } finally {
-            this.modelQuotaInFlight.delete(key);
-        }
+        return this.modelQuotaService.fetch(model);
     }
 
     private shouldAcceptTurnCompletionFinal(sessionId: string | undefined, info: any): boolean {
