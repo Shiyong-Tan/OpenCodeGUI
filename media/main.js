@@ -220,7 +220,9 @@ if (typeof createSessionSearchDomController !== 'function') {
 const sessionSearchDomController = createSessionSearchDomController({
     document,
     state: sessionSearch,
-    onManualScroll: () => { autoScrollPinnedToBottom = false; }
+    onManualScroll: () => { autoScrollPinnedToBottom = false; },
+    collectTextMatchKeys: (query) => collectLoadedTextSearchKeys(query),
+    ensureKeyMounted: (key) => ensureChatWindowKeyMounted(key, 'search')
 });
 const createSessionSearchInteractionController = window.__ocFeatures?.createSessionSearchInteractionController;
 if (typeof createSessionSearchInteractionController !== 'function') {
@@ -6443,55 +6445,7 @@ function syncActiveTextSearchDomHit(options) {
 }
 
 function refreshSessionSearchHighlights({ jumpToFirst = false } = {}) {
-    if (sessionSearch.mode === 'smart') {
-        updateSessionSearchControls();
-        return;
-    }
-    clearSessionSearchHighlights();
-
-    const query = String(sessionSearch.query || '').trim();
-    if (!query) {
-        sessionSearch.clearTextMatches();
-        updateSessionSearchControls();
-        return;
-    }
-
-    sessionSearch.setTextMatchKeys(collectLoadedTextSearchKeys(query), jumpToFirst);
-    const targetKey = sessionSearch.activeKeyIndex >= 0 ? sessionSearch.fullMatchKeys[sessionSearch.activeKeyIndex] : '';
-    if (targetKey && !keyedRootForSearchKey(targetKey) && ensureChatWindowKeyMounted(targetKey, 'search')) {
-        sessionSearch.windowTargetKey = targetKey;
-        return;
-    }
-
-    const chat = document.getElementById('chat');
-    if (!chat) {
-        sessionSearch.activeIndex = -1;
-        updateSessionSearchControls();
-        return;
-    }
-
-    const queryLower = query.toLowerCase();
-    const roots = Array.from(chat.querySelectorAll('.message-content, .change-list-card'));
-    for (const root of roots) {
-        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-            acceptNode(node) {
-                return isSessionSearchTextNode(node, queryLower)
-                    ? NodeFilter.FILTER_ACCEPT
-                    : NodeFilter.FILTER_REJECT;
-            }
-        });
-        const nodes = [];
-        let node = walker.nextNode();
-        while (node) {
-            nodes.push(node);
-            node = walker.nextNode();
-        }
-        for (const textNode of nodes) {
-            highlightSessionSearchTextNode(textNode, query, queryLower);
-        }
-    }
-
-    syncActiveTextSearchDomHit({ scroll: jumpToFirst });
+    sessionSearchDomController.refreshTextHighlights({ jumpToFirst });
 }
 
 function scheduleSessionSearchRefresh({ jumpToFirst = false } = {}) {
@@ -6499,26 +6453,7 @@ function scheduleSessionSearchRefresh({ jumpToFirst = false } = {}) {
 }
 
 function goToSessionSearchMatch(delta) {
-    const navigation = sessionSearch.navigate(delta);
-    if (navigation?.mode === 'text') {
-        const targetKey = navigation.targetKey;
-        if (!keyedRootForSearchKey(targetKey) && ensureChatWindowKeyMounted(targetKey, 'search')) return;
-        syncActiveTextSearchDomHit({ scroll: true });
-        return;
-    }
-    if (navigation?.mode === 'smart') {
-        const targetKey = navigation.targetKey;
-        if (!keyedRootForSearchKey(targetKey) && ensureChatWindowKeyMounted(targetKey, 'search')) {
-            updateSessionSearchControls();
-            return;
-        }
-        applySmartSessionSearchResults(sessionSearch.smartMessageIds, { scroll: true });
-        return;
-    }
-    const total = sessionSearch.matches.length;
-    if (!total) return;
-    sessionSearch.activeIndex = (sessionSearch.activeIndex + delta + total) % total;
-    updateActiveSessionSearchHit({ scroll: true });
+    sessionSearchDomController.navigate(delta);
 }
 
 function openSessionSearch() {
@@ -6555,27 +6490,7 @@ function collectSmartSearchMessages() {
 }
 
 function applySmartSessionSearchResults(messageIds, { scroll = true } = {}) {
-    clearSessionSearchHighlights();
-    const requestedKey = sessionSearch.setSmartResults(messageIds);
-    if (requestedKey && !keyedRootForSearchKey(requestedKey) && ensureChatWindowKeyMounted(requestedKey, 'search')) {
-        sessionSearch.windowTargetKey = requestedKey;
-        updateSessionSearchControls();
-        return;
-    }
-    sessionSearch.matches = [];
-    const seen = new Set();
-    for (const id of sessionSearch.smartMessageIds) {
-        if (typeof id !== 'string' || !id || seen.has(id)) continue;
-        seen.add(id);
-        const escaped = typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
-            ? CSS.escape(id)
-            : id.replace(/["\\]/g, '\\$&');
-        const el = document.querySelector(`[data-message-id="${escaped}"], [data-segment-key="${escaped}"]`);
-        if (!(el instanceof HTMLElement)) continue;
-        el.classList.add('session-search-semantic-hit');
-        sessionSearch.matches.push(el);
-    }
-    updateActiveSessionSearchHit({ scroll });
+    sessionSearchDomController.applySmartResults(messageIds, { scroll });
 }
 
 function runSmartSessionSearch() {

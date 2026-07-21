@@ -25,4 +25,10 @@ describe('session search production state ownership', () => {
     expect(source).not.toContain('let sessionSearchDebounceTimer');
     expect(source).not.toContain("searchInput?.addEventListener('keydown'");
   });
+
+  it('delegates highlight refresh, global navigation, and Smart result mounting', () => {
+    expect(source).toContain('sessionSearchDomController.refreshTextHighlights({ jumpToFirst });');
+    expect(source).toContain('sessionSearchDomController.navigate(delta);');
+    expect(source).toContain('sessionSearchDomController.applySmartResults(messageIds, { scroll });');
+  });
 });

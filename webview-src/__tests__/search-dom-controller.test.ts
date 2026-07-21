@@ -39,6 +39,8 @@ describe('session search DOM controller', () => {
       document: { getElementById: (id: string) => byId[id] || null } as unknown as Document,
       state,
       onManualScroll: () => undefined,
+      collectTextMatchKeys: () => [],
+      ensureKeyMounted: () => false,
     });
     controller.updateControls();
     expect(count.textContent).toBe('1/3');
@@ -64,6 +66,8 @@ describe('session search DOM controller', () => {
       document: { getElementById: () => null } as unknown as Document,
       state,
       onManualScroll: () => { manual = true; },
+      collectTextMatchKeys: () => [],
+      ensureKeyMounted: () => false,
     });
     controller.syncActiveTextHit({ scroll: true });
     expect(state.activeIndex).toBe(0);

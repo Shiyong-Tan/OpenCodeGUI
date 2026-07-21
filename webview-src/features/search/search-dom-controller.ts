@@ -14,6 +14,11 @@ type SearchStateLike = {
   smartInFlight: boolean;
   fullMatchKeys: string[];
   activeKeyIndex: number;
+  windowTargetKey: string;
+  clearTextMatches(): void;
+  setTextMatchKeys(values: unknown, jumpToFirst?: boolean): void;
+  setSmartResults(messageIds: unknown): string;
+  navigate(delta: number): { mode: 'text' | 'smart'; targetKey: string } | null;
 };
 
 export type SessionSearchControls = Readonly<{
@@ -51,6 +56,8 @@ export function createSessionSearchDomController(options: {
   document: Document;
   state: SearchStateLike;
   onManualScroll(): void;
+  collectTextMatchKeys(query: string): string[];
+  ensureKeyMounted(key: string): boolean;
 }) {
   const elements = () => ({
     bar: options.document.getElementById('session-search-bar') as SearchElement | null,
@@ -172,5 +179,109 @@ export function createSessionSearchDomController(options: {
     updateActiveHit({ scroll });
   };
 
-  return { elements, clearHighlights, updateControls, updateActiveHit, keyedRoot, isTextNode, highlightTextNode, syncActiveTextHit };
+  const refreshTextHighlights = ({ jumpToFirst = false }: { jumpToFirst?: boolean } = {}): void => {
+    if (options.state.mode === 'smart') {
+      updateControls();
+      return;
+    }
+    clearHighlights();
+    const query = String(options.state.query || '').trim();
+    if (!query) {
+      options.state.clearTextMatches();
+      updateControls();
+      return;
+    }
+    options.state.setTextMatchKeys(options.collectTextMatchKeys(query), jumpToFirst);
+    const targetKey = options.state.activeKeyIndex >= 0
+      ? options.state.fullMatchKeys[options.state.activeKeyIndex]
+      : '';
+    if (targetKey && !keyedRoot(targetKey) && options.ensureKeyMounted(targetKey)) {
+      options.state.windowTargetKey = targetKey;
+      return;
+    }
+    const chat = options.document.getElementById('chat');
+    if (!chat) {
+      options.state.activeIndex = -1;
+      updateControls();
+      return;
+    }
+    const queryLower = query.toLowerCase();
+    const roots = Array.from(chat.querySelectorAll('.message-content, .change-list-card'));
+    const nodeFilter = options.document.defaultView?.NodeFilter;
+    for (const root of roots) {
+      const walker = options.document.createTreeWalker(root, nodeFilter?.SHOW_TEXT ?? 4, {
+        acceptNode(node) {
+          return isTextNode(node, queryLower)
+            ? (nodeFilter?.FILTER_ACCEPT ?? 1)
+            : (nodeFilter?.FILTER_REJECT ?? 2);
+        }
+      });
+      const nodes: Node[] = [];
+      let node = walker.nextNode();
+      while (node) {
+        nodes.push(node);
+        node = walker.nextNode();
+      }
+      for (const textNode of nodes) highlightTextNode(textNode, query, queryLower);
+    }
+    syncActiveTextHit({ scroll: jumpToFirst });
+  };
+
+  const applySmartResults = (messageIds: unknown, { scroll = true }: { scroll?: boolean } = {}): void => {
+    clearHighlights();
+    const requestedKey = options.state.setSmartResults(messageIds);
+    if (requestedKey && !keyedRoot(requestedKey) && options.ensureKeyMounted(requestedKey)) {
+      options.state.windowTargetKey = requestedKey;
+      updateControls();
+      return;
+    }
+    options.state.matches = [];
+    const seen = new Set<string>();
+    for (const id of options.state.smartMessageIds) {
+      if (typeof id !== 'string' || !id || seen.has(id)) continue;
+      seen.add(id);
+      const css = options.document.defaultView?.CSS;
+      const escaped = typeof css?.escape === 'function' ? css.escape(id) : id.replace(/["\\]/g, '\\$&');
+      const element = options.document.querySelector(`[data-message-id="${escaped}"], [data-segment-key="${escaped}"]`);
+      if (!element) continue;
+      element.classList.add('session-search-semantic-hit');
+      options.state.matches.push(element);
+    }
+    updateActiveHit({ scroll });
+  };
+
+  const navigate = (delta: number): void => {
+    const navigation = options.state.navigate(delta);
+    if (navigation?.mode === 'text') {
+      if (!keyedRoot(navigation.targetKey) && options.ensureKeyMounted(navigation.targetKey)) return;
+      syncActiveTextHit({ scroll: true });
+      return;
+    }
+    if (navigation?.mode === 'smart') {
+      if (!keyedRoot(navigation.targetKey) && options.ensureKeyMounted(navigation.targetKey)) {
+        updateControls();
+        return;
+      }
+      applySmartResults(options.state.smartMessageIds, { scroll: true });
+      return;
+    }
+    const total = options.state.matches.length;
+    if (!total) return;
+    options.state.activeIndex = (options.state.activeIndex + delta + total) % total;
+    updateActiveHit({ scroll: true });
+  };
+
+  return {
+    elements,
+    clearHighlights,
+    updateControls,
+    updateActiveHit,
+    keyedRoot,
+    isTextNode,
+    highlightTextNode,
+    syncActiveTextHit,
+    refreshTextHighlights,
+    applySmartResults,
+    navigate,
+  };
 }

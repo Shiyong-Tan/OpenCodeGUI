@@ -10,6 +10,10 @@ const searchInteractionSource = fs.readFileSync(
   path.join(process.cwd(), 'webview-src', 'features', 'search', 'search-interaction-controller.ts'),
   'utf8',
 );
+const searchDomSource = fs.readFileSync(
+  path.join(process.cwd(), 'webview-src', 'features', 'search', 'search-dom-controller.ts'),
+  'utf8',
+);
 
 function extractFunction(marker: string): string {
   const start = source.indexOf(marker);
@@ -122,12 +126,14 @@ describe('Wave 4 main-script local older contract', () => {
     const searchState = createSessionSearchState();
     searchState.setTextQuery('needle');
     searchState.setTextMatchKeys(['old-unrevealed', 'middle-unrevealed', 'recent']);
-    const context = vm.createContext({
-      sessionSearch: searchState,
-      ensureChatWindowKeyMounted: (key: string) => { jumps.push(key); return true; },
-      keyedRootForSearchKey: () => null,
-      updateActiveSessionSearchHit: () => undefined,
+    const sessionSearchDomController = createSessionSearchDomController({
+      document: { defaultView: null, querySelector: () => null, getElementById: () => null } as unknown as Document,
+      state: searchState,
+      onManualScroll: () => undefined,
+      collectTextMatchKeys: () => [],
+      ensureKeyMounted: (key) => { jumps.push(key); return true; },
     });
+    const context = vm.createContext({ sessionSearch: searchState, sessionSearchDomController });
     vm.runInContext(`${extractFunction('function goToSessionSearchMatch(')}; globalThis.go = goToSessionSearchMatch;`, context);
     (context as any).go(1);
     (context as any).go(1);
@@ -151,9 +157,15 @@ describe('Wave 4 main-script local older contract', () => {
     searchState.navigate(1);
     searchState.matches = Array.from({ length: 8 });
     const sessionSearchDomController = createSessionSearchDomController({
-      document: { getElementById: (id: string) => elements[id] || null } as unknown as Document,
+      document: {
+        defaultView: null,
+        getElementById: (id: string) => elements[id] || null,
+        querySelector: () => null,
+      } as unknown as Document,
       state: searchState,
       onManualScroll: () => undefined,
+      collectTextMatchKeys: () => [],
+      ensureKeyMounted: () => false,
     });
     const context = vm.createContext({ sessionSearch: searchState, sessionSearchDomController });
     vm.runInContext(`${extractFunction('function getSessionSearchElements(')}\n${extractFunction('function updateSessionSearchControls(')}; globalThis.update = updateSessionSearchControls;`, context);
@@ -181,16 +193,19 @@ describe('Wave 4 main-script local older contract', () => {
     searchState.setSmartResults(['old-unmounted', 'middle-unmounted', 'recent-mounted']);
     searchState.matches = [{ dataset: { messageId: 'recent-mounted' } }];
     const sessionSearchDomController = createSessionSearchDomController({
-      document: { getElementById: (id: string) => elements[id] || null } as unknown as Document,
+      document: {
+        defaultView: null,
+        getElementById: (id: string) => elements[id] || null,
+        querySelector: () => null,
+      } as unknown as Document,
       state: searchState,
       onManualScroll: () => undefined,
+      collectTextMatchKeys: () => [],
+      ensureKeyMounted: (key) => { jumps.push(key); return true; },
     });
     const context = vm.createContext({
       sessionSearch: searchState,
       sessionSearchDomController,
-      ensureChatWindowKeyMounted: (key: string) => { jumps.push(key); return true; },
-      keyedRootForSearchKey: () => null,
-      applySmartSessionSearchResults: () => undefined,
     });
     vm.runInContext(`${extractFunction('function getSessionSearchElements(')}\n${extractFunction('function updateSessionSearchControls(')}\n${extractFunction('function goToSessionSearchMatch(')}; globalThis.update = updateSessionSearchControls; globalThis.go = goToSessionSearchMatch;`, context);
 
@@ -220,8 +235,7 @@ describe('Wave 4 main-script local older contract', () => {
     expect(source).toContain('onManualScroll: () => { autoScrollPinnedToBottom = false; }');
     expect(syncOwner).toContain('sessionSearchDomController.syncActiveTextHit(options);');
     expect(syncOwner).not.toContain('chatWindowState');
-    expect(extractFunction('function goToSessionSearchMatch('))
-      .toContain("if (!keyedRootForSearchKey(targetKey) && ensureChatWindowKeyMounted(targetKey, 'search')) return;");
+    expect(searchDomSource).toContain('!keyedRoot(navigation.targetKey) && options.ensureKeyMounted(navigation.targetKey)');
   });
 
   test('typing computes globally without moving the virtual window and first next selects result zero', () => {
