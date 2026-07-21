@@ -208,7 +208,6 @@ let questionOverlayTimer = null;
 let questionOverlayState = null;
 let quoteSelectionButton = null;
 let quoteSelectionText = '';
-let sessionSearchDebounceTimer = null;
 const createSessionSearchState = window.__ocFeatures?.createSessionSearchState;
 if (typeof createSessionSearchState !== 'function') {
     throw new Error('Session search state is unavailable');
@@ -222,6 +221,20 @@ const sessionSearchDomController = createSessionSearchDomController({
     document,
     state: sessionSearch,
     onManualScroll: () => { autoScrollPinnedToBottom = false; }
+});
+const createSessionSearchInteractionController = window.__ocFeatures?.createSessionSearchInteractionController;
+if (typeof createSessionSearchInteractionController !== 'function') {
+    throw new Error('Session search interaction controller is unavailable');
+}
+const sessionSearchInteractionController = createSessionSearchInteractionController({
+    state: sessionSearch,
+    dom: sessionSearchDomController,
+    refresh: (options) => refreshSessionSearchHighlights(options),
+    navigate: (delta) => goToSessionSearchMatch(delta),
+    runSmart: () => runSmartSessionSearch(),
+    requestAnimationFrame: (callback) => requestAnimationFrame(callback),
+    setTimeout: (callback, delay) => setTimeout(callback, delay),
+    clearTimeout: (handle) => clearTimeout(handle)
 });
 const shownQuestionCallIds = new Set();
 const sentQuestionCallIds = new Set();
@@ -6482,14 +6495,7 @@ function refreshSessionSearchHighlights({ jumpToFirst = false } = {}) {
 }
 
 function scheduleSessionSearchRefresh({ jumpToFirst = false } = {}) {
-    sessionSearch.setTextMode();
-    if (sessionSearchDebounceTimer) {
-        clearTimeout(sessionSearchDebounceTimer);
-    }
-    sessionSearchDebounceTimer = setTimeout(() => {
-        sessionSearchDebounceTimer = null;
-        refreshSessionSearchHighlights({ jumpToFirst });
-    }, 120);
+    sessionSearchInteractionController.scheduleRefresh({ jumpToFirst });
 }
 
 function goToSessionSearchMatch(delta) {
@@ -6516,28 +6522,11 @@ function goToSessionSearchMatch(delta) {
 }
 
 function openSessionSearch() {
-    const { bar, input } = getSessionSearchElements();
-    if (!bar || !input) return;
-    sessionSearch.openSearch();
-    bar.classList.remove('hidden');
-    requestAnimationFrame(() => {
-        input.focus();
-        input.select();
-    });
-    refreshSessionSearchHighlights({ jumpToFirst: false });
+    sessionSearchInteractionController.open();
 }
 
 function closeSessionSearch() {
-    const { bar, input } = getSessionSearchElements();
-    sessionSearch.closeSearch();
-    if (sessionSearchDebounceTimer) {
-        clearTimeout(sessionSearchDebounceTimer);
-        sessionSearchDebounceTimer = null;
-    }
-    if (input) input.value = '';
-    clearSessionSearchHighlights();
-    updateSessionSearchControls();
-    bar?.classList.add('hidden');
+    sessionSearchInteractionController.close();
 }
 
 function collectSmartSearchMessages() {
@@ -15034,53 +15023,13 @@ function appendMessageImages(parentEl, message) {
         openSessionPanel();
     });
 
-    searchBtn?.addEventListener('click', () => {
-        if (sessionSearch.open) {
-            closeSessionSearch();
-        } else {
-            openSessionSearch();
-        }
-    });
-
-    searchInput?.addEventListener('input', () => {
-        sessionSearch.setTextQuery(searchInput.value || '');
-        scheduleSessionSearchRefresh({ jumpToFirst: false });
-    });
-
-    searchInput?.addEventListener('keydown', (event) => {
-        if (event.key === 'Escape') {
-            event.preventDefault();
-            closeSessionSearch();
-            return;
-        }
-        if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
-            event.preventDefault();
-            runSmartSessionSearch();
-            return;
-        }
-        if (event.key === 'Enter') {
-            event.preventDefault();
-            goToSessionSearchMatch(event.shiftKey ? -1 : 1);
-        }
-    });
-
-    searchSmartBtn?.addEventListener('click', () => {
-        runSmartSessionSearch();
-        searchInput?.focus();
-    });
-
-    searchPrevBtn?.addEventListener('click', () => {
-        goToSessionSearchMatch(-1);
-        searchInput?.focus();
-    });
-
-    searchNextBtn?.addEventListener('click', () => {
-        goToSessionSearchMatch(1);
-        searchInput?.focus();
-    });
-
-    searchCloseBtn?.addEventListener('click', () => {
-        closeSessionSearch();
+    sessionSearchInteractionController.install({
+        toggle: searchBtn,
+        input: searchInput,
+        smart: searchSmartBtn,
+        prev: searchPrevBtn,
+        next: searchNextBtn,
+        close: searchCloseBtn
     });
 
     newSessionBtn.addEventListener('click', () => {

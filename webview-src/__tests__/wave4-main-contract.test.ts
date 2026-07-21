@@ -6,6 +6,10 @@ import { createSessionSearchDomController } from '../features/search/search-dom-
 
 const source = fs.readFileSync(path.join(process.cwd(), 'media', 'main.js'), 'utf8');
 const css = fs.readFileSync(path.join(process.cwd(), 'media', 'main.css'), 'utf8');
+const searchInteractionSource = fs.readFileSync(
+  path.join(process.cwd(), 'webview-src', 'features', 'search', 'search-interaction-controller.ts'),
+  'utf8',
+);
 
 function extractFunction(marker: string): string {
   const start = source.indexOf(marker);
@@ -222,12 +226,9 @@ describe('Wave 4 main-script local older contract', () => {
 
   test('typing computes globally without moving the virtual window and first next selects result zero', () => {
     const syncOwner = extractFunction('function syncActiveTextSearchDomHit(');
-    const inputStart = source.indexOf("searchInput?.addEventListener('input', () => {");
-    const inputEnd = source.indexOf("searchInput?.addEventListener('keydown'", inputStart);
-    const inputOwner = source.slice(inputStart, inputEnd);
-    expect(inputOwner).toContain("sessionSearch.setTextQuery(searchInput.value || '');");
-    expect(inputOwner).toContain('scheduleSessionSearchRefresh({ jumpToFirst: false });');
-    expect(inputOwner).not.toContain('jumpToFirst: true');
+    expect(source).toContain('sessionSearchInteractionController.install({');
+    expect(searchInteractionSource).toContain("options.state.setTextQuery(elements.input?.value || '');");
+    expect(searchInteractionSource).toContain('scheduleRefresh({ jumpToFirst: false });');
 
     expect(syncOwner).toContain('sessionSearchDomController.syncActiveTextHit(options);');
   });

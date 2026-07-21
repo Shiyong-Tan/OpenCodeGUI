@@ -18,4 +18,11 @@ describe('session search production state ownership', () => {
     expect(source).toContain('sessionSearchDomController.syncActiveTextHit(options);');
     expect(source).not.toContain("document.querySelectorAll('mark.session-search-hit')");
   });
+
+  it('delegates search listeners and debounce lifecycle to the interaction controller', () => {
+    expect(source).toContain('const sessionSearchInteractionController = createSessionSearchInteractionController({');
+    expect(source).toContain('sessionSearchInteractionController.install({');
+    expect(source).not.toContain('let sessionSearchDebounceTimer');
+    expect(source).not.toContain("searchInput?.addEventListener('keydown'");
+  });
 });
