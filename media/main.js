@@ -6236,7 +6236,6 @@ function getMarkdownController() {
         document,
         renderMarkdown: (text) => md.render(text),
         sanitizeHtml: (html, config) => purify.sanitize(html, config),
-        normalizeMarkdown: (text) => normalizeLists(normalizeInlineMath(normalizeBlockMath(escapeSystemReminderTags(text)))),
         wrapTables,
         linkifyFileRefs,
         highlightElement: (element) => {
@@ -6280,14 +6279,6 @@ function resetCachedCodeBlockCopyEnhancements(root) {
     getMarkdownController().resetCachedCodeBlockCopyEnhancements(root);
 }
 
-function escapeSystemReminderTags(text) {
-    if (!text || typeof text !== 'string') return text;
-    return text
-        .replace(/<system-reminder\b[^>]*>/gi, '&lt;system-reminder&gt;')
-        .replace(/<\/system-reminder>/gi, '&lt;/system-reminder&gt;')
-        .replace(/\r\n/g, '\n');
-}
-
 function isCopilotProvider(providerId) {
     if (!providerId || typeof providerId !== 'string') return false;
     return providerId.toLowerCase().includes('copilot');
@@ -6324,23 +6315,6 @@ function parseSpeedMultiplier(value) {
     return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
 }
 
-function normalizeBlockMath(text) {
-    if (!text || typeof text !== 'string') return text;
-    return text.replace(/\\\[(.*?)\\\]/gs, (match, inner) => {
-        return `\n\n\\[${inner}\\]\n\n`;
-    });
-}
-
-function normalizeInlineMath(text) {
-    if (!text || typeof text !== 'string') return text;
-    return text.replace(/\$([^$\n]*?)\$/g, (match, inner) => {
-        const hasLatex = /\\[a-zA-Z]+|\^|_/.test(inner);
-        if (!hasLatex) return match;
-        const trimmed = inner.trim();
-        return `$${trimmed}$`;
-    });
-}
-
 function hashText(value) {
     const text = String(value || '');
     let hash = 0;
@@ -6367,48 +6341,6 @@ function shouldRenderDiffChunk(session, message) {
         session.seenDiffKeys = compact;
     }
     return true;
-}
-
-function normalizeLists(text) {
-    const lines = String(text || '').split('\n');
-    let inFence = false;
-
-    const isFence = (line) => /^\s*```/.test(line) || /^\s*~~~/.test(line);
-    const isOrdered = (line) => /^\s*\d+[.)]\s+/.test(line);
-    const isHeading = (line) => /^\s*#{1,6}\s+/.test(line);
-    const isHr = (line) => /^\s*(\*\s*){3,}$/.test(line)
-        || /^\s*(-\s*){3,}$/.test(line)
-        || /^\s*(_\s*){3,}$/.test(line);
-    const isBlank = (line) => /^\s*$/.test(line);
-    const isUnindentedBullet = (line) => /^[-+*]\s+/.test(line);
-
-    for (let i = 0; i < lines.length; i += 1) {
-        const line = lines[i];
-        if (isFence(line)) {
-            inFence = !inFence;
-            continue;
-        }
-        if (inFence || !isOrdered(line)) continue;
-
-        let j = i + 1;
-        let touched = false;
-        while (j < lines.length) {
-            const next = lines[j];
-            if (isFence(next) || isBlank(next) || isHeading(next) || isHr(next) || isOrdered(next)) break;
-            if (isUnindentedBullet(next)) {
-                lines[j] = `    ${next}`;
-                touched = true;
-                j += 1;
-                continue;
-            }
-            break;
-        }
-        if (touched) {
-            i = j - 1;
-        }
-    }
-
-    return lines.join('\n');
 }
 
 function wrapTables(root) {

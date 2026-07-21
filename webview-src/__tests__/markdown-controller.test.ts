@@ -1,4 +1,18 @@
-import { createMarkdownController } from '../rendering/markdown-controller';
+import { createMarkdownController, normalizeMarkdownText } from '../rendering/markdown-controller';
+
+describe('markdown text normalization', () => {
+  test('preserves the production reminder, math, newline, and nested-list transformations', () => {
+    expect(normalizeMarkdownText('<system-reminder source="x">keep</system-reminder>\r\n\\[x + y\\]\r\n$  x_1  $'))
+      .toBe('&lt;system-reminder&gt;keep&lt;/system-reminder&gt;\n\n\n\\[x + y\\]\n\n\n$x_1$');
+    expect(normalizeMarkdownText('1. parent\n- child\n+ child two\n2. next'))
+      .toBe('1. parent\n    - child\n    + child two\n2. next');
+  });
+
+  test('does not rewrite plain currency, fenced lists, headings, or horizontal rules', () => {
+    expect(normalizeMarkdownText('$12.50\n```\n1. code\n- unchanged\n```\n1. item\n# heading\n- top'))
+      .toBe('$12.50\n```\n1. code\n- unchanged\n```\n1. item\n# heading\n- top');
+  });
+});
 
 type Listener = (event: { stopPropagation(): void }) => unknown;
 

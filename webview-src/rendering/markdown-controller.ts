@@ -15,7 +15,7 @@ export interface MarkdownControllerDependencies {
     readonly ALLOWED_TAGS: readonly string[];
     readonly ALLOWED_ATTR: readonly string[];
   }) => string;
-  readonly normalizeMarkdown: (text: string) => string;
+  readonly normalizeMarkdown?: (text: string) => string;
   readonly wrapTables: (root: HTMLElement) => unknown;
   readonly linkifyFileRefs: (root: HTMLElement) => unknown;
   readonly highlightElement?: (element: Element) => unknown;
@@ -47,6 +47,50 @@ const ALLOWED_ATTR = Object.freeze([
   'href', 'title', 'target', 'rel', 'class', 'role', 'aria-hidden', 'style',
   'mathvariant', 'display', 'xmlns', 'encoding',
 ]);
+
+export function normalizeMarkdownText(value: string): string {
+  let text = typeof value === 'string' ? value : '';
+  text = text
+    .replace(/<system-reminder\b[^>]*>/gi, '&lt;system-reminder&gt;')
+    .replace(/<\/system-reminder>/gi, '&lt;/system-reminder&gt;')
+    .replace(/\r\n/g, '\n');
+  text = text.replace(/\\\[(.*?)\\\]/gs, (_match, inner: string) => `\n\n\\[${inner}\\]\n\n`);
+  text = text.replace(/\$([^$\n]*?)\$/g, (match, inner: string) => {
+    if (!/\\[a-zA-Z]+|\^|_/.test(inner)) return match;
+    return `$${inner.trim()}$`;
+  });
+
+  const lines = text.split('\n');
+  let inFence = false;
+  const isFence = (line: string): boolean => /^\s*```/.test(line) || /^\s*~~~/.test(line);
+  const isOrdered = (line: string): boolean => /^\s*\d+[.)]\s+/.test(line);
+  const isHeading = (line: string): boolean => /^\s*#{1,6}\s+/.test(line);
+  const isHr = (line: string): boolean => /^\s*(\*\s*){3,}$/.test(line)
+    || /^\s*(-\s*){3,}$/.test(line)
+    || /^\s*(_\s*){3,}$/.test(line);
+  const isBlank = (line: string): boolean => /^\s*$/.test(line);
+  const isUnindentedBullet = (line: string): boolean => /^[-+*]\s+/.test(line);
+
+  for (let index = 0; index < lines.length; index += 1) {
+    if (isFence(lines[index])) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence || !isOrdered(lines[index])) continue;
+    let cursor = index + 1;
+    let touched = false;
+    while (cursor < lines.length) {
+      const next = lines[cursor];
+      if (isFence(next) || isBlank(next) || isHeading(next) || isHr(next) || isOrdered(next)) break;
+      if (!isUnindentedBullet(next)) break;
+      lines[cursor] = `    ${next}`;
+      touched = true;
+      cursor += 1;
+    }
+    if (touched) index = cursor - 1;
+  }
+  return lines.join('\n');
+}
 
 export function createMarkdownController(dependencies: MarkdownControllerDependencies): MarkdownController {
   const scheduleTimeout = dependencies.scheduleTimeout || setTimeout;
@@ -143,7 +187,8 @@ export function createMarkdownController(dependencies: MarkdownControllerDepende
   function renderMarkdownInto(element: HTMLElement, text: string, options: MarkdownRenderOptions = {}): void {
     const richEnhancementStartedAt = dependencies.startRenderPhase?.();
     delete element.dataset.linkified;
-    const raw = dependencies.renderMarkdown(dependencies.normalizeMarkdown(text || ''));
+    const normalizeMarkdown = dependencies.normalizeMarkdown || normalizeMarkdownText;
+    const raw = dependencies.renderMarkdown(normalizeMarkdown(text || ''));
     element.innerHTML = dependencies.sanitizeHtml(raw, {
       ALLOWED_TAGS,
       ALLOWED_ATTR,
