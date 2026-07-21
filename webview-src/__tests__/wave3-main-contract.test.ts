@@ -182,6 +182,30 @@ describe('undo segment placeholder presentation revisions', () => {
     expect(JSON.parse(collapsed).undoSegment.collapsed).toBe(true);
     expect(JSON.parse(expanded).undoSegment.collapsed).toBe(false);
   });
+
+  test('toggle invalidates only the mounted placeholder keyed unit', () => {
+    const invalidate = extractFunction('function invalidateKeyedChatUnitPresentation(');
+    const untouched = { key: 'msg-before', fingerprint: 'before', streamStableFingerprint: 'before-stable' };
+    const placeholder = {
+      key: 'system:undo-seg:system:undo:msg-a',
+      fingerprint: 'collapsed',
+      streamStableFingerprint: 'collapsed-stable',
+    };
+    const context = vm.createContext({
+      activeSessionId: 'session-a',
+      keyedChatReconcileState: { sessionId: 'session-a', items: [untouched, placeholder], roots: new Map() },
+    });
+    vm.runInContext(`${invalidate}; globalThis.invalidate = invalidateKeyedChatUnitPresentation;`, context);
+
+    expect(context.invalidate(placeholder.key)).toBe(true);
+    expect(context.keyedChatReconcileState.items[0]).toEqual(untouched);
+    expect(context.keyedChatReconcileState.items[1]).toMatchObject({
+      key: placeholder.key,
+      fingerprint: null,
+      streamStableFingerprint: null,
+    });
+    expect(context.invalidate('missing')).toBe(false);
+  });
 });
 
 function extractCaseBlock(startMarker: string, endMarker: string): string {

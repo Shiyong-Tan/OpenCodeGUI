@@ -7997,9 +7997,10 @@ function renderMessageElement(message, renderedSet) {
             toggleBtn.addEventListener('click', () => {
                 if (!segment) return;
                 segment.collapsed = !segment.collapsed;
+                const invalidated = invalidateKeyedChatUnitPresentation(message.id);
                 vscode.postMessage({
                     type: 'ui-debug',
-                    payload: ['[WV][SEG_TOGGLE]', `noticeKey=${noticeKey || 'null'}`, `collapsed=${segment.collapsed}`]
+                    payload: ['[WV][SEG_TOGGLE]', `noticeKey=${noticeKey || 'null'}`, `collapsed=${segment.collapsed}`, `invalidated=${invalidated}`]
                 });
                 window.__oc?.renderFromState?.();
             });
@@ -9525,6 +9526,16 @@ function shouldHideDcpUiMessage(message) {
     let keyedChatReconcileFailure = null;
     let keyedChatFailedSessionId = '';
     let keyedChatReconcileState = { sessionId: '', items: [], roots: new Map() };
+    function invalidateKeyedChatUnitPresentation(unitKey) {
+        if (!unitKey || keyedChatReconcileState.sessionId !== (activeSessionId || '')) return false;
+        let invalidated = false;
+        keyedChatReconcileState.items = keyedChatReconcileState.items.map((item) => {
+            if (item.key !== unitKey) return item;
+            invalidated = true;
+            return { ...item, fingerprint: null, streamStableFingerprint: null };
+        });
+        return invalidated;
+    }
     let chatWindowGeneration = 0;
     const B4_SYNTHETIC_EVIDENCE_OPTIONS = Object.freeze([
         Object.freeze({ optionIndex: 0, overscanTier: 20, initialTail: 80, forwardReserve: 13, backwardReserve: 7 }),
