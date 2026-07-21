@@ -3992,9 +3992,7 @@ function replaceKeyEverywhere(oldId, newId, sessionId = activeSessionId) {
     if (session.serverIdToClientKey?.get(newId) === oldId) {
         session.serverIdToClientKey.set(newId, newId);
     }
-    if (typeof sessionSearch !== 'undefined' && Array.isArray(sessionSearch.smartMessageIds)) {
-        sessionSearch.smartMessageIds = sessionSearch.smartMessageIds.map((id) => id === oldId ? newId : id);
-    }
+    if (typeof sessionSearch !== 'undefined') sessionSearch.rekey(oldId, newId);
     if (typeof subagentTextExpandedByKey !== 'undefined' && subagentTextExpandedByKey instanceof Map) {
         const expansionNeedle = `:${oldId}:`;
         for (const [key, expanded] of Array.from(subagentTextExpandedByKey.entries())) {
@@ -6581,15 +6579,12 @@ function refreshSessionSearchHighlights({ jumpToFirst = false } = {}) {
 
     const query = String(sessionSearch.query || '').trim();
     if (!query) {
-        sessionSearch.activeIndex = -1;
-        sessionSearch.fullMatchKeys = [];
-        sessionSearch.activeKeyIndex = -1;
+        sessionSearch.clearTextMatches();
         updateSessionSearchControls();
         return;
     }
 
-    sessionSearch.fullMatchKeys = collectLoadedTextSearchKeys(query);
-    if (jumpToFirst) sessionSearch.activeKeyIndex = sessionSearch.fullMatchKeys.length ? 0 : -1;
+    sessionSearch.setTextMatchKeys(collectLoadedTextSearchKeys(query), jumpToFirst);
     const targetKey = sessionSearch.activeKeyIndex >= 0 ? sessionSearch.fullMatchKeys[sessionSearch.activeKeyIndex] : '';
     if (targetKey && !keyedRootForSearchKey(targetKey) && ensureChatWindowKeyMounted(targetKey, 'search')) {
         sessionSearch.windowTargetKey = targetKey;
@@ -6628,7 +6623,7 @@ function refreshSessionSearchHighlights({ jumpToFirst = false } = {}) {
 }
 
 function scheduleSessionSearchRefresh({ jumpToFirst = false } = {}) {
-    sessionSearch.mode = 'text';
+    sessionSearch.setTextMode();
     if (sessionSearchDebounceTimer) {
         clearTimeout(sessionSearchDebounceTimer);
     }
@@ -6639,20 +6634,15 @@ function scheduleSessionSearchRefresh({ jumpToFirst = false } = {}) {
 }
 
 function goToSessionSearchMatch(delta) {
-    if (sessionSearch.mode === 'text' && sessionSearch.fullMatchKeys.length) {
-        const totalKeys = sessionSearch.fullMatchKeys.length;
-        sessionSearch.activeKeyIndex = (sessionSearch.activeKeyIndex + delta + totalKeys) % totalKeys;
-        const targetKey = sessionSearch.fullMatchKeys[sessionSearch.activeKeyIndex];
-        sessionSearch.windowTargetKey = targetKey;
+    const navigation = sessionSearch.navigate(delta);
+    if (navigation?.mode === 'text') {
+        const targetKey = navigation.targetKey;
         if (!keyedRootForSearchKey(targetKey) && ensureChatWindowKeyMounted(targetKey, 'search')) return;
         syncActiveTextSearchDomHit({ scroll: true });
         return;
     }
-    if (sessionSearch.mode === 'smart' && sessionSearch.smartMessageIds.length) {
-        const totalIds = sessionSearch.smartMessageIds.length;
-        sessionSearch.activeIndex = (sessionSearch.activeIndex + delta + totalIds) % totalIds;
-        const targetKey = sessionSearch.smartMessageIds[sessionSearch.activeIndex];
-        sessionSearch.windowTargetKey = targetKey;
+    if (navigation?.mode === 'smart') {
+        const targetKey = navigation.targetKey;
         if (!keyedRootForSearchKey(targetKey) && ensureChatWindowKeyMounted(targetKey, 'search')) {
             updateSessionSearchControls();
             return;
@@ -6669,7 +6659,7 @@ function goToSessionSearchMatch(delta) {
 function openSessionSearch() {
     const { bar, input } = getSessionSearchElements();
     if (!bar || !input) return;
-    sessionSearch.open = true;
+    sessionSearch.openSearch();
     bar.classList.remove('hidden');
     requestAnimationFrame(() => {
         input.focus();
@@ -6680,16 +6670,7 @@ function openSessionSearch() {
 
 function closeSessionSearch() {
     const { bar, input } = getSessionSearchElements();
-    sessionSearch.open = false;
-    sessionSearch.query = '';
-    sessionSearch.mode = 'text';
-    sessionSearch.activeIndex = -1;
-    sessionSearch.smartMessageIds = [];
-    sessionSearch.smartRequestId = '';
-    sessionSearch.smartInFlight = false;
-    sessionSearch.fullMatchKeys = [];
-    sessionSearch.activeKeyIndex = -1;
-    sessionSearch.windowTargetKey = '';
+    sessionSearch.closeSearch();
     if (sessionSearchDebounceTimer) {
         clearTimeout(sessionSearchDebounceTimer);
         sessionSearchDebounceTimer = null;
@@ -6726,16 +6707,8 @@ function collectSmartSearchMessages() {
 }
 
 function applySmartSessionSearchResults(messageIds, { scroll = true } = {}) {
-    const previousIndex = sessionSearch.activeIndex;
     clearSessionSearchHighlights();
-    sessionSearch.mode = 'smart';
-    sessionSearch.smartMessageIds = Array.isArray(messageIds)
-        ? Array.from(new Set(messageIds.filter((id) => typeof id === 'string' && id)))
-        : [];
-    sessionSearch.activeIndex = sessionSearch.smartMessageIds.length
-        ? Math.min(Math.max(previousIndex, 0), sessionSearch.smartMessageIds.length - 1)
-        : -1;
-    const requestedKey = sessionSearch.activeIndex >= 0 ? sessionSearch.smartMessageIds[sessionSearch.activeIndex] : '';
+    const requestedKey = sessionSearch.setSmartResults(messageIds);
     if (requestedKey && !keyedRootForSearchKey(requestedKey) && ensureChatWindowKeyMounted(requestedKey, 'search')) {
         sessionSearch.windowTargetKey = requestedKey;
         updateSessionSearchControls();
@@ -6763,16 +6736,12 @@ function runSmartSessionSearch() {
     const messages = collectSmartSearchMessages();
     if (!messages.length) {
         clearSessionSearchHighlights();
-        sessionSearch.mode = 'smart';
-        sessionSearch.activeIndex = -1;
+        sessionSearch.setEmptySmartResults();
         updateSessionSearchControls();
         return;
     }
     const requestId = `smart-search-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    sessionSearch.mode = 'smart';
-    sessionSearch.smartRequestId = requestId;
-    sessionSearch.smartMessageIds = [];
-    sessionSearch.smartInFlight = true;
+    if (!sessionSearch.beginSmartSearch(requestId)) return;
     clearSessionSearchHighlights();
     updateSessionSearchControls();
     vscode.postMessage({
@@ -13189,8 +13158,7 @@ function shouldHideDcpUiMessage(message) {
         });
         chatWindowState.adapter?.migrateKey?.(oldKey, newKey);
         if (chatWindowState.anchorKey === oldKey) chatWindowState.anchorKey = newKey;
-        if (sessionSearch.windowTargetKey === oldKey) sessionSearch.windowTargetKey = newKey;
-        sessionSearch.fullMatchKeys = sessionSearch.fullMatchKeys.map((key) => key === oldKey ? newKey : key);
+        sessionSearch.rekey(oldKey, newKey);
         return true;
     }
 
@@ -15216,13 +15184,7 @@ function appendMessageImages(parentEl, message) {
     });
 
     searchInput?.addEventListener('input', () => {
-        sessionSearch.query = searchInput.value || '';
-        sessionSearch.mode = 'text';
-        sessionSearch.smartRequestId = '';
-        sessionSearch.smartInFlight = false;
-        sessionSearch.activeIndex = -1;
-        sessionSearch.activeKeyIndex = -1;
-        sessionSearch.windowTargetKey = '';
+        sessionSearch.setTextQuery(searchInput.value || '');
         scheduleSessionSearchRefresh({ jumpToFirst: false });
     });
 

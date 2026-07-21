@@ -117,6 +117,9 @@ export function createSessionSearchState() {
       activeKeyIndex = -1;
       windowTargetKey = '';
     },
+    setTextMode(): void {
+      mode = 'text';
+    },
     setTextMatchKeys(values: unknown, jumpToFirst = false): void {
       fullMatchKeys = uniqueKeys(values);
       if (jumpToFirst) activeKeyIndex = fullMatchKeys.length ? 0 : -1;
@@ -138,6 +141,21 @@ export function createSessionSearchState() {
       smartInFlight = true;
       activeIndex = -1;
       return true;
+    },
+    setSmartResults(messageIds: unknown): string {
+      const previousIndex = activeIndex;
+      mode = 'smart';
+      smartMessageIds = uniqueKeys(messageIds);
+      activeIndex = smartMessageIds.length
+        ? Math.min(Math.max(previousIndex, 0), smartMessageIds.length - 1)
+        : -1;
+      return activeIndex >= 0 ? smartMessageIds[activeIndex] : '';
+    },
+    setEmptySmartResults(): void {
+      mode = 'smart';
+      smartMessageIds = [];
+      activeIndex = -1;
+      windowTargetKey = '';
     },
     completeSmartSearch(requestId: string, messageIds: unknown): boolean {
       if (!requestId || requestId !== smartRequestId) return false;

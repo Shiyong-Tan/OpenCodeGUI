@@ -442,7 +442,7 @@ describe('Wave 3 main-script window contract', () => {
     expect(source).toContain('destroyChatWindowAdapter(\'session-switch\')');
     expect(source).toContain('chatWindowState.adapter?.migrateKey?.(oldKey, newKey);');
     expect(source).toContain('chatWindowState.anchorKey === oldKey');
-    expect(source).toContain('sessionSearch.windowTargetKey === oldKey');
+    expect(source).toContain('sessionSearch.rekey(oldKey, newKey);');
     expect(source).toContain('rendering.restoreKeyedScrollAnchor');
     expect(extractFunction('function collectSmartSearchMessages()')).toContain('session.timeline');
     expect(source).toContain('ensureChatWindowKeyMounted(targetKey, \'search\')');

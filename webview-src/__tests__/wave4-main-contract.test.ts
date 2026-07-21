@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import vm from 'vm';
+import { createSessionSearchState } from '../features/search/search-state';
 
 const source = fs.readFileSync(path.join(process.cwd(), 'media', 'main.js'), 'utf8');
 const css = fs.readFileSync(path.join(process.cwd(), 'media', 'main.css'), 'utf8');
@@ -113,11 +114,11 @@ describe('Wave 4 main-script local older contract', () => {
 
   test('executable next/previous search keeps full loaded ordering and jumps unrevealed keys once', () => {
     const jumps: string[] = [];
+    const searchState = createSessionSearchState();
+    searchState.setTextQuery('needle');
+    searchState.setTextMatchKeys(['old-unrevealed', 'middle-unrevealed', 'recent']);
     const context = vm.createContext({
-      sessionSearch: {
-        mode: 'text', fullMatchKeys: ['old-unrevealed', 'middle-unrevealed', 'recent'],
-        activeKeyIndex: -1, windowTargetKey: '', matches: [], activeIndex: -1,
-      },
+      sessionSearch: searchState,
       ensureChatWindowKeyMounted: (key: string) => { jumps.push(key); return true; },
       keyedRootForSearchKey: () => null,
       updateActiveSessionSearchHit: () => undefined,
@@ -167,14 +168,13 @@ describe('Wave 4 main-script local older contract', () => {
       'session-search-count': count, 'session-search-prev': prev,
       'session-search-next': next, 'session-search-smart': smart,
     };
+    const searchState = createSessionSearchState();
+    searchState.setTextQuery('related request');
+    searchState.setSmartResults(['old-unmounted', 'middle-unmounted', 'recent-mounted']);
+    searchState.matches = [{ dataset: { messageId: 'recent-mounted' } }];
     const context = vm.createContext({
       document: { getElementById: (id: string) => elements[id] || null },
-      sessionSearch: {
-        mode: 'smart', query: 'related request', smartInFlight: false,
-        smartMessageIds: ['old-unmounted', 'middle-unmounted', 'recent-mounted'],
-        activeIndex: 0, matches: [{ dataset: { messageId: 'recent-mounted' } }],
-        fullMatchKeys: [], activeKeyIndex: -1, windowTargetKey: '',
-      },
+      sessionSearch: searchState,
       ensureChatWindowKeyMounted: (key: string) => { jumps.push(key); return true; },
       keyedRootForSearchKey: () => null,
       applySmartSessionSearchResults: () => undefined,
@@ -215,8 +215,7 @@ describe('Wave 4 main-script local older contract', () => {
     const inputStart = source.indexOf("searchInput?.addEventListener('input', () => {");
     const inputEnd = source.indexOf("searchInput?.addEventListener('keydown'", inputStart);
     const inputOwner = source.slice(inputStart, inputEnd);
-    expect(inputOwner).toContain('sessionSearch.activeKeyIndex = -1;');
-    expect(inputOwner).toContain("sessionSearch.windowTargetKey = '';");
+    expect(inputOwner).toContain("sessionSearch.setTextQuery(searchInput.value || '');");
     expect(inputOwner).toContain('scheduleSessionSearchRefresh({ jumpToFirst: false });');
     expect(inputOwner).not.toContain('jumpToFirst: true');
 
