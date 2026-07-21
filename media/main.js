@@ -6871,6 +6871,19 @@ document.addEventListener('DOMContentLoaded', () => {
         isAppendActive: () => Boolean(appendInputMode && appendInputMode.sessionId === activeSessionId),
         exitAppend: () => exitAppendInputMode({ restoreDraft: true })
     });
+    const createFileMentionController = window.__ocFeatures?.createFileMentionController;
+    if (typeof createFileMentionController !== 'function' || !fileMentionList || !input) {
+        throw new Error('File mention controller is unavailable');
+    }
+    const fileMentionController = createFileMentionController({
+        contextState: getComposerContextStateController(),
+        document,
+        window,
+        input,
+        listElement: fileMentionList,
+        postMessage: (message) => vscode.postMessage(message),
+        onContextChanged: () => renderContextTokens()
+    });
     const usageEl = document.getElementById('header-usage');
     const usageFillEl = document.getElementById('header-usage-fill');
     const usageLabelEl = document.getElementById('header-usage-label');
@@ -14299,144 +14312,12 @@ function shouldHideDcpUiMessage(message) {
         if (getComposerContextStateController().addContext(displayText, payload)) renderContextTokens();
     }
 
-    const fileMentionState = {
-        open: false,
-        requestId: '',
-        query: '',
-        range: null,
-        items: [],
-        selectedIndex: 0,
-        timer: null
-    };
-
-    function normalizeFileRef(file) {
-        if (!file || typeof file.path !== 'string' || !file.path) return null;
-        return {
-            path: file.path,
-            name: typeof file.name === 'string' ? file.name : file.path.split('/').pop(),
-            directory: typeof file.directory === 'string' ? file.directory : ''
-        };
-    }
-
-    function addFileRef(file) {
-        const normalized = normalizeFileRef(file);
-        if (!normalized) return;
-        getComposerContextStateController().addFileRef(normalized);
-        renderContextTokens();
-    }
-
     function closeFileMentionList() {
-        fileMentionState.open = false;
-        fileMentionState.items = [];
-        fileMentionState.selectedIndex = 0;
-        fileMentionState.range = null;
-        if (fileMentionList) {
-            fileMentionList.classList.add('hidden');
-            fileMentionList.innerHTML = '';
-        }
-    }
-
-    function renderFileMentionList() {
-        if (!fileMentionList) return;
-        fileMentionList.innerHTML = '';
-        if (!fileMentionState.open) {
-            fileMentionList.classList.add('hidden');
-            return;
-        }
-        const items = fileMentionState.items || [];
-        if (!items.length) {
-            const empty = document.createElement('div');
-            empty.className = 'file-mention-empty';
-            empty.textContent = 'No files found';
-            fileMentionList.appendChild(empty);
-            fileMentionList.classList.remove('hidden');
-            return;
-        }
-        items.forEach((item, index) => {
-            const option = document.createElement('button');
-            option.type = 'button';
-            option.className = `file-mention-item${index === fileMentionState.selectedIndex ? ' selected' : ''}`;
-            option.dataset.index = String(index);
-
-            const name = document.createElement('span');
-            name.className = 'file-mention-name';
-            name.textContent = item.name || item.path;
-            option.appendChild(name);
-
-            const dir = document.createElement('span');
-            dir.className = 'file-mention-dir';
-            dir.textContent = item.directory || '.';
-            option.appendChild(dir);
-
-            option.addEventListener('mousedown', (event) => {
-                event.preventDefault();
-                selectFileMention(index);
-            });
-            fileMentionList.appendChild(option);
-        });
-        fileMentionList.classList.remove('hidden');
-    }
-
-    function findActiveFileMention() {
-        if (!input) return null;
-        const cursor = input.selectionStart;
-        if (cursor !== input.selectionEnd) return null;
-        const beforeCursor = input.value.slice(0, cursor);
-        const match = beforeCursor.match(/(^|\s)@([^\s@]*)$/);
-        if (!match) return null;
-        const query = match[2] || '';
-        return {
-            query,
-            start: cursor - query.length - 1,
-            end: cursor
-        };
-    }
-
-    function requestFileMentionResults() {
-        const activeMention = findActiveFileMention();
-        if (!activeMention) {
-            closeFileMentionList();
-            return;
-        }
-        fileMentionState.open = true;
-        fileMentionState.query = activeMention.query;
-        fileMentionState.range = { start: activeMention.start, end: activeMention.end };
-        fileMentionState.selectedIndex = 0;
-        const requestId = `files-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        fileMentionState.requestId = requestId;
-        vscode.postMessage({
-            type: 'listWorkspaceFiles',
-            requestId,
-            query: activeMention.query
-        });
+        fileMentionController.close();
     }
 
     function scheduleFileMentionUpdate() {
-        if (fileMentionState.timer) {
-            clearTimeout(fileMentionState.timer);
-        }
-        const activeMention = findActiveFileMention();
-        if (!activeMention) {
-            closeFileMentionList();
-            return;
-        }
-        fileMentionState.open = true;
-        fileMentionState.query = activeMention.query;
-        fileMentionState.range = { start: activeMention.start, end: activeMention.end };
-        renderFileMentionList();
-        fileMentionState.timer = setTimeout(requestFileMentionResults, 120);
-    }
-
-    function selectFileMention(index) {
-        const item = fileMentionState.items[index];
-        if (!item || !fileMentionState.range || !input) return;
-        const { start, end } = fileMentionState.range;
-        input.value = `${input.value.slice(0, start)}${input.value.slice(end)}`;
-        input.selectionStart = start;
-        input.selectionEnd = start;
-        addFileRef(item);
-        closeFileMentionList();
-        input.focus();
+        fileMentionController.schedule();
     }
 
     function openSessionPanel() {
@@ -15315,28 +15196,7 @@ function appendMessageImages(parentEl, message) {
     });
 
     input.addEventListener('keydown', (e) => {
-        if (fileMentionState.open && !fileMentionList?.classList.contains('hidden')) {
-            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-                e.preventDefault();
-                const count = fileMentionState.items.length;
-                if (count > 0) {
-                    const delta = e.key === 'ArrowDown' ? 1 : -1;
-                    fileMentionState.selectedIndex = (fileMentionState.selectedIndex + delta + count) % count;
-                    renderFileMentionList();
-                }
-                return;
-            }
-            if (e.key === 'Enter' && fileMentionState.items.length > 0) {
-                e.preventDefault();
-                selectFileMention(fileMentionState.selectedIndex);
-                return;
-            }
-            if (e.key === 'Escape') {
-                e.preventDefault();
-                closeFileMentionList();
-                return;
-            }
-        }
+        if (fileMentionController.handleKeydown(e)) return;
         if (appendInputMode && e.key === 'Escape') {
             e.preventDefault();
             exitAppendInputMode({ restoreDraft: true });
@@ -17046,12 +16906,8 @@ function appendMessageImages(parentEl, message) {
                 break;
             }
             case 'workspaceFileResults': {
-                if (message.requestId !== fileMentionState.requestId) break;
                 const files = Array.isArray(message.files) ? message.files : [];
-                fileMentionState.items = files.map(normalizeFileRef).filter(Boolean);
-                fileMentionState.selectedIndex = 0;
-                fileMentionState.open = Boolean(fileMentionState.range);
-                renderFileMentionList();
+                fileMentionController.handleResults(message.requestId, files);
                 break;
             }
             case 'messageIdMap': {

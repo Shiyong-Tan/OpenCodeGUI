@@ -14,7 +14,6 @@ describe('composer context production ownership', () => {
   it('routes add, remove, reset, display, and send payload behavior through context state', () => {
     expect(source).toContain('composerContextStateController = factory();');
     expect(source).toContain('getComposerContextStateController().addContext(displayText, payload)');
-    expect(source).toContain('getComposerContextStateController().addFileRef(normalized);');
     expect(source).toContain('contextState.getDisplayPrefix();');
     expect(source).toContain('contextState.getContextPayload();');
     expect(source).toContain('contextState.getFilesPayload();');
