@@ -3585,6 +3585,23 @@ function sanitizeMergedSegmentSnapshot(seg) {
     };
 }
 
+function orderSegmentMemberMsgIdsByTimeline(memberMsgIds, timeline) {
+    const ordered = [];
+    const remaining = new Set(
+        (Array.isArray(memberMsgIds) ? memberMsgIds : [])
+            .filter((id) => typeof id === 'string' && id.startsWith('msg_'))
+    );
+    for (const id of Array.isArray(timeline) ? timeline : []) {
+        if (!remaining.delete(id)) continue;
+        ordered.push(id);
+    }
+    for (const id of Array.isArray(memberMsgIds) ? memberMsgIds : []) {
+        if (!remaining.delete(id)) continue;
+        ordered.push(id);
+    }
+    return ordered;
+}
+
 function isHiddenControlUserText(text) {
     if (typeof text !== 'string') return false;
     const trimmed = text.trim();
@@ -18881,7 +18898,10 @@ function appendMessageImages(parentEl, message) {
                                 });
                             }
 
-                            finalMemberMsgIds = Array.from(mergedMemberMsgIds);
+                            finalMemberMsgIds = orderSegmentMemberMsgIdsByTimeline(
+                                Array.from(mergedMemberMsgIds),
+                                session.timeline
+                            );
                             const candidateEndIds = [endForUpsert];
                             for (const oldSeg of mergedChildSegments) {
                                 if (oldSeg?.endMsgId) {

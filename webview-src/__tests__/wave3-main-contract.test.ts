@@ -225,6 +225,34 @@ describe('undo segment placeholder presentation revisions', () => {
   });
 });
 
+describe('merged undo segment ordering and restore isolation', () => {
+  test('orders merged child members at their unwrapped timeline positions', () => {
+    const orderMembers = extractFunction('function orderSegmentMemberMsgIdsByTimeline(');
+    const context = vm.createContext({ Set, Array });
+    vm.runInContext(`${orderMembers}; globalThis.orderMembers = orderSegmentMemberMsgIdsByTimeline;`, context);
+
+    const mergedByInsertion = ['msg_outer-user', 'msg_outer-assistant', 'msg_later-user', 'msg_later-assistant', 'msg_child-user', 'msg_child-assistant'];
+    const timeline = ['msg_outer-user', 'msg_outer-assistant', 'system:changeList:1', 'msg_child-user', 'msg_child-assistant', 'msg_later-user', 'msg_later-assistant'];
+    expect(Array.from(context.orderMembers(mergedByInsertion, timeline))).toEqual([
+      'msg_outer-user', 'msg_outer-assistant', 'msg_child-user', 'msg_child-assistant', 'msg_later-user', 'msg_later-assistant',
+    ]);
+  });
+
+  test('ordering does not rewrite child restore snapshots and restore still recreates child placeholders', () => {
+    const mergeStart = source.indexOf('finalMemberMsgIds = orderSegmentMemberMsgIdsByTimeline(');
+    const mergeEnd = source.indexOf("payload: ['[WV][MERGE_DELETE]'", mergeStart);
+    const mergeBlock = source.slice(mergeStart, mergeEnd);
+    const restoreBlock = extractCaseBlock("case 'restoredSegment': {", "case 'revertedSegmentState': {");
+
+    expect(mergeStart).toBeGreaterThanOrEqual(0);
+    expect(mergeBlock).toContain('Array.from(mergedMemberMsgIds)');
+    expect(mergeBlock).not.toContain('mergedInvalidSegments =');
+    expect(restoreBlock).toContain('for (const child of mergedInvalidSegments)');
+    expect(restoreBlock).toContain('memberMsgIds: Array.isArray(child.memberMsgIds) ? child.memberMsgIds : []');
+    expect(restoreBlock).toContain('upsertUndoPlaceholder(session, child.noticeKey, child.anchorMsgId, child.endMsgId');
+  });
+});
+
 function extractCaseBlock(startMarker: string, endMarker: string): string {
   const start = source.indexOf(startMarker);
   const end = source.indexOf(endMarker, start + startMarker.length);
