@@ -3307,13 +3307,21 @@ function isChangeListSessionMessage(item) {
 
 function materializeInjectedChangeLists(session, rawSessionMessages, source = 'sessionData') {
     if (!session || !Array.isArray(rawSessionMessages) || !rawSessionMessages.length) {
-        return { seen: 0, alreadyTimeline: 0, materialized: 0, insertedAfter: 0, skippedMissingAnchor: 0, skippedNoFiles: 0 };
+        return { seen: 0, alreadyTimeline: 0, materialized: 0, insertedAfter: 0, appended: 0, skippedNoFiles: 0 };
     }
 
-    const stats = { seen: 0, alreadyTimeline: 0, materialized: 0, insertedAfter: 0, skippedMissingAnchor: 0, skippedNoFiles: 0 };
-    const insertionTailByAnchor = new Map();
+    const stats = { seen: 0, alreadyTimeline: 0, materialized: 0, insertedAfter: 0, appended: 0, skippedNoFiles: 0 };
+    const findNearestPriorTimelineId = (index) => {
+        for (let i = index - 1; i >= 0; i--) {
+            const priorId = rawSessionMessages[i]?.id;
+            if (typeof priorId !== 'string' || !priorId.length) continue;
+            const stablePriorId = toStableMessageKey(session, priorId) || priorId;
+            if (session.timeline.includes(stablePriorId)) return stablePriorId;
+        }
+        return '';
+    };
 
-    rawSessionMessages.forEach((item) => {
+    rawSessionMessages.forEach((item, index) => {
         if (!isChangeListSessionMessage(item)) return;
         stats.seen++;
         const id = item.id;
@@ -3341,32 +3349,25 @@ function materializeInjectedChangeLists(session, rawSessionMessages, source = 's
         };
         session.messagesById.set(id, message);
 
-        const alreadyInTimeline = session.timeline.includes(id);
-        if (alreadyInTimeline) {
+        if (session.timeline.includes(id)) {
             stats.alreadyTimeline++;
-        }
-
-        const explicitAnchorId = typeof message.meta?.stableAnchorMessageId === 'string' && message.meta.stableAnchorMessageId.length
-            ? message.meta.stableAnchorMessageId
-            : (typeof message.meta?.anchorMessageId === 'string' ? message.meta.anchorMessageId : '');
-        const anchorId = explicitAnchorId
-            ? (toStableMessageKey(session, explicitAnchorId) || explicitAnchorId)
-            : '';
-        if (anchorId && session.timeline.includes(anchorId)) {
-            session.timeline = session.timeline.filter((timelineId) => timelineId !== id);
-            const placementTailId = insertionTailByAnchor.get(anchorId) || anchorId;
-            const placementIndex = session.timeline.indexOf(placementTailId);
-            session.timeline.splice(placementIndex + 1, 0, id);
-            insertionTailByAnchor.set(anchorId, id);
-            stats.insertedAfter++;
-        } else {
-            if (alreadyInTimeline) {
-                session.timeline = session.timeline.filter((timelineId) => timelineId !== id);
-            }
-            stats.skippedMissingAnchor++;
             return;
         }
-        if (!alreadyInTimeline) stats.materialized++;
+
+        const anchorId = typeof message.meta?.stableAnchorMessageId === 'string' && session.timeline.includes(message.meta.stableAnchorMessageId)
+            ? message.meta.stableAnchorMessageId
+            : (typeof message.meta?.anchorMessageId === 'string'
+                ? (toStableMessageKey(session, message.meta.anchorMessageId) || message.meta.anchorMessageId)
+                : findNearestPriorTimelineId(index));
+        if (anchorId && session.timeline.includes(anchorId)) {
+            const anchorIndex = session.timeline.indexOf(anchorId);
+            session.timeline.splice(anchorIndex + 1, 0, id);
+            stats.insertedAfter++;
+        } else {
+            session.timeline.push(id);
+            stats.appended++;
+        }
+        stats.materialized++;
     });
 
     if (stats.seen || stats.materialized) {
@@ -3378,48 +3379,13 @@ function materializeInjectedChangeLists(session, rawSessionMessages, source = 's
                 `alreadyTimeline=${stats.alreadyTimeline}`,
                 `materialized=${stats.materialized}`,
                 `insertedAfter=${stats.insertedAfter}`,
-                `skippedMissingAnchor=${stats.skippedMissingAnchor}`,
+                `appended=${stats.appended}`,
                 `skippedNoFiles=${stats.skippedNoFiles}`,
                 `timelineSize=${session.timeline.length}`]
         });
     }
 
     return stats;
-}
-
-function buildAnchoredPresentationTimeline(session) {
-    const timeline = Array.isArray(session?.timeline) ? session.timeline : [];
-    if (!session || timeline.length === 0) return timeline.slice();
-    const timelineIds = new Set(timeline);
-    const changeListsByAnchor = new Map();
-    const baseTimeline = [];
-    for (const id of timeline) {
-        const message = session.messagesById?.get?.(id);
-        if (!isChangeListSessionMessage(message)) {
-            baseTimeline.push(id);
-            continue;
-        }
-        const explicitAnchorId = typeof message.meta?.stableAnchorMessageId === 'string' && message.meta.stableAnchorMessageId.length
-            ? message.meta.stableAnchorMessageId
-            : (typeof message.meta?.anchorMessageId === 'string' ? message.meta.anchorMessageId : '');
-        const anchorId = explicitAnchorId
-            ? (toStableMessageKey(session, explicitAnchorId) || explicitAnchorId)
-            : '';
-        if (!anchorId || anchorId === id || !timelineIds.has(anchorId) || !session.messagesById.has(anchorId)) {
-            baseTimeline.push(id);
-            continue;
-        }
-        if (!changeListsByAnchor.has(anchorId)) changeListsByAnchor.set(anchorId, []);
-        changeListsByAnchor.get(anchorId).push(id);
-    }
-    if (changeListsByAnchor.size === 0) return baseTimeline;
-    const projected = [];
-    for (const id of baseTimeline) {
-        projected.push(id);
-        const anchored = changeListsByAnchor.get(id);
-        if (anchored) projected.push(...anchored);
-    }
-    return projected;
 }
 
 /**
@@ -6232,60 +6198,152 @@ function renderSafeShellMarkdownMessage(session, unit, presentationSelection) {
     return root;
 }
 
-let markdownController = null;
-
-function getMarkdownController() {
-    if (markdownController) return markdownController;
-    const createController = window.__ocRendering?.createMarkdownController;
-    if (typeof createController !== 'function') {
-        throw new Error('Markdown rendering controller is unavailable');
-    }
-    markdownController = createController({
-        document,
-        renderMarkdown: (text) => md.render(text),
-        sanitizeHtml: (html, config) => purify.sanitize(html, config),
-        normalizeMarkdown: (text) => normalizeLists(normalizeInlineMath(normalizeBlockMath(escapeSystemReminderTags(text)))),
-        wrapTables,
-        linkifyFileRefs,
-        highlightElement: (element) => {
-            if (window.hljs && typeof window.hljs.highlightElement === 'function') {
-                window.hljs.highlightElement(element);
-            }
-        },
-        writeClipboardText: (text) => {
-            if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') {
-                return Promise.reject(new Error('Clipboard API unavailable'));
-            }
-            return navigator.clipboard.writeText(text);
-        },
-        startRenderPhase: typeof startChatRenderPhase === 'function' ? startChatRenderPhase : undefined,
-        finishRenderPhase: typeof finishChatRenderPhase === 'function' ? finishChatRenderPhase : undefined
-    });
-    return markdownController;
-}
-
 function renderAssistantMarkdown(content, message) {
-    getMarkdownController().renderAssistantMarkdown(content, message, shouldLinkifyAssistantMessage(message));
+    const text = typeof message?.text === 'string' ? message.text : '';
+    const linkifyRefs = shouldLinkifyAssistantMessage(message);
+    const signature = `${linkifyRefs ? '1' : '0'}:${text}`;
+    if (message && message._renderSignature === signature && typeof message._renderHtml === 'string') {
+        content.innerHTML = message._renderHtml;
+        resetCachedCodeBlockCopyEnhancements(content);
+        enhanceCodeBlocksWithCopyButtons(content);
+        return;
+    }
+    renderMarkdownInto(content, text, { linkifyRefs });
+    if (message && typeof message === 'object') {
+        message._renderSignature = signature;
+        message._renderHtml = content.innerHTML;
+    }
 }
 
 function renderUserMarkdown(content, text) {
-    getMarkdownController().renderUserMarkdown(content, text);
+    renderMarkdownInto(content, text || '', { linkifyRefs: false });
 }
 
 function renderMarkdownInto(element, text, options = {}) {
-    getMarkdownController().renderMarkdownInto(element, text, options);
+    const richEnhancementStartedAt = typeof startChatRenderPhase === 'function' ? startChatRenderPhase() : null;
+    delete element.dataset.linkified;
+    const unwrapped = escapeSystemReminderTags(text || '');
+    const normalized = normalizeLists(normalizeInlineMath(normalizeBlockMath(unwrapped)));
+    const raw = md.render(normalized);
+    element.innerHTML = purify.sanitize(raw, {
+        ALLOWED_TAGS: [
+            'a', 'p', 'br', 'strong', 'em', 'code', 'pre', 'ul', 'ol', 'li',
+            'blockquote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hr',
+            'table', 'thead', 'tbody', 'tr', 'th', 'td', 'span', 'section', 'eq', 'eqn',
+            'math', 'mrow', 'mi', 'mo', 'mn', 'msup', 'msub', 'mfrac', 'msqrt', 'mroot',
+            'mtable', 'mtr', 'mtd', 'mtext', 'mstyle', 'annotation', 'semantics'
+        ],
+        ALLOWED_ATTR: ['href', 'title', 'target', 'rel', 'class', 'role', 'aria-hidden', 'style', 'mathvariant', 'display', 'xmlns', 'encoding']
+    });
+    for (const link of element.querySelectorAll('a')) {
+        link.setAttribute('target', '_blank');
+        link.setAttribute('rel', 'noopener noreferrer');
+    }
+    if (window.hljs && typeof window.hljs.highlightElement === 'function') {
+        for (const block of element.querySelectorAll('pre code')) {
+            window.hljs.highlightElement(block);
+        }
+    }
+    wrapTables(element);
+    enhanceCodeBlocksWithCopyButtons(element);
+    if (options.linkifyRefs === true && element.dataset.linkified !== '1') {
+        linkifyFileRefs(element);
+        element.dataset.linkified = '1';
+    }
+    if (typeof finishChatRenderPhase === 'function') finishChatRenderPhase('richEnhancement', richEnhancementStartedAt);
 }
 
-function writeTextToClipboard(text) {
-    return getMarkdownController().writeTextToClipboard(text);
+async function writeTextToClipboard(text) {
+    if (!text) return false;
+    let copied = false;
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        try {
+            await navigator.clipboard.writeText(text);
+            copied = true;
+        } catch {
+            copied = false;
+        }
+    }
+    if (!copied) {
+        let textarea = null;
+        try {
+            textarea = document.createElement('textarea');
+            textarea.value = text;
+            textarea.setAttribute('readonly', '');
+            textarea.style.position = 'absolute';
+            textarea.style.left = '-9999px';
+            document.body.appendChild(textarea);
+            textarea.select();
+            copied = document.execCommand('copy');
+        } catch {
+            copied = false;
+        } finally {
+            if (textarea && textarea.parentNode) {
+                textarea.parentNode.removeChild(textarea);
+            }
+        }
+    }
+    return copied;
 }
 
 function enhanceCodeBlocksWithCopyButtons(root) {
-    getMarkdownController().enhanceCodeBlocksWithCopyButtons(root);
+    if (!root || typeof root.querySelectorAll !== 'function') return;
+    if (root.closest && root.closest('.conflict-card')) return;
+    const richEnhancementStartedAt = typeof startChatRenderPhase === 'function' ? startChatRenderPhase() : null;
+
+    for (const pre of root.querySelectorAll('pre')) {
+        if (pre.closest && pre.closest('.conflict-card')) continue;
+        if (pre.dataset.hasCopyBtn === '1') continue;
+        const code = pre.querySelector('code');
+        if (!code) continue;
+        pre.dataset.hasCopyBtn = '1';
+
+        let wrapper = pre.parentElement;
+        if (!wrapper || !wrapper.classList.contains('code-block-wrap')) {
+            wrapper = document.createElement('div');
+            wrapper.className = 'code-block-wrap';
+            pre.parentElement?.insertBefore(wrapper, pre);
+            wrapper.appendChild(pre);
+        }
+
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'code-copy-btn';
+        btn.textContent = 'Copy';
+        btn.addEventListener('click', async (event) => {
+            event.stopPropagation();
+            const text = code.innerText || '';
+            if (!text) return;
+            const copied = await writeTextToClipboard(text);
+            const prev = 'Copy';
+            if (btn._copyResetTimer) {
+                clearTimeout(btn._copyResetTimer);
+            }
+            if (copied) {
+                btn.textContent = 'Copied!';
+                btn._copyResetTimer = setTimeout(() => {
+                    btn.textContent = prev;
+                }, 800);
+            } else {
+                btn.textContent = 'Failed';
+                btn._copyResetTimer = setTimeout(() => {
+                    btn.textContent = prev;
+                }, 1200);
+            }
+        });
+        wrapper.appendChild(btn);
+    }
+    if (typeof finishChatRenderPhase === 'function') finishChatRenderPhase('richEnhancement', richEnhancementStartedAt);
 }
 
 function resetCachedCodeBlockCopyEnhancements(root) {
-    getMarkdownController().resetCachedCodeBlockCopyEnhancements(root);
+    if (!root || typeof root.querySelectorAll !== 'function') return;
+    for (const button of root.querySelectorAll('.code-copy-btn')) {
+        button.remove();
+    }
+    for (const pre of root.querySelectorAll('pre[data-has-copy-btn="1"]')) {
+        delete pre.dataset.hasCopyBtn;
+    }
 }
 
 function escapeSystemReminderTags(text) {
@@ -10218,7 +10276,7 @@ function shouldHideDcpUiMessage(message) {
     }
 
     function buildKeyedRenderCandidates(session) {
-        const timeline = buildAnchoredPresentationTimeline(session);
+        const timeline = Array.isArray(session?.timeline) ? session.timeline : [];
         if (!session || timeline.length === 0) {
             const loadingHistory = isActiveSessionHistoryLoading();
             return [{
@@ -10261,68 +10319,6 @@ function shouldHideDcpUiMessage(message) {
             candidates.push({ key: `conflict:${activeSessionId || 'none'}:${identity}`, kind: 'conflict', value: lastConflictPayload });
         }
         return candidates;
-    }
-
-    const changeListOrderAuditBySession = new Map();
-    let changeListOrderAuditEmissions = 0;
-    function auditChangeListPresentationOrder(session, units) {
-        if (!session || !Array.isArray(units) || changeListOrderAuditEmissions >= 24) return;
-        const projectedTimeline = buildAnchoredPresentationTimeline(session);
-        const unitKeys = units.map((unit) => unit.key);
-        const mountedKeys = keyedRoots().map((root) => root.dataset.renderUnitKey).filter(Boolean);
-        const resolveAnchor = (message) => {
-            const explicit = typeof message?.meta?.stableAnchorMessageId === 'string' && message.meta.stableAnchorMessageId.length
-                ? message.meta.stableAnchorMessageId
-                : (typeof message?.meta?.anchorMessageId === 'string' ? message.meta.anchorMessageId : '');
-            return explicit ? (toStableMessageKey(session, explicit) || explicit) : '';
-        };
-        const followsAnchorGroup = (keys, changeListId, anchorId) => {
-            let index = keys.indexOf(changeListId);
-            if (index < 0) return 'absent';
-            while (index > 0) {
-                const priorId = keys[index - 1];
-                if (priorId === anchorId) return 'anchored';
-                const priorMessage = session.messagesById.get(priorId);
-                if (!isChangeListSessionMessage(priorMessage) || resolveAnchor(priorMessage) !== anchorId) break;
-                index--;
-            }
-            return keys.includes(anchorId) ? 'misplaced' : 'orphan';
-        };
-        const counts = {
-            total: 0, projectionMisplaced: 0, projectionOrphan: 0,
-            unitMisplaced: 0, unitOrphan: 0, mountedMisplaced: 0, mountedOrphan: 0
-        };
-        const samples = [];
-        for (const id of projectedTimeline) {
-            const message = session.messagesById.get(id);
-            if (!isChangeListSessionMessage(message)) continue;
-            counts.total++;
-            const anchorId = resolveAnchor(message);
-            const projection = followsAnchorGroup(projectedTimeline, id, anchorId);
-            const unit = followsAnchorGroup(unitKeys, id, anchorId);
-            const mounted = followsAnchorGroup(mountedKeys, id, anchorId);
-            if (projection === 'misplaced') counts.projectionMisplaced++;
-            if (projection === 'orphan') counts.projectionOrphan++;
-            if (unit === 'misplaced') counts.unitMisplaced++;
-            if (unit === 'orphan') counts.unitOrphan++;
-            if (mounted === 'misplaced') counts.mountedMisplaced++;
-            if (mounted === 'orphan') counts.mountedOrphan++;
-            if (samples.length < 6 && (projection === 'misplaced' || projection === 'orphan'
-                || unit === 'misplaced' || unit === 'orphan' || mounted === 'misplaced' || mounted === 'orphan')) {
-                samples.push(`${id}>${anchorId || 'none'}:p=${projection},u=${unit},m=${mounted}`);
-            }
-        }
-        const signature = JSON.stringify({ ...counts, mountedCount: mountedKeys.length, samples });
-        const sessionId = activeSessionId || '__no_session__';
-        if (changeListOrderAuditBySession.get(sessionId) === signature) return;
-        changeListOrderAuditBySession.set(sessionId, signature);
-        changeListOrderAuditEmissions++;
-        vscode.postMessage({
-            type: 'ui-debug',
-            payload: ['[WV][CHANGELIST_ORDER_AUDIT]', `sessionId=${sessionId}`,
-                ...Object.entries(counts).map(([key, value]) => `${key}=${value}`),
-                `mountedCount=${mountedKeys.length}`, `samples=${samples.join('|') || 'none'}`]
-        });
     }
 
     let safeShellPresentationGeneration = 0;
@@ -12039,18 +12035,6 @@ function shouldHideDcpUiMessage(message) {
         chatWindowState.pendingRangeRender = false;
         chatWindowState.pendingScrollKey = '';
         chatWindowState.pendingScrollAttempts = 0;
-        chatWindowState.anchorKey = '';
-        chatWindowState.visualOffset = 0;
-        chatWindowState.userScrollActiveUntil = 0;
-        chatWindowState.activityBelow = false;
-        autoScrollPinnedToBottom = true;
-        chatWindowState.programmaticScroll = true;
-        if (chatContainer) chatContainer.scrollTop = 0;
-        if (typeof requestAnimationFrame === 'function') {
-            requestAnimationFrame(() => { chatWindowState.programmaticScroll = false; });
-        } else {
-            chatWindowState.programmaticScroll = false;
-        }
         chatLocalHistoryController?.complete?.(ownedSessionId);
         destroyChatLocalOlderSurface();
         chatWindowState.topSpacer?.remove?.();
@@ -12518,19 +12502,6 @@ function shouldHideDcpUiMessage(message) {
                         }
                         return;
                     }
-                    const pinnedContainedContraction = autoScrollPinnedToBottom
-                        && acknowledged
-                        && snapshot.totalSize === acknowledged.totalSize
-                        && snapshot.items.length > 0
-                        && snapshot.items.length < chatWindowState.mountedKeys.size
-                        && snapshot.items.every((item) => chatWindowState.mountedKeys.has(item.key));
-                    if (pinnedContainedContraction) {
-                        // A bottom-clamped viewport can alternate by one boundary item after DOM
-                        // measurement. Keep the already-mounted superset so that range callbacks
-                        // converge without a render/scroll feedback loop.
-                        chatWindowState.snapshot = acknowledged;
-                        return;
-                    }
                     const priorObservations = typeof chatWindowAdaptiveShadow !== 'undefined'
                         ? chatWindowAdaptiveShadow?.observations : null;
                     const rangeObservations = typeof createChatWindowAdaptiveObservations === 'function' ? createChatWindowAdaptiveObservations(
@@ -12551,7 +12522,6 @@ function shouldHideDcpUiMessage(message) {
                         && snapshot.items.every((item) => chatWindowState.mountedKeys.has(item.key));
                     if (sameMountedRange && chatWindowState.topSpacer && chatWindowState.bottomSpacer) {
                         updateChatWindowSpacers(snapshot);
-                        if (autoScrollPinnedToBottom) scrollToBottom(true);
                         return;
                     }
                     if (chatWindowState.rendering && chatWindowState.pendingScrollKey) {
@@ -13950,9 +13920,6 @@ function shouldHideDcpUiMessage(message) {
                 recordChatWindowOuterRecovery(owner, chatWindowRoute || 'window-route-unavailable');
                 return;
             }
-            if (typeof auditChangeListPresentationOrder === 'function') {
-                auditChangeListPresentationOrder(session, units);
-            }
             stage = 'raw-integrity';
             const rawIntegrity = captureChatWindowRawIntegrityAudit();
             if (rawIntegrity.anomaly) {
@@ -14021,7 +13988,7 @@ function shouldHideDcpUiMessage(message) {
             }
         }
 
-        const timeline = buildAnchoredPresentationTimeline(session);
+        const timeline = Array.isArray(session.timeline) ? session.timeline : [];
         const segments = Array.from(session.segmentsByNoticeKey.values());
         const derivedHiddenSet = session.hiddenSet; // Already computed by rebuildHiddenSetFromTimeline
         const appendChildPresentationIndex = buildAppendChildPresentationIndex(session);

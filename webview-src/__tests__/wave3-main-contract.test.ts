@@ -10,11 +10,10 @@ import { decideChatWindowAdaptivePolicy } from '../rendering/chat-window-adaptiv
 
 const { createAtomicScenarioExecutor, createRealTransactionHarness } = require('../../scripts/chat-window-adaptive-range-harness.js');
 
-const readNormalizedSource = (filePath: string) => fs.readFileSync(filePath, 'utf8').replace(/\r\n/g, '\n');
-const source = readNormalizedSource(path.join(process.cwd(), 'media', 'main.js'));
-const recoveredSource = readNormalizedSource(path.join(process.cwd(), '.opencode', 'attachments',
-  '2026-07-16-wave-b4s-recovered-reviewed', 'media-main.js'));
-const wave3TestSource = readNormalizedSource(__filename);
+const source = fs.readFileSync(path.join(process.cwd(), 'media', 'main.js'), 'utf8');
+const recoveredSource = fs.readFileSync(path.join(process.cwd(), '.opencode', 'attachments',
+  '2026-07-16-wave-b4s-recovered-reviewed', 'media-main.js'), 'utf8');
+const wave3TestSource = fs.readFileSync(__filename, 'utf8');
 const b4ScriptPath = path.join(process.cwd(), 'scripts', 'chat-window-adaptive-range-synthetic.js');
 const b4EvidencePath = 'C:\\Users\\tan_s\\AppData\\Local\\Temp\\opencode\\wave-b4-adaptive-range-evidence.json';
 
@@ -1284,7 +1283,6 @@ describe('UI log regression repairs', () => {
       activeSessionId: 'session-a',
       hydratedSessions: new Set(),
       getSessionState: () => session,
-      buildAnchoredPresentationTimeline: (value: any) => Array.isArray(value?.timeline) ? value.timeline.slice() : [],
     });
     expect(context.buildKeyedRenderCandidates(session)).toEqual([{
       key: 'history-loading:session-a', kind: 'greeting', value: { text: 'Loading history ...' },
@@ -1585,7 +1583,7 @@ describe('B4-RED-0 authenticity gap proof (intentional RED)', () => {
     throw new Error(`unclosed production function ${name}`);
   };
   const independentlyComputedHashes = () => {
-    const mainSource = readNormalizedSource(path.join(process.cwd(), 'media', 'main.js'));
+    const mainSource = fs.readFileSync(path.join(process.cwd(), 'media', 'main.js'), 'utf8');
     return Object.fromEntries(requiredProductionFunctions.map((name) => [name,
       crypto.createHash('sha256').update(extractDurable(mainSource, name).replace(/\r\n/g, '\n')).digest('hex'),
     ]));
@@ -2070,19 +2068,17 @@ describe('Wave 3 extracted runtime coordinator', () => {
         adapter: { destroy: () => calls.push('destroy'), scrollToKey: () => true }, snapshot: {}, mountedKeys: new Set(['a']),
         sessionId: 'old', pendingRangeRender: true, topSpacer: { remove: () => calls.push('top') },
         bottomSpacer: { remove: () => calls.push('bottom') }, activityBelow: false, allUnits: [{ key: 'old-key' }],
-        localOlderSurface: null, localOlderObserver: null, anchorKey: 'old-key', visualOffset: 37,
-        userScrollActiveUntil: 999999, programmaticScroll: true,
+        localOlderSurface: null, localOlderObserver: null,
       },
       activeSessionId: 'old',
       chatLocalHistoryController: { complete: () => undefined, revealToKey: () => true },
       destroyChatLocalOlderSurface: () => undefined,
       tryPendingChatWindowScroll: () => { calls.push('pending-scroll'); return true; },
-      chatContainer: { classList, scrollTop: 30486 },
+      chatContainer: { classList },
       vscode: { postMessage: () => undefined },
       isChatWindowAvailable: () => true,
       sessionSearch: { windowTargetKey: '' },
       autoScrollPinnedToBottom: false,
-      requestAnimationFrame: (callback: () => void) => callback(),
       scheduleRenderFromState: (reason: string) => calls.push(reason),
       Set,
     });
@@ -2090,76 +2086,6 @@ describe('Wave 3 extracted runtime coordinator', () => {
     expect(calls).toContain('window-search');
     context.destroyChatWindowAdapter('session-switch');
     expect(calls).toEqual(expect.arrayContaining(['destroy', 'top', 'bottom', 'class:chat-window-active']));
-    expect(context.chatWindowState).toEqual(expect.objectContaining({
-      anchorKey: '', visualOffset: 0, userScrollActiveUntil: 0, programmaticScroll: false, activityBelow: false,
-    }));
-    expect(context.chatContainer.scrollTop).toBe(0);
-    expect(context.autoScrollPinnedToBottom).toBe(true);
-  });
-
-  test('hydrated change lists require and preserve their explicit anchor instead of guessing by raw position', () => {
-    const materialize = extractFunction('function materializeInjectedChangeLists(');
-    const diagnostics: string[][] = [];
-    const context = vm.createContext({
-      isChangeListSessionMessage: (item: any) => item?.meta?.kind === 'changeList',
-      toStableMessageKey: (_session: any, id: string) => id,
-      vscode: { postMessage: (message: any) => diagnostics.push(message.payload) },
-      Map, Set,
-    });
-    vm.runInContext(`${materialize}; globalThis.materialize = materializeInjectedChangeLists;`, context);
-    const session = {
-      timeline: ['anchor', 'tail', 'system:changeList:existing'],
-      messagesById: new Map([
-        ['anchor', { id: 'anchor', role: 'assistant' }],
-        ['tail', { id: 'tail', role: 'assistant' }],
-        ['system:changeList:existing', {
-          id: 'system:changeList:existing', role: 'system', text: '',
-          meta: { kind: 'changeList', files: ['src/old.ts'], stableAnchorMessageId: 'anchor' },
-        }],
-      ]),
-      nextOrder: 2,
-    };
-    const anchored = {
-      id: 'system:changeList:anchored', role: 'system', text: '',
-      meta: { kind: 'changeList', files: ['src/a.ts'], stableAnchorMessageId: 'anchor' },
-    };
-    const unanchored = {
-      id: 'system:changeList:unanchored', role: 'system', text: '',
-      meta: { kind: 'changeList', files: ['src/b.ts'] },
-    };
-    const existing = session.messagesById.get('system:changeList:existing');
-
-    const stats = context.materialize(session, [unanchored, existing, { id: 'tail' }, anchored], 'test');
-
-    expect(Array.from(session.timeline)).toEqual([
-      'anchor', 'system:changeList:existing', 'system:changeList:anchored', 'tail',
-    ]);
-    expect(stats).toEqual(expect.objectContaining({
-      alreadyTimeline: 1, insertedAfter: 2, materialized: 1, skippedMissingAnchor: 1,
-    }));
-    expect(diagnostics.at(-1)).toEqual(expect.arrayContaining(['skippedMissingAnchor=1']));
-  });
-
-  test('presentation projection repairs a changelist that was moved away from its explicit anchor', () => {
-    const project = extractFunction('function buildAnchoredPresentationTimeline(');
-    const context = vm.createContext({
-      isChangeListSessionMessage: (item: any) => item?.meta?.kind === 'changeList',
-      toStableMessageKey: (_session: any, id: string) => id,
-      Map, Set,
-    });
-    vm.runInContext(`${project}; globalThis.project = buildAnchoredPresentationTimeline;`, context);
-    const messagesById = new Map([
-      ['assistant-a', { id: 'assistant-a', role: 'assistant' }],
-      ['assistant-b', { id: 'assistant-b', role: 'assistant' }],
-      ['change-a', {
-        id: 'change-a', role: 'system',
-        meta: { kind: 'changeList', files: ['src/a.ts'], stableAnchorMessageId: 'assistant-a' },
-      }],
-    ]);
-
-    expect(Array.from(context.project({
-      timeline: ['assistant-a', 'assistant-b', 'change-a'], messagesById,
-    }))).toEqual(['assistant-a', 'change-a', 'assistant-b']);
   });
 });
 
@@ -2446,7 +2372,7 @@ describe('A2.4D journaled keyed and structural transaction', () => {
       expect(fs.existsSync(helperPath)).toBe(true);
       if (!fs.existsSync(helperPath)) return;
 
-      const helperSource = readNormalizedSource(helperPath);
+      const helperSource = fs.readFileSync(helperPath, 'utf8');
       const beforeGlobals = new Set(Object.getOwnPropertyNames(globalThis));
       const beforeArgv = [...process.argv];
       const first = require(helperPath);
@@ -3147,7 +3073,7 @@ describe('A2.4D journaled keyed and structural transaction', () => {
       }
     }
     expect(constructed).toBe(9 * 8);
-    const helperSource = readNormalizedSource(path.join(process.cwd(), 'scripts', 'chat-window-adaptive-range-harness.js'));
+    const helperSource = fs.readFileSync(path.join(process.cwd(), 'scripts', 'chat-window-adaptive-range-harness.js'), 'utf8');
     for (const consumerOwned of [
       'search-unmounted', 'append-active', 'undo-reverted', 'change-list', 'subagent', 'session-switch',
       "'trace'", "'smoke'", 'deferredPending', 'reduceExternalOutcome', '125', '63',
@@ -4617,53 +4543,6 @@ describe('A2.4D journaled keyed and structural transaction', () => {
 
     harness.context.destroyChatWindowAdapter('session-switch');
     expect(harness.chatWindowState.acknowledgedRawSnapshot).toBeNull();
-  });
-
-  test('CF3 pinned bottom keeps an already-mounted range superset instead of oscillating on contraction', () => {
-    const harness = candidateStagingHarness();
-    harness.context.prepareUnpublishedChatWindowTransaction({}, harness.units, [], null);
-    const mounted = Array.from({ length: 13 }, (_, index) => ({
-      key: `unit-${index}`, index, start: index * 50, end: (index + 1) * 50, size: 50,
-    }));
-    const acknowledged = Object.freeze({
-      items: Object.freeze(mounted.map((item) => Object.freeze({ ...item }))),
-      totalSize: 1074.8,
-    });
-    harness.chatWindowState.mountedKeys = new Set(mounted.map((item) => item.key));
-    harness.chatWindowState.acknowledgedRawSnapshot = acknowledged;
-    harness.chatWindowState.pendingRangeRender = false;
-    harness.context.autoScrollPinnedToBottom = true;
-    const schedulesBefore = harness.calls.filter((entry: string) => entry === 'schedule').length;
-
-    harness.callbacks.onRangeChange({ items: mounted.slice(1), totalSize: 1074.8 });
-
-    expect(harness.calls.filter((entry: string) => entry === 'schedule')).toHaveLength(schedulesBefore);
-    expect(harness.chatWindowState.pendingRangeRender).toBe(false);
-    expect(harness.chatWindowState.snapshot).toBe(acknowledged);
-  });
-
-  test('CF3 same mounted range re-pins after spacer growth changes the scroll height', () => {
-    const harness = candidateStagingHarness();
-    harness.context.prepareUnpublishedChatWindowTransaction({}, harness.units, [], null);
-    const items = [
-      { key: 'unit-98', index: 98, start: 0, end: 50, size: 50 },
-      { key: 'unit-99', index: 99, start: 50, end: 100, size: 50 },
-    ];
-    harness.chatWindowState.mountedKeys = new Set(items.map((item) => item.key));
-    harness.chatWindowState.topSpacer = {};
-    harness.chatWindowState.bottomSpacer = {};
-    harness.chatWindowState.acknowledgedRawSnapshot = {
-      items: items.map((item) => ({ ...item })), totalSize: 100,
-    };
-    harness.context.autoScrollPinnedToBottom = true;
-    const spacersBefore = harness.calls.filter((entry: string) => entry === 'spacers').length;
-    const scrollsBefore = harness.calls.filter((entry: string) => entry === 'scroll').length;
-
-    harness.callbacks.onRangeChange({ items, totalSize: 120 });
-
-    expect(harness.calls.filter((entry: string) => entry === 'spacers')).toHaveLength(spacersBefore + 1);
-    expect(harness.calls.filter((entry: string) => entry === 'scroll')).toHaveLength(scrollsBefore + 1);
-    expect(harness.calls).not.toContain('schedule');
   });
 
   test('CF2 accepted rollback restores the prior acknowledged raw snapshot and never acknowledges a failed attempt', () => {

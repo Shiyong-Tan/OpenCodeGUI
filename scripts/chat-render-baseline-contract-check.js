@@ -4,7 +4,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 function read(relativePath) {
-  return fs.readFileSync(path.join(process.cwd(), relativePath), 'utf8').replace(/\r\n/g, '\n');
+  return fs.readFileSync(path.join(process.cwd(), relativePath), 'utf8');
 }
 
 function assert(condition, label) {

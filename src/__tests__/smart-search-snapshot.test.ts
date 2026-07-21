@@ -1,9 +1,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-const readNormalizedSource = (filePath: string) => fs.readFileSync(filePath, 'utf8').replace(/\r\n/g, '\n');
-const source = readNormalizedSource(path.join(process.cwd(), 'src', 'SidebarProvider.ts'));
-const clientSource = readNormalizedSource(path.join(process.cwd(), 'src', 'OpenCodeClient.ts'));
+const source = fs.readFileSync(path.join(process.cwd(), 'src', 'SidebarProvider.ts'), 'utf8');
+const clientSource = fs.readFileSync(path.join(process.cwd(), 'src', 'OpenCodeClient.ts'), 'utf8');
 
 function extractMethod(marker: string): string {
     const start = source.indexOf(marker);

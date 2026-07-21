@@ -8,7 +8,6 @@ import { planReconciliation } from './reconcile-planner';
 import { restoreKeyedScrollAnchor, restoreScrollAnchor } from './scroll-anchor-model';
 import { createTanStackVirtualAdapter } from './tanstack-virtual-adapter';
 import { createLocalHistoryPresentationController, deriveLocalOlderPresentation, normalizeHydrationCoverage } from './local-history-window';
-import { createMarkdownController } from './markdown-controller';
 
 export const RENDERING_FACADE_VERSION = 1 as const;
 
@@ -31,25 +30,43 @@ const facadeBase = {
   buildChatPressureAttribution,
 };
 
-const hiddenCapability = (value: unknown): PropertyDescriptor => ({
-  value,
-  enumerable: false,
-  writable: false,
-  configurable: false,
-});
-
-const facade = Object.freeze(Object.defineProperties(facadeBase, {
-  getSafeShellSpec: hiddenCapability(getSafeShellSpec),
-  planChatWindowContainment: hiddenCapability(planChatWindowContainment),
-  classifyChatWindowIntegrity: hiddenCapability(classifyChatWindowIntegrity),
-  decideChatWindowAdaptivePolicy: hiddenCapability(decideChatWindowAdaptivePolicy),
-  createMarkdownController: hiddenCapability(createMarkdownController),
-})) as typeof facadeBase
+const facade = Object.freeze(Object.defineProperty(
+  Object.defineProperty(
+    Object.defineProperty(
+      Object.defineProperty(facadeBase, 'getSafeShellSpec', {
+        value: getSafeShellSpec,
+        enumerable: false,
+        writable: false,
+        configurable: false,
+      }),
+      'planChatWindowContainment',
+      {
+        value: planChatWindowContainment,
+        enumerable: false,
+        writable: false,
+        configurable: false,
+      },
+    ),
+    'classifyChatWindowIntegrity',
+    {
+      value: classifyChatWindowIntegrity,
+      enumerable: false,
+      writable: false,
+      configurable: false,
+    },
+  ),
+  'decideChatWindowAdaptivePolicy',
+  {
+    value: decideChatWindowAdaptivePolicy,
+    enumerable: false,
+    writable: false,
+    configurable: false,
+  },
+)) as typeof facadeBase
   & { readonly getSafeShellSpec: typeof getSafeShellSpec }
   & { readonly planChatWindowContainment: typeof planChatWindowContainment }
   & { readonly classifyChatWindowIntegrity: typeof classifyChatWindowIntegrity }
-  & { readonly decideChatWindowAdaptivePolicy: typeof decideChatWindowAdaptivePolicy }
-  & { readonly createMarkdownController: typeof createMarkdownController };
+  & { readonly decideChatWindowAdaptivePolicy: typeof decideChatWindowAdaptivePolicy };
 
 declare global {
   interface Window {
