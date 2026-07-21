@@ -3,6 +3,7 @@ import path from 'path';
 import vm from 'vm';
 import { createSessionSearchState } from '../features/search/search-state';
 import { createSessionSearchDomController } from '../features/search/search-dom-controller';
+import { collectLoadedTextSearchKeys as collectProjectedTextSearchKeys } from '../features/search/search-corpus';
 
 const source = fs.readFileSync(path.join(process.cwd(), 'media', 'main.js'), 'utf8');
 const css = fs.readFileSync(path.join(process.cwd(), 'media', 'main.css'), 'utf8');
@@ -223,10 +224,13 @@ describe('Wave 4 main-script local older contract', () => {
     const context = vm.createContext({
       activeSessionId: 'session-a',
       getSessionState: () => ({ timeline: ['message-a'], messagesById: new Map(), hiddenSet: new Set() }),
-      window: { __oc: { getLoadedChatSearchRows: () => [
-        { id: 'message-a', text: '灰屏灰屏', matchCount: 2 },
-        { id: 'message-b', text: '灰屏', matchCount: 1 },
-      ] } },
+      window: {
+        __oc: { getLoadedChatSearchRows: () => [
+          { id: 'message-a', text: '灰屏灰屏', matchCount: 2 },
+          { id: 'message-b', text: '灰屏', matchCount: 1 },
+        ] },
+        __ocFeatures: { collectLoadedTextSearchKeys: collectProjectedTextSearchKeys },
+      },
     });
     vm.runInContext(`${extractFunction('function collectLoadedTextSearchKeys(')}; globalThis.collect = collectLoadedTextSearchKeys;`, context);
     expect((context as any).collect('灰屏')).toEqual(['message-a', 'message-b']);

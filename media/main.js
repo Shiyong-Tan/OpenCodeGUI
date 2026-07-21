@@ -6281,109 +6281,24 @@ function updateActiveSessionSearchHit({ scroll = false } = {}) {
 }
 
 function pickMode(agent) {
-    if (typeof agent?.mode === 'string' && agent.mode.trim()) return agent.mode.trim();
-    if (typeof agent?.description === 'string' && agent.description.trim()) return agent.description.trim();
-    return '';
+    return window.__ocFeatures.pickSearchAgentMode(agent);
 }
 
 function cleanSubagentTitle(title) {
-    const raw = typeof title === 'string' ? title.trim() : '';
-    if (!raw) return 'Subagent';
-    return raw
-        .replace(/\s*[（(]\s*@[^()]*[)）]\s*$/i, '')
-        .trim() || 'Subagent';
+    return window.__ocFeatures.cleanSearchSubagentTitle(title);
 }
 
 function formatSubagentModel(agent) {
-    const modelId = (typeof agent?.model === 'string' && agent.model.trim()) ? agent.model.trim() : '';
-    const providerId = (typeof agent?.providerId === 'string' && agent.providerId.trim()) ? agent.providerId.trim() : '';
-    if (modelId && providerId) return `${modelId}/${providerId}`;
-    return modelId || providerId || '';
+    return window.__ocFeatures.formatSearchSubagentModel(agent);
 }
 
 function visitLoadedChatSearchChunks(session, unit, visitor) {
-    if (!unit || typeof visitor !== 'function') return;
-    let hasValue = false;
-    let stopped = false;
-    const visitValue = (value) => {
-        if (stopped || typeof value !== 'string' || !value) return;
-        if (hasValue && visitor(' ') === false) {
-            stopped = true;
-            return;
-        }
-        if (visitor(value) === false) {
-            stopped = true;
-            return;
-        }
-        hasValue = true;
-    };
-    const visitMessage = (message, subagentsOnly = false) => {
-        if (!message) return;
-        const meta = message.meta || {};
-        if (!subagentsOnly) {
-            if (meta.isDiff === true) {
-                visitValue(String(meta.diffText || message.text || ''));
-                return;
-            }
-            visitValue(message.text || '');
-            visitValue(meta.diffText || '');
-            if (Array.isArray(meta.files)) {
-                for (const file of meta.files) {
-                    visitValue(typeof file === 'string' ? file : file?.path || file?.name || '');
-                    if (stopped) break;
-                }
-            }
-            if (!stopped && Array.isArray(meta.todos)) {
-                for (const todo of meta.todos) visitValue(todo?.content || todo?.text || '');
-            }
-            return;
-        }
-        if (!Array.isArray(meta.subagents)) return;
-        for (const agent of meta.subagents) {
-            if (!agent) continue;
-            visitValue(cleanSubagentTitle(agent.title));
-            visitValue(pickMode(agent));
-            visitValue(formatSubagentModel(agent));
-            const latestFullText = typeof agent.latestFullText === 'string' ? agent.latestFullText.trim() : '';
-            const latestText = typeof agent.latestText === 'string' ? agent.latestText.trim() : '';
-            visitValue(latestFullText || latestText);
-            visitValue(typeof agent.latestTool === 'string' ? agent.latestTool.trim() : '');
-            visitValue(typeof agent.latestToolInput === 'string' ? agent.latestToolInput.trim() : '');
-            if (stopped) break;
-        }
-    };
-
-    const message = unit.value?.message;
-    const memberIds = unit.kind === 'segment'
-        ? unit.value?.segment?.memberMsgIds || unit.value?.segment?.memberIds
-        : null;
-    const appendItems = message && typeof getAppendItems === 'function' ? getAppendItems(message) : [];
-    visitMessage(message, false);
-    if (!stopped && memberIds && typeof memberIds[Symbol.iterator] === 'function') {
-        for (const id of memberIds) {
-            visitMessage(session?.messagesById?.get?.(id), false);
-            if (stopped) break;
-        }
-    }
-    if (!stopped && Array.isArray(appendItems)) {
-        for (const item of appendItems) {
-            visitMessage(item, false);
-            if (stopped) break;
-        }
-    }
-    if (stopped) return;
-    visitMessage(message, true);
-    if (!stopped && unit.kind === 'segment') {
-        if (memberIds && typeof memberIds[Symbol.iterator] === 'function') {
-            for (const id of memberIds) {
-                visitMessage(session?.messagesById?.get?.(id), true);
-                if (stopped) break;
-            }
-        }
-    }
-    if (!stopped && Array.isArray(appendItems)) {
-        for (const item of appendItems) visitMessage(item, true);
-    }
+    return window.__ocFeatures.visitLoadedChatSearchChunks(
+        session,
+        unit,
+        visitor,
+        (message) => typeof getAppendItems === 'function' ? getAppendItems(message) : []
+    );
 }
 
 function createLinearSearchMatcher(query) {
@@ -6396,31 +6311,16 @@ function collectBoundedSmartSearchText(produce, cap = 2200, normalizeWhitespace 
 
 function collectLoadedTextSearchKeys(query) {
     const session = getSessionState(activeSessionId, false);
-    const queryLower = String(query || '').trim().toLowerCase();
-    if (!session || !queryLower || !Array.isArray(session.timeline)) return [];
-    const projectedRows = window.__oc?.getLoadedChatSearchRows?.(queryLower);
-    if (Array.isArray(projectedRows)) {
-        const projectedKeys = [];
-        for (const row of projectedRows) if (row?.id) projectedKeys.push(row.id);
-        return projectedKeys;
-    }
-    const keys = [];
-    for (const id of session.timeline) {
-        const message = session.messagesById?.get?.(id);
-        if (!message || session.hiddenSet?.has?.(id)) continue;
-        const matcher = createLinearSearchMatcher(queryLower);
-        visitLoadedChatSearchChunks(session, { key: id, kind: 'message', value: { message } }, matcher.visit);
-        if (matcher.matched()) keys.push(id);
-    }
-    return keys;
+    return window.__ocFeatures.collectLoadedTextSearchKeys({
+        query,
+        session,
+        projectedRows: window.__oc?.getLoadedChatSearchRows?.(String(query || '').trim().toLowerCase()),
+        getAppendItems: (message) => typeof getAppendItems === 'function' ? getAppendItems(message) : []
+    });
 }
 
 function getLoadedSessionSearchText(message) {
-    const meta = message?.meta || {};
-    if (meta.isDiff === true) return String(meta.diffText || message?.text || '');
-    const files = Array.isArray(meta.files) ? meta.files.map((file) => typeof file === 'string' ? file : file?.path || file?.name || '') : [];
-    const todos = Array.isArray(meta.todos) ? meta.todos.map((todo) => todo?.content || todo?.text || '') : [];
-    return [message?.text || '', meta.diffText || '', ...files, ...todos].filter(Boolean).join(' ');
+    return window.__ocFeatures.getLoadedSessionSearchText(message);
 }
 
 function ensureChatWindowKeyMounted(targetKey, reason = 'search') {
@@ -6466,27 +6366,11 @@ function closeSessionSearch() {
 
 function collectSmartSearchMessages() {
     const session = getSessionState(activeSessionId, false);
-    if (!session || !Array.isArray(session.timeline)) return [];
-    const projectedRows = window.__oc?.getLoadedChatSearchRows?.();
-    if (Array.isArray(projectedRows) && projectedRows.length) return projectedRows;
-    const seen = new Set();
-    const rows = [];
-    for (const id of session.timeline) {
-        if (!id || seen.has(id)) continue;
-        seen.add(id);
-        const message = session.messagesById?.get?.(id);
-        if (!message || session.hiddenSet?.has?.(id)) continue;
-        const text = collectBoundedSmartSearchText((visit) => {
-            visitLoadedChatSearchChunks(session, { key: id, kind: 'message', value: { message } }, visit);
-        }, 2200, true);
-        if (!text) continue;
-        rows.push({
-            id,
-            role: message.role || 'system',
-            text
-        });
-    }
-    return rows;
+    return window.__ocFeatures.collectSmartSearchMessages({
+        session,
+        projectedRows: window.__oc?.getLoadedChatSearchRows?.(),
+        getAppendItems: (message) => typeof getAppendItems === 'function' ? getAppendItems(message) : []
+    });
 }
 
 function applySmartSessionSearchResults(messageIds, { scroll = true } = {}) {

@@ -31,4 +31,11 @@ describe('session search production state ownership', () => {
     expect(source).toContain('sessionSearchDomController.navigate(delta);');
     expect(source).toContain('sessionSearchDomController.applySmartResults(messageIds, { scroll });');
   });
+
+  it('delegates timeline and Smart candidate projection to the corpus module', () => {
+    expect(source).toContain('window.__ocFeatures.collectLoadedTextSearchKeys({');
+    expect(source).toContain('window.__ocFeatures.collectSmartSearchMessages({');
+    expect(source).toContain('window.__ocFeatures.visitLoadedChatSearchChunks(');
+    expect(source).toContain("getAppendItems: (message) => typeof getAppendItems === 'function' ? getAppendItems(message) : []");
+  });
 });
