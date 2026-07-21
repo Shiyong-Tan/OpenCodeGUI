@@ -354,6 +354,7 @@ describe('A2.1 dormant chat-window facade contract', () => {
       'planChatWindowContainment',
       'classifyChatWindowIntegrity',
       'decideChatWindowAdaptivePolicy',
+      'createMarkdownController',
     ]);
 
     for (const capability of [
@@ -361,6 +362,7 @@ describe('A2.1 dormant chat-window facade contract', () => {
       'planChatWindowContainment',
       'classifyChatWindowIntegrity',
       'decideChatWindowAdaptivePolicy',
+      'createMarkdownController',
     ]) {
       expect(Object.getOwnPropertyDescriptor(facade, capability)).toMatchObject({
         value: expect.any(Function),

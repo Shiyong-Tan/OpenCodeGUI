@@ -224,7 +224,7 @@ describe('A1S.0 pure safe-shell specification', () => {
   test('RED-3 adds only one reviewed dormant facade entry point', () => {
     const indexSource = fs.readFileSync(path.join(root, 'webview-src/rendering/index.ts'), 'utf8');
     expect(indexSource).toContain("import { getSafeShellSpec } from './safe-shell-spec';");
-    expect(indexSource).toContain("Object.defineProperty(facadeBase, 'getSafeShellSpec'");
+    expect(indexSource).toContain('getSafeShellSpec: hiddenCapability(getSafeShellSpec)');
     expect(indexSource).not.toMatch(/safe.?shell.*(?:threshold|telemetry|pressure)/i);
 
     const bundleSource = fs.readFileSync(path.join(root, 'media/rendering.bundle.js'), 'utf8');
