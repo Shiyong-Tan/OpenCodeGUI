@@ -97,7 +97,7 @@ export function createModelState(initial?: {
   };
 
   const normalizeSelection = (): ModelSelectionResult => {
-    if (!models.some((model) => model.fullId === selectedModel)) {
+    if (!selectedModel) {
       selectedModel = models[0]?.fullId || '';
     }
     const variants = variantsFor(models.find((model) => model.fullId === selectedModel));

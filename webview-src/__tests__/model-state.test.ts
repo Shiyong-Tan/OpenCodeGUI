@@ -31,6 +31,12 @@ describe('webview model state', () => {
       variantChanged: true,
     });
     expect(state.selectVariant('missing').selectedVariant).toBe('standard');
+
+    expect(state.setCatalog(models.slice(1), 'missing/model', 'legacy')).toEqual({
+      selectedModel: 'missing/model',
+      selectedVariant: '',
+      variantChanged: true,
+    });
   });
 
   it('derives the existing free, warning, danger, and hidden quota visuals', () => {

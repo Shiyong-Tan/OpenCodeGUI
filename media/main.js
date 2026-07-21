@@ -187,11 +187,8 @@ function assertTempFinalParity(sessionId, stage, finalKey) {
     }
 }
 
-let models = [];
 let sessions = [];
 let modes = ['plan', 'build'];
-let selectedModel = '';
-let selectedVariant = '';
 let selectedMode = 'plan';
 let activeSessionId = '';
 let isBusy = false;
@@ -200,6 +197,7 @@ let attachments = [];
 let messageCounter = 0;
 let collapsedProviders = new Set();
 let modelDropdownOutsideHandler = null;
+let modelStateController = null;
 let simpleDropdownHandlers = new Map();
 const subagentTextExpandedByKey = new Map();
 let rekeyKeyedChatPresentation = null;
@@ -251,14 +249,12 @@ let sendBtn = null;
 let sendButtonEl = null;
 let sendButtonSendIconHtml = '';
 let sendButtonStopIconHtml = '';
-let currentModelQuota = null;
 let quotaTooltipEl = null;
 let inputEl = null;
 let appendInputMode = null;
 let appendHoverActiveKey = null;
 let appendHoverHideTimer = null;
 let inputDefaultPlaceholder = 'Ask anything...';
-let freeModelIds = new Set();
 const pendingUiPrompts = [];
 let pendingContextItems = [];
 let pendingFileRefs = [];
@@ -306,11 +302,7 @@ function clampPercent(value) {
 }
 
 function getSelectedModelContextLimit() {
-    if (!Array.isArray(models) || !selectedModel) return 0;
-    const model = models.find((item) => item && item.fullId === selectedModel);
-    const raw = model?.contextLimit;
-    const limit = Number(raw);
-    return Number.isFinite(limit) && limit > 0 ? limit : 0;
+    return getModelStateController().getContextLimit();
 }
 
 function recomputeSessionUsageFromMessages(session) {
@@ -2685,7 +2677,7 @@ function updateSendGate() {
         setSendBlockedNotice('');
         return;
     }
-    if (models.length === 0) {
+    if (getModelStateController().getModels().length === 0) {
         sendBtn.disabled = true;
         setSendBlockedNotice('');
         return;
@@ -6279,40 +6271,23 @@ function resetCachedCodeBlockCopyEnhancements(root) {
     getMarkdownController().resetCachedCodeBlockCopyEnhancements(root);
 }
 
-function isCopilotProvider(providerId) {
-    if (!providerId || typeof providerId !== 'string') return false;
-    return providerId.toLowerCase().includes('copilot');
-}
-
-function isFreeModel(model) {
-    if (!model) return false;
-    const provider = String(model.providerId || '').toLowerCase();
-    const fullId = String(model.fullId || '').toLowerCase();
-    const name = String(model.name || '').toLowerCase();
-    const id = String(model.id || '').toLowerCase();
-    const speed = typeof model.speedMultiplier === 'string' ? model.speedMultiplier.trim().toLowerCase() : '';
-    const isCopilot = isCopilotProvider(provider) || fullId.includes('copilot');
-    if (isCopilot && speed === '0x') return true;
-    const isOpenCode = provider === 'opencode' || fullId.startsWith('opencode/');
-    const hasFree = name.includes('free') || fullId.includes('free') || id.includes('free');
-    return isOpenCode && hasFree;
-}
-
-function refreshFreeModelIds() {
-    const next = new Set();
-    for (const model of models) {
-        if (isFreeModel(model) && model.fullId) {
-            next.add(model.fullId);
-        }
+function getModelStateController() {
+    if (modelStateController) return modelStateController;
+    const factory = window.__ocRendering?.createModelState;
+    if (typeof factory !== 'function') {
+        throw new Error('Model state controller is unavailable');
     }
-    freeModelIds = next;
+    modelStateController = factory();
+    return modelStateController;
+}
+
+function isCopilotProvider(providerId) {
+    return window.__ocRendering?.isCopilotProvider?.(providerId) === true;
 }
 
 function parseSpeedMultiplier(value) {
-    if (!value || typeof value !== 'string') return Number.POSITIVE_INFINITY;
-    const normalized = value.trim().toLowerCase().replace(/x$/, '');
-    const parsed = Number.parseFloat(normalized);
-    return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
+    const parsed = window.__ocRendering?.parseSpeedMultiplier?.(value);
+    return typeof parsed === 'number' ? parsed : Number.POSITIVE_INFINITY;
 }
 
 function hashText(value) {
@@ -7405,18 +7380,13 @@ document.addEventListener('DOMContentLoaded', () => {
         quotaTooltipEl = div;
     }
 
-    function normalizeResetText(resetText) {
-        if (!resetText || typeof resetText !== 'string') return '';
-        return resetText
-            .replace(/^resets\s+(at|on|in)\s+/i, '')
-            .trim();
-    }
-
     function updateSendQuotaVisual() {
         if (!sendBtn) return;
-        const isFree = freeModelIds.has(selectedModel);
         const activeBusy = isActiveSessionBusy();
-        if (activeBusy || (!isFree && (!currentModelQuota || typeof currentModelQuota.summaryRemainingPercent !== 'number'))) {
+        const modelState = getModelStateController();
+        const quota = modelState.getQuota();
+        const visual = modelState.deriveQuotaVisual(activeBusy);
+        if (!visual.visible) {
             sendBtn.classList.remove('has-quota');
             sendBtn.style.removeProperty('--quota-remaining-deg');
             sendBtn.style.removeProperty('--quota-remaining-color');
@@ -7426,23 +7396,18 @@ document.addEventListener('DOMContentLoaded', () => {
                 payload: [
                     'quota.render.skip',
                     `busy=${String(activeBusy)}`,
-                    `summary=${currentModelQuota?.summaryRemainingPercent ?? 'null'}`
+                    `summary=${quota?.summaryRemainingPercent ?? 'null'}`
                 ]
             });
             return;
         }
-        const remaining = isFree
-            ? 100
-            : Math.max(0, Math.min(100, Number(currentModelQuota.summaryRemainingPercent || 0)));
-        const used = Math.max(0, 100 - remaining);
-        const remainingDeg = Math.round(remaining * 3.6);
-        const usedDeg = 360 - remainingDeg;
+        const { remaining, used, remainingDeg, usedDeg, severity } = visual;
         let centerColor = 'var(--vscode-button-background)';
-        if (!isFree && remaining <= 0) {
+        if (severity === 'danger') {
             sendBtn.style.setProperty('--quota-remaining-color', 'var(--quota-danger)');
             sendBtn.style.setProperty('--quota-used-color', 'var(--quota-danger)');
             centerColor = 'var(--quota-danger)';
-        } else if (!isFree && remaining < 10) {
+        } else if (severity === 'warning') {
             sendBtn.style.setProperty('--quota-remaining-color', 'var(--quota-warning)');
             sendBtn.style.setProperty('--quota-used-color', 'var(--quota-warning-light)');
             centerColor = 'var(--quota-warning)';
@@ -7467,10 +7432,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function showQuotaTooltip() {
         if (!sendBtn || !quotaTooltipEl || isActiveSessionBusy()) return;
-        const rows = currentModelQuota && Array.isArray(currentModelQuota.rows) ? currentModelQuota.rows : [];
+        const quota = getModelStateController().getQuota();
+        const rows = quota && Array.isArray(quota.rows) ? quota.rows : [];
         const body = rows.length
             ? rows.map((row) => {
-                const reset = normalizeResetText(row.resetText);
+                const reset = window.__ocRendering?.normalizeResetText?.(row.resetText) || '';
                 return `<div class="quota-tooltip-row"><span class="quota-col-label">${row.label}</span><span class="quota-col-pct">${row.remainingPercent}%</span><span class="quota-col-reset">${reset}</span></div>`;
             }).join('')
             : '<div class="quota-tooltip-row">Quota unavailable</div>';
@@ -14157,6 +14123,8 @@ function shouldHideDcpUiMessage(message) {
     window.__oc.isRenderPending = () => renderScheduled;
 
     function renderModelSelect() {
+        const modelState = getModelStateController();
+        const selectedModel = modelState.getSelectedModel();
         vscode.postMessage({
             type: 'ui-debug',
             payload: ['[WV][RENDER_MODELS]', `count=${models.length}`, `selected=${selectedModel || 'none'}`]
@@ -14179,10 +14147,6 @@ function shouldHideDcpUiMessage(message) {
             }
             modelSelect.appendChild(option);
         }
-        if (!selectedModel && models[0]) {
-            selectedModel = models[0].fullId;
-        }
-
         modelSelect.classList.add('is-hidden');
         const existing = wrapper.querySelector('.model-dropdown');
         if (existing) {
@@ -14294,9 +14258,9 @@ function shouldHideDcpUiMessage(message) {
                     option.classList.add('is-selected');
                 }
                 option.addEventListener('click', () => {
-                    selectedModel = model.fullId;
-                    updateVariantOptions();
-                    vscode.postMessage({ type: 'setModel', value: selectedModel });
+                    const selection = modelState.selectModel(model.fullId);
+                    updateVariantOptions(selection.variantChanged);
+                    vscode.postMessage({ type: 'setModel', value: selection.selectedModel });
                     updateLabel();
                     updateSendQuotaVisual();
                     closeDropdown();
@@ -14318,10 +14282,11 @@ function shouldHideDcpUiMessage(message) {
         wrapper.appendChild(dropdown);
 
         function updateLabel() {
-            const selected = models.find((item) => item.fullId === selectedModel);
+            const currentModelId = modelState.getSelectedModel();
+            const selected = models.find((item) => item.fullId === currentModelId);
             label.textContent = selected ? (selected.name || selected.fullId) : 'Select model';
             for (const option of panel.querySelectorAll('.model-option')) {
-                option.classList.toggle('is-selected', option.dataset.value === selectedModel);
+                option.classList.toggle('is-selected', option.dataset.value === currentModelId);
             }
         }
 
@@ -14393,11 +14358,11 @@ function shouldHideDcpUiMessage(message) {
 
     function renderVariantSelect() {
         renderSimpleSelect(variantSelect, {
-            getValue: () => selectedVariant,
+            getValue: () => getModelStateController().getSelectedVariant(),
             onSelect: (value) => {
-                selectedVariant = value;
-                variantSelect.value = value;
-                vscode.postMessage({ type: 'setVariant', value: selectedVariant });
+                const selection = getModelStateController().selectVariant(value);
+                variantSelect.value = selection.selectedVariant;
+                vscode.postMessage({ type: 'setVariant', value: selection.selectedVariant });
             }
         });
     }
@@ -14510,10 +14475,11 @@ function shouldHideDcpUiMessage(message) {
         `;
     }
 
-    function updateVariantOptions() {
-        const model = models.find(m => m.fullId === selectedModel);
-        const variants = model?.variants || [];
-        const variantKeys = Array.isArray(variants) ? variants : Object.keys(variants);
+    function updateVariantOptions(notifyCurrentVariant = false) {
+        const modelState = getModelStateController();
+        const models = modelState.getModels();
+        const selectedModel = modelState.getSelectedModel();
+        const variantKeys = Array.from(modelState.getVariants());
         
         vscode.postMessage({
             type: 'ui-debug',
@@ -14524,8 +14490,7 @@ function shouldHideDcpUiMessage(message) {
         });
         
         variantSelect.innerHTML = '';
-        const selected = models.find((item) => item.fullId === selectedModel);
-        const variantsData = selected?.variants || [];
+        const variantsData = variantKeys;
         
         // Hide variant dropdown if no variants available
         const variantWrapper = variantSelect.parentElement;
@@ -14537,8 +14502,8 @@ function shouldHideDcpUiMessage(message) {
             option.selected = true;
             variantSelect.appendChild(option);
             variantSelect.disabled = true;
-            selectedVariant = '';
-            vscode.postMessage({ type: 'setVariant', value: selectedVariant });
+            const selection = modelState.selectVariant('');
+            vscode.postMessage({ type: 'setVariant', value: selection.selectedVariant });
             
             // Hide the entire variant wrapper
             if (variantWrapper) {
@@ -14555,8 +14520,12 @@ function shouldHideDcpUiMessage(message) {
         }
 
         variantSelect.disabled = false;
+        let selectedVariant = modelState.getSelectedVariant();
         if (!variantsData.includes(selectedVariant)) {
-            selectedVariant = variantsData[0] || '';
+            const selection = modelState.selectVariant(variantsData[0] || '');
+            selectedVariant = selection.selectedVariant;
+            vscode.postMessage({ type: 'setVariant', value: selection.selectedVariant });
+        } else if (notifyCurrentVariant) {
             vscode.postMessage({ type: 'setVariant', value: selectedVariant });
         }
 
@@ -15975,13 +15944,13 @@ function appendMessageImages(parentEl, message) {
     });
 
     modelSelect.addEventListener('change', (e) => {
-        selectedModel = e.target.value;
-        updateVariantOptions();
+        const selection = getModelStateController().selectModel(e.target.value);
+        updateVariantOptions(selection.variantChanged);
         renderHeaderUsage();
         if (activeSessionId) {
             // agent timeout notice removed
         }
-        vscode.postMessage({ type: 'setModel', value: selectedModel });
+        vscode.postMessage({ type: 'setModel', value: selection.selectedModel });
     });
 
     modeSelect.addEventListener('change', (e) => {
@@ -15993,8 +15962,8 @@ function appendMessageImages(parentEl, message) {
     });
 
     variantSelect.addEventListener('change', (e) => {
-        selectedVariant = e.target.value;
-        vscode.postMessage({ type: 'setVariant', value: selectedVariant });
+        const selection = getModelStateController().selectVariant(e.target.value);
+        vscode.postMessage({ type: 'setVariant', value: selection.selectedVariant });
     });
 
     historyBtn.addEventListener('click', () => {
@@ -16721,13 +16690,15 @@ function appendMessageImages(parentEl, message) {
                 break;
             }
             case 'modelQuota': {
-                currentModelQuota = message.quota || null;
+                const modelState = getModelStateController();
+                modelState.setQuota(message.quota || null);
+                const quota = modelState.getQuota();
                 vscode.postMessage({
                     type: 'ui-debug',
                     payload: [
                         'modelQuota.rx',
-                        `summary=${currentModelQuota?.summaryRemainingPercent ?? 'null'}`,
-                        `rows=${currentModelQuota?.rows?.length ?? 0}`
+                        `summary=${quota?.summaryRemainingPercent ?? 'null'}`,
+                        `rows=${quota?.rows?.length ?? 0}`
                     ]
                 });
                 updateSendQuotaVisual();
@@ -16752,8 +16723,13 @@ function appendMessageImages(parentEl, message) {
                     });
                 }
                 logSegmentState(activeSessionId, 'before-init');
-                models = Array.isArray(message.models) ? message.models : [];
-                refreshFreeModelIds();
+                const modelState = getModelStateController();
+                const modelSelection = modelState.setCatalog(
+                    message.models,
+                    message.selectedModel || undefined,
+                    message.selectedVariant || ''
+                );
+                const models = modelState.getModels();
                 sessions = Array.isArray(message.sessions) ? message.sessions : [];
                 // Deduplicate modes and keep OMO-family agents in one contiguous block.
                 const rawModes = Array.isArray(message.modes)
@@ -16778,8 +16754,6 @@ function appendMessageImages(parentEl, message) {
                 receivedModes.push(...omoModes);
                 modes = receivedModes.length ? receivedModes : ['plan', 'build'];
 
-                selectedModel = message.selectedModel || (models[0] ? models[0].fullId : '');
-                selectedVariant = message.selectedVariant || '';
                 const incomingMode = typeof message.selectedMode === 'string' ? message.selectedMode : '';
                 selectedMode = modes.includes(incomingMode)
                     ? incomingMode
@@ -16809,7 +16783,7 @@ function appendMessageImages(parentEl, message) {
                 applyModeStyles(selectedMode);
                 renderModelSelect();
                 renderModeSelect();
-                updateVariantOptions();
+                updateVariantOptions(modelSelection.variantChanged);
                 updateSendQuotaVisual();
                 renderSessionList();
                 if (!hydrated) {
@@ -16929,10 +16903,14 @@ function appendMessageImages(parentEl, message) {
                 break;
             }
             case 'models': {
-                models = Array.isArray(message.models) ? message.models : [];
-                refreshFreeModelIds();
+                const modelState = getModelStateController();
+                const selection = modelState.setCatalog(
+                    message.models,
+                    modelState.getSelectedModel(),
+                    modelState.getSelectedVariant()
+                );
                 renderModelSelect();
-                updateVariantOptions();
+                updateVariantOptions(selection.variantChanged);
                 updateSendQuotaVisual();
                 renderHeaderUsage();
                 break;
@@ -18103,13 +18081,13 @@ function appendMessageImages(parentEl, message) {
                     renderAttachments();
                 }
                 if (typeof draft.model === 'string') {
-                    selectedModel = draft.model;
-                    modelSelect.value = selectedModel;
-                    updateVariantOptions();
+                    const selection = getModelStateController().selectModel(draft.model);
+                    modelSelect.value = selection.selectedModel;
+                    updateVariantOptions(selection.variantChanged);
                 }
                 if (typeof draft.variant === 'string') {
-                    selectedVariant = draft.variant;
-                    variantSelect.value = selectedVariant;
+                    const selection = getModelStateController().selectVariant(draft.variant);
+                    variantSelect.value = selection.selectedVariant;
                 }
                 if (typeof draft.mode === 'string') {
                     selectedMode = modes.includes(draft.mode)
