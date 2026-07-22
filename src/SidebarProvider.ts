@@ -15,6 +15,7 @@ import { SmartSearchService } from './search/SmartSearchService';
 import type { SmartSearchMessage } from './search/SmartSearchService';
 import { injectChangeListRecords, type ChangeListRecord, type SessionMessage } from './changes/ChangeListInjection';
 import { ChangeListStore } from './changes/ChangeListStore';
+import { DiffFileViewer } from './changes/DiffFileViewer';
 
 type CanceledTurnRecord = {
     opId?: string;
@@ -729,6 +730,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private lastSnapshotPayloadBySession = new Map<string, any>();
     private lastEmittedChangeListHeadBySession = new Map<string, string>();
     private changeListStore?: ChangeListStore;
+    private readonly diffFileViewer: DiffFileViewer;
     private assistantTextBufferBySession = new Map<string, string>();
     private pendingSnapshotUserTextBySession = new Map<string, string>();
     private lastKnownModels: ModelInfo[] = [];
@@ -4369,29 +4371,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.uiDebugChannel?.appendLine(`[EXT][TURN_BIND] phase=defer_diff_list | sessionId=${sessionId} | reqId=${identity.reqId || 'null'} | reason=max-retries-final-bind-missing | anchor=${finalAnchor || 'null'}`);
     }
 
-    private async getFileTextAtCommit(repo: GitRepoRef, commit: string, relativePath: string): Promise<string | null> {
-        const normalized = relativePath.replace(/\\/g, '/');
-        const exists = await runGit(repo, ['cat-file', '-e', `${commit}:${normalized}`]);
-        if (exists.code !== 0) return null;
-        const result = await runGit(repo, ['show', `${commit}:${normalized}`]);
-        if (result.code !== 0) return null;
-        return result.stdout ?? '';
-    }
-
-    private async getDiffTextForPath(repo: GitRepoRef, baseCommit: string, relativePath: string): Promise<string> {
-        const normalized = relativePath.replace(/\\/g, '/');
-        const result = await runGit(repo, ['diff', baseCommit, '--', normalized]);
-        if (result.code !== 0) return '';
-        return result.stdout ?? '';
-    }
-
-    private async getDiffTextBetweenCommits(repo: GitRepoRef, baseCommit: string, headCommit: string, relativePath: string): Promise<string> {
-        const normalized = relativePath.replace(/\\/g, '/');
-        const result = await runGit(repo, ['diff', baseCommit, headCommit, '--', normalized]);
-        if (result.code !== 0) return '';
-        return result.stdout ?? '';
-    }
-
     private async openGitDiffForFile(
         sessionId: string,
         filePath: string,
@@ -4399,35 +4378,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         commitHead?: string,
         commitBase?: string
     ): Promise<void> {
-        if (!filePath || !sessionId) return;
-        const repo = await this.resolveInternalRepo(sessionId);
-        if (!repo) return;
-        let headCommit = commitHead || await this.getInternalHeadCommit(repo);
-        let baseCommit = commitBase || (headCommit ? await this.getInternalParentCommit(repo, headCommit) : null);
-        if (!headCommit || !baseCommit) {
-            this.postAddResponse(webview, 'No baseline available to open diff.');
-            return;
-        }
-        const workspaceRoot = this.getWorkspaceRootPath();
-        const absPath = pathModule.isAbsolute(filePath)
-            ? filePath
-            : pathModule.join(workspaceRoot, filePath);
-        const relPath = pathModule.relative(workspaceRoot, absPath).replace(/\\/g, '/');
-        const beforeText = (await this.getFileTextAtCommit(repo, baseCommit, relPath)) ?? '';
-        let afterText = '';
-        let diffText = '';
-        if (commitHead) {
-            afterText = (await this.getFileTextAtCommit(repo, headCommit, relPath)) ?? '';
-            diffText = await this.getDiffTextBetweenCommits(repo, baseCommit, headCommit, relPath);
-        } else {
-            try {
-                afterText = await fs.promises.readFile(absPath, 'utf-8');
-            } catch {
-                afterText = '';
-            }
-            diffText = await this.getDiffTextForPath(repo, baseCommit, relPath);
-        }
-        await this.diffProvider.updateFromSnapshot(relPath, beforeText, afterText, diffText || undefined);
+        await this.diffFileViewer.open({
+            sessionId,
+            filePath,
+            commitHead,
+            commitBase,
+            noBaseline: () => this.postAddResponse(webview, 'No baseline available to open diff.'),
+        });
     }
 
     constructor(
@@ -4436,6 +4393,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         private readonly diffProvider: OpenCodeDiffProvider
     ) {
         this.client = new OpenCodeClient();
+        this.diffFileViewer = new DiffFileViewer({
+            resolveRepo: (sessionId) => this.resolveInternalRepo(sessionId),
+            getHead: (repo) => this.getInternalHeadCommit(repo),
+            getParent: (repo, commit) => this.getInternalParentCommit(repo, commit),
+            getWorkspaceRoot: () => this.getWorkspaceRootPath(),
+            updateDiff: (relativePath, beforeText, afterText, diffText) => this.diffProvider.updateFromSnapshot(
+                relativePath,
+                beforeText,
+                afterText,
+                diffText,
+            ),
+        });
         this.client.setStorage(this._context.globalState);
         this.uiDebugChannel = vscode.window.createOutputChannel('OpenCode UI Debug');
         this.client.setUiDebugChannel(this.uiDebugChannel);
