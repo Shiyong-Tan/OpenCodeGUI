@@ -16,6 +16,7 @@ import type { SmartSearchMessage } from './search/SmartSearchService';
 import { injectChangeListRecords, type ChangeListRecord, type SessionMessage } from './changes/ChangeListInjection';
 import { ChangeListStore } from './changes/ChangeListStore';
 import { DiffFileViewer } from './changes/DiffFileViewer';
+import { ChangeListEmitter, type FinalizeTurnIdentity } from './changes/ChangeListEmitter';
 
 type CanceledTurnRecord = {
     opId?: string;
@@ -59,17 +60,6 @@ type PersistedRevertedSegment = {
     conflicts: ConflictDetail[];
     discarded?: boolean;
     updatedAt: number;
-};
-
-type FinalizeTurnIdentity = {
-    sessionId: string;
-    reqId?: string;
-    clientMessageId?: string;
-    userMessageId?: string;
-    assistantMessageId?: string;
-    rootUserMessageId?: string;
-    latestAppendUserMessageId?: string;
-    commitResult?: CommitPendingTurnChangesResult;
 };
 
 type AppendSnapshotMetaRoot = {
@@ -731,6 +721,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private lastEmittedChangeListHeadBySession = new Map<string, string>();
     private changeListStore?: ChangeListStore;
     private readonly diffFileViewer: DiffFileViewer;
+    private readonly changeListEmitter: ChangeListEmitter;
     private assistantTextBufferBySession = new Map<string, string>();
     private pendingSnapshotUserTextBySession = new Map<string, string>();
     private lastKnownModels: ModelInfo[] = [];
@@ -4128,6 +4119,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const identity = typeof identityInput === 'string'
             ? this.buildFinalizeTurnIdentity(identityInput)
             : identityInput;
+        await this.changeListEmitter.emit(identity, webview);
+    }
+
+    private async emitDiffFileListLegacy(identity: FinalizeTurnIdentity, webview: { postMessage(message: unknown): unknown }): Promise<void> {
         const sessionId = identity.sessionId;
         if (!this.gitUndoEnabled || !sessionId) return;
         const repo = await this.resolveInternalRepo(sessionId);
@@ -4405,6 +4400,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 diffText,
             ),
         });
+        this.changeListEmitter = new ChangeListEmitter(
+            (identity, target) => this.emitDiffFileListLegacy(identity, target),
+        );
         this.client.setStorage(this._context.globalState);
         this.uiDebugChannel = vscode.window.createOutputChannel('OpenCode UI Debug');
         this.client.setUiDebugChannel(this.uiDebugChannel);
