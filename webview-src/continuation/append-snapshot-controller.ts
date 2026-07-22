@@ -1,5 +1,3 @@
-import { planAppendItemUpsert, planAppendRoot, planAssistantParentSeen, planFinalizedItems } from './append-alias-planner';
-
 type AppendSnapshotControllerOptions = {
   resolveMessageKey(session: any, key: unknown): string | null;
   getSession(sessionId: string): any;
@@ -51,8 +49,21 @@ export function createAppendSnapshotController(options: AppendSnapshotController
 
   function normalizeItemsForFinalize(items: unknown): AppendFinalizeResult {
     if (!Array.isArray(items)) return { items: [], changed: false };
-    const plan = planFinalizedItems(items);
-    return { items: [...plan.items], changed: plan.changed };
+    let changed = false;
+    const normalized = items.map((item) => {
+      if (!item || typeof item !== 'object') return item;
+      if (item.status === 'applied' || item.status === 'failed' || item.status === 'rejected') return item;
+      if (item.status === 'seen' || ((item.status === 'queued' || item.status === 'sending') && item.appendUserMsgId)) {
+        changed = true;
+        return { ...item, status: 'applied' };
+      }
+      if (item.status === 'sending' || item.status === 'queued') {
+        changed = true;
+        return { ...item, status: 'failed', reason: item.reason || 'append-not-acknowledged' };
+      }
+      return item;
+    });
+    return { items: normalized, changed };
   }
 
   function normalizeSessionForFinalize(session: any): boolean {
@@ -163,29 +174,84 @@ export function createAppendSnapshotController(options: AppendSnapshotController
 
   function resolveRootMessage(session: any, message: any): any | null {
     if (!session?.messagesById) return null;
-    const messages = [...session.messagesById.values()].filter((candidate) => candidate?.role === 'user').map((candidate) => ({ id: candidate.id, role: candidate.role, items: getItems(candidate) }));
-    const aliases: Array<[string, string]> = [];
-    for (const map of [session.serverIdToClientKey, session.clientKeyToServerId, session.serverIdToKey]) for (const [from, to] of map?.entries?.() || []) if (typeof from === 'string' && typeof to === 'string') aliases.push([from, to]);
-    const plan = planAppendRoot({ messages, message, appendRootUserKey: session.appendRootUserKey, lastTurnUserId: session.lastTurnUserId, aliases });
-    return plan.rootId ? session.messagesById.get(plan.rootId) || null : null;
+    const clientMessageId = typeof message?.clientMessageId === 'string' ? message.clientMessageId : '';
+    if (clientMessageId) {
+      for (const candidate of session.messagesById.values()) {
+        if (candidate?.role === 'user' && getItems(candidate).some((item) => item?.clientMessageId === clientMessageId)) return candidate;
+      }
+    }
+    const keys: string[] = [];
+    const addKey = (key: unknown) => {
+      if (typeof key !== 'string' || !key || keys.includes(key)) return;
+      keys.push(key);
+      for (const mapped of [
+        session.serverIdToClientKey?.get?.(key),
+        session.clientKeyToServerId?.get?.(key),
+        session.serverIdToKey?.get?.(key),
+      ]) {
+        if (typeof mapped === 'string' && mapped && !keys.includes(mapped)) keys.push(mapped);
+      }
+    };
+    addKey(message?.rootUserMsgId);
+    addKey(session.appendRootUserKey);
+    addKey(session.lastTurnUserId);
+    for (const key of keys) {
+      const candidate = session.messagesById.get(key);
+      if (candidate?.role === 'user') return candidate;
+    }
+    return null;
   }
 
   function upsertItem(message: any, item: any): any | null {
     if (!message) return null;
     if (!message.meta) message.meta = {};
-    const plan = planAppendItemUpsert(Array.isArray(message.meta.appendedPrompts) ? message.meta.appendedPrompts : [], item);
-    message.meta.appendedPrompts = [...plan.items];
-    return plan.next;
+    const items = Array.isArray(message.meta.appendedPrompts) ? [...message.meta.appendedPrompts] : [];
+    const index = items.findIndex((entry) =>
+      (item.clientMessageId && entry.clientMessageId === item.clientMessageId)
+      || (item.appendUserMsgId && entry.appendUserMsgId === item.appendUserMsgId));
+    const existing = index >= 0 ? items[index] : {};
+    const statusRank: Record<string, number> = { sending: 1, queued: 2, seen: 3, applied: 4, failed: 10, rejected: 10 };
+    let status = item.status || existing.status;
+    if (existing.status && item.status) {
+      status = (statusRank[item.status] || 0) >= (statusRank[existing.status] || 0) ? item.status : existing.status;
+    }
+    const next = { ...existing, ...item, status };
+    if (index >= 0) items[index] = next;
+    else items.push(next);
+    const seenClientMessageIds = new Set<string>();
+    message.meta.appendedPrompts = items.filter((entry, entryIndex) => {
+      if (!entry?.clientMessageId) return true;
+      if (entryIndex === index) {
+        seenClientMessageIds.add(entry.clientMessageId);
+        return true;
+      }
+      if (seenClientMessageIds.has(entry.clientMessageId)) return false;
+      seenClientMessageIds.add(entry.clientMessageId);
+      return true;
+    });
+    return next;
   }
 
   function markSeenByAssistantParent(session: any, parentId: string): boolean {
     if (!session || !parentId || !(session.messagesById instanceof Map)) return false;
-    const roots = [...session.messagesById.values()].filter((message) => message?.role === 'user').map((message) => ({ id: message.id, role: message.role, items: getItems(message) }));
-    const plan = planAssistantParentSeen(roots, parentId);
-    const root = plan.rootId ? session.messagesById.get(plan.rootId) : null;
-    if (!root || !plan.changed) return false;
-    for (const item of plan.items) upsertItem(root, item);
-    return true;
+    for (const message of session.messagesById.values()) {
+      const items = getItems(message);
+      const parentIndex = items.findIndex((entry) => entry?.appendUserMsgId === parentId);
+      if (parentIndex < 0) continue;
+      let changed = false;
+      for (let index = 0; index <= parentIndex; index++) {
+        const item = items[index];
+        if (!item?.appendUserMsgId || ['seen', 'applied', 'failed', 'rejected'].includes(item.status)) continue;
+        upsertItem(message, {
+          clientMessageId: item.clientMessageId,
+          appendUserMsgId: item.appendUserMsgId,
+          status: 'seen',
+        });
+        changed = true;
+      }
+      return changed;
+    }
+    return false;
   }
 
   return Object.freeze({
