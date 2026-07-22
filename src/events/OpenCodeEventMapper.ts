@@ -19,11 +19,6 @@ export function mapServerEventToChatEvents(
         const events: ChatEvent[] = [];
         const normalized = host.normalizeEvent(type, props, source);
         const sessionId = normalized.sessionId;
-        if (type === 'message.updated'
-            && normalized.role === 'assistant'
-        ) {
-            host.tryBindAppendSuccessor(sessionId, normalized.messageId, normalized.parentId);
-        }
         if (sessionId) {
             host.logUiDebug(`EXT: event.normalized | type=${normalized.type} | lane=${normalized.lane} | sessionId=${normalized.sessionId} | messageId=${normalized.messageId || 'null'} | parentId=${normalized.parentId || 'null'} | finish=${normalized.finish || 'null'} | partType=${normalized.partType || 'null'} | source=${normalized.source}`);
         }
@@ -229,12 +224,8 @@ export function mapServerEventToChatEvents(
                 }
             }
             if (role === 'assistant' && messageId) {
-                const isAppendSuccessor = host.isAppendSuccessorMessage(sessionId, messageId);
-                const isSubagentLane = !isAppendSuccessor && typeof sessionId === 'string' && host.subagentToParentSessionMap.has(sessionId);
+                const isSubagentLane = typeof sessionId === 'string' && host.subagentToParentSessionMap.has(sessionId);
                 const lane: EventLane = isSubagentLane ? 'subagent' : host.classifyEventLane(sessionId);
-                if (isAppendSuccessor) {
-                    events.push({ type: 'assistantMessageMeta', sessionId, assistantMsgId: messageId, messageId, tmpKey: undefined, source, lane: 'main' });
-                }
                 const tokens = info?.tokens;
                 if (sessionId && tokens && typeof tokens === 'object') {
                     const input = Number(tokens?.input || 0);
@@ -834,7 +825,6 @@ export function mapServerEventToChatEvents(
             }
             // General session error: resolve turn immediately (no settle delay)
             if (sessionId) {
-                host.clearAppendSuccessorState(sessionId);
                 host.logUiDebug(`EXT: session.error.resolve | sessionId=${sessionId} | error=${errorName || 'unknown'} | reason=session_error`);
                 host.resolveTurnFinal(sessionId, 'session-error');
             }

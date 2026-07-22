@@ -5257,11 +5257,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     private resetSessionState(): void {
         const retainedSendInFlightBySession = new Set(this.sendInFlightBySession);
-        for (const sessionId of this.sendInFlightBySession) {
-            if (typeof (this.client as any).getAppendSuccessorState === 'function' && (this.client as any).getAppendSuccessorState(sessionId)) {
-                retainedSendInFlightBySession.add(sessionId);
-            }
-        }
         const retainedPendingLocalKeyBySession = new Map<string, string>();
         const retainedPendingAssistantTmpKeyBySession = new Map<string, string>();
         const retainedPendingAssistantMessageIdBySession = new Map<string, string>();

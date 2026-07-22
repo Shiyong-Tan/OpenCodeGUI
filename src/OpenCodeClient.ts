@@ -423,15 +423,6 @@ type AppendTurnState = {
     emittedAppendUserMsgIds: Set<string>;
 };
 
-type AppendSuccessorState = {
-    sessionId: string;
-    rootUserMsgId: string;
-    appendUserMsgId: string;
-    successorAssistantMsgId: string;
-    generation: number;
-    terminal: boolean;
-};
-
 export type BeginAppendPromptResult = {
     sessionId: string;
     rootUserMsgId: string;
@@ -518,9 +509,6 @@ export class OpenCodeClient {
     private turnFinalResolvedBySession = new Set<string>();
     private turnFinalSourceBySession = new Map<string, EventSource>();
     private appendTurnStateBySession = new Map<string, AppendTurnState>();
-    private appendSuccessorStateBySession = new Map<string, AppendSuccessorState>();
-    private finalizedAppendSuccessorKeys = new Set<string>();
-    private appendSuccessorGeneration = 0;
     private turnFinishedBySession = new Set<string>();
     private turnRescueTimerBySession = new Map<string, NodeJS.Timeout>();
     private turnRescueRunIdBySession = new Map<string, number>();
@@ -609,7 +597,6 @@ export class OpenCodeClient {
         const retainedPendingTurnChangesBySession = new Map<string, PendingTurnChanges>();
         const retainedTurnWriteStateBySession = new Map<string, { turnKey: string; hasWrites: boolean }>();
         const retainedMessageIdAliasBySession = new Map<string, Map<string, string>>();
-        const retainedAppendSuccessors = new Map<string, AppendSuccessorState>();
         if (preserveInFlightSessionIds?.size) {
             for (const sessionId of preserveInFlightSessionIds) {
                 if (typeof sessionId !== 'string' || !sessionId) continue;
@@ -635,10 +622,6 @@ export class OpenCodeClient {
                 if (aliasMap) {
                     retainedMessageIdAliasBySession.set(sessionId, new Map(aliasMap));
                 }
-                const successor = this.appendSuccessorStateBySession.get(sessionId);
-                if (successor && !successor.terminal) {
-                    retainedAppendSuccessors.set(sessionId, { ...successor });
-                }
             }
         }
         const subagentMapCount = this.subagentToParentSessionMap.size;
@@ -657,8 +640,6 @@ export class OpenCodeClient {
         this.seqCounter = 0;
         this.revertedSegment = undefined;
         this.turnStateBySession.clear();
-        this.appendSuccessorStateBySession.clear();
-        this.finalizedAppendSuccessorKeys.clear();
         this.pendingTurnChangesBySession.clear();
         this.turnWriteStateBySession.clear();
         this.sessionUndoEnabled.clear();
@@ -770,11 +751,6 @@ export class OpenCodeClient {
             const aliasMap = retainedMessageIdAliasBySession.get(sessionId);
             if (aliasMap) {
                 this.messageIdAliasBySession.set(sessionId, aliasMap);
-                restored = true;
-            }
-            const successor = retainedAppendSuccessors.get(sessionId);
-            if (successor) {
-                this.appendSuccessorStateBySession.set(sessionId, successor);
                 restored = true;
             }
             if (restored) retainedClientTurnBindingSessions += 1;
@@ -1745,7 +1721,6 @@ export class OpenCodeClient {
 
     public startTurn(sessionId: string, pendingUserLocalKey: string): void {
         if (!sessionId) return;
-        this.appendSuccessorStateBySession.delete(sessionId);
         this.invalidateContinuationChainForSubmittedPrompt(sessionId, 'start-turn');
         this.changeListEmittedBySession.delete(sessionId);
         this.canceledActiveTurnBySession.set(sessionId, false);
@@ -1803,7 +1778,6 @@ export class OpenCodeClient {
 
     public cancelTurn(sessionId: string, opId?: string): void {
         if (!sessionId) return;
-        this.appendSuccessorStateBySession.delete(sessionId);
         this.canceledActiveTurnBySession.set(sessionId, true);
         if (opId && typeof opId === 'string') {
             this.activeTurnOpIdBySession.set(sessionId, opId);
@@ -1860,74 +1834,8 @@ export class OpenCodeClient {
         return (Date.now() - finishedAt) <= windowMs;
     }
 
-    public getAppendSuccessorState(sessionId: string | undefined): AppendSuccessorState | undefined {
-        if (!sessionId) return undefined;
-        const state = this.appendSuccessorStateBySession.get(sessionId);
-        return state ? { ...state } : undefined;
-    }
-
-    public isAppendSuccessorMessage(sessionId: string | undefined, messageId: string | undefined): boolean {
-        const state = this.getAppendSuccessorState(sessionId);
-        return Boolean(state && !state.terminal && state.successorAssistantMsgId === messageId);
-    }
-
-    public tryBindAppendSuccessor(sessionId: string | undefined, messageId: string | undefined, parentId: string | undefined): boolean {
-        if (!sessionId || !messageId || !parentId || !messageId.startsWith('msg_')) return false;
-        const existing = this.appendSuccessorStateBySession.get(sessionId);
-        let state: AppendSuccessorState;
-        if (existing) {
-            if (!existing.terminal && existing.successorAssistantMsgId === messageId && existing.appendUserMsgId === parentId) {
-                if (this.turnStateBySession.has(sessionId)) return true;
-                state = existing;
-            } else {
-                this.appendSuccessorStateBySession.delete(sessionId);
-                this.logUiDebug(`[EXT][APPEND_SUCCESSOR_DROP] sessionId=${sessionId} reason=conflicting-successor parent=${parentId} messageId=${messageId}`);
-                return false;
-            }
-        } else {
-            if (!this.turnFinishedBySession.has(sessionId)) return false;
-            const append = this.appendTurnStateBySession.get(sessionId);
-            if (!append || !append.appendUserMsgIds.has(parentId)) return false;
-            state = { sessionId, rootUserMsgId: append.rootUserMsgId, appendUserMsgId: parentId, successorAssistantMsgId: messageId, generation: ++this.appendSuccessorGeneration, terminal: false };
-            this.appendSuccessorStateBySession.set(sessionId, state);
-        }
-        this.turnFinishedBySession.delete(sessionId);
-        this.finishedMainAgentBySession.delete(sessionId);
-        this.finishedTurnAtBySession.delete(sessionId);
-        this.canceledActiveTurnBySession.set(sessionId, false);
-        this.clearFinalizeSessionState(sessionId, 'turn-start');
-        this.currentTurnUserMsgIdBySession.set(sessionId, parentId);
-        this.currentTurnAssistantMsgIdBySession.set(sessionId, messageId);
-        this.pendingUserMsgIdBySession.set(sessionId, parentId);
-        this.pendingAssistantMsgIdBySession.set(sessionId, messageId);
-        this.turnStateBySession.set(sessionId, { pendingUserLocalKey: `append-successor:${sessionId}:${state.generation}`, pendingAssistantTmpKey: undefined, assistantMsgId: messageId, exportInFlight: false, exportResolved: false, resolvedUserMsgId: parentId, lastResolvedAssistantMsgId: messageId, turnMessageIds: new Set([messageId]) });
-        this.currentTurnStartedAtBySession.set(sessionId, Date.now());
-        this.lastSseAtBySession.set(sessionId, Date.now());
-        this.logUiDebug(`[EXT][APPEND_SUCCESSOR_BIND] sessionId=${sessionId} rootUserMsgId=${state.rootUserMsgId} appendUserMsgId=${parentId} successorAssistantMsgId=${messageId} generation=${state.generation}`);
-        return true;
-    }
-
-    public clearAppendSuccessorState(sessionId: string | undefined): void {
-        if (sessionId) this.appendSuccessorStateBySession.delete(sessionId);
-    }
-
-    public consumeAppendSuccessorFinalization(sessionId: string | undefined, messageId: string | undefined): boolean {
-        if (!sessionId || !messageId) return false;
-        const key = `${sessionId}:${messageId}`;
-        if (this.finalizedAppendSuccessorKeys.has(key)) return false;
-        const state = this.appendSuccessorStateBySession.get(sessionId);
-        if (!state || state.successorAssistantMsgId !== messageId) return false;
-        this.finalizedAppendSuccessorKeys.add(key);
-        return true;
-    }
-
-    public isAppendSuccessorFinalized(sessionId: string | undefined, messageId: string | undefined): boolean {
-        return Boolean(sessionId && messageId && this.finalizedAppendSuccessorKeys.has(`${sessionId}:${messageId}`));
-    }
-
     public finishTurn(sessionId: string): void {
         if (!sessionId) return;
-        this.appendSuccessorStateBySession.delete(sessionId);
 
         const chain = this.continuationChainsBySession.get(sessionId);
         const isContinuationActive = chain && (chain.state === 'continuation_active' || chain.state === 'bootstrap_buffering' || chain.state === 'revive_armed');
@@ -6470,7 +6378,6 @@ export class OpenCodeClient {
         if (!sessionId) return;
         await this.ensureServer();
         await this.requestJson('POST', `/session/${encodeURIComponent(sessionId)}/abort`, {});
-        this.appendSuccessorStateBySession.delete(sessionId);
     }
 
     public async dispose(): Promise<void> {

@@ -196,31 +196,6 @@ describe('OpenCodeClient subagent lane classification', () => {
         ]));
     });
 
-    it('keeps a registered same-session subagent lane stable when a planned append successor collides', () => {
-        const client = new OpenCodeClient() as any;
-        const successorOwner = 'appendSuccessorStateBySession';
-        // Test-only anticipation of the reviewed successor owner; production does
-        // not own it yet, so this guard will force a review if that changes.
-        const successors = new Map([['ses_parent', {
-            sessionId: 'ses_parent', rootUserMsgId: 'msg_root', appendUserMsgId: 'msg_append',
-            successorAssistantMsgId: 'msg_successor', generation: 1, terminal: false,
-        }]]);
-        Object.defineProperty(client, successorOwner, { value: successors, configurable: true, writable: true });
-        client.currentSessionId = 'ses_parent';
-        client.registerSubagentSession('ses_child', 'ses_parent');
-
-        const events = client.mapServerEventToChatEvents('message.part.updated', {
-            part: { sessionID: 'ses_child', messageID: 'msg_child', type: 'text', text: 'child work' },
-        }, 'sse');
-
-        expect(client.getParentSessionForSubagent('ses_child')).toBe('ses_parent');
-        expect(successors.get('ses_parent')).toEqual(expect.objectContaining({ appendUserMsgId: 'msg_append', generation: 1 }));
-        expect(events).toEqual(expect.arrayContaining([
-            expect.objectContaining({ type: 'backgroundActivityPulse', sessionId: 'ses_parent', agentSessionId: 'ses_child', displayTarget: 'parent' }),
-            expect.objectContaining({ type: 'text', sessionId: 'ses_child', parentSessionId: 'ses_parent', agentSessionId: 'ses_child', displayTarget: 'agent-lane' }),
-        ]));
-    });
-
     it('carries backend parentID as explicit parent evidence on session events', () => {
         const client = new OpenCodeClient() as any;
         client.logUiDebug = jest.fn();

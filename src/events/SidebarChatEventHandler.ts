@@ -67,17 +67,7 @@ export async function handleSidebarChatEvent(
         }
         if (event.type === 'turnResolved' && event.sessionId) {
             const liveWebview = host._view?.webview || webview;
-            if (host.client.isAppendSuccessorFinalized(event.sessionId, event.assistantMsgId)) {
-                return;
-            }
-            const successor = host.client.getAppendSuccessorState(event.sessionId);
-            if (successor && !host.client.consumeAppendSuccessorFinalization(event.sessionId, event.assistantMsgId)) {
-                return;
-            }
             await host.finalizeResolvedTurn(event.sessionId, liveWebview, event.assistantMsgId);
-            if (successor && successor.successorAssistantMsgId === event.assistantMsgId) {
-                host.uiDebugChannel.appendLine(`[EXT][APPEND_SUCCESSOR_FINAL] sessionId=${successor.sessionId} rootUserMsgId=${successor.rootUserMsgId} appendUserMsgId=${successor.appendUserMsgId} successorAssistantMsgId=${successor.successorAssistantMsgId} generation=${successor.generation} outcome=success`);
-            }
             return;
         }
         if (event.type === 'session' && event.sessionId) {
@@ -563,7 +553,6 @@ export async function handleSidebarChatEvent(
                 liveWebview?.postMessage({
                     type: 'assistantMessageMeta',
                     sessionId,
-                    assistantMsgId: event.assistantMsgId || event.messageId,
                     parentSessionId: event.parentSessionId,
                     agentSessionId: event.agentSessionId,
                     displayTarget: event.displayTarget,
