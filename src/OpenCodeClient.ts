@@ -1,4 +1,3 @@
-import * as cp from 'child_process';
 import * as net from 'net';
 import * as https from 'https';
 import * as path from 'path';
@@ -23,6 +22,7 @@ import { OpenCodeProcessRunner } from './transport/OpenCodeProcessRunner';
 import { OpenCodeHttpClient, type ServerConnection, type ServerFetchOptions, type ServerLock } from './transport/OpenCodeHttpClient';
 import { OpenCodeServerLockStore } from './transport/OpenCodeServerLockStore';
 import { OpenCodeEventStream } from './transport/OpenCodeEventStream';
+import { OpenCodeServerProcess } from './transport/OpenCodeServerProcess';
 export type { ModelInfo, ModelQuota, ModelQuotaRow } from './models/types';
 
 export type AgentInfo = {
@@ -447,8 +447,8 @@ export class OpenCodeClient {
     private readonly httpClient: OpenCodeHttpClient;
     private readonly serverLocks: OpenCodeServerLockStore;
     private readonly eventStream: OpenCodeEventStream;
+    private readonly serverProcessManager: OpenCodeServerProcess;
     public static outputChannel = vscode.window.createOutputChannel("OpenCode CLI");
-    private serverProcess?: cp.ChildProcess;
     private serverBaseUrl?: string;
     private serverPort?: number;
     private serverStartPromise?: Promise<void>;
@@ -457,7 +457,6 @@ export class OpenCodeClient {
     private serverReadyReject?: (error: Error) => void;
     private workspaceRoot: string;
     private storage?: vscode.Memento;
-    private serverPid?: number;
     private serverPassword?: string;
     private readonly eventListeners = new Set<(event: ChatEvent) => void>();
     private currentSessionId?: string;
@@ -786,6 +785,7 @@ export class OpenCodeClient {
             getWorkspaceRoot: () => this.workspaceRoot,
             log: (message) => this.logUiDebug(message),
         });
+        this.serverProcessManager = new OpenCodeServerProcess();
         this.httpClient = new OpenCodeHttpClient({
             waitUntilReady: () => this.waitForServerReady(),
             getConnection: (forceRefresh) => this.getServerConn(forceRefresh),
@@ -823,10 +823,9 @@ export class OpenCodeClient {
         this.workspaceRoot = newRoot;
         this.gitUndo = new GitUndoEngine(this.workspaceRoot, (message) => this.logUiDebug(message));
         this.gitUndoAvailable = false;
-        this.serverProcess = undefined;
+        this.serverProcessManager.detach();
         this.serverBaseUrl = undefined;
         this.serverPort = undefined;
-        this.serverPid = undefined;
         this.serverPassword = undefined;
         this.serverStartPromise = undefined;
         this.serverReadyPromise = undefined;
@@ -836,7 +835,7 @@ export class OpenCodeClient {
     }
 
     public getServerPid(): number | undefined {
-        return this.serverProcess?.pid || this.serverPid;
+        return this.serverProcessManager.getPid();
     }
 
 
@@ -5055,16 +5054,11 @@ export class OpenCodeClient {
         const port = lock.port;
         this.initServerReadyPromise();
         const spawnSpec = await this.buildServeSpawn(['serve', '--port', String(port), '--hostname', '127.0.0.1']);
-        this.serverProcess = cp.spawn(spawnSpec.command, spawnSpec.args, {
-            cwd: this.workspaceRoot,
-            shell: false,
-            env: { ...process.env, PYTHONIOENCODING: 'utf-8', OPENCODE_SERVER_PASSWORD: lock.password }
-        });
+        const serverPid = this.serverProcessManager.start(spawnSpec, this.workspaceRoot, lock.password);
         this.serverPort = port;
-        this.serverPid = this.serverProcess.pid;
         this.serverBaseUrl = `http://127.0.0.1:${port}`;
         this.serverPassword = lock.password;
-        this.logUiDebug(`EXT: server.start | port=${port} | pid=${this.serverPid || 'null'}`);
+        this.logUiDebug(`EXT: server.start | port=${port} | pid=${serverPid || 'null'}`);
 
         try {
             await this.waitForServerHealthy(port, lock.password);
@@ -5082,68 +5076,17 @@ export class OpenCodeClient {
             }
             this.serverBaseUrl = undefined;
             this.serverPort = undefined;
-            this.serverPid = undefined;
+            this.serverProcessManager.clearRememberedPid();
             this.serverPassword = undefined;
             this.failServerReady(error as Error);
             throw error;
         }
     }
 
-    private async killProcessTree(pid: number): Promise<void> {
-        if (process.platform === 'win32') {
-            await new Promise<void>((resolve) => {
-                const attemptKill = () => {
-                    cp.exec(`taskkill /PID ${pid} /T /F`, async (_err, stdout, stderr) => {
-                        const output = `${String(stdout || '')}\n${String(stderr || '')}`;
-                        if (/SUCCESS/i.test(output)) {
-                            resolve();
-                            return;
-                        }
-                        const exists = await this.isProcessRunningWindows(pid);
-                        if (!exists) {
-                            resolve();
-                            return;
-                        }
-                        setTimeout(attemptKill, 500);
-                    });
-                };
-                attemptKill();
-            });
-            return;
-        }
-        try {
-            process.kill(pid, 'SIGTERM');
-        } catch {
-            // ignore
-        }
-    }
-
-    private async isProcessRunningWindows(pid: number): Promise<boolean> {
-        return new Promise<boolean>((resolve) => {
-            cp.exec(`tasklist /FI "PID eq ${pid}" /FO CSV /NH`, (err, stdout, stderr) => {
-                const output = `${String(stdout || '')}\n${String(stderr || '')}`;
-                if (err && /No tasks are running|没有运行的任务|找不到/i.test(output)) {
-                    resolve(false);
-                    return;
-                }
-                if (/No tasks are running|没有运行的任务|找不到/i.test(output)) {
-                    resolve(false);
-                    return;
-                }
-                resolve(new RegExp(`\\b${pid}\\b`).test(output));
-            });
-        });
-    }
-
     public async shutdownServer(): Promise<void> {
-        const pid = this.serverProcess?.pid || this.serverPid;
-        if (pid) {
-            await this.killProcessTree(pid);
-        }
-        this.serverProcess = undefined;
+        await this.serverProcessManager.shutdown();
         this.serverBaseUrl = undefined;
         this.serverPort = undefined;
-        this.serverPid = undefined;
         this.serverPassword = undefined;
         this.serverStartPromise = undefined;
         this.serverReadyPromise = undefined;
