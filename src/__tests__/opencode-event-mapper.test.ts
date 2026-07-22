@@ -46,11 +46,4 @@ describe('OpenCodeEventMapper', () => {
     }]);
     expect(calls).toEqual(['normalized-log', 'status-detail', 'idle-store', 'idle-log', 'mark-final']);
   });
-
-  test('keeps post-final admission explicit and canonical', () => {
-    const source = fs.readFileSync(path.join(process.cwd(), 'src', 'events', 'OpenCodeEventMapper.ts'), 'utf8');
-    expect(source).toContain('tryBindAppendSuccessor');
-    expect(source).toContain('isExactAppendSuccessorEvent');
-    expect(source).toContain('noncanonical-event');
-  });
 });

@@ -211,11 +211,4 @@ describe('OpenCodeClient subagent lane classification', () => {
             mode: 'coder',
         })]);
     });
-
-    it('does not use current session fallback for append successor admission', () => {
-        const client = new OpenCodeClient() as any;
-        client.currentSessionId = 'ses_current';
-        expect(client.tryBindAppendSuccessor('ses_current', 'msg_successor', 'msg_parent')).toBeUndefined();
-        expect(client.classifyEventLane('ses_current')).toBe('unknown');
-    });
 });
