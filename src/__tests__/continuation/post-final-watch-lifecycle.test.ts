@@ -204,6 +204,21 @@ describe('OpenCodeClient post-final watch lifecycle', () => {
         ]);
     });
 
+    it('drains the real finishTurn continuation persist before dispose returns', async () => {
+        const workspaceRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'opencode-cont-dispose-drain-'));
+        const sessionId = 'ses_dispose_drain';
+        const client = await createPersistingClient(workspaceRoot) as any;
+        client.startTurn(sessionId, 'local-user-1');
+        client.expectedMainAgentBySession.set(sessionId, 'sisyphus');
+        client.recordAssistantMsgId(sessionId, 'msg_owner_dispose');
+        client.markTurnFinal(sessionId, 'msg_owner_dispose', 'sse');
+        client.finishTurn(sessionId);
+        client.queueTurnChanges(sessionId, sessionId, undefined, undefined, [{ type: 'update', path: 'src/dispose-drain.ts' }]);
+        await client.dispose();
+        const map = await loadPersistedMap(client, sessionId);
+        expect(map.continuation).toMatchObject({ currentOwnerMsgId: 'msg_owner_dispose', lifecycleState: 'watching' });
+    });
+
     it('persists retry-ready failure state while keeping current owner and watched entries', async () => {
         const workspaceRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'opencode-cont-fail-'));
         const sessionId = 'ses_persisted_failure';

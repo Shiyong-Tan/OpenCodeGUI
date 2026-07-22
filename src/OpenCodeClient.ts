@@ -557,6 +557,7 @@ export class OpenCodeClient {
     private lastTurnCommitBaseBySession = new Map<string, string>();
     private postFinalWatchStateBySession = new Map<string, PostFinalWatchState>();
     private continuationPersistBySession = new Map<string, Promise<void>>();
+    private disposePromise?: Promise<void>;
     private readonly resyncCooldownMs = 5000;
     private readonly silenceWindowMs = 1800;
     private readonly finalQuietWindowMs = 300;
@@ -6381,10 +6382,23 @@ export class OpenCodeClient {
     }
 
     public async dispose(): Promise<void> {
-        this.resetSessionState();
-        this.eventListeners.clear();
-        this.serverStatusHandler = undefined;
-        await this.shutdownServer();
+        if (this.disposePromise) return this.disposePromise;
+        this.disposePromise = (async () => {
+            while (true) {
+                const pending = Array.from(this.continuationPersistBySession.values());
+                if (pending.length) {
+                    await Promise.allSettled(pending);
+                    continue;
+                }
+                await Promise.resolve();
+                if (!this.continuationPersistBySession.size) break;
+            }
+            this.resetSessionState();
+            this.eventListeners.clear();
+            this.serverStatusHandler = undefined;
+            await this.shutdownServer();
+        })();
+        return this.disposePromise;
     }
 
     public async warmServer(): Promise<void> {
