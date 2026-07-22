@@ -34,6 +34,7 @@ import {
     normalizeIncomingFileSnapshots,
     type FileSnapshot,
 } from './changes/FileChangeExtractor';
+import { PendingTurnChangeStore, type PendingTurnChanges } from './changes/PendingTurnChangeStore';
 export type { ModelInfo, ModelQuota, ModelQuotaRow } from './models/types';
 export type { FileSnapshot } from './changes/FileChangeExtractor';
 
@@ -369,13 +370,6 @@ type TurnState = {
     continuationState?: ContinuationLifecycleState;
 };
 
-type PendingTurnChanges = {
-    turnKey: string;
-    tmpKey?: string;
-    changes: FileChangeSpec[];
-    lastAssistantMsgId?: string;
-};
-
 type PostFinalWatchState = {
     ownerMsgId: string;
     turnKey: string;
@@ -463,7 +457,7 @@ export class OpenCodeClient {
     private revertedSegment?: RevertedSegment;
     private uiDebugChannel?: vscode.OutputChannel;
     private turnStateBySession = new Map<string, TurnState>();
-    private pendingTurnChangesBySession = new Map<string, PendingTurnChanges>();
+    private pendingTurnChangesBySession = new PendingTurnChangeStore();
     private turnWriteStateBySession = new Map<string, { turnKey: string; hasWrites: boolean }>();
     private gitUndo?: GitUndoEngine;
     private gitUndoAvailable = false;
@@ -3590,26 +3584,13 @@ export class OpenCodeClient {
             return;
         }
         this.markTurnHasWrites(sessionId, 'file-change');
-        const existing = this.pendingTurnChangesBySession.get(sessionId);
-        if (existing && existing.turnKey !== turnKey) {
-            // this.logUiDebug(`[DBG_TURN_QUEUE] session=${sessionId} staleTurn=${existing.turnKey} newTurn=${turnKey} cleared=true`);
-            this.pendingTurnChangesBySession.delete(sessionId);
-        }
-        const next = this.pendingTurnChangesBySession.get(sessionId) || {
+        this.pendingTurnChangesBySession.queue({
+            sessionId,
             turnKey,
             tmpKey,
-            changes: [],
-            lastAssistantMsgId: assistantMsgId
-        };
-        next.turnKey = turnKey;
-        if (tmpKey) {
-            next.tmpKey = tmpKey;
-        }
-        if (assistantMsgId) {
-            next.lastAssistantMsgId = assistantMsgId;
-        }
-        next.changes.push(...changeSpecs);
-        this.pendingTurnChangesBySession.set(sessionId, next);
+            assistantMsgId,
+            changes: changeSpecs,
+        });
         // this.logUiDebug(`[DBG_TURN_QUEUE] session=${sessionId} turnKey=${turnKey} added=${changeSpecs.length} total=${next.changes.length}`);
     }
 
