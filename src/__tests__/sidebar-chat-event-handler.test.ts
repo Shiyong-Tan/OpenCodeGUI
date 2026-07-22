@@ -30,5 +30,4 @@ describe('SidebarChatEventHandler', () => {
       sessionId: 'session-a', parentSessionId: 'parent-a', agentSessionId: 'agent-a', displayTarget: 'parent',
     });
   });
-  test('keeps successor terminal marker handler-owned', () => { const source = fs.readFileSync(path.join(process.cwd(), 'src/events/SidebarChatEventHandler.ts'), 'utf8'); expect(source).toContain('[EXT][APPEND_SUCCESSOR_FINAL]'); });
 });

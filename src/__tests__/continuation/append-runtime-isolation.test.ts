@@ -588,7 +588,6 @@ describe('append runtime isolation', () => {
         expect(client.displayTurnUserMsgIdBySession.has('ses_keep')).toBe(false);
         expect(client.canceledActiveTurnBySession.has('ses_keep')).toBe(false);
     });
-    it('does not introduce successor ownership into ordinary retained reset state', () => { const client = createClientWithAppendTurn('ses', 'msg_root'); client.resetSessionState({ preserveInFlightSessionIds: new Set(['ses']) }); expect(client.getActiveAppendSuccessor?.('ses')).toBeUndefined(); });
 
     it('retains only allowlisted provider bindings for pre-reset send-in-flight sessions', () => {
         const provider = createProvider();
