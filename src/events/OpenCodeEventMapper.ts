@@ -17,8 +17,14 @@ export function mapServerEventToChatEvents(
     source: EventSource = 'sse'
 ): ChatEvent[] {
         const events: ChatEvent[] = [];
+        let newlyBoundAppendSuccessor: any;
+        if (type === 'message.updated' && props?.info?.role === 'assistant') newlyBoundAppendSuccessor = host.tryBindAppendSuccessor(typeof props.info.sessionID === 'string' ? props.info.sessionID : undefined, typeof props.info.id === 'string' ? props.info.id : undefined, typeof props.info.parentID === 'string' ? props.info.parentID : undefined);
         const normalized = host.normalizeEvent(type, props, source);
         const sessionId = normalized.sessionId;
+        const appendSuccessor = host.getActiveAppendSuccessor?.(sessionId);
+        const exactAppendSuccessor = host.isActiveAppendSuccessorEvent?.(sessionId, type, normalized.messageId, normalized.parentId) || false;
+        if (source === 'sse' && appendSuccessor && (type === 'message.updated' || type === 'message.part.updated') && !exactAppendSuccessor) return events;
+        if (newlyBoundAppendSuccessor && sessionId) events.push({ type: 'turnInFlight', sessionId, inFlight: true, ownerMsgId: newlyBoundAppendSuccessor.appendUserMsgId, appendSuccessor: newlyBoundAppendSuccessor, source });
         if (sessionId) {
             host.logUiDebug(`EXT: event.normalized | type=${normalized.type} | lane=${normalized.lane} | sessionId=${normalized.sessionId} | messageId=${normalized.messageId || 'null'} | parentId=${normalized.parentId || 'null'} | finish=${normalized.finish || 'null'} | partType=${normalized.partType || 'null'} | source=${normalized.source}`);
         }
@@ -64,7 +70,7 @@ export function mapServerEventToChatEvents(
             }
         }
         const isSessionStatus = type === 'session.status';
-        if (source === 'sse' && sessionId && host.turnFinishedBySession.has(sessionId) && !isSessionStatus) {
+        if (source === 'sse' && sessionId && host.turnFinishedBySession.has(sessionId) && !isSessionStatus && !exactAppendSuccessor) {
             return events;
         }
         if (source === 'resync' && sessionId && (type === 'files' || type === 'diff' || type === 'toolPatch')) {
@@ -224,7 +230,8 @@ export function mapServerEventToChatEvents(
                 }
             }
             if (role === 'assistant' && messageId) {
-                const isSubagentLane = typeof sessionId === 'string' && host.subagentToParentSessionMap.has(sessionId);
+                const successor = host.getActiveAppendSuccessor(sessionId, messageId);
+                const isSubagentLane = typeof sessionId === 'string' && host.subagentToParentSessionMap.has(sessionId) && !successor;
                 const lane: EventLane = isSubagentLane ? 'subagent' : host.classifyEventLane(sessionId);
                 const tokens = info?.tokens;
                 if (sessionId && tokens && typeof tokens === 'object') {
@@ -340,6 +347,7 @@ export function mapServerEventToChatEvents(
                             messageId,
                             messageIndex,
                             tmpKey: host.getPendingAssistantTmpKey(sessionId),
+                            appendSuccessor: successor,
                             ...(isSubagentLane ? {
                                 parentSessionId: host.getParentSessionForSubagent(sessionId),
                                 agentSessionId: sessionId,
@@ -526,13 +534,15 @@ export function mapServerEventToChatEvents(
                     }
                     host.assistantStatusCleared.add(msgId);
                 }
-                const textParentSessionId = host.getParentSessionForSubagent(sessionId);
+                const successor = host.getActiveAppendSuccessor(sessionId, msgId);
+                const textParentSessionId = successor ? undefined : host.getParentSessionForSubagent(sessionId);
                 events.push({
                     type: 'text',
                     text: chunk,
                     sessionId,
                     assistantMsgId: part?.messageID,
                     tmpKey: host.getPendingAssistantTmpKey(sessionId),
+                    appendSuccessor: successor,
                     ...(textParentSessionId ? {
                         parentSessionId: textParentSessionId,
                         agentSessionId: sessionId,
@@ -814,6 +824,11 @@ export function mapServerEventToChatEvents(
                 // Guard: sessionId can be undefined, so check before using
                 if (sessionId && host.canceledActiveTurnBySession.get(sessionId) === true) {
                     // User cancel: preserve existing behavior (silently drop)
+                    return events;
+                }
+                const appendSuccessor = host.getActiveAppendSuccessor?.(sessionId);
+                if (sessionId && appendSuccessor) {
+                    events.push({ type: 'error', text: message || errorName, sessionId, appendSuccessor, appendSuccessorOutcome: 'aborted', source });
                     return events;
                 }
                 // Non-user abort: resolve turn immediately (no settle delay)

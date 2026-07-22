@@ -274,6 +274,8 @@ export type ChatEvent = {
     lane?: EventLane;
     source?: EventSource;
     continuationMeta?: ContinuationMessageMetadata;
+    appendSuccessor?: AppendSuccessorBinding;
+    appendSuccessorOutcome?: 'aborted';
 };
 type PendingQuestionControl = {
     callId: string;
@@ -421,7 +423,11 @@ type AppendTurnState = {
     pending: AppendPendingPrompt[];
     appendUserMsgIds: Set<string>;
     emittedAppendUserMsgIds: Set<string>;
+    sealedPredecessorTmpKey?: string;
+    nextSuccessorGeneration?: number;
+    activeSuccessor?: AppendSuccessorBinding;
 };
+export type AppendSuccessorBinding = { rootUserMsgId: string; appendUserMsgId: string; assistantMsgId: string; generation: number; sealedPredecessorTmpKey?: string; startedAt: number; };
 
 export type BeginAppendPromptResult = {
     sessionId: string;
@@ -677,6 +683,7 @@ export class OpenCodeClient {
         this.turnFinalSourceBySession.clear();
         if (this.appendTurnStateBySession.size) {
             this.logUiDebug(`[EXT][APPEND_RETAIN] preserved sessions=${this.appendTurnStateBySession.size} reason=resetSessionState`);
+            for (const [sessionId, state] of this.appendTurnStateBySession) if (!preserveInFlightSessionIds?.has(sessionId)) state.activeSuccessor = undefined;
         }
         this.clearRescueTimers();
         this.clearResyncLoopTimers();
@@ -1780,6 +1787,7 @@ export class OpenCodeClient {
     public cancelTurn(sessionId: string, opId?: string): void {
         if (!sessionId) return;
         this.canceledActiveTurnBySession.set(sessionId, true);
+        this.clearAppendSuccessor(sessionId, 'cancel');
         if (opId && typeof opId === 'string') {
             this.activeTurnOpIdBySession.set(sessionId, opId);
         }
@@ -1878,6 +1886,9 @@ export class OpenCodeClient {
             void this.persistContinuationState(sessionId, postFinal.ownerMsgId, 'watching', postFinal.changes);
         }
         this.beginLateDiffGrace(sessionId);
+        const appendState = this.appendTurnStateBySession.get(sessionId);
+        if (appendState && !appendState.activeSuccessor) appendState.sealedPredecessorTmpKey = this.turnStateBySession.get(sessionId)?.pendingAssistantTmpKey;
+        this.clearAppendSuccessor(sessionId, 'finish');
         this.turnStateBySession.delete(sessionId);
         this.pendingTurnChangesBySession.delete(sessionId);
         this.turnWriteStateBySession.delete(sessionId);
@@ -2298,6 +2309,37 @@ export class OpenCodeClient {
         const state = this.appendTurnStateBySession.get(sessionId);
         if (!state?.appendUserMsgIds?.size) return undefined;
         return Array.from(state.appendUserMsgIds).pop();
+    }
+    public getActiveAppendSuccessor(sessionId: string | undefined, assistantMsgId?: string): AppendSuccessorBinding | undefined {
+        const binding = sessionId ? this.appendTurnStateBySession.get(sessionId)?.activeSuccessor : undefined;
+        return !binding || (assistantMsgId && binding.assistantMsgId !== assistantMsgId) ? undefined : { ...binding };
+    }
+    public tryBindAppendSuccessor(sessionId: string | undefined, assistantMsgId: string | undefined, parentId: string | undefined): AppendSuccessorBinding | undefined {
+        if (!sessionId || !assistantMsgId || !parentId) return undefined;
+        const state = this.appendTurnStateBySession.get(sessionId);
+        if (!state?.appendUserMsgIds.has(parentId)) return undefined;
+        const existing = state.activeSuccessor;
+        if (existing) {
+            if (existing.assistantMsgId === assistantMsgId && existing.appendUserMsgId === parentId) return { ...existing };
+            this.logUiDebug(`[EXT][APPEND_SUCCESSOR_DROP] sessionId=${sessionId} reason=conflicting-canonical-id`);
+            this.clearAppendSuccessor(sessionId, 'conflict'); this.turnStateBySession.delete(sessionId); this.turnWriteStateBySession.delete(sessionId); this.turnFinishedBySession.add(sessionId); return undefined;
+        }
+        if (this.turnStateBySession.has(sessionId) || !this.turnFinishedBySession.has(sessionId)) return undefined;
+        const binding: AppendSuccessorBinding = { rootUserMsgId: state.rootUserMsgId, appendUserMsgId: parentId, assistantMsgId, generation: (state.nextSuccessorGeneration || 0) + 1, sealedPredecessorTmpKey: state.sealedPredecessorTmpKey, startedAt: Date.now() };
+        state.nextSuccessorGeneration = binding.generation; state.activeSuccessor = binding;
+        this.turnFinishedBySession.delete(sessionId); this.finishedMainAgentBySession.delete(sessionId); this.finishedTurnAtBySession.delete(sessionId); this.canceledActiveTurnBySession.set(sessionId, false); this.clearFinalizeSessionState(sessionId, 'turn-start');
+        this.currentTurnUserMsgIdBySession.set(sessionId, parentId); this.currentTurnAssistantMsgIdBySession.set(sessionId, assistantMsgId); this.pendingUserMsgIdBySession.set(sessionId, parentId); this.pendingAssistantMsgIdBySession.set(sessionId, assistantMsgId); this.currentTurnStartedAtBySession.set(sessionId, binding.startedAt);
+        this.turnStateBySession.set(sessionId, { pendingUserLocalKey: `append:${sessionId}:${binding.generation}`, pendingAssistantTmpKey: undefined, assistantMsgId, exportInFlight: false, exportResolved: false, resolvedUserMsgId: parentId, lastResolvedAssistantMsgId: undefined, turnMessageIds: new Set([assistantMsgId]) });
+        this.turnWriteStateBySession.set(sessionId, { turnKey: `append:${sessionId}:${binding.generation}`, hasWrites: false }); this.scheduleSilenceResync(sessionId);
+        return { ...binding };
+    }
+    public isActiveAppendSuccessorEvent(sessionId: string | undefined, type: string, messageId: string | undefined, parentId?: string): boolean {
+        const binding = this.getActiveAppendSuccessor(sessionId);
+        return Boolean(binding && binding.assistantMsgId === messageId && (type !== 'message.updated' || parentId === binding.appendUserMsgId));
+    }
+    private clearAppendSuccessor(sessionId: string, reason: string): void {
+        const state = this.appendTurnStateBySession.get(sessionId); if (!state?.activeSuccessor) return;
+        this.logUiDebug(`[EXT][APPEND_SUCCESSOR_CLEANUP] sessionId=${sessionId} generation=${state.activeSuccessor.generation} reason=${reason}`); state.activeSuccessor = undefined; state.sealedPredecessorTmpKey = undefined;
     }
 
     public getCurrentTurnUserMsgId(sessionId: string | undefined): string | undefined {

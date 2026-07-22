@@ -46,4 +46,5 @@ describe('OpenCodeEventMapper', () => {
     }]);
     expect(calls).toEqual(['normalized-log', 'status-detail', 'idle-store', 'idle-log', 'mark-final']);
   });
+  test('keeps the authoritative abort event on the mapper-to-handler path', () => { const source = fs.readFileSync(path.join(process.cwd(), 'src/events/OpenCodeEventMapper.ts'), 'utf8'); expect(source).toContain("appendSuccessorOutcome: 'aborted'"); });
 });

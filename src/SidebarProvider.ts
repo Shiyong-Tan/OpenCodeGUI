@@ -5374,6 +5374,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
     }
 
+    private consumeAppendSuccessorTmpKey(sessionId: string, successor: { generation: number; sealedPredecessorTmpKey?: string }): void {
+        const expected = successor?.sealedPredecessorTmpKey; const actual = this.pendingAssistantTmpKeyBySession.get(sessionId);
+        if (!expected || !actual || actual !== expected) { this.uiDebugChannel.appendLine(`[EXT][APPEND_SUCCESSOR_TMP_RETAIN] sessionId=${sessionId} generation=${successor?.generation} reason=key-mismatch-or-missing`); return; }
+        this.pendingAssistantTmpKeyBySession.delete(sessionId); this.uiDebugChannel.appendLine(`[EXT][APPEND_SUCCESSOR_TMP_CLEAR] sessionId=${sessionId} generation=${successor.generation}`);
+    }
+
     private async handleAbortedMessage(messageId: string, webview: vscode.Webview): Promise<void> {
         this.client.removeMessageId(messageId);
         this.clientMessageIdMap.delete(messageId);

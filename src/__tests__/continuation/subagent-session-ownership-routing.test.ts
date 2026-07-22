@@ -211,4 +211,5 @@ describe('OpenCodeClient subagent lane classification', () => {
             mode: 'coder',
         })]);
     });
+    it('does not promote current-session-only successor evidence', () => { const client = new OpenCodeClient() as any; client.currentSessionId = 'ses'; expect(client.tryBindAppendSuccessor('ses', 'msg', 'msg_parent')).toBeUndefined(); });
 });
