@@ -275,6 +275,14 @@ const changeListEventController = createChangeListEventController({
     postDebug: (payload) => vscode.postMessage({ type: 'ui-debug', payload }),
     now: () => Date.now()
 });
+const createSegmentTopology = window.__ocFeatures?.createSegmentTopology;
+if (typeof createSegmentTopology !== 'function') {
+    throw new Error('Segment topology is unavailable');
+}
+const segmentTopology = createSegmentTopology({
+    debug: (payload) => vscode.postMessage({ type: 'ui-debug', payload }),
+    now: () => Date.now()
+});
 const shownQuestionCallIds = new Set();
 const sentQuestionCallIds = new Set();
 const questionOverlayQueue = [];
@@ -3336,208 +3344,23 @@ function materializeInjectedChangeLists(session, rawSessionMessages, source = 's
  * Returns all msg_* messages in the range
  */
 function computeMemberMsgIdsFromTimeline(session, anchorMsgId, endMsgId) {
-    const inTimelineAnchor = session.timeline.includes(anchorMsgId);
-    const inTimelineEnd = endMsgId ? session.timeline.includes(endMsgId) : false;
-    vscode.postMessage({
-        type: 'ui-debug',
-        payload: ['MEMBERS_PRECHECK', `anchor=${anchorMsgId || 'null'}`, `end=${endMsgId || 'null'}`,
-            `inTimelineAnchor=${inTimelineAnchor}`, `inTimelineEnd=${inTimelineEnd}`, `timelineLen=${session.timeline.length}`]
-    });
-    const anchorIdx = session.timeline.indexOf(anchorMsgId);
-    const endIdx = session.timeline.indexOf(endMsgId);
-    
-    // If anchor not found, return empty (segment will be skipped)
-    if (anchorIdx === -1) {
-        vscode.postMessage({
-            type: 'ui-debug',
-            payload: ['[WV][COMPUTE_MEMBERS]', 'anchor-not-found', `anchorMsgId=${anchorMsgId}`]
-        });
-        return [];
-    }
-    
-    if (endIdx < anchorIdx) {
-        vscode.postMessage({
-            type: 'ui-debug',
-            payload: ['[WV][COMPUTE_MEMBERS]', 'inverted-range-drop',
-                `anchorMsgId=${anchorMsgId}`, `endMsgId=${endMsgId || 'null'}`, 
-                `anchorIdx=${anchorIdx}`, `endIdx=${endIdx}`]
-        });
-        return [];
-    }
-
-    // If end not found or invalid, degrade to single-item interval [anchor, anchor]
-    if (endIdx === -1) {
-        vscode.postMessage({
-            type: 'ui-debug',
-            payload: ['[WV][COMPUTE_MEMBERS]', 'end-missing', 
-                `anchorMsgId=${anchorMsgId}`, `endMsgId=${endMsgId || 'null'}`, 
-                'degrade-to-anchor-only']
-        });
-        return typeof anchorMsgId === 'string' && anchorMsgId.startsWith('msg_') ? [anchorMsgId] : [];
-    }
-    
-    // Collect all msg_* in [anchorIdx, endIdx] closed interval
-    const result = [];
-    for (let i = anchorIdx; i <= endIdx; i++) {
-        const id = session.timeline[i];
-        if (typeof id === 'string' && id.startsWith('msg_')) {
-            result.push(id);
-        }
-    }
-    
-    vscode.postMessage({
-        type: 'ui-debug',
-        payload: ['[WV][COMPUTE_MEMBERS]', 
-            `anchorMsgId=${anchorMsgId}`, 
-            `endMsgId=${endMsgId}`,
-            `count=${result.length}`]
-    });
-    
-    return result;
+    return segmentTopology.computeMembers(session, anchorMsgId, endMsgId);
 }
 
 function resolveSegmentMessageId(session, messageId) {
-    if (!messageId || typeof messageId !== 'string') return null;
-    const mappedServer = session.clientKeyToServerId?.get(messageId);
-    if (mappedServer && session.timeline.includes(mappedServer)) return mappedServer;
-    if (session.timeline.includes(messageId)) return messageId;
-    const mappedLocal = session.serverIdToClientKey?.get(messageId);
-    if (mappedLocal && session.timeline.includes(mappedLocal)) return mappedLocal;
-    return null;
+    return segmentTopology.resolveMessageId(session, messageId);
 }
 
 function normalizeSegmentMembersFromTimeline(session, anchorMsgId, endMsgId, candidateMsgIds, noticeKey) {
-    const explicitMemberMsgIds = Array.isArray(candidateMsgIds)
-        ? candidateMsgIds
-            .map((id) => resolveSegmentMessageId(session, id) || id)
-            .filter((id) => typeof id === 'string' && id.startsWith('msg_'))
-        : [];
-    if (explicitMemberMsgIds.length) {
-        const deduped = [];
-        const seen = new Set();
-        for (const id of explicitMemberMsgIds) {
-            if (seen.has(id)) continue;
-            seen.add(id);
-            deduped.push(id);
-        }
-        const resolvedAnchor = resolveSegmentMessageId(session, anchorMsgId) || deduped[0];
-        const resolvedEnd = resolveSegmentMessageId(session, endMsgId) || deduped[deduped.length - 1] || resolvedAnchor;
-        vscode.postMessage({
-            type: 'ui-debug',
-            payload: ['[WV][SEG_MEMBERS]', 'source=explicit',
-                `noticeKey=${noticeKey || 'null'}`,
-                `anchor=${resolvedAnchor || 'null'}`,
-                `end=${resolvedEnd || 'null'}`,
-                `count=${deduped.length}`]
-        });
-        return {
-            anchorMsgId: deduped[0] || resolvedAnchor,
-            endMsgId: deduped[deduped.length - 1] || resolvedEnd,
-            memberMsgIds: deduped
-        };
-    }
-
-    const resolvedAnchor = resolveSegmentMessageId(session, anchorMsgId);
-    if (!resolvedAnchor) {
-        return { anchorMsgId: null, endMsgId: null, memberMsgIds: [] };
-    }
-
-    const resolvedEnd = resolveSegmentMessageId(session, endMsgId) || resolvedAnchor;
-    const resolvedAnchorIdx = session.timeline.indexOf(resolvedAnchor);
-    const resolvedEndIdx = session.timeline.indexOf(resolvedEnd);
-    if (resolvedEndIdx >= 0 && resolvedEndIdx < resolvedAnchorIdx) {
-        vscode.postMessage({
-            type: 'ui-debug',
-            payload: ['[WV][SEG_MEMBERS]', 'source=timeline', 'inverted-range-drop',
-                `noticeKey=${noticeKey || 'null'}`,
-                `anchor=${resolvedAnchor}`,
-                `end=${resolvedEnd}`,
-                `anchorIdx=${resolvedAnchorIdx}`,
-                `endIdx=${resolvedEndIdx}`]
-        });
-        return { anchorMsgId: resolvedAnchor, endMsgId: resolvedEnd, memberMsgIds: [] };
-    }
-    let memberMsgIds = computeMemberMsgIdsFromTimeline(session, resolvedAnchor, resolvedEnd);
-    if (memberMsgIds.length === 0 && typeof resolvedAnchor === 'string' && resolvedAnchor.startsWith('msg_')) {
-        memberMsgIds = [resolvedAnchor];
-    }
-
-    if (Array.isArray(candidateMsgIds) && candidateMsgIds.length) {
-        const candidateSet = new Set(candidateMsgIds.filter((id) => typeof id === 'string' && id.startsWith('msg_')));
-        const normalizedSet = new Set(memberMsgIds);
-        let dropped = 0;
-        for (const id of candidateSet) {
-            if (!normalizedSet.has(id)) dropped++;
-        }
-        if (dropped > 0) {
-            vscode.postMessage({
-                type: 'ui-debug',
-                payload: ['[WV][SEG_NORMALIZE_DROP]',
-                    `noticeKey=${noticeKey || 'null'}`,
-                    `dropped=${dropped}`,
-                    `anchor=${resolvedAnchor}`,
-                    `end=${resolvedEnd}`]
-            });
-        }
-    }
-
-    vscode.postMessage({
-        type: 'ui-debug',
-        payload: ['[WV][SEG_MEMBERS]', 'source=timeline',
-            `noticeKey=${noticeKey || 'null'}`,
-            `anchor=${resolvedAnchor || 'null'}`,
-            `end=${resolvedEnd || 'null'}`,
-            `count=${memberMsgIds.length}`]
-    });
-
-    return {
-        anchorMsgId: resolvedAnchor,
-        endMsgId: resolvedEnd,
-        memberMsgIds
-    };
+    return segmentTopology.normalizeMembers(session, anchorMsgId, endMsgId, candidateMsgIds, noticeKey);
 }
 
 function sanitizeMergedSegmentSnapshot(seg) {
-    if (!seg || typeof seg.noticeKey !== 'string') return null;
-    const memberMsgIds = Array.isArray(seg.memberMsgIds)
-        ? seg.memberMsgIds.filter((id) => typeof id === 'string' && id.startsWith('msg_'))
-        : [];
-    const anchorMsgId = typeof seg.anchorMsgId === 'string' && seg.anchorMsgId.startsWith('msg_')
-        ? seg.anchorMsgId
-        : (memberMsgIds[0] || '');
-    const endMsgId = typeof seg.endMsgId === 'string' && seg.endMsgId.startsWith('msg_')
-        ? seg.endMsgId
-        : (memberMsgIds[memberMsgIds.length - 1] || anchorMsgId);
-    if (!anchorMsgId || memberMsgIds.length === 0) return null;
-    return {
-        noticeKey: seg.noticeKey,
-        anchorMsgId,
-        endMsgId,
-        memberMsgIds,
-        applied: seg.applied ?? true,
-        restoreAllowed: seg.restoreAllowed === false ? false : true,
-        collapsed: seg.collapsed !== false,
-        mergedInvalidSegments: [],
-        createdAt: typeof seg.createdAt === 'number' ? seg.createdAt : Date.now(),
-        updatedAt: typeof seg.updatedAt === 'number' ? seg.updatedAt : Date.now()
-    };
+    return segmentTopology.sanitizeMergedSnapshot(seg);
 }
 
 function orderSegmentMemberMsgIdsByTimeline(memberMsgIds, timeline) {
-    const ordered = [];
-    const remaining = new Set(
-        (Array.isArray(memberMsgIds) ? memberMsgIds : [])
-            .filter((id) => typeof id === 'string' && id.startsWith('msg_'))
-    );
-    for (const id of Array.isArray(timeline) ? timeline : []) {
-        if (!remaining.delete(id)) continue;
-        ordered.push(id);
-    }
-    for (const id of Array.isArray(memberMsgIds) ? memberMsgIds : []) {
-        if (!remaining.delete(id)) continue;
-        ordered.push(id);
-    }
-    return ordered;
+    return segmentTopology.orderMembersByTimeline(memberMsgIds, timeline);
 }
 
 function isHiddenControlUserText(text) {

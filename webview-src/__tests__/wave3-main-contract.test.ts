@@ -7,6 +7,7 @@ import { classifyChatWindowIntegrity, planChatWindowContainment } from '../rende
 import { createTanStackVirtualAdapter, type VirtualizerConstructor } from '../rendering/tanstack-virtual-adapter';
 import { getSafeShellSpec } from '../rendering/safe-shell-spec';
 import { decideChatWindowAdaptivePolicy } from '../rendering/chat-window-adaptive-policy';
+import { createSegmentTopology } from '../features/segments/segment-topology';
 
 const { createAtomicScenarioExecutor, createRealTransactionHarness } = require('../../scripts/chat-window-adaptive-range-harness.js');
 
@@ -227,13 +228,13 @@ describe('undo segment placeholder presentation revisions', () => {
 
 describe('merged undo segment ordering and restore isolation', () => {
   test('orders merged child members at their unwrapped timeline positions', () => {
-    const orderMembers = extractFunction('function orderSegmentMemberMsgIdsByTimeline(');
-    const context = vm.createContext({ Set, Array });
-    vm.runInContext(`${orderMembers}; globalThis.orderMembers = orderSegmentMemberMsgIdsByTimeline;`, context);
+    const owner = extractFunction('function orderSegmentMemberMsgIdsByTimeline(');
+    expect(owner).toContain('segmentTopology.orderMembersByTimeline(memberMsgIds, timeline)');
+    const topology = createSegmentTopology({ debug: () => undefined, now: () => 0 });
 
     const mergedByInsertion = ['msg_outer-user', 'msg_outer-assistant', 'msg_later-user', 'msg_later-assistant', 'msg_child-user', 'msg_child-assistant'];
     const timeline = ['msg_outer-user', 'msg_outer-assistant', 'system:changeList:1', 'msg_child-user', 'msg_child-assistant', 'msg_later-user', 'msg_later-assistant'];
-    expect(Array.from(context.orderMembers(mergedByInsertion, timeline))).toEqual([
+    expect(topology.orderMembersByTimeline(mergedByInsertion, timeline)).toEqual([
       'msg_outer-user', 'msg_outer-assistant', 'msg_child-user', 'msg_child-assistant', 'msg_later-user', 'msg_later-assistant',
     ]);
   });

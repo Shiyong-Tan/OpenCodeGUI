@@ -2,6 +2,52 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vm from 'vm';
 
+function createHarnessSegmentTopology(debug: (payload: string[]) => void) {
+    const resolveMessageId = (session: any, id: unknown): string | null => {
+        if (typeof id !== 'string') return null;
+        const mappedServer = session.clientKeyToServerId?.get(id);
+        if (mappedServer && session.timeline.includes(mappedServer)) return mappedServer;
+        if (session.timeline.includes(id)) return id;
+        const mappedLocal = session.serverIdToClientKey?.get(id);
+        return mappedLocal && session.timeline.includes(mappedLocal) ? mappedLocal : null;
+    };
+    const computeMembers = (session: any, anchor: string, end: string): string[] => {
+        const anchorIndex = session.timeline.indexOf(anchor);
+        const endIndex = session.timeline.indexOf(end);
+        if (anchorIndex < 0 || endIndex < anchorIndex) return [];
+        return session.timeline.slice(anchorIndex, endIndex + 1).filter((id: unknown) => typeof id === 'string' && id.startsWith('msg_'));
+    };
+    const normalizeMembers = (session: any, anchor: unknown, end: unknown, candidates: unknown, noticeKey: unknown) => {
+        const explicit = Array.isArray(candidates)
+            ? Array.from(new Set(candidates.map((id: unknown) => resolveMessageId(session, id) || id).filter((id: unknown): id is string => typeof id === 'string' && id.startsWith('msg_'))))
+            : [];
+        if (explicit.length) {
+            debug(['[WV][SEG_MEMBERS]', 'source=explicit', `noticeKey=${noticeKey || 'null'}`, `count=${explicit.length}`]);
+            return { anchorMsgId: explicit[0], endMsgId: explicit[explicit.length - 1], memberMsgIds: explicit };
+        }
+        const resolvedAnchor = resolveMessageId(session, anchor);
+        if (!resolvedAnchor) return { anchorMsgId: null, endMsgId: null, memberMsgIds: [] };
+        const resolvedEnd = resolveMessageId(session, end) || resolvedAnchor;
+        if (session.timeline.indexOf(resolvedEnd) < session.timeline.indexOf(resolvedAnchor)) {
+            debug(['[WV][SEG_MEMBERS]', 'source=timeline', 'inverted-range-drop']);
+            return { anchorMsgId: resolvedAnchor, endMsgId: resolvedEnd, memberMsgIds: [] };
+        }
+        const members = computeMembers(session, resolvedAnchor, resolvedEnd);
+        debug(['[WV][SEG_MEMBERS]', 'source=timeline', `count=${members.length}`]);
+        return { anchorMsgId: resolvedAnchor, endMsgId: resolvedEnd, memberMsgIds: members };
+    };
+    return {
+        resolveMessageId,
+        computeMembers,
+        normalizeMembers,
+        sanitizeMergedSnapshot: (segment: any) => segment,
+        orderMembersByTimeline: (members: string[], timeline: string[]) => [
+            ...timeline.filter((id) => members.includes(id)),
+            ...members.filter((id) => !timeline.includes(id)),
+        ],
+    };
+}
+
 function loadSegmentHarness() {
     const mainPath = path.join(__dirname, '../../../media/main.js');
     const source = fs.readFileSync(mainPath, 'utf8');
@@ -30,6 +76,9 @@ function loadSegmentHarness() {
         getSessionState: (sessionId: string) => sessions.get(sessionId),
         formatList: (items: unknown[]) => JSON.stringify(items),
     };
+    context.segmentTopology = createHarnessSegmentTopology(
+        (payload) => posts.push({ type: 'ui-debug', payload }),
+    );
     vm.createContext(context);
     vm.runInContext(source.slice(start, end), context);
     return { context, posts, sessions };
