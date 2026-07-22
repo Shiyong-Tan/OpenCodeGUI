@@ -3,6 +3,7 @@ import * as path from 'path';
 
 const source = fs.readFileSync(path.join(process.cwd(), 'src', 'SidebarProvider.ts'), 'utf8');
 const clientSource = fs.readFileSync(path.join(process.cwd(), 'src', 'OpenCodeClient.ts'), 'utf8');
+const eventMapperSource = fs.readFileSync(path.join(process.cwd(), 'src', 'events', 'OpenCodeEventMapper.ts'), 'utf8');
 const registrySource = fs.readFileSync(path.join(process.cwd(), 'src', 'search', 'SmartSearchSessionRegistry.ts'), 'utf8');
 const protocolSource = fs.readFileSync(path.join(process.cwd(), 'src', 'search', 'SmartSearchProtocol.ts'), 'utf8');
 const serviceSource = fs.readFileSync(path.join(process.cwd(), 'src', 'search', 'SmartSearchService.ts'), 'utf8');
@@ -91,12 +92,12 @@ describe('Smart Search staged agent contract', () => {
         expect(serviceSource).toContain('effectiveTools.size');
         expect(attempt).toContain('EXT: smartSearch.tool');
         expect(serviceSource).toContain('EXT: smartSearch.agent.output');
-        expect(clientSource).toContain("text: message || errorName || 'Unknown session error'");
+        expect(eventMapperSource).toContain("text: message || errorName || 'Unknown session error'");
     });
 
     test('keeps temporary search events out of the ordinary Webview chat pipeline', () => {
         const handler = extractMethod('private async handleChatEvent(');
         expect(handler).toMatch(/smartSearchSessions\.owns\(event\.sessionId\)[\s\S]*return;/);
-        expect(clientSource).toContain("type: 'tool',");
+        expect(eventMapperSource).toContain("type: 'tool',");
     });
 });
