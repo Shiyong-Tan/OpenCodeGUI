@@ -15,6 +15,17 @@ const markdownControllerSource = fs.readFileSync(
   path.join(process.cwd(), 'webview-src', 'rendering', 'markdown-controller.ts'),
   'utf8',
 ).replace(/\r\n/g, '\n');
+const messageRendererSource = fs.readFileSync(
+  path.join(process.cwd(), 'webview-src', 'rendering', 'message-renderer.ts'),
+  'utf8',
+).replace(/\r\n/g, '\n');
+
+function extractMessageRenderer(): string {
+  const marker = 'export function renderMessageElement(';
+  const start = messageRendererSource.indexOf(marker);
+  expect(start).toBeGreaterThanOrEqual(0);
+  return messageRendererSource.slice(start);
+}
 
 function extractFunction(marker: string): string {
   const start = source.indexOf(marker);
@@ -1298,7 +1309,7 @@ describe('A1S.5 explicit change-list safe shell main contract', () => {
       id: 'change-list-huge', role: 'system',
       meta: { kind: 'changeList', files, statsByPath: { [hugePath]: { additions: Number.MAX_SAFE_INTEGER, deletions: 9e200 } }, reverted: true, commitHead: 'head-a', commitBase: 'base-a' },
     };
-    const owner = extractFunction('function renderMessageElement(');
+    const owner = extractMessageRenderer();
     const detached = extractFunction('function renderDetachedKeyedUnit(');
     expect(detached).toContain('renderSafeShellChangeList(session, unit, presentationSelection)');
     expect(detached.indexOf('renderSafeShellChangeList')).toBeLessThan(detached.indexOf('renderMessageElement(unit.value.message, renderedSet);'));
@@ -1413,7 +1424,7 @@ describe('A1S.6 explicit reverted-segment safe shell main contract', () => {
 
   test('A1S.6-RED-1 covers both real paths before expanded nested construction while omitted mode stays rich', () => {
     const detached = extractFunction('function renderDetachedKeyedUnit(');
-    const messageOwner = extractFunction('function renderMessageElement(');
+    const messageOwner = extractMessageRenderer();
     const segmentOwner = extractFunction('function renderSegmentElement(');
     expect(detached).toContain('renderSafeShellSegment(session, unit, presentationSelection)');
     expect(detached.indexOf('renderSafeShellSegment')).toBeLessThan(detached.indexOf('renderSegmentElement(session, unit.value.segment'));
@@ -1802,7 +1813,7 @@ describe('A1S.10 explicit dormant message-diff safe shell main contract', () => 
 
   test('A1S.10-RED-1 routes both real diff branches before pre/code construction without fabricating a Git owner', async () => {
     const detached = extractFunction('function renderDetachedKeyedUnit(');
-    const topLevelOwner = extractFunction('function renderMessageElement(');
+    const topLevelOwner = extractMessageRenderer();
     const nestedOwner = extractFunction('function renderNestedMessageElement(');
     expect(detached).toContain('renderSafeShellDiffMessage(session, unit, presentationSelection)');
     expect(detached.indexOf('renderSafeShellDiffMessage')).toBeLessThan(detached.indexOf('renderMessageElement(unit.value.message, renderedSet'));
