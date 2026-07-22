@@ -507,13 +507,14 @@ describe('W5A snapshot export and finalize contracts', () => {
 
 describe('W5A paths and guards', () => {
     const providerSource = fs.readFileSync(path.join(process.cwd(), 'src', 'SidebarProvider.ts'), 'utf8');
+    const initializerSource = fs.readFileSync(path.join(process.cwd(), 'src', 'history', 'SidebarSessionInitializer.ts'), 'utf8');
 
     it('site E surrounds recent hydration with session, epoch, liveness, and exact-webview identity guards', () => {
-        const siteStart = providerSource.indexOf('const recentSelectionEpoch = this.sessionSelectionEpoch');
-        const siteEnd = providerSource.indexOf("this.uiDebugChannel.appendLine(`[EXT][SNAP_SAVE_SKIP] sessionId=${recentSessionId} reason=sendInit:recent", siteStart);
+        const siteStart = initializerSource.indexOf('const recentSelectionEpoch = host.sessionSelectionEpoch');
+        const siteEnd = initializerSource.indexOf("host.uiDebugChannel.appendLine(`[EXT][SNAP_SAVE_SKIP] sessionId=${recentSessionId} reason=sendInit:recent", siteStart);
         expect(siteStart).toBeGreaterThanOrEqual(0);
         expect(siteEnd).toBeGreaterThan(siteStart);
-        const siteE = providerSource.slice(siteStart, siteEnd);
+        const siteE = initializerSource.slice(siteStart, siteEnd);
 
         expect(siteE).toMatch(/currentSessionId\s*===\s*recentSessionId/);
         expect(siteE).toContain('sessionSelectionEpoch');
@@ -534,9 +535,9 @@ describe('W5A paths and guards', () => {
     });
 
     it('fresh active sendInit remains history merge-only followed by resume', () => {
-        const chainStart = providerSource.indexOf('EXT: webviewAutoRescue.hardRescue.sendInitGuard.defer');
-        const chainEnd = providerSource.indexOf('await this.ensureSessionUndoReady(recentSessionId', chainStart);
-        const freshChain = providerSource.slice(chainStart, chainEnd);
+        const chainStart = initializerSource.indexOf('EXT: webviewAutoRescue.hardRescue.sendInitGuard.defer');
+        const chainEnd = initializerSource.indexOf('await host.ensureSessionUndoReady(recentSessionId', chainStart);
+        const freshChain = initializerSource.slice(chainStart, chainEnd);
         const historyIndex = freshChain.indexOf('postLiveTurnHistoryForSendInitGuardDefer');
         const resumeIndex = freshChain.indexOf('postLiveTurnResumeForSendInitGuardDefer');
 
@@ -551,15 +552,16 @@ describe('W5A paths and guards', () => {
             ['private async repostSessionDataForSendInitGuardCompensation', 'private async runPendingSendInitGuardCompensation'],
             ['private async repostActiveSessionDataForWebviewSoftRescue', 'private async executeWebviewAutoRescueSoftRescue'],
             ['case "selectSession"', 'case "clipboardImage"'],
-            ['const recentSelectionEpoch = this.sessionSelectionEpoch', '[EXT][SNAP_SAVE_SKIP] sessionId=${recentSessionId} reason=sendInit:recent'],
+            ['const recentSelectionEpoch = host.sessionSelectionEpoch', '[EXT][SNAP_SAVE_SKIP] sessionId=${recentSessionId} reason=sendInit:recent'],
         ];
 
         for (const [startMarker, endMarker] of familyRanges) {
-            const start = providerSource.indexOf(startMarker);
-            const end = providerSource.indexOf(endMarker, start);
+            const ownerSource = startMarker.includes('host.sessionSelectionEpoch') ? initializerSource : providerSource;
+            const start = ownerSource.indexOf(startMarker);
+            const end = ownerSource.indexOf(endMarker, start);
             expect(start).toBeGreaterThanOrEqual(0);
             expect(end).toBeGreaterThan(start);
-            const family = providerSource.slice(start, end);
+            const family = ownerSource.slice(start, end);
             expect(family).toContain('buildImmutableSnapshotWithProvenSuffix');
             expect(family).not.toContain('mergeSessionMessagesById(');
         }

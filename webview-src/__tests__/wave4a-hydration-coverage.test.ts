@@ -11,6 +11,7 @@ import { buildFullExportSnapshotDelta } from '../../src/history/SnapshotDeltaPla
 
 const source = fs.readFileSync(path.join(process.cwd(), 'media', 'main.js'), 'utf8');
 const providerSource = fs.readFileSync(path.join(process.cwd(), 'src', 'SidebarProvider.ts'), 'utf8');
+const initializerSource = fs.readFileSync(path.join(process.cwd(), 'src', 'history', 'SidebarSessionInitializer.ts'), 'utf8');
 
 function extractFunction(marker: string): string {
   const start = source.indexOf(marker);
@@ -30,6 +31,14 @@ function extractProviderRange(startMarker: string, endMarker: string): string {
   const end = providerSource.indexOf(endMarker, start);
   expect(end).toBeGreaterThan(start);
   return providerSource.slice(start, end);
+}
+
+function extractInitializerRange(startMarker: string, endMarker: string): string {
+  const start = initializerSource.indexOf(startMarker);
+  expect(start).toBeGreaterThanOrEqual(0);
+  const end = initializerSource.indexOf(endMarker, start);
+  expect(end).toBeGreaterThan(start);
+  return initializerSource.slice(start, end);
 }
 
 describe('Wave 4A hydration coverage', () => {
@@ -197,8 +206,8 @@ describe('Wave 4A hydration coverage', () => {
     expect(selectSession).toMatch(/snapshotIds\.length > 0[\s\S]*\? 'authoritativeHistoryComplete'[\s\S]*: 'deltaContinuityUnknown'/);
     expect(selectSession).toMatch(/fullDelta\.proven[\s\S]*\? 'authoritativeHistoryComplete'[\s\S]*: 'deltaContinuityUnknown'/);
 
-    const sendInitRecent = extractProviderRange(
-      'const recentSelectionEpoch = this.sessionSelectionEpoch',
+    const sendInitRecent = extractInitializerRange(
+      'const recentSelectionEpoch = host.sessionSelectionEpoch',
       '[EXT][SNAP_SAVE_SKIP] sessionId=${recentSessionId} reason=sendInit:recent',
     );
     expect(sendInitRecent).toMatch(/snapshotTimelineIds\.length > 0 && continuity\.proven[\s\S]*\? 'authoritativeHistoryComplete'[\s\S]*: 'deltaContinuityUnknown'/);
@@ -223,8 +232,8 @@ describe('Wave 4A hydration coverage', () => {
     );
     expect(fresh).toContain("type: 'liveTurnHistory'");
     expect(fresh).not.toContain("type: 'sessionData'");
-    const chainStart = providerSource.indexOf('EXT: webviewAutoRescue.hardRescue.sendInitGuard.defer');
-    const chain = providerSource.slice(chainStart, providerSource.indexOf('await this.ensureSessionUndoReady(recentSessionId', chainStart));
+    const chainStart = initializerSource.indexOf('EXT: webviewAutoRescue.hardRescue.sendInitGuard.defer');
+    const chain = initializerSource.slice(chainStart, initializerSource.indexOf('await host.ensureSessionUndoReady(recentSessionId', chainStart));
     expect(chain.indexOf('postLiveTurnHistoryForSendInitGuardDefer')).toBeGreaterThanOrEqual(0);
     expect(chain.indexOf('postLiveTurnResumeForSendInitGuardDefer')).toBeGreaterThan(chain.indexOf('postLiveTurnHistoryForSendInitGuardDefer'));
     expect(chain).not.toContain("type: 'sessionData'");
