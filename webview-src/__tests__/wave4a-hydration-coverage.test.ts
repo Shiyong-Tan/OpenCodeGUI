@@ -6,6 +6,7 @@ import {
   normalizeHydrationCoverage,
   type HydrationCoverage,
 } from '../rendering/local-history-window';
+import { createSessionState } from '../continuation/session-store';
 
 const source = fs.readFileSync(path.join(process.cwd(), 'media', 'main.js'), 'utf8');
 const providerSource = fs.readFileSync(path.join(process.cwd(), 'src', 'SidebarProvider.ts'), 'utf8');
@@ -146,9 +147,7 @@ describe('Wave 4A hydration coverage', () => {
   });
 
   test('new/reset session state starts unknown', () => {
-    const context = vm.createContext({ Map, Set });
-    vm.runInContext(`${extractFunction('function createSessionState(')}; globalThis.createSessionState = createSessionState;`, context);
-    expect((context as any).createSessionState().hydrationCoverage).toBe('deltaContinuityUnknown');
+    expect(createSessionState().hydrationCoverage).toBe('deltaContinuityUnknown');
   });
 
   test('sessionData and merge-only liveTurnHistory apply coverage after existing identity routing; resume does not erase it', () => {
