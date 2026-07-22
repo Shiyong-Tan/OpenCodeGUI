@@ -17,6 +17,7 @@ import { injectChangeListRecords, type ChangeListRecord, type SessionMessage } f
 import { ChangeListStore } from './changes/ChangeListStore';
 import { DiffFileViewer } from './changes/DiffFileViewer';
 import { ChangeListEmitter, type FinalizeTurnIdentity } from './changes/ChangeListEmitter';
+import { hydrateUndoSegments, serializeUndoSegments, type SegmentState } from './undo/UndoSegmentPersistence';
 
 type CanceledTurnRecord = {
     opId?: string;
@@ -228,23 +229,6 @@ type HydrationCoverage = 'authoritativeHistoryComplete' | 'deltaContinuityUnknow
 const SNAPSHOT_DELTA_CONTINUITY_REPAIR_ENABLED = !['0', 'false'].includes(
     String(process.env.SNAPSHOT_DELTA_CONTINUITY_REPAIR_ENABLED || 'true').toLowerCase()
 );
-
-/**
- * Simplified SegmentState interface (V2)
- * Only tracks essential data, no state/anchor/resolved complexity
- */
-interface SegmentState {
-    noticeKey: string;       // Primary key: "system:undo:msg_xxx"
-    anchorMsgId: string;     // Must start with msg_
-    endMsgId: string;        // Must start with msg_
-    memberMsgIds: string[];  // All msg_* in [anchor, end] interval
-    mergedInvalidSegments?: SegmentState[];
-    applied?: boolean;
-    restoreAllowed?: boolean;
-    collapsed?: boolean;
-    createdAt: number;
-    updatedAt: number;
-}
 
 type SubagentLifecycleState = 'queued' | 'running' | 'finalizing' | 'done' | 'failed' | 'cancelled' | 'dismissed';
 
@@ -4255,16 +4239,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         try {
             const raw = this._context.globalState.get<string>(this.UNDO_SEGMENTS_KEY);
-            if (raw) {
-                const parsed = JSON.parse(raw) as Record<string, Record<string, SegmentState>>;
-                for (const [sid, segs] of Object.entries(parsed)) {
-                    const segMap = new Map<string, SegmentState>();
-                    for (const [nk, seg] of Object.entries(segs)) {
-                        segMap.set(nk, seg);
-                    }
-                    this.undoSegmentsBySession.set(sid, segMap);
-                }
-            }
+            this.undoSegmentsBySession = hydrateUndoSegments(raw);
             const totalSegments = Array.from(this.undoSegmentsBySession.values())
                 .flatMap(m => Array.from(m.values())).length;
             this.uiDebugChannel.appendLine(`EXT: segments hydrate | sessions | ${this.undoSegmentsBySession.size} | totalSegments | ${totalSegments}`);
@@ -5181,15 +5156,10 @@ ${attachmentLines.join('\n')}`
                     segMap.set(seg.noticeKey, segmentState);
                     
                     // Save to globalState
-                    const toSave: Record<string, Record<string, SegmentState>> = {};
-                    for (const [sid, sMap] of this.undoSegmentsBySession) {
-                        const obj: Record<string, SegmentState> = {};
-                        for (const [nk, s] of sMap) {
-                            obj[nk] = s;
-                        }
-                        toSave[sid] = obj;
-                    }
-                    await this._context.globalState.update(this.UNDO_SEGMENTS_KEY, JSON.stringify(toSave));
+                    await this._context.globalState.update(
+                        this.UNDO_SEGMENTS_KEY,
+                        serializeUndoSegments(this.undoSegmentsBySession)
+                    );
                     
                     this.uiDebugChannel.appendLine(
                         `[EXT][SEG_UPSERT_SAVE] sessionId=${sessionId} before=${beforeCount} after=${segMap.size}`
@@ -5217,15 +5187,10 @@ ${attachmentLines.join('\n')}`
                     
                     if (deleted) {
                         // Save to globalState
-                        const toSave: Record<string, Record<string, SegmentState>> = {};
-                        for (const [sid, sMap] of this.undoSegmentsBySession) {
-                            const obj: Record<string, SegmentState> = {};
-                            for (const [nk, seg] of sMap) {
-                                obj[nk] = seg;
-                            }
-                            toSave[sid] = obj;
-                        }
-                        await this._context.globalState.update(this.UNDO_SEGMENTS_KEY, JSON.stringify(toSave));
+                        await this._context.globalState.update(
+                            this.UNDO_SEGMENTS_KEY,
+                            serializeUndoSegments(this.undoSegmentsBySession)
+                        );
                     }
                     
                     this.uiDebugChannel.appendLine(
@@ -5254,15 +5219,10 @@ ${attachmentLines.join('\n')}`
                     const after = segMap?.size ?? 0;
 
                     if (deleted) {
-                        const toSave: Record<string, Record<string, SegmentState>> = {};
-                        for (const [sid, sMap] of this.undoSegmentsBySession) {
-                            const obj: Record<string, SegmentState> = {};
-                            for (const [nk, seg] of sMap) {
-                                obj[nk] = seg;
-                            }
-                            toSave[sid] = obj;
-                        }
-                        await this._context.globalState.update(this.UNDO_SEGMENTS_KEY, JSON.stringify(toSave));
+                        await this._context.globalState.update(
+                            this.UNDO_SEGMENTS_KEY,
+                            serializeUndoSegments(this.undoSegmentsBySession)
+                        );
                     }
 
                     this.uiDebugChannel.appendLine(
@@ -8316,15 +8276,10 @@ ${attachmentLines.join('\n')}`
     }
 
     private async saveUndoSegmentsState(): Promise<void> {
-        const toSave: Record<string, Record<string, SegmentState>> = {};
-        for (const [sid, sMap] of this.undoSegmentsBySession) {
-            const obj: Record<string, SegmentState> = {};
-            for (const [nk, segment] of sMap) {
-                obj[nk] = segment;
-            }
-            toSave[sid] = obj;
-        }
-        await this._context.globalState.update(this.UNDO_SEGMENTS_KEY, JSON.stringify(toSave));
+        await this._context.globalState.update(
+            this.UNDO_SEGMENTS_KEY,
+            serializeUndoSegments(this.undoSegmentsBySession)
+        );
     }
 
     private async rmPathIfExists(targetPath: string): Promise<void> {
