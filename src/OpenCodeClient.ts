@@ -20,6 +20,7 @@ import {
 import { ModelQuotaService } from './models/ModelQuotaService';
 import type { ModelInfo, ModelQuota } from './models/types';
 import { OpenCodeCommandResolver } from './transport/OpenCodeCommandResolver';
+import { OpenCodeProcessRunner } from './transport/OpenCodeProcessRunner';
 export type { ModelInfo, ModelQuota, ModelQuotaRow } from './models/types';
 
 export type AgentInfo = {
@@ -455,8 +456,8 @@ const COPILOT_SPEED_MULTIPLIER_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 export class OpenCodeClient {
     private readonly modelQuotaService: ModelQuotaService;
     private readonly commandResolver: OpenCodeCommandResolver;
+    private readonly processRunner: OpenCodeProcessRunner;
     public static outputChannel = vscode.window.createOutputChannel("OpenCode CLI");
-    private currentChild?: cp.ChildProcess;
     private serverProcess?: cp.ChildProcess;
     private serverBaseUrl?: string;
     private serverPort?: number;
@@ -795,6 +796,11 @@ export class OpenCodeClient {
     constructor() {
         this.modelQuotaService = new ModelQuotaService({ log: (message) => this.logUiDebug(message) });
         this.commandResolver = new OpenCodeCommandResolver((message) => OpenCodeClient.outputChannel.appendLine(message));
+        this.processRunner = new OpenCodeProcessRunner({
+            resolver: this.commandResolver,
+            getCwd: () => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd(),
+            log: (message) => OpenCodeClient.outputChannel.appendLine(message),
+        });
         this.workspaceRoot = this.resolveWorkspaceRoot();
         this.gitUndo = new GitUndoEngine(this.workspaceRoot, (message) => this.logUiDebug(message));
     }
@@ -3411,100 +3417,19 @@ export class OpenCodeClient {
     }
 
     private execute(args: string[]): Promise<string> {
-        return new Promise((resolve, reject) => {
-            const workspaceFolder = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0
-                ? vscode.workspace.workspaceFolders[0].uri.fsPath
-                : process.cwd();
-
-            this.resolveBin()
-                .then((bin) => {
-                    // OpenCodeClient.outputChannel.appendLine(`[SPAWN] ${bin} ${args.join(' ')} (cwd: ${workspaceFolder})`);
-                    const startTime = Date.now();
-
-                    const spawnSpec = this.buildSpawn(bin, args);
-                    const child = cp.spawn(spawnSpec.command, spawnSpec.args, {
-                        cwd: workspaceFolder,
-                        shell: false,
-                        timeout: 60000,
-                        env: { ...process.env, PYTHONIOENCODING: 'utf-8' }
-                    });
-
-                    child.stdin.end();
-
-                    let stdout = "";
-                    let stderr = "";
-
-                    child.stdout.on('data', (data) => {
-                        const rawChunk = data.toString('utf8');
-                        const cleanChunk = this.stripAnsi(rawChunk);
-                        stdout += rawChunk;
-                        OpenCodeClient.outputChannel.appendLine(`[STDOUT_CHUNK] (dt: ${Date.now() - startTime}ms) ${cleanChunk}`);
-                    });
-
-                    child.stderr.on('data', (data) => {
-                        const rawChunk = data.toString('utf8');
-                        stderr += rawChunk;
-                        OpenCodeClient.outputChannel.appendLine(`[STDERR_CHUNK] ${this.stripAnsi(rawChunk)}`);
-                    });
-
-                    child.on('close', (code) => {
-                        const duration = Date.now() - startTime;
-                        OpenCodeClient.outputChannel.appendLine(`[CLOSE] Exit code: ${code}, Duration: ${duration}ms`);
-
-                        if (stdout) {
-                            resolve(this.stripAnsi(stdout.trim()));
-                        } else {
-                            reject(this.stripAnsi(stderr.trim()) || `Process finished with no output (Code: ${code})`);
-                        }
-                    });
-
-                    child.on('error', (err: NodeJS.ErrnoException) => {
-                        OpenCodeClient.outputChannel.appendLine(`[SPAWN_ERR] ${err.message}`);
-                        if (err.code === 'ENOENT') {
-                            reject('Could not find "opencode" on PATH. Please install it or add it to your PATH.');
-                            return;
-                        }
-                        reject(err.message);
-                    });
-                })
-                .catch((error) => {
-                    reject(error);
-                });
-        });
+        return this.processRunner.execute(args);
     }
 
     private executeStreaming(args: string[], onEvent?: (event: ChatEvent) => void, stdinText?: string): Promise<void> {
-        return new Promise((resolve, reject) => {
-            const workspaceFolder = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0
-                ? vscode.workspace.workspaceFolders[0].uri.fsPath
-                : process.cwd();
+        return this.processRunner.executeStreaming(
+            args,
+            (line) => this.handleCliOutputLine(line, onEvent),
+            stdinText,
+        );
+    }
 
-            this.resolveBin()
-                .then((bin) => {
-                    OpenCodeClient.outputChannel.appendLine(`[SPAWN] ${bin} ${args.join(' ')} (cwd: ${workspaceFolder})`);
-                    const startTime = Date.now();
-
-                    const spawnSpec = this.buildSpawn(bin, args);
-                    const child = cp.spawn(spawnSpec.command, spawnSpec.args, {
-                        cwd: workspaceFolder,
-                        shell: false,
-                        timeout: 60000,
-                        env: { ...process.env, PYTHONIOENCODING: 'utf-8' }
-                    });
-                    this.currentChild = child;
-
-                    if (typeof stdinText === 'string') {
-                        child.stdin.write(stdinText);
-                    }
-                    child.stdin.end();
-
-                    let stdout = "";
-                    let stderr = "";
-                    let buffer = "";
-
-            const flushLine = (line: string) => {
-                const trimmed = line.trim();
-                if (!trimmed) return;
+    private handleCliOutputLine(trimmed: string, onEvent?: (event: ChatEvent) => void): void {
+        if (!trimmed) return;
                 try {
                     const parsed = JSON.parse(trimmed);
                     const sessionId = parsed.sessionID as string | undefined;
@@ -3621,58 +3546,6 @@ export class OpenCodeClient {
                         onEvent({ type: 'raw', text: trimmed });
                     }
                 }
-            };
-
-                    child.stdout.on('data', (data) => {
-                        const rawChunk = data.toString('utf8');
-                        const cleanChunk = this.stripAnsi(rawChunk);
-                        stdout += rawChunk;
-                        // OpenCodeClient.outputChannel.appendLine(`[STDOUT_CHUNK] (dt: ${Date.now() - startTime}ms) ${cleanChunk}`);
-
-                        buffer += cleanChunk;
-                        const lines = buffer.split(/\r?\n/);
-                        buffer = lines.pop() || "";
-                        for (const line of lines) {
-                            flushLine(line);
-                        }
-                    });
-
-                    child.stderr.on('data', (data) => {
-                        const rawChunk = data.toString('utf8');
-                        stderr += rawChunk;
-                        // OpenCodeClient.outputChannel.appendLine(`[STDERR_CHUNK] ${this.stripAnsi(rawChunk)}`);
-                    });
-
-                    child.on('close', (code) => {
-                        const duration = Date.now() - startTime;
-                        // OpenCodeClient.outputChannel.appendLine(`[CLOSE] Exit code: ${code}, Duration: ${duration}ms`);
-                        this.currentChild = undefined;
-
-                        if (buffer.trim()) {
-                            flushLine(buffer);
-                        }
-
-                        if (code === 0 || stdout) {
-                            resolve();
-                        } else {
-                            reject(this.stripAnsi(stderr.trim()) || `Process finished with no output (Code: ${code})`);
-                        }
-                    });
-
-                    child.on('error', (err: NodeJS.ErrnoException) => {
-                        this.currentChild = undefined;
-                        OpenCodeClient.outputChannel.appendLine(`[SPAWN_ERR] ${err.message}`);
-                        if (err.code === 'ENOENT') {
-                            reject('Could not find "opencode" on PATH. Please install it or add it to your PATH.');
-                            return;
-                        }
-                        reject(err.message);
-                    });
-                })
-                .catch((error) => {
-                    reject(error);
-                });
-        });
     }
 
     private resolveBin(): Promise<string> {
@@ -5021,11 +4894,6 @@ export class OpenCodeClient {
             hash = ((hash * 31) + text.charCodeAt(i)) >>> 0;
         }
         return `${text.length}:${hash.toString(16)}`;
-    }
-
-
-    private stripAnsi(str: string): string {
-        return str.replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '');
     }
 
     private getServerBaseUrl(): string {
