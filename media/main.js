@@ -6218,10 +6218,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function appendMessageToChat(messageElement, message) {
-        if (!messageElement) return;
+        if (!messageElement) return false;
         if (message?.role !== 'assistant' && message?.role !== 'user') {
-            appendChatRenderRoot(messageElement);
-            return;
+            return appendChatRenderRoot(messageElement);
         }
         const row = document.createElement('div');
         row.className = `message-row ${message.role === 'user' ? 'user' : 'bot'}`;
@@ -6232,7 +6231,7 @@ document.addEventListener('DOMContentLoaded', () => {
             row.appendChild(divider);
         }
         row.appendChild(messageElement);
-        appendChatRenderRoot(row);
+        return appendChatRenderRoot(row);
     }
 
     function renderNestedMessageElement(message) {

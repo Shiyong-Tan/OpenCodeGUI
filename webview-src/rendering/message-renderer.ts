@@ -10,7 +10,6 @@ export function renderMessageElement(
         console.warn('[Render] duplicate message skipped', message.id);
         return;
     }
-    renderedSet.add(message.id);
     const session = host.getSessionState(host.activeSessionId);
     const finalAssistantId = typeof session?.finalAssistantLock?.assistantMsgId === 'string'
         ? session.finalAssistantLock.assistantMsgId
@@ -36,7 +35,7 @@ export function renderMessageElement(
         if (message.meta?.kind === 'changeList') {
             const container = host.changeListRenderer.render(message);
             if (!container) return;
-            host.appendChatRenderRoot(container);
+            if (host.appendChatRenderRoot(container) === true) renderedSet.add(message.id);
             return;
         }
 
@@ -161,7 +160,7 @@ export function renderMessageElement(
 
             content.appendChild(card);
             div.appendChild(content);
-            host.appendChatRenderRoot(div);
+            if (host.appendChatRenderRoot(div) === true) renderedSet.add(message.id);
             return;
         }
 
@@ -506,12 +505,12 @@ export function renderMessageElement(
             }
             if (!host.gitUndoEnabled) {
                 div.appendChild(actions);
-                host.appendMessageToChat(div, message);
+                if (host.appendMessageToChat(div, message) === true) renderedSet.add(message.id);
                 return;
             }
             if (isAppendableActiveUserMessage) {
                 div.appendChild(actions);
-                host.appendMessageToChat(div, message);
+                if (host.appendMessageToChat(div, message) === true) renderedSet.add(message.id);
                 return;
             }
             const undoBtn = document.createElement('button');
@@ -585,6 +584,6 @@ export function renderMessageElement(
             }
             div.appendChild(todoCard);
         }
-        host.appendMessageToChat(div, message);
+        if (host.appendMessageToChat(div, message) === true) renderedSet.add(message.id);
     
 }
