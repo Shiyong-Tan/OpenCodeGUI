@@ -13,29 +13,7 @@ import type { AttachmentPayload, SavedAttachment } from './attachments/Attachmen
 import { SmartSearchSessionRegistry } from './search/SmartSearchSessionRegistry';
 import { SmartSearchService } from './search/SmartSearchService';
 import type { SmartSearchMessage } from './search/SmartSearchService';
-
-type SessionMessage = {
-    role: 'user' | 'assistant' | 'system';
-    text: string;
-    id?: string;
-    messageIndex?: number;
-    meta?: Record<string, unknown>;
-};
-
-type ChangeListRecord = {
-    id: string;
-    commitHead: string;
-    commitBase: string;
-    files: string[];
-    anchorMessageId: string;
-    createdAt: number;
-    reverted?: boolean;
-    statsByPath?: Record<string, { additions: number | null; deletions: number | null }>;
-    userMessageId?: string;
-    rootUserMessageId?: string;
-    latestAppendUserMessageId?: string;
-    assistantMessageId?: string;
-};
+import { injectChangeListRecords, type ChangeListRecord, type SessionMessage } from './changes/ChangeListInjection';
 
 type CanceledTurnRecord = {
     opId?: string;
@@ -3096,149 +3074,22 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const records = await this.readChangeLists(sessionId);
         if (!records.length) return formatted;
 
-        const messages = formatted.messages || [];
-        const idSet = new Set(messages.map((m) => m.id).filter((id): id is string => typeof id === 'string'));
-        const byAnchor = new Map<string, ChangeListRecord[]>();
-        const byId = new Map<string, ChangeListRecord>();
         const ownershipMap = await this.readPersistedSessionMap(sessionId);
-        const counts = {
-            read: records.length,
-            injectedByResolvedAnchor: 0,
-            convertedByExistingId: 0,
-            skippedMissingAnchor: 0,
-            skippedDuplicate: 0
-        };
-        const collectStringCandidates = (value: unknown, out: string[] = []): string[] => {
-            if (typeof value === 'string' && value.length > 0) {
-                out.push(value);
-            } else if (Array.isArray(value)) {
-                for (const item of value) collectStringCandidates(item, out);
-            } else if (value && typeof value === 'object') {
-                for (const item of Object.values(value as Record<string, unknown>)) collectStringCandidates(item, out);
-            }
-            return out;
-        };
-        const resolveRecordAnchor = (record: ChangeListRecord): string | undefined => {
-            const rawRecord = record as ChangeListRecord & Record<string, unknown>;
-            const meta = rawRecord.metadata || rawRecord.meta;
-            const candidates = [
-                record.anchorMessageId,
-                rawRecord.ownerMsgId,
-                rawRecord.ownerMessageId,
-                rawRecord.currentOwnerMsgId,
-                rawRecord.currentOwnerMessageId,
-                rawRecord.finalAssistantMsgId,
-                rawRecord.assistantMsgId,
-                rawRecord.assistantMessageId,
-                rawRecord.messageId,
-                rawRecord.msgId,
-                ...collectStringCandidates(meta)
-            ].filter((id): id is string => typeof id === 'string' && id.length > 0);
-            const seen = new Set<string>();
-            for (const candidate of candidates) {
-                if (seen.has(candidate)) continue;
-                seen.add(candidate);
-                const resolved = this.resolvePersistedVisibleOwnerMessageId(ownershipMap, candidate) || candidate;
-                if (idSet.has(resolved)) return resolved;
-                if (idSet.has(candidate)) return candidate;
-            }
-            return undefined;
-        };
-        for (const record of records) {
-            const resolvedAnchor = resolveRecordAnchor(record);
-            const effectiveRecord = resolvedAnchor && resolvedAnchor !== record.anchorMessageId
-                ? { ...record, anchorMessageId: resolvedAnchor }
-                : record;
-            if (effectiveRecord.id && idSet.has(effectiveRecord.id)) {
-                if (byId.has(effectiveRecord.id)) {
-                    counts.skippedDuplicate++;
-                    continue;
-                }
-                byId.set(effectiveRecord.id, effectiveRecord);
-                counts.convertedByExistingId++;
-                continue;
-            }
-            if (!resolvedAnchor || !idSet.has(resolvedAnchor)) {
-                if (!effectiveRecord.id || !idSet.has(effectiveRecord.id)) {
-                    counts.skippedMissingAnchor++;
-                    this.uiDebugChannel.appendLine(
-                        `[EXT][CHANGELIST_INJECT_SKIP] sessionId=${sessionId} changeListId=${record.id || 'null'} anchor=${record.anchorMessageId || 'null'} resolvedAnchor=${resolvedAnchor || 'null'} reason=missing-resolvable-anchor`
-                    );
-                }
-                continue;
-            }
-            if (!byAnchor.has(resolvedAnchor)) {
-                byAnchor.set(resolvedAnchor, []);
-            }
-            byAnchor.get(resolvedAnchor)?.push(effectiveRecord);
-            counts.injectedByResolvedAnchor++;
-        }
+        const injection = injectChangeListRecords({
+            messages: formatted.messages || [],
+            records,
+            resolveOwner: (candidate) => this.resolvePersistedVisibleOwnerMessageId(ownershipMap, candidate),
+            onMissingAnchor: (record, resolvedAnchor) => {
+                this.uiDebugChannel.appendLine(
+                    `[EXT][CHANGELIST_INJECT_SKIP] sessionId=${sessionId} changeListId=${record.id || 'null'} anchor=${record.anchorMessageId || 'null'} resolvedAnchor=${resolvedAnchor || 'null'} reason=missing-resolvable-anchor`
+                );
+            },
+        });
+        const counts = injection.counts;
         this.uiDebugChannel.appendLine(
             `[EXT][CHANGELIST_INJECT] sessionId=${sessionId} read=${counts.read} injectedByResolvedAnchor=${counts.injectedByResolvedAnchor} convertedByExistingId=${counts.convertedByExistingId} skippedMissingAnchor=${counts.skippedMissingAnchor} skippedDuplicate=${counts.skippedDuplicate}`
         );
-        if (!byAnchor.size && !byId.size) return formatted;
-
-        for (const list of byAnchor.values()) {
-            list.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
-        }
-
-        const merged: SessionMessage[] = [];
-        const seenIds = new Set<string>();
-        for (const message of messages) {
-            let nextMessage = message;
-            if (message?.id) {
-                const bound = byId.get(message.id);
-                if (bound) {
-                    nextMessage = {
-                        ...message,
-                        role: 'system',
-                        text: '',
-                        meta: {
-                            ...(message.meta || {}),
-                            kind: 'changeList',
-                            files: bound.files,
-                            source: 'message-summary-diffs',
-                            scope: 'turn',
-                            commitHead: bound.commitHead,
-                            commitBase: bound.commitBase,
-                            reverted: bound.reverted === true,
-                            statsByPath: bound.statsByPath || {}
-                        }
-                    };
-                }
-            }
-            if (message.id && seenIds.has(message.id)) {
-                continue;
-            }
-            if (message.id) {
-                seenIds.add(message.id);
-            }
-            merged.push(nextMessage);
-            if (!message.id) continue;
-            const list = byAnchor.get(message.id);
-            if (!list || !list.length) continue;
-            for (const record of list) {
-                if (seenIds.has(record.id)) continue;
-                merged.push({
-                    role: 'system',
-                    id: record.id,
-                    text: '',
-                    meta: {
-                        kind: 'changeList',
-                        files: record.files,
-                        source: 'message-summary-diffs',
-                        scope: 'turn',
-                        commitHead: record.commitHead,
-                        commitBase: record.commitBase,
-                        reverted: record.reverted === true,
-                        statsByPath: record.statsByPath || {}
-                    }
-                });
-                seenIds.add(record.id);
-            }
-        }
-
-        return { ...formatted, messages: this.normalizeDisplayMessagesForSnapshot(merged) };
+        return { ...formatted, messages: this.normalizeDisplayMessagesForSnapshot(injection.messages) };
     }
 
     private collectSegmentVisibleMemberMessageIds(segments: any[] | undefined): Set<string> {
