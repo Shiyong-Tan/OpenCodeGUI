@@ -589,6 +589,18 @@ describe('append runtime isolation', () => {
         expect(client.canceledActiveTurnBySession.has('ses_keep')).toBe(false);
     });
 
+    it('retains an already-bound append successor only through the in-flight preserve allowlist', () => {
+        const client = createClientWithAppendTurn('ses_successor', 'msg_root');
+        client.beginAppendPrompt('ses_successor', 'append-local', 'follow up', 'msg_root');
+        client.bindAppendUserMessage('ses_successor', 'msg_append');
+        client.finishTurn('ses_successor');
+        client.tryBindAppendSuccessor('ses_successor', 'msg_successor', 'msg_append');
+        client.resetSessionState({ preserveInFlightSessionIds: new Set(['ses_successor']) });
+        expect(client.getActiveAppendSuccessor('ses_successor')).toEqual(expect.objectContaining({ assistantMsgId: 'msg_successor' }));
+        client.resetSessionState();
+        expect(client.getActiveAppendSuccessor('ses_successor')).toBeUndefined();
+    });
+
     it('retains only allowlisted provider bindings for pre-reset send-in-flight sessions', () => {
         const provider = createProvider();
         provider.client.resetSessionState = jest.fn();

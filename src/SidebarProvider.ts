@@ -5367,6 +5367,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
     }
 
+    /**
+     * Clears only the tmp key sealed by the predecessor of a proven append successor.
+     * The local-key map intentionally remains untouched: it belongs to the ordinary
+     * send lifecycle and is not successor ownership evidence.
+     */
+    private consumeAppendSuccessorTmpKey(sessionId: string, successor: {
+        generation: number;
+        sealedPredecessorTmpKey?: string;
+    }): void {
+        const expected = successor?.sealedPredecessorTmpKey;
+        const actual = this.pendingAssistantTmpKeyBySession.get(sessionId);
+        if (!expected || !actual || actual !== expected) {
+            this.uiDebugChannel.appendLine(`[EXT][APPEND_SUCCESSOR_TMP_RETAIN] sessionId=${sessionId} generation=${successor?.generation} reason=${!expected ? 'missing-sealed-key' : (!actual ? 'missing-session-key' : 'generation-key-mismatch')}`);
+            return;
+        }
+        this.pendingAssistantTmpKeyBySession.delete(sessionId);
+        this.uiDebugChannel.appendLine(`[EXT][APPEND_SUCCESSOR_TMP_CLEAR] sessionId=${sessionId} generation=${successor.generation}`);
+    }
+
     private resetUiState(sessionId?: string): void {
         this.resetSessionState();
         if (this._view) {

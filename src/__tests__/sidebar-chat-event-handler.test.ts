@@ -30,4 +30,20 @@ describe('SidebarChatEventHandler', () => {
       sessionId: 'session-a', parentSessionId: 'parent-a', agentSessionId: 'agent-a', displayTarget: 'parent',
     });
   });
+
+  test('forwards canonical append successor text without a predecessor tmp key', async () => {
+    const webview = { postMessage: jest.fn() };
+    const host = {
+      smartSearchSessions: { owns: () => false }, currentSessionId: 'other', _view: { webview },
+      markWebviewActiveTurnUpdated: jest.fn(), appendAssistantBuffer: jest.fn(), isCurrentTurnSynthetic: () => false,
+      getAssistantMetaAllowedSessionIds: () => ['ses'], pendingAssistantTmpKeyBySession: new Map([['ses', 'tmp:old']]),
+      activeSubagentSessionIds: new Set(), subagentProgressBySession: new Map(),
+    };
+    await handleSidebarChatEvent(host, {
+      type: 'text', sessionId: 'ses', assistantMsgId: 'msg_successor', text: 'canonical',
+      appendSuccessor: { rootUserMsgId: 'msg_root', appendUserMsgId: 'msg_append', assistantMsgId: 'msg_successor', generation: 1, startedAt: 1 },
+    } as any, webview as any);
+    expect(webview.postMessage).toHaveBeenCalledWith(expect.objectContaining({ assistantMsgId: 'msg_successor', lastText: 'canonical' }));
+    expect(webview.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ tmpKey: 'tmp:old' }));
+  });
 });
