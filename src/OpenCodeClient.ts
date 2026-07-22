@@ -1,5 +1,4 @@
 import * as cp from 'child_process';
-import * as fs from 'fs';
 import * as net from 'net';
 import * as https from 'https';
 import * as path from 'path';
@@ -22,6 +21,7 @@ import type { ModelInfo, ModelQuota } from './models/types';
 import { OpenCodeCommandResolver } from './transport/OpenCodeCommandResolver';
 import { OpenCodeProcessRunner } from './transport/OpenCodeProcessRunner';
 import { OpenCodeHttpClient, type ServerConnection, type ServerFetchOptions, type ServerLock } from './transport/OpenCodeHttpClient';
+import { OpenCodeServerLockStore } from './transport/OpenCodeServerLockStore';
 export type { ModelInfo, ModelQuota, ModelQuotaRow } from './models/types';
 
 export type AgentInfo = {
@@ -444,6 +444,7 @@ export class OpenCodeClient {
     private readonly commandResolver: OpenCodeCommandResolver;
     private readonly processRunner: OpenCodeProcessRunner;
     private readonly httpClient: OpenCodeHttpClient;
+    private readonly serverLocks: OpenCodeServerLockStore;
     public static outputChannel = vscode.window.createOutputChannel("OpenCode CLI");
     private serverProcess?: cp.ChildProcess;
     private serverBaseUrl?: string;
@@ -456,15 +457,10 @@ export class OpenCodeClient {
     private storage?: vscode.Memento;
     private serverPid?: number;
     private serverPassword?: string;
-    private serverLockCache?: { lock: ServerLock; baseUrl: string; authHeader: string; mtimeMs: number };
     private eventStreamAbort?: AbortController;
     private eventStreamActive = false;
     private eventStreamBackoffMs = 1000;
     private readonly eventListeners = new Set<(event: ChatEvent) => void>();
-    private readonly serverLockDir = '.opencode';
-    private readonly serverLockFile = 'server.lock.json';
-    private readonly serverPortBase = 42000;
-    private readonly serverPortRange = 256;
     private currentSessionId?: string;
     private messageIndexById = new Map<string, number>();
     private messageOrder: string[] = [];
@@ -787,6 +783,10 @@ export class OpenCodeClient {
             resolver: this.commandResolver,
             getCwd: () => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd(),
             log: (message) => OpenCodeClient.outputChannel.appendLine(message),
+        });
+        this.serverLocks = new OpenCodeServerLockStore({
+            getWorkspaceRoot: () => this.workspaceRoot,
+            log: (message) => this.logUiDebug(message),
         });
         this.httpClient = new OpenCodeHttpClient({
             waitUntilReady: () => this.waitForServerReady(),
@@ -4897,205 +4897,24 @@ export class OpenCodeClient {
         return this.serverBaseUrl;
     }
 
-    private normalizeWorkspaceRootForHash(workspaceRoot: string): string {
-        let normalized = workspaceRoot.replace(/\\/g, '/');
-        normalized = normalized.replace(/\/+$/, '');
-        if (process.platform === 'win32') {
-            normalized = normalized.toLowerCase();
-        }
-        return normalized;
-    }
-
-    private hashWorkspaceRoot(workspaceRoot: string): number {
-        const normalized = this.normalizeWorkspaceRootForHash(workspaceRoot);
-        let hash = 0;
-        for (let i = 0; i < normalized.length; i++) {
-            hash = ((hash * 31) + normalized.charCodeAt(i)) >>> 0;
-        }
-        return hash;
-    }
-
-    private getLockDirPath(workspaceRoot: string): string {
-        return path.join(workspaceRoot, this.serverLockDir);
-    }
-
-    private getLockFilePath(workspaceRoot: string): string {
-        return path.join(this.getLockDirPath(workspaceRoot), this.serverLockFile);
-    }
-
-    private async ensureLockDir(workspaceRoot: string): Promise<void> {
-        const dirPath = this.getLockDirPath(workspaceRoot);
-        await fs.promises.mkdir(dirPath, { recursive: true });
-    }
-
-    private generateServerPassword(): string {
-        return crypto.randomBytes(32).toString('base64');
-    }
-
-    private getDefaultPort(workspaceRoot: string): number {
-        const hash = this.hashWorkspaceRoot(workspaceRoot);
-        return this.serverPortBase + (hash % this.serverPortRange);
-    }
-
-    private getPasswordPrefix(password: string): string {
-        return password.slice(0, 6);
-    }
-
-    private async readServerLockFromDisk(workspaceRoot: string): Promise<{ lock: ServerLock; mtimeMs: number } | null> {
-        const lockPath = this.getLockFilePath(workspaceRoot);
-        try {
-            const raw = await fs.promises.readFile(lockPath, 'utf-8');
-            const parsed = JSON.parse(raw);
-            if (!parsed || typeof parsed !== 'object') return null;
-            const port = Number(parsed.port);
-            const password = typeof parsed.password === 'string' ? parsed.password : '';
-            const lock: ServerLock = {
-                workspaceRoot: typeof parsed.workspaceRoot === 'string' ? parsed.workspaceRoot : workspaceRoot,
-                port: Number.isFinite(port) ? port : this.getDefaultPort(workspaceRoot),
-                password: password || this.generateServerPassword(),
-                updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : new Date().toISOString()
-            };
-            const stat = await fs.promises.stat(lockPath);
-            return { lock, mtimeMs: stat.mtimeMs };
-        } catch {
-            return null;
-        }
-    }
-
     private async writeServerLock(lock: ServerLock, workspaceRoot: string, logUpdate: boolean): Promise<number> {
-        const pathFull = this.getLockFilePath(workspaceRoot);
-        const tmpPath = `${pathFull}.tmp`;
-        const payload: ServerLock = {
-            workspaceRoot: lock.workspaceRoot,
-            port: lock.port,
-            password: lock.password,
-            updatedAt: new Date().toISOString()
-        };
-        await fs.promises.writeFile(tmpPath, JSON.stringify(payload, null, 2), 'utf-8');
-        await fs.promises.rename(tmpPath, pathFull);
-        const stat = await fs.promises.stat(pathFull);
-        if (logUpdate) {
-            this.logUiDebug(`EXT: server.lock.update | port=${payload.port} | updatedAt=${payload.updatedAt}`);
-        }
-        return stat.mtimeMs;
+        return this.serverLocks.write(lock, workspaceRoot, logUpdate);
     }
 
     private updateServerLockCache(lock: ServerLock, mtimeMs: number): void {
-        this.serverLockCache = {
-            lock,
-            baseUrl: `http://127.0.0.1:${lock.port}`,
-            authHeader: this.buildAuthHeader(lock.password),
-            mtimeMs
-        };
+        this.serverLocks.updateCache(lock, mtimeMs);
     }
 
     private async readOrCreateServerLock(workspaceRoot: string): Promise<{ lock: ServerLock; mtimeMs: number }> {
-        await this.ensureLockDir(workspaceRoot);
-        const lockPath = this.getLockFilePath(workspaceRoot);
-        const exists = fs.existsSync(lockPath);
-        const defaultPort = this.getDefaultPort(workspaceRoot);
-
-        if (!exists) {
-            this.logUiDebug(
-                `EXT: server.lock.read | path=${lockPath} | exists=false | port=${defaultPort} | hasPassword=false`
-            );
-            const lock: ServerLock = {
-                workspaceRoot,
-                port: defaultPort,
-                password: this.generateServerPassword(),
-                updatedAt: new Date().toISOString()
-            };
-            await this.writeServerLock(lock, workspaceRoot, false);
-            this.logUiDebug(
-                `EXT: server.lock.create | path=${lockPath} | port=${lock.port} | passwordHashPrefix=${this.getPasswordPrefix(lock.password)}`
-            );
-            const reread = await this.readServerLockFromDisk(workspaceRoot);
-            if (reread) {
-                this.logUiDebug(
-                    `EXT: server.lock.read | path=${lockPath} | exists=true | port=${reread.lock.port} | hasPassword=${String(Boolean(reread.lock.password))}`
-                );
-                return reread;
-            }
-            const stat = await fs.promises.stat(lockPath);
-            return { lock, mtimeMs: stat.mtimeMs };
-        }
-
-        const loaded = await this.readServerLockFromDisk(workspaceRoot);
-        if (!loaded) {
-            this.logUiDebug(
-                `EXT: server.lock.read | path=${lockPath} | exists=true | port=${defaultPort} | hasPassword=false`
-            );
-            const lock: ServerLock = {
-                workspaceRoot,
-                port: defaultPort,
-                password: this.generateServerPassword(),
-                updatedAt: new Date().toISOString()
-            };
-            const mtimeMs = await this.writeServerLock(lock, workspaceRoot, false);
-            this.logUiDebug(
-                `EXT: server.lock.create | path=${lockPath} | port=${lock.port} | passwordHashPrefix=${this.getPasswordPrefix(lock.password)}`
-            );
-            return { lock, mtimeMs };
-        }
-
-        const lock = loaded.lock;
-        this.logUiDebug(
-            `EXT: server.lock.read | path=${lockPath} | exists=true | port=${lock.port} | hasPassword=${String(Boolean(lock.password))}`
-        );
-        let updated = false;
-        const prevPort = lock.port;
-        if (lock.workspaceRoot !== workspaceRoot) {
-            lock.workspaceRoot = workspaceRoot;
-            updated = true;
-        }
-        if (!lock.password) {
-            lock.password = this.generateServerPassword();
-            updated = true;
-        }
-        if (!Number.isFinite(lock.port)) {
-            lock.port = defaultPort;
-            updated = true;
-        }
-        if (updated) {
-            const portChanged = lock.port !== prevPort;
-            const mtimeMs = await this.writeServerLock(lock, workspaceRoot, portChanged);
-            return { lock, mtimeMs };
-        }
-        return loaded;
+        return this.serverLocks.readOrCreate(workspaceRoot);
     }
 
     private async getServerConn(forceRefresh = false): Promise<ServerConnection> {
-        const lockPath = this.getLockFilePath(this.workspaceRoot);
-        if (!forceRefresh && this.serverLockCache) {
-            try {
-                const stat = await fs.promises.stat(lockPath);
-                if (stat.mtimeMs === this.serverLockCache.mtimeMs) {
-                    return {
-                        host: '127.0.0.1',
-                        port: this.serverLockCache.lock.port,
-                        baseUrl: this.serverLockCache.baseUrl,
-                        authHeader: this.serverLockCache.authHeader,
-                        lock: this.serverLockCache.lock
-                    };
-                }
-            } catch {
-                // fall through to refresh
-            }
-        }
-
-        const { lock, mtimeMs } = await this.readOrCreateServerLock(this.workspaceRoot);
-        this.updateServerLockCache(lock, mtimeMs);
-        return {
-            host: '127.0.0.1',
-            port: lock.port,
-            baseUrl: `http://127.0.0.1:${lock.port}`,
-            authHeader: this.buildAuthHeader(lock.password),
-            lock
-        };
+        return this.serverLocks.getConnection(forceRefresh);
     }
 
     private buildAuthHeader(password: string): string {
-        return `Basic ${Buffer.from(`opencode:${password}`).toString('base64')}`;
+        return this.serverLocks.buildAuthHeader(password);
     }
 
     private initServerReadyPromise(): void {
@@ -5183,10 +5002,8 @@ export class OpenCodeClient {
     }
 
     private async migrateServerPort(lock: ServerLock, reason: '401' | 'EADDRINUSE'): Promise<void> {
-        const baseHash = this.hashWorkspaceRoot(lock.workspaceRoot);
         const startPort = lock.port;
-        for (let i = 0; i < this.serverPortRange; i++) {
-            const candidate = this.serverPortBase + ((baseHash + i) % this.serverPortRange);
+        for (const candidate of this.serverLocks.getMigrationPorts(lock.workspaceRoot)) {
             const result = await this.checkServerHealth(candidate, lock.password, 1000);
             this.logUiDebug(`EXT: server.health.try | port=${candidate} | result=${result}`);
             if (result === 'ok') {
@@ -5215,7 +5032,7 @@ export class OpenCodeClient {
             return;
         }
 
-        const message = `OpenCode server failed to find available port in range ${this.serverPortBase}-${this.serverPortBase + this.serverPortRange - 1}.`;
+        const message = `OpenCode server failed to find available port in range ${this.serverLocks.portBase}-${this.serverLocks.portBase + this.serverLocks.portRange - 1}.`;
         vscode.window.showErrorMessage(message);
         throw new Error(message);
     }
