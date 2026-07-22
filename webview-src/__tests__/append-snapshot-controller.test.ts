@@ -71,4 +71,32 @@ describe('append snapshot controller', () => {
     expect(controller.restore('session-a', session)).toMatchObject({ rootCount: 1, appendCount: 1 });
     expect(session.appendRootUserKey).toBe('msg_live');
   });
+
+  test('append status progression is monotonic and assistant parent marks the prefix seen', () => {
+    const { controller } = createHarness();
+    const root = { id: 'msg_root', role: 'user', meta: { appendedPrompts: [
+      { clientMessageId: 'c1', appendUserMsgId: 'msg_a', status: 'queued' },
+      { clientMessageId: 'c2', appendUserMsgId: 'msg_b', status: 'sending' },
+    ] } };
+    const session = { messagesById: new Map([['msg_root', root]]) };
+    expect(controller.markSeenByAssistantParent(session, 'msg_b')).toBe(true);
+    expect(root.meta.appendedPrompts.map((item) => item.status)).toEqual(['seen', 'seen']);
+    controller.upsertItem(root, { clientMessageId: 'c1', status: 'sending' });
+    expect(root.meta.appendedPrompts[0].status).toBe('seen');
+  });
+
+  test('resolves append roots by client id before mapped turn anchors', () => {
+    const { controller } = createHarness();
+    const direct = { id: 'msg_direct', role: 'user', meta: { appendedPrompts: [{ clientMessageId: 'c1' }] } };
+    const fallback = { id: 'msg_fallback', role: 'user', meta: {} };
+    const session = {
+      messagesById: new Map([['msg_direct', direct], ['msg_fallback', fallback]]),
+      appendRootUserKey: 'local-fallback',
+      clientKeyToServerId: new Map([['local-fallback', 'msg_fallback']]),
+      serverIdToClientKey: new Map(),
+      serverIdToKey: new Map(),
+    };
+    expect(controller.resolveRootMessage(session, { clientMessageId: 'c1' })).toBe(direct);
+    expect(controller.resolveRootMessage(session, {})).toBe(fallback);
+  });
 });

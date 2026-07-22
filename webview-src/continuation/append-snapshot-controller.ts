@@ -157,6 +157,103 @@ export function createAppendSnapshotController(options: AppendSnapshotController
     return { rootCount, appendCount, restoredRootUserKey };
   }
 
+  function getItems(message: any): any[] {
+    return Array.isArray(message?.meta?.appendedPrompts) ? message.meta.appendedPrompts : [];
+  }
+
+  function canAppend(session: any, message: any, activeSessionId: string | null | undefined): boolean {
+    if (!session || !message || message.role !== 'user' || !activeSessionId) return false;
+    if (session.backendTurnInFlight !== true || session.turnFullyFinalized === true || session.canceledActiveTurn === true) return false;
+    if (session.finalAssistantLock?.assistantMsgId) return false;
+    return Boolean(session.appendRootUserKey && message.id === session.appendRootUserKey);
+  }
+
+  function hasBlockingSubmission(message: any): boolean {
+    return getItems(message).some((item) => item && item.status === 'sending');
+  }
+
+  function resolveRootMessage(session: any, message: any): any | null {
+    if (!session?.messagesById) return null;
+    const clientMessageId = typeof message?.clientMessageId === 'string' ? message.clientMessageId : '';
+    if (clientMessageId) {
+      for (const candidate of session.messagesById.values()) {
+        if (candidate?.role === 'user' && getItems(candidate).some((item) => item?.clientMessageId === clientMessageId)) return candidate;
+      }
+    }
+    const keys: string[] = [];
+    const addKey = (key: unknown) => {
+      if (typeof key !== 'string' || !key || keys.includes(key)) return;
+      keys.push(key);
+      for (const mapped of [
+        session.serverIdToClientKey?.get?.(key),
+        session.clientKeyToServerId?.get?.(key),
+        session.serverIdToKey?.get?.(key),
+      ]) {
+        if (typeof mapped === 'string' && mapped && !keys.includes(mapped)) keys.push(mapped);
+      }
+    };
+    addKey(message?.rootUserMsgId);
+    addKey(session.appendRootUserKey);
+    addKey(session.lastTurnUserId);
+    for (const key of keys) {
+      const candidate = session.messagesById.get(key);
+      if (candidate?.role === 'user') return candidate;
+    }
+    return null;
+  }
+
+  function upsertItem(message: any, item: any): any | null {
+    if (!message) return null;
+    if (!message.meta) message.meta = {};
+    const items = Array.isArray(message.meta.appendedPrompts) ? [...message.meta.appendedPrompts] : [];
+    const index = items.findIndex((entry) =>
+      (item.clientMessageId && entry.clientMessageId === item.clientMessageId)
+      || (item.appendUserMsgId && entry.appendUserMsgId === item.appendUserMsgId));
+    const existing = index >= 0 ? items[index] : {};
+    const statusRank: Record<string, number> = { sending: 1, queued: 2, seen: 3, applied: 4, failed: 10, rejected: 10 };
+    let status = item.status || existing.status;
+    if (existing.status && item.status) {
+      status = (statusRank[item.status] || 0) >= (statusRank[existing.status] || 0) ? item.status : existing.status;
+    }
+    const next = { ...existing, ...item, status };
+    if (index >= 0) items[index] = next;
+    else items.push(next);
+    const seenClientMessageIds = new Set<string>();
+    message.meta.appendedPrompts = items.filter((entry, entryIndex) => {
+      if (!entry?.clientMessageId) return true;
+      if (entryIndex === index) {
+        seenClientMessageIds.add(entry.clientMessageId);
+        return true;
+      }
+      if (seenClientMessageIds.has(entry.clientMessageId)) return false;
+      seenClientMessageIds.add(entry.clientMessageId);
+      return true;
+    });
+    return next;
+  }
+
+  function markSeenByAssistantParent(session: any, parentId: string): boolean {
+    if (!session || !parentId || !(session.messagesById instanceof Map)) return false;
+    for (const message of session.messagesById.values()) {
+      const items = getItems(message);
+      const parentIndex = items.findIndex((entry) => entry?.appendUserMsgId === parentId);
+      if (parentIndex < 0) continue;
+      let changed = false;
+      for (let index = 0; index <= parentIndex; index++) {
+        const item = items[index];
+        if (!item?.appendUserMsgId || ['seen', 'applied', 'failed', 'rejected'].includes(item.status)) continue;
+        upsertItem(message, {
+          clientMessageId: item.clientMessageId,
+          appendUserMsgId: item.appendUserMsgId,
+          status: 'seen',
+        });
+        changed = true;
+      }
+      return changed;
+    }
+    return false;
+  }
+
   return Object.freeze({
     sanitizeItem,
     sanitizeItems,
@@ -166,5 +263,11 @@ export function createAppendSnapshotController(options: AppendSnapshotController
     hasProtectedInflightRoot,
     sync,
     restore,
+    getItems,
+    canAppend,
+    hasBlockingSubmission,
+    resolveRootMessage,
+    upsertItem,
+    markSeenByAssistantParent,
   });
 }

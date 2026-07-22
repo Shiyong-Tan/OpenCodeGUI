@@ -13443,134 +13443,27 @@ function applyPromptToSession(sessionId, payload) {
     }
 
 function canAppendToMessage(session, message) {
-    if (!session || !message || message.role !== 'user') return false;
-    if (!activeSessionId) return false;
-    if (session.backendTurnInFlight !== true) return false;
-    if (session.turnFullyFinalized === true) return false;
-    if (session.canceledActiveTurn === true) return false;
-    if (session.finalAssistantLock?.assistantMsgId) return false;
-    return Boolean(session.appendRootUserKey && message.id === session.appendRootUserKey);
+    return appendSnapshotController.canAppend(session, message, activeSessionId);
 }
 
 function hasBlockingAppendSubmission(message) {
-    const items = getAppendItems(message);
-    return items.some((item) => item && item.status === 'sending');
+    return appendSnapshotController.hasBlockingSubmission(message);
 }
 
 function getAppendItems(message) {
-    if (!message.meta || !Array.isArray(message.meta.appendedPrompts)) return [];
-    return message.meta.appendedPrompts;
+    return appendSnapshotController.getItems(message);
 }
 
 function resolveAppendRootMessage(session, message) {
-    if (!session?.messagesById) return null;
-    const clientMessageId = typeof message?.clientMessageId === 'string' ? message.clientMessageId : '';
-
-    if (clientMessageId) {
-        for (const candidate of session.messagesById.values()) {
-            if (!candidate || candidate.role !== 'user') continue;
-            const items = getAppendItems(candidate);
-            if (items.some((item) => item?.clientMessageId === clientMessageId)) {
-                return candidate;
-            }
-        }
-    }
-
-    const keys = [];
-    const addKey = (key) => {
-        if (typeof key !== 'string' || !key || keys.includes(key)) return;
-        keys.push(key);
-        const localKey = session.serverIdToClientKey?.get?.(key);
-        if (typeof localKey === 'string' && localKey && !keys.includes(localKey)) keys.push(localKey);
-        const stableKey = session.clientKeyToServerId?.get?.(key);
-        if (typeof stableKey === 'string' && stableKey && !keys.includes(stableKey)) keys.push(stableKey);
-        const mappedKey = session.serverIdToKey?.get?.(key);
-        if (typeof mappedKey === 'string' && mappedKey && !keys.includes(mappedKey)) keys.push(mappedKey);
-    };
-
-    addKey(message?.rootUserMsgId);
-    addKey(session.appendRootUserKey);
-    addKey(session.lastTurnUserId);
-
-    for (const key of keys) {
-        const candidate = session.messagesById.get(key);
-        if (candidate?.role === 'user') return candidate;
-    }
-    return null;
+    return appendSnapshotController.resolveRootMessage(session, message);
 }
 
 function upsertAppendItem(message, item) {
-    if (!message) return null;
-    if (!message.meta) message.meta = {};
-    const items = Array.isArray(message.meta.appendedPrompts)
-        ? [...message.meta.appendedPrompts]
-        : [];
-    const index = items.findIndex((entry) =>
-        (item.clientMessageId && entry.clientMessageId === item.clientMessageId)
-        || (item.appendUserMsgId && entry.appendUserMsgId === item.appendUserMsgId)
-    );
-    const existing = index >= 0 ? items[index] : {};
-    const statusRank = { sending: 1, queued: 2, seen: 3, applied: 4, failed: 10, rejected: 10 };
-    let status = item.status || existing.status;
-    if (existing.status && item.status) {
-        const oldRank = statusRank[existing.status] || 0;
-        const newRank = statusRank[item.status] || 0;
-        status = newRank >= oldRank ? item.status : existing.status;
-    }
-    const next = {
-        ...existing,
-        ...item,
-        status
-    };
-    if (index >= 0) {
-        items[index] = next;
-    } else {
-        items.push(next);
-    }
-    const seenClientMessageIds = new Set();
-    message.meta.appendedPrompts = items.filter((entry, entryIndex) => {
-        if (!entry?.clientMessageId) return true;
-        if (entryIndex === index) {
-            seenClientMessageIds.add(entry.clientMessageId);
-            return true;
-        }
-        if (seenClientMessageIds.has(entry.clientMessageId)) return false;
-        seenClientMessageIds.add(entry.clientMessageId);
-        return true;
-    });
-    return next;
+    return appendSnapshotController.upsertItem(message, item);
 }
 
 function markAppendItemSeenByAssistantParent(session, parentId) {
-    if (!session || !parentId || !(session.messagesById instanceof Map)) return false;
-    for (const message of session.messagesById.values()) {
-        const items = Array.isArray(message?.meta?.appendedPrompts)
-            ? message.meta.appendedPrompts
-            : [];
-        const parentIndex = items.findIndex((entry) => entry?.appendUserMsgId === parentId);
-        if (parentIndex < 0) continue;
-        let changed = false;
-        for (let i = 0; i <= parentIndex; i += 1) {
-            const item = items[i];
-            if (
-                !item?.appendUserMsgId ||
-                item.status === 'seen' ||
-                item.status === 'applied' ||
-                item.status === 'failed' ||
-                item.status === 'rejected'
-            ) {
-                continue;
-            }
-            upsertAppendItem(message, {
-                clientMessageId: item.clientMessageId,
-                appendUserMsgId: item.appendUserMsgId,
-                status: 'seen'
-            });
-            changed = true;
-        }
-        return changed;
-    }
-    return false;
+    return appendSnapshotController.markSeenByAssistantParent(session, parentId);
 }
 
 function submitAppendMessage(sessionId, rootUserKey, text) {
