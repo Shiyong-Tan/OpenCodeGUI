@@ -275,7 +275,7 @@ const changeListEventController = createChangeListEventController({
     postDebug: (payload) => vscode.postMessage({ type: 'ui-debug', payload }),
     now: () => Date.now()
 });
-const createSegmentTopology = window.__ocFeatures?.createSegmentTopology;
+const createSegmentTopology = window.__ocUndo?.createSegmentTopology;
 if (typeof createSegmentTopology !== 'function') {
     throw new Error('Segment topology is unavailable');
 }

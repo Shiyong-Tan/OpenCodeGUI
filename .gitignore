@@ -25,3 +25,5 @@ media/rendering.bundle.js
 media/rendering.bundle.js.map
 media/features.bundle.js
 media/features.bundle.js.map
+media/undo.bundle.js
+media/undo.bundle.js.map
