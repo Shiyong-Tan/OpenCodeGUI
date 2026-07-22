@@ -2,6 +2,8 @@ import fs from 'fs';
 import path from 'path';
 import { renderMessageElement } from '../rendering/message-renderer';
 
+const render = renderMessageElement as (host: any, message: any, renderedSet: Set<string>) => void;
+
 describe('message renderer module', () => {
   test('main keeps a live host facade instead of duplicating renderer behavior', () => {
     const source = fs.readFileSync(path.join(process.cwd(), 'media', 'main.js'), 'utf8');
@@ -14,7 +16,7 @@ describe('message renderer module', () => {
     const rendered = new Set(['message-a']);
     const host = new Proxy({}, { get: () => { throw new Error('host accessed'); } });
     const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
-    expect(() => renderMessageElement(host, { id: 'message-a' }, rendered)).not.toThrow();
+    expect(() => render(host, { id: 'message-a' }, rendered)).not.toThrow();
     expect(warn).toHaveBeenCalledWith('[Render] duplicate message skipped', 'message-a');
     warn.mockRestore();
   });
@@ -28,7 +30,7 @@ describe('message renderer module', () => {
       changeListRenderer: { render: () => root },
       appendChatRenderRoot: append,
     };
-    renderMessageElement(host, { id: 'change-a', role: 'system', meta: { kind: 'changeList' } }, new Set());
+    render(host, { id: 'change-a', role: 'system', meta: { kind: 'changeList' } }, new Set());
     expect(append).toHaveBeenCalledTimes(1);
     expect(append).toHaveBeenCalledWith(root);
   });
@@ -42,7 +44,7 @@ describe('message renderer module', () => {
       appendChatRenderRoot: append,
     };
 
-    expect(() => renderMessageElement(host, {
+    expect(() => render(host, {
       id: 'change-empty', role: 'system', meta: { kind: 'changeList' },
     }, new Set())).not.toThrow();
     expect(append).not.toHaveBeenCalled();
@@ -66,7 +68,7 @@ describe('message renderer module', () => {
     };
 
     try {
-      renderMessageElement(host, { id: 'blank-user', role: 'user', text: '   ' }, new Set());
+      render(host, { id: 'blank-user', role: 'user', text: '   ' }, new Set());
       expect(append).not.toHaveBeenCalled();
       expect(createElement).toHaveBeenCalledTimes(2);
     } finally {

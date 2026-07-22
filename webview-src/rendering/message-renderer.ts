@@ -1,4 +1,57 @@
-export type MessageRendererHost = Record<string, any>;
+type Message = any;
+type SessionState = any;
+type RenderElement = any;
+
+type SubagentTextExpansionState = {
+    get(key: string): boolean | undefined;
+    set(key: string, expanded: boolean): void;
+};
+
+export interface MessageRendererHost {
+    readonly KEYED_CHAT_RECONCILE_ENABLED: boolean;
+    readonly activeSessionId: string;
+    readonly appendChatRenderRoot: (root: RenderElement) => boolean;
+    readonly appendHoverActiveKey: string | null;
+    readonly appendMessageImages: (root: RenderElement, message: Message) => void;
+    readonly appendMessageToChat: (root: RenderElement, message: Message) => boolean;
+    readonly attachMessageCopyButton: (root: RenderElement, message: Message) => void;
+    readonly buildAppendHoverKey: (sessionId: string, messageId: string) => string;
+    readonly busySessionId: string | null;
+    readonly canAppendToMessage: (session: SessionState, message: Message) => boolean;
+    readonly canUndo: (session: SessionState, anchorKey: string) => { allowed: boolean; msgId?: string; reason?: string };
+    readonly changeListRenderer: { render(message: Message): RenderElement | null };
+    readonly chatContainer: { appendChild(node: RenderElement): void };
+    readonly cleanSubagentTitle: (title: string) => string;
+    readonly discardAllSegments: (sessionId: string, reason: string, mode: string, options: { anchorMsgId: string }) => void;
+    readonly enterAppendInputMode: (messageId: string) => void;
+    readonly formatSubagentModel: (agent: Message) => string;
+    readonly getAppendItems: (message: Message) => Message[];
+    readonly getSessionOrNull: (sessionId: string) => SessionState | null;
+    readonly getSessionState: (sessionId: string) => SessionState | null;
+    readonly gitUndoEnabled: boolean;
+    readonly handleRestoreSegment: (sessionId: string, noticeKey: string) => void;
+    readonly handleUndoToMessage: (sessionId: string, messageId: string) => void;
+    readonly invalidateKeyedChatUnitPresentation: (messageId: string) => boolean;
+    readonly isBusy: boolean;
+    readonly keyedFollowingTurnDividerOverride: boolean | null;
+    readonly logSessionState: (sessionId: string, eventName: string) => void;
+    readonly pickMode: (agent: Message) => string;
+    readonly renderAssistantMarkdown: (container: RenderElement, message: Message) => void;
+    readonly renderMarkdownInto: (container: RenderElement, markdown: string) => void;
+    readonly renderNestedInvalidSegmentElement: (session: SessionState, segment: Message) => RenderElement;
+    readonly renderNestedMessageElement: (message: Message) => RenderElement;
+    readonly renderUserMarkdown: (container: RenderElement, markdown: string) => void;
+    readonly sanitizeMergedSegmentSnapshot: (segment: Message) => Message | null;
+    readonly scheduleClearAppendHover: (key: string) => void;
+    readonly selectedMode: string | null;
+    readonly setAppendHoverActive: (key: string | null) => void;
+    readonly shouldShowBackgroundSubagentIndicator: (session: SessionState, message: Message) => boolean;
+    readonly stripAttachmentManifest: (text: string) => string;
+    readonly stripSystemInjections: (text: string) => string;
+    readonly subagentTextExpandedByKey: SubagentTextExpansionState;
+    readonly toggleUndoSegmentPlaceholder: (sessionId: string, noticeKey: string) => Message | null;
+    readonly vscode: { postMessage(message: Message): void };
+}
 
 /** Renders one canonical chat message without owning session or virtualization state. */
 export function renderMessageElement(

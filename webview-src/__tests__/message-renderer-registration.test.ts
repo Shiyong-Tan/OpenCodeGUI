@@ -3,6 +3,8 @@ import path from 'path';
 import vm from 'vm';
 import { renderMessageElement } from '../rendering/message-renderer';
 
+const render = renderMessageElement as (host: any, message: any, renderedSet: Set<string>) => void;
+
 function withDocument(run: () => void): void {
   const previousDocument = (global as any).document;
   (global as any).document = {
@@ -54,26 +56,26 @@ function invokeRealAppend(admission: (root: any) => boolean): { result: any; adm
 describe('message renderer registration', () => {
   test('keeps early, rejected, missing-element, and thrown appends retryable', () => {
     const nullChangeList = new Set<string>();
-    renderMessageElement({ activeSessionId: 'session-a', getSessionState: () => ({}), changeListRenderer: { render: () => null }, appendChatRenderRoot: jest.fn() }, { id: 'null-changelist', role: 'system', meta: { kind: 'changeList' } }, nullChangeList);
+    render({ activeSessionId: 'session-a', getSessionState: () => ({}), changeListRenderer: { render: () => null }, appendChatRenderRoot: jest.fn() }, { id: 'null-changelist', role: 'system', meta: { kind: 'changeList' } }, nullChangeList);
     expect(nullChangeList).not.toContain('null-changelist');
 
     const rejectedRoot = new Set<string>();
-    renderMessageElement({ activeSessionId: 'session-a', getSessionState: () => ({}), changeListRenderer: { render: () => ({}) }, appendChatRenderRoot: () => false }, { id: 'rejected-root', role: 'system', meta: { kind: 'changeList' } }, rejectedRoot);
+    render({ activeSessionId: 'session-a', getSessionState: () => ({}), changeListRenderer: { render: () => ({}) }, appendChatRenderRoot: () => false }, { id: 'rejected-root', role: 'system', meta: { kind: 'changeList' } }, rejectedRoot);
     expect(rejectedRoot).not.toContain('rejected-root');
 
     const thrownRoot = new Set<string>();
-    expect(() => renderMessageElement({ activeSessionId: 'session-a', getSessionState: () => ({}), changeListRenderer: { render: () => ({}) }, appendChatRenderRoot: () => { throw new Error('root failed'); } }, { id: 'thrown-root', role: 'system', meta: { kind: 'changeList' } }, thrownRoot)).toThrow('root failed');
+    expect(() => render({ activeSessionId: 'session-a', getSessionState: () => ({}), changeListRenderer: { render: () => ({}) }, appendChatRenderRoot: () => { throw new Error('root failed'); } }, { id: 'thrown-root', role: 'system', meta: { kind: 'changeList' } }, thrownRoot)).toThrow('root failed');
     expect(thrownRoot).not.toContain('thrown-root');
 
     withDocument(() => {
       const blank = new Set<string>();
-      renderMessageElement(createUserHost(jest.fn()), { id: 'blank', role: 'user', text: '   ' }, blank);
+      render(createUserHost(jest.fn()), { id: 'blank', role: 'user', text: '   ' }, blank);
       expect(blank).not.toContain('blank');
       const rejected = new Set<string>();
-      renderMessageElement(createUserHost(() => false), { id: 'rejected', role: 'user', text: 'text' }, rejected);
+      render(createUserHost(() => false), { id: 'rejected', role: 'user', text: 'text' }, rejected);
       expect(rejected).not.toContain('rejected');
       const thrown = new Set<string>();
-      expect(() => renderMessageElement(createUserHost(() => { throw new Error('message failed'); }), { id: 'thrown', role: 'user', text: 'text' }, thrown)).toThrow('message failed');
+      expect(() => render(createUserHost(() => { throw new Error('message failed'); }), { id: 'thrown', role: 'user', text: 'text' }, thrown)).toThrow('message failed');
       expect(thrown).not.toContain('thrown');
     });
   });
@@ -82,8 +84,8 @@ describe('message renderer registration', () => {
     const changelist = new Set<string>();
     const appendRoot = jest.fn(() => true);
     const changelistHost = { activeSessionId: 'session-a', getSessionState: () => ({}), changeListRenderer: { render: () => ({}) }, appendChatRenderRoot: appendRoot };
-    renderMessageElement(changelistHost, { id: 'change', role: 'system', meta: { kind: 'changeList' } }, changelist);
-    renderMessageElement(changelistHost, { id: 'change', role: 'system', meta: { kind: 'changeList' } }, changelist);
+    render(changelistHost, { id: 'change', role: 'system', meta: { kind: 'changeList' } }, changelist);
+    render(changelistHost, { id: 'change', role: 'system', meta: { kind: 'changeList' } }, changelist);
     expect(changelist).toEqual(new Set(['change']));
     expect(appendRoot).toHaveBeenCalledTimes(1);
 
@@ -94,8 +96,8 @@ describe('message renderer registration', () => {
         const host = createUserHost(append);
         if (role === 'assistant') Object.assign(host, { renderAssistantMarkdown: jest.fn() });
         const message = { id: `${role}-accepted`, role, text: 'text', meta: {} };
-        renderMessageElement(host, message, rendered);
-        renderMessageElement(host, message, rendered);
+        render(host, message, rendered);
+        render(host, message, rendered);
         expect(rendered).toEqual(new Set([message.id]));
         expect(append).toHaveBeenCalledTimes(1);
       }
