@@ -950,7 +950,6 @@ const UNCLEAR_ANCHOR_CIRCUIT_BREAKER_OPEN_COOLDOWN_MS = 5000;
 const SESSION_METADATA_RENDER_INTERVAL_MS = 250;
 const unclearAnchorCircuitBreakers = new Map();
 const pendingStatusOnlyCoalescedByKey = new Map();
-const sessionMetadataRenderStates = new Map();
 const renderStormCounters = {
     fullRenderRequestsByReason: Object.create(null),
     suppressedFallbackRenderRequestsByReason: Object.create(null),
@@ -2002,46 +2001,22 @@ function renderIfActive(sessionId, reason, options = {}) {
     return sessionEventRouter.renderIfActive(sessionId, reason, options);
 }
 
+const sessionRenderScheduler = window.__ocRendering.createSessionRenderScheduler({
+    getActiveSessionId: () => activeSessionId,
+    render: (reason) => window.__oc?.renderFromState?.(reason),
+    onInactive: (sessionId, reason) => logBackgroundStateUpdate(sessionId, reason, { extra: ['render=false', 'coalesced=inactive'] }),
+    setTimeout: (callback, delay) => setTimeout(callback, delay),
+    clearTimeout: (handle) => clearTimeout(handle),
+    now: () => Date.now(),
+    intervalMs: SESSION_METADATA_RENDER_INTERVAL_MS
+});
+
 function scheduleCoalescedSessionMetadataRender(sessionId, reason, options) {
-    options = options || {};
-    if (!sessionId || sessionId !== activeSessionId) {
-        logBackgroundStateUpdate(sessionId, reason, { extra: ['render=false', 'coalesced=inactive'] });
-        return false;
-    }
-    const key = sessionId;
-    let state = sessionMetadataRenderStates.get(key);
-    if (!state) {
-        state = { timer: null, lastRenderedAt: 0, reason: '' };
-        sessionMetadataRenderStates.set(key, state);
-    }
-    state.reason = reason || state.reason || 'session-metadata-coalesced';
-    const render = () => {
-        state.timer = null;
-        if (sessionId !== activeSessionId) {
-            sessionMetadataRenderStates.delete(key);
-            return;
-        }
-        state.lastRenderedAt = Date.now();
-        const renderReason = state.reason;
-        state.reason = '';
-        window.__oc?.renderFromState?.(renderReason);
-    };
-    if (options.immediate === true) {
-        if (state.timer !== null) clearTimeout(state.timer);
-        render();
-        return true;
-    }
-    if (state.timer !== null) return true;
-    const delay = Math.max(0, SESSION_METADATA_RENDER_INTERVAL_MS - (Date.now() - state.lastRenderedAt));
-    state.timer = setTimeout(render, delay);
-    return true;
+    return sessionRenderScheduler.schedule(sessionId, reason, options || {});
 }
 
 function disposeSessionMetadataRenderStates() {
-    for (const state of sessionMetadataRenderStates.values()) {
-        if (state?.timer !== null) clearTimeout(state.timer);
-    }
-    sessionMetadataRenderStates.clear();
+    sessionRenderScheduler.dispose();
 }
 
 if (typeof window.addEventListener === 'function') {

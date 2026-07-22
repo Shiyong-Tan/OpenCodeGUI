@@ -7,6 +7,7 @@ import { presentationFingerprint } from './presentation-fingerprint';
 import { planReconciliation } from './reconcile-planner';
 import { restoreKeyedScrollAnchor, restoreScrollAnchor } from './scroll-anchor-model';
 import { createTanStackVirtualAdapter } from './tanstack-virtual-adapter';
+import { createSessionRenderScheduler } from './session-render-scheduler';
 import { createLocalHistoryPresentationController, deriveLocalOlderPresentation, normalizeHydrationCoverage } from './local-history-window';
 import { createMarkdownController } from './markdown-controller';
 
@@ -24,6 +25,7 @@ const facadeBase = {
   restoreScrollAnchor,
   restoreKeyedScrollAnchor,
   createTanStackVirtualAdapter,
+  createSessionRenderScheduler,
   createLocalHistoryPresentationController,
   deriveLocalOlderPresentation,
   normalizeHydrationCoverage,
