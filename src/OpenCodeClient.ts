@@ -21,6 +21,7 @@ import { ModelQuotaService } from './models/ModelQuotaService';
 import type { ModelInfo, ModelQuota } from './models/types';
 import { OpenCodeCommandResolver } from './transport/OpenCodeCommandResolver';
 import { OpenCodeProcessRunner } from './transport/OpenCodeProcessRunner';
+import { OpenCodeHttpClient, type ServerConnection, type ServerFetchOptions, type ServerLock } from './transport/OpenCodeHttpClient';
 export type { ModelInfo, ModelQuota, ModelQuotaRow } from './models/types';
 
 export type AgentInfo = {
@@ -405,21 +406,6 @@ type RevertedSegment = {
 type EventSource = 'sse' | 'resync' | 'session-idle';
 type ServerStatus = 'connected' | 'reconnecting' | 'error';
 
-type ServerLock = {
-    workspaceRoot: string;
-    port: number;
-    password: string;
-    updatedAt: string;
-};
-
-type ServerConn = {
-    host: string;
-    port: number;
-    baseUrl: string;
-    authHeader: string;
-    lock: ServerLock;
-};
-
 type PendingMainFinalGate = {
     messageId: string;
     messageIndex: number;
@@ -457,6 +443,7 @@ export class OpenCodeClient {
     private readonly modelQuotaService: ModelQuotaService;
     private readonly commandResolver: OpenCodeCommandResolver;
     private readonly processRunner: OpenCodeProcessRunner;
+    private readonly httpClient: OpenCodeHttpClient;
     public static outputChannel = vscode.window.createOutputChannel("OpenCode CLI");
     private serverProcess?: cp.ChildProcess;
     private serverBaseUrl?: string;
@@ -800,6 +787,13 @@ export class OpenCodeClient {
             resolver: this.commandResolver,
             getCwd: () => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd(),
             log: (message) => OpenCodeClient.outputChannel.appendLine(message),
+        });
+        this.httpClient = new OpenCodeHttpClient({
+            waitUntilReady: () => this.waitForServerReady(),
+            getConnection: (forceRefresh) => this.getServerConn(forceRefresh),
+            migrateUnauthorized: (lock) => this.migrateServerPort(lock, '401'),
+            recoverTransport: () => this.ensureServer(),
+            log: (message) => this.logUiDebug(message),
         });
         this.workspaceRoot = this.resolveWorkspaceRoot();
         this.gitUndo = new GitUndoEngine(this.workspaceRoot, (message) => this.logUiDebug(message));
@@ -5070,7 +5064,7 @@ export class OpenCodeClient {
         return loaded;
     }
 
-    private async getServerConn(forceRefresh = false): Promise<ServerConn> {
+    private async getServerConn(forceRefresh = false): Promise<ServerConnection> {
         const lockPath = this.getLockFilePath(this.workspaceRoot);
         if (!forceRefresh && this.serverLockCache) {
             try {
@@ -5131,118 +5125,16 @@ export class OpenCodeClient {
         }
     }
 
-    private async serverFetchOnce(
-        conn: { baseUrl: string; authHeader: string },
-        reqPath: string,
-        init: RequestInit,
-        opName: string,
-        timeoutMs: number
-    ): Promise<Response> {
-        const url = new URL(reqPath, conn.baseUrl).toString();
-        const headers = new Headers(init.headers || undefined);
-        headers.set('Authorization', conn.authHeader);
-        if (!headers.has('Content-Type') && init.body && typeof init.body === 'string') {
-            headers.set('Content-Type', 'application/json');
-        }
-
-        let controller: AbortController | undefined;
-        let timeoutId: NodeJS.Timeout | undefined;
-        if (timeoutMs > 0) {
-            controller = new AbortController();
-            timeoutId = setTimeout(() => controller?.abort(), timeoutMs);
-            if (init.signal) {
-                init.signal.addEventListener('abort', () => controller?.abort(), { once: true });
-            }
-        }
-
-        try {
-            const response = await fetch(url, {
-                ...init,
-                headers,
-                signal: controller ? controller.signal : init.signal
-            } as any);
-            this.logUiDebug(`EXT: server.fetch | url=${url} | op=${opName} | status=${response.status}`);
-            return response;
-        } catch (error) {
-            this.logUiDebug(`EXT: server.fetch | url=${url} | op=${opName} | err=${String(error)}`);
-            throw error;
-        } finally {
-            if (timeoutId) clearTimeout(timeoutId);
-        }
-    }
-
     private async serverFetch(
         reqPath: string,
         init: RequestInit = {},
-        options?: {
-            opName?: string;
-            retry?: boolean;
-            timeoutMs?: number;
-            noTimeout?: boolean;
-            retryOnAbort?: boolean;
-            retryTimeoutMs?: number;
-            conn?: ServerConn;
-            skipReady?: boolean;
-        }
+        options?: ServerFetchOptions
     ): Promise<Response> {
-        const opName = options?.opName || 'fetch';
-        const retry = options?.retry !== false;
-        const retryOnAbort = options?.retryOnAbort === true;
-        const timeoutMs = options?.noTimeout ? 0 : (options?.timeoutMs ?? 2000);
-        const retryTimeoutMs = options?.retryTimeoutMs ?? timeoutMs;
-        if (!options?.skipReady) {
-            await this.waitForServerReady();
-        }
-        const conn = options?.conn || await this.getServerConn();
-        try {
-            const response = await this.serverFetchOnce(conn, reqPath, init, opName, timeoutMs);
-            if (response.status === 401 && retry) {
-                await this.migrateServerPort(conn.lock, '401');
-                const nextConn = await this.getServerConn(true);
-                return this.serverFetch(reqPath, init, {
-                    opName,
-                    retry: false,
-                    timeoutMs,
-                    noTimeout: options?.noTimeout,
-                    retryOnAbort,
-                    retryTimeoutMs,
-                    conn: nextConn,
-                    skipReady: true
-                });
-            }
-            return response;
-        } catch (error) {
-            if (!retry) throw error;
-            if (retryOnAbort && (error as Error)?.name === 'AbortError') {
-                const nextConn = await this.getServerConn(true);
-                return this.serverFetch(reqPath, init, {
-                    opName,
-                    retry: false,
-                    timeoutMs: retryTimeoutMs,
-                    noTimeout: options?.noTimeout,
-                    retryOnAbort: false,
-                    retryTimeoutMs,
-                    conn: nextConn,
-                    skipReady: true
-                });
-            }
-            await this.ensureServer();
-            const nextConn = await this.getServerConn(true);
-            return this.serverFetch(reqPath, init, {
-                opName,
-                retry: false,
-                timeoutMs,
-                noTimeout: options?.noTimeout,
-                retryOnAbort,
-                retryTimeoutMs,
-                conn: nextConn,
-                skipReady: true
-            });
-        }
+        return this.httpClient.fetch(reqPath, init, options);
     }
 
     private async checkServerHealth(port: number, password: string, timeoutMs = 1000): Promise<'ok' | 'unauthorized' | 'timeout' | 'connrefused' | 'unreachable'> {
-        const conn: ServerConn = {
+        const conn: ServerConnection = {
             host: '127.0.0.1',
             port,
             baseUrl: `http://127.0.0.1:${port}`,
@@ -5475,74 +5367,7 @@ export class OpenCodeClient {
     }
 
     private async requestJson<T>(method: string, path: string, body?: any): Promise<T> {
-        const options: any = { method };
-        if (body !== undefined && method !== 'GET') {
-            options.body = JSON.stringify(body);
-            options.headers = { 'Content-Type': 'application/json' };
-        }
-        const fetchOptions = this.getFetchOptionsForPath(method, path);
-        const response = await this.serverFetch(path, options, fetchOptions);
-        if (!response.ok) {
-            const text = await response.text();
-            throw new Error(`Server ${method} ${path} failed: ${response.status} ${text}`);
-        }
-        if (response.status === 204) {
-            return {} as T;
-        }
-        return (await response.json()) as T;
-    }
-
-    private getFetchOptionsForPath(method: string, reqPath: string): {
-        opName: string;
-        timeoutMs: number;
-        noTimeout?: boolean;
-        retryOnAbort?: boolean;
-        retryTimeoutMs?: number;
-    } {
-        const messageMatch = /\/session\/[^/]+\/message(?:\/[^/?]+)?(?:\?.*)?$/.test(reqPath);
-        const promptAsyncMatch = /\/session\/[^/]+\/prompt_async(?:\?.*)?$/.test(reqPath);
-        const summarizeMatch = /\/session\/[^/]+\/summarize(?:\?.*)?$/.test(reqPath);
-        const sessionInfoMatch = /\/session\/[^/?]+(?:\?.*)?$/.test(reqPath);
-        if (reqPath === '/global/health') {
-            return { opName: 'health', timeoutMs: 1000 };
-        }
-        if (reqPath === '/config/providers') {
-            return { opName: 'models.list', timeoutMs: 5000 };
-        }
-        if (reqPath === '/session') {
-            return { opName: 'sessions.list', timeoutMs: 5000 };
-        }
-        if (messageMatch) {
-            return {
-                opName: 'session.message',
-                timeoutMs: 20000,
-                retryOnAbort: true,
-                retryTimeoutMs: 30000
-            };
-        }
-        if (promptAsyncMatch) {
-            return {
-                opName: 'session.post',
-                timeoutMs: 60000,
-                retryOnAbort: true,
-                retryTimeoutMs: 90000
-            };
-        }
-        if (summarizeMatch) {
-            return {
-                opName: 'session.summarize',
-                timeoutMs: 0,
-                noTimeout: true,
-                retryOnAbort: true
-            };
-        }
-        if (sessionInfoMatch) {
-            return { opName: 'session.info', timeoutMs: 10000, retryOnAbort: true, retryTimeoutMs: 15000 };
-        }
-        if (reqPath.startsWith('/session/')) {
-            return { opName: `session.${method.toLowerCase()}`, timeoutMs: 5000 };
-        }
-        return { opName: `${method.toLowerCase()} ${reqPath}`, timeoutMs: 5000 };
+        return this.httpClient.requestJson<T>(method, path, body);
     }
 
     private parseModelRef(model?: string): { providerID: string; modelID: string } | undefined {
