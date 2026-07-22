@@ -6339,6 +6339,7 @@ const renderMessageElementHost = Object.freeze({
     get isBusy() { return isBusy; },
     get keyedFollowingTurnDividerOverride() { return keyedFollowingTurnDividerOverride; },
     get logSessionState() { return logSessionState; },
+    get logWarning() { return (message, payload) => console.warn(message, payload); },
     get pickMode() { return pickMode; },
     get renderAssistantMarkdown() { return renderAssistantMarkdown; },
     get renderMarkdownInto() { return renderMarkdownInto; },

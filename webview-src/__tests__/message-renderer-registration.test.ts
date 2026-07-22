@@ -18,6 +18,7 @@ function createUserHost(appendMessageToChat: () => boolean | void) {
     activeSessionId: 'session-a', appendMessageImages: jest.fn(), appendMessageToChat,
     attachMessageCopyButton: jest.fn(), canAppendToMessage: () => false, getAppendItems: () => [],
     getSessionState: () => ({}), gitUndoEnabled: false, keyedFollowingTurnDividerOverride: false,
+    logWarning: jest.fn(),
     shouldShowBackgroundSubagentIndicator: () => false, stripAttachmentManifest: (text: string) => text,
     stripSystemInjections: (text: string) => text, renderUserMarkdown: jest.fn(),
   };
@@ -83,7 +84,7 @@ describe('message renderer registration', () => {
   test('registers accepted changelist and ordinary user/assistant appends exactly once', () => {
     const changelist = new Set<string>();
     const appendRoot = jest.fn(() => true);
-    const changelistHost = { activeSessionId: 'session-a', getSessionState: () => ({}), changeListRenderer: { render: () => ({}) }, appendChatRenderRoot: appendRoot };
+    const changelistHost = { activeSessionId: 'session-a', getSessionState: () => ({}), changeListRenderer: { render: () => ({}) }, appendChatRenderRoot: appendRoot, logWarning: jest.fn() };
     render(changelistHost, { id: 'change', role: 'system', meta: { kind: 'changeList' } }, changelist);
     render(changelistHost, { id: 'change', role: 'system', meta: { kind: 'changeList' } }, changelist);
     expect(changelist).toEqual(new Set(['change']));

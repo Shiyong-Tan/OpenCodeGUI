@@ -35,6 +35,7 @@ export interface MessageRendererHost {
     readonly isBusy: boolean;
     readonly keyedFollowingTurnDividerOverride: boolean | null;
     readonly logSessionState: (sessionId: string, eventName: string) => void;
+    readonly logWarning: (message: string, payload?: Message) => void;
     readonly pickMode: (agent: Message) => string;
     readonly renderAssistantMarkdown: (container: RenderElement, message: Message) => void;
     readonly renderMarkdownInto: (container: RenderElement, markdown: string) => void;
@@ -61,7 +62,7 @@ export function renderMessageElement(
   renderedSet: Set<string>,
 ): void {
     if (renderedSet.has(message.id)) {
-        console.warn('[Render] duplicate message skipped', message.id);
+        host.logWarning('[Render] duplicate message skipped', message.id);
         return;
     }
     const session = host.getSessionState(host.activeSessionId);

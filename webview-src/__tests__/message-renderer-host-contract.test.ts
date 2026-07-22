@@ -12,7 +12,7 @@ const capabilityNames: Array<keyof MessageRendererHost> = [
   'handleUndoToMessage', 'invalidateKeyedChatUnitPresentation', 'isBusy',
   'keyedFollowingTurnDividerOverride', 'logSessionState', 'pickMode', 'renderAssistantMarkdown',
   'renderMarkdownInto', 'renderNestedInvalidSegmentElement', 'renderNestedMessageElement',
-  'renderUserMarkdown', 'requestRerender', 'sanitizeMergedSegmentSnapshot', 'scheduleClearAppendHover', 'selectedMode',
+  'renderUserMarkdown', 'requestRerender', 'logWarning', 'sanitizeMergedSegmentSnapshot', 'scheduleClearAppendHover', 'selectedMode',
   'setAppendHoverActive', 'shouldShowBackgroundSubagentIndicator', 'stripAttachmentManifest',
   'stripSystemInjections', 'subagentTextExpandedByKey', 'toggleUndoSegmentPlaceholder', 'vscode',
 ];
@@ -37,7 +37,7 @@ describe('message renderer host facade', () => {
       enterAppendInputMode: callable, formatSubagentModel: callable, getAppendItems: callable,
       getSessionOrNull: callable, getSessionState: callable, gitUndoEnabled: true, handleRestoreSegment: callable,
       handleUndoToMessage: callable, invalidateKeyedChatUnitPresentation: callable, isBusy: true,
-      keyedFollowingTurnDividerOverride: null, logSessionState: callable, pickMode: callable,
+      keyedFollowingTurnDividerOverride: null, logSessionState: callable, logWarning: callable, pickMode: callable,
       renderAssistantMarkdown: callable, renderMarkdownInto: callable, renderNestedInvalidSegmentElement: callable,
       renderNestedMessageElement: callable, renderUserMarkdown: callable, window: { __oc: { renderFromState: callable } },
       sanitizeMergedSegmentSnapshot: callable,

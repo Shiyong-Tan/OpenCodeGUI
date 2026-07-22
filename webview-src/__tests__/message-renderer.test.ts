@@ -14,11 +14,13 @@ describe('message renderer module', () => {
 
   test('preserves duplicate suppression before any host state is read', () => {
     const rendered = new Set(['message-a']);
-    const host = new Proxy({}, { get: () => { throw new Error('host accessed'); } });
-    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const warn = jest.fn();
+    const host = new Proxy({ logWarning: warn }, { get: (target, key) => {
+      if (key === 'logWarning') return target.logWarning;
+      throw new Error('host accessed');
+    } });
     expect(() => render(host, { id: 'message-a' }, rendered)).not.toThrow();
     expect(warn).toHaveBeenCalledWith('[Render] duplicate message skipped', 'message-a');
-    warn.mockRestore();
   });
 
   test('delegates changelist rendering and appends exactly one root', () => {
