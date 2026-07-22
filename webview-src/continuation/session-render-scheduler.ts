@@ -10,7 +10,6 @@ type SessionRenderSchedulerOptions = {
 
 export function createSessionRenderScheduler(options: SessionRenderSchedulerOptions) {
   const states = new Map<string, { timer: any; lastRenderedAt: number; reason: string }>();
-
   function schedule(sessionId: string, reason: string, scheduleOptions: { immediate?: boolean } = {}): boolean {
     if (!sessionId || sessionId !== options.getActiveSessionId()) {
       options.onInactive(sessionId, reason);
@@ -43,13 +42,9 @@ export function createSessionRenderScheduler(options: SessionRenderSchedulerOpti
     state.timer = options.setTimeout(render, delay);
     return true;
   }
-
   function dispose(): void {
-    for (const state of states.values()) {
-      if (state.timer !== null) options.clearTimeout(state.timer);
-    }
+    for (const state of states.values()) if (state.timer !== null) options.clearTimeout(state.timer);
     states.clear();
   }
-
   return Object.freeze({ schedule, dispose });
 }

@@ -2001,7 +2001,7 @@ function renderIfActive(sessionId, reason, options = {}) {
     return sessionEventRouter.renderIfActive(sessionId, reason, options);
 }
 
-const sessionRenderScheduler = window.__ocRendering.createSessionRenderScheduler({
+const sessionRenderScheduler = window.__ocContinuation.createSessionRenderScheduler({
     getActiveSessionId: () => activeSessionId,
     render: (reason) => window.__oc?.renderFromState?.(reason),
     onInactive: (sessionId, reason) => logBackgroundStateUpdate(sessionId, reason, { extra: ['render=false', 'coalesced=inactive'] }),

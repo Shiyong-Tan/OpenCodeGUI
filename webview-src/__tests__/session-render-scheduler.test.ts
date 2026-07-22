@@ -1,4 +1,4 @@
-import { createSessionRenderScheduler } from '../rendering/session-render-scheduler';
+import { createSessionRenderScheduler } from '../continuation/session-render-scheduler';
 
 describe('session render scheduler', () => {
   test('coalesces active-session metadata and renders the latest reason', () => {
