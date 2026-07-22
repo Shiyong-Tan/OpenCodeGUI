@@ -4,6 +4,7 @@ import * as path from 'path';
 const source = fs.readFileSync(path.join(process.cwd(), 'src', 'SidebarProvider.ts'), 'utf8');
 const clientSource = fs.readFileSync(path.join(process.cwd(), 'src', 'OpenCodeClient.ts'), 'utf8');
 const eventMapperSource = fs.readFileSync(path.join(process.cwd(), 'src', 'events', 'OpenCodeEventMapper.ts'), 'utf8');
+const sidebarEventHandlerSource = fs.readFileSync(path.join(process.cwd(), 'src', 'events', 'SidebarChatEventHandler.ts'), 'utf8');
 const registrySource = fs.readFileSync(path.join(process.cwd(), 'src', 'search', 'SmartSearchSessionRegistry.ts'), 'utf8');
 const protocolSource = fs.readFileSync(path.join(process.cwd(), 'src', 'search', 'SmartSearchProtocol.ts'), 'utf8');
 const serviceSource = fs.readFileSync(path.join(process.cwd(), 'src', 'search', 'SmartSearchService.ts'), 'utf8');
@@ -96,7 +97,7 @@ describe('Smart Search staged agent contract', () => {
     });
 
     test('keeps temporary search events out of the ordinary Webview chat pipeline', () => {
-        const handler = extractMethod('private async handleChatEvent(');
+        const handler = extractMethod('export async function handleSidebarChatEvent(', sidebarEventHandlerSource);
         expect(handler).toMatch(/smartSearchSessions\.owns\(event\.sessionId\)[\s\S]*return;/);
         expect(eventMapperSource).toContain("type: 'tool',");
     });
