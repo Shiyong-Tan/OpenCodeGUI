@@ -19,6 +19,13 @@ import { DiffFileViewer } from './changes/DiffFileViewer';
 import { ChangeListEmitter, type FinalizeTurnIdentity } from './changes/ChangeListEmitter';
 import { hydrateUndoSegments, serializeUndoSegments, type SegmentState } from './undo/UndoSegmentPersistence';
 import { resolveUndoUiVisibleRange, sanitizeUndoRangeMessageIds } from './undo/UndoRangeResolver';
+import {
+    buildFullExportSnapshotDelta as planFullExportSnapshotDelta,
+    classifyRecentAppendCandidates as classifySnapshotAppendCandidates,
+    computeRecentVisibleAppend as planRecentVisibleAppend,
+    getMaxMessageIndex as findMaxMessageIndex,
+    getSnapshotTimelineIds as deriveSnapshotTimelineIds,
+} from './history/SnapshotDeltaPlanner';
 
 type CanceledTurnRecord = {
     opId?: string;
@@ -3016,48 +3023,23 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private getSnapshotTimelineIds(sessionData: any, formattedMessages: SessionMessage[]): string[] {
-        const explicitIds = Array.isArray(sessionData?.meta?.timelineMessageIds)
-            ? (sessionData.meta.timelineMessageIds as unknown[])
-                .filter((id): id is string => typeof id === 'string' && Boolean(id))
-            : [];
-        if (explicitIds.length > 0) {
-            return Array.from(new Set(explicitIds));
-        }
-        return Array.from(new Set(
-            this.collectVisibleSnapshotMessages(formattedMessages)
-                .map((message) => (typeof message?.id === 'string' ? message.id : ''))
-                .filter((id): id is string => Boolean(id))
-        ));
+        return deriveSnapshotTimelineIds({
+            sessionData,
+            formattedMessages,
+            collectVisible: (messages) => this.collectVisibleSnapshotMessages(messages),
+        });
     }
 
     private computeRecentVisibleAppend(snapshotTimelineIdSet: Set<string>, recentFormattedMessages: SessionMessage[]): string[] {
-        const newIds: string[] = [];
-        const seenNewIds = new Set<string>();
-        for (const message of Array.isArray(recentFormattedMessages) ? recentFormattedMessages : []) {
-            if (!message || typeof message.id !== 'string' || !message.id) continue;
-            const id = message.id;
-            if (snapshotTimelineIdSet.has(id)) continue;       // already in snapshot
-            if (seenNewIds.has(id)) continue;                   // internal dedup
-            const text = typeof message.text === 'string' ? message.text : '';
-            if (message.role === 'user') {
-                const visibleText = this.normalizeUserTextForSnapshot(text);
-                if (!visibleText.trim()) continue;
-                if (this.isHiddenControlUserText(visibleText)) continue;
-            }
-            if (message.role === 'assistant' && this.isHiddenControlAssistantText(text)) continue;
-            newIds.push(id);
-            seenNewIds.add(id);
-        }
-        return newIds;
+        return planRecentVisibleAppend({
+            snapshotTimelineIdSet,
+            recentFormattedMessages,
+            isVisible: (message) => this.collectVisibleSnapshotMessages([message]).length === 1,
+        });
     }
 
     private getMaxMessageIndex(messages: SessionMessage[]): number | null {
-        let maxIndex: number | null = null;
-        for (const message of Array.isArray(messages) ? messages : []) {
-            if (typeof message?.messageIndex !== 'number' || !Number.isFinite(message.messageIndex)) continue;
-            maxIndex = maxIndex === null ? message.messageIndex : Math.max(maxIndex, message.messageIndex);
-        }
-        return maxIndex;
+        return findMaxMessageIndex(messages);
     }
 
     private computeRecentAppendCandidates(
@@ -3077,45 +3059,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         snapshotMaxMessageIndex: number | null,
         recentFormattedMessages: SessionMessage[]
     ): { proven: boolean; suffix: SessionMessage[] } {
-        const recentList = Array.isArray(recentFormattedMessages) ? recentFormattedMessages : [];
-        if (snapshotTimelineIdSet.size === 0) return { proven: false, suffix: [] };
-        const snapshotIds = Array.from(snapshotTimelineIdSet);
-        const boundaryId = snapshotIds[snapshotIds.length - 1];
-        if (!boundaryId) return { proven: false, suffix: [] };
-
-        let boundaryIndex = -1;
-        for (let i = 0; i < recentList.length; i++) {
-            const id = typeof recentList[i]?.id === 'string' ? recentList[i]!.id : '';
-            if (id !== boundaryId) continue;
-            if (boundaryIndex >= 0) return { proven: false, suffix: [] };
-            boundaryIndex = i;
-        }
-        if (boundaryIndex < 0) return { proven: false, suffix: [] };
-
-        const out: SessionMessage[] = [];
-        const seen = new Set<string>();
-        let previousIndex = snapshotMaxMessageIndex;
-        for (let i = boundaryIndex + 1; i < recentList.length; i++) {
-            const message = recentList[i];
-            if (!message || typeof message.id !== 'string' || !message.id) return { proven: false, suffix: [] };
-            if (typeof message.messageIndex !== 'number' || !Number.isFinite(message.messageIndex)) return { proven: false, suffix: [] };
-            const id = message.id;
-            if (id.startsWith('local-') || id.startsWith('tmp:')) continue;
-            if (snapshotTimelineIdSet.has(id)) continue;
-            if (seen.has(id)) continue;
-            if (previousIndex !== null && message.messageIndex <= previousIndex) return { proven: false, suffix: [] };
-            previousIndex = message.messageIndex;
-            const text = typeof message.text === 'string' ? message.text : '';
-            if (message.role === 'user') {
-                const visibleText = this.normalizeUserTextForSnapshot(text);
-                if (!visibleText.trim()) continue;
-                if (this.isHiddenControlUserText(visibleText)) continue;
-            }
-            if (message.role === 'assistant' && this.isHiddenControlAssistantText(text)) continue;
-            out.push(message);
-            seen.add(id);
-        }
-        return { proven: true, suffix: out };
+        return classifySnapshotAppendCandidates({
+            snapshotTimelineIdSet,
+            snapshotMaxMessageIndex,
+            recentFormattedMessages,
+            isVisible: (message) => this.collectVisibleSnapshotMessages([message]).length === 1,
+        });
     }
 
     private buildFullExportSnapshotDelta(
@@ -3124,86 +3073,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         fullExportRecords: SessionMessage[],
         repairRequiredMessageIds: string[] = []
     ): { proven: boolean; messages: SessionMessage[]; timelineMessageIds: string[]; repairedSnapshot?: boolean } {
-        if (snapshotTimelineIds.length === 0) {
-            const messages = this.buildImmutableSnapshotWithProvenSuffix([], fullExportRecords);
-            return {
-                proven: true,
-                messages,
-                timelineMessageIds: messages.map((message) => message.id || '').filter(Boolean)
-            };
-        }
-        const boundaryId = snapshotTimelineIds[snapshotTimelineIds.length - 1];
-        const boundaryIndexes = fullExportRecords
-            .map((message, index) => message?.id === boundaryId ? index : -1)
-            .filter((index) => index >= 0);
-        if (boundaryIndexes.length !== 1) {
-            return { proven: false, messages: [...existingSnapshotRecords], timelineMessageIds: [...snapshotTimelineIds] };
-        }
-        const storedMessageIds = new Set(
-            existingSnapshotRecords
-                .map((message) => typeof message?.id === 'string' ? message.id : '')
-                .filter((id): id is string => id.startsWith('msg_'))
-        );
-        const visibleRepairIds = Array.from(new Set([
-            ...snapshotTimelineIds,
-            ...repairRequiredMessageIds
-        ].filter((id) => typeof id === 'string' && id.startsWith('msg_'))));
-        const missingSnapshotMessageIds = visibleRepairIds.filter((id) => !storedMessageIds.has(id));
-        if (missingSnapshotMessageIds.length > 0) {
-            const fullById = new Map(
-                fullExportRecords
-                    .filter((message) => typeof message?.id === 'string' && message.id.startsWith('msg_'))
-                    .map((message) => [message.id as string, message] as const)
-            );
-            if (missingSnapshotMessageIds.every((id) => fullById.has(id))) {
-                const boundaryIndex = boundaryIndexes[0];
-                const visibleRepairIdSet = new Set(visibleRepairIds);
-                const suffixIds = fullExportRecords
-                    .slice(boundaryIndex + 1)
-                    .map((message) => typeof message?.id === 'string' ? message.id : '')
-                    .filter((id): id is string => id.startsWith('msg_'));
-                const allowedVisibleIds = new Set([...visibleRepairIdSet, ...suffixIds]);
-                const existingById = new Map(
-                    existingSnapshotRecords
-                        .filter((message) => typeof message?.id === 'string' && message.id.startsWith('msg_'))
-                        .map((message) => [message.id as string, message] as const)
-                );
-                const repairedMessages = fullExportRecords
-                    .filter((message) => typeof message?.id === 'string' && allowedVisibleIds.has(message.id))
-                    .map((message) => {
-                        const existing = existingById.get(message.id as string);
-                        if (!existing) return message;
-                        return {
-                            ...message,
-                            ...existing,
-                            text: typeof existing.text === 'string' && existing.text.length ? existing.text : message.text,
-                            meta: {
-                                ...(message.meta || {}),
-                                ...(existing.meta || {})
-                            }
-                        };
-                    });
-                return {
-                    proven: true,
-                    messages: repairedMessages,
-                    timelineMessageIds: repairedMessages
-                        .map((message) => message.id || '')
-                        .filter((id): id is string => id.startsWith('msg_')),
-                    repairedSnapshot: true
-                };
-            }
-        }
-        const suffix = fullExportRecords.slice(boundaryIndexes[0] + 1);
-        const messages = this.buildImmutableSnapshotWithProvenSuffix(existingSnapshotRecords, suffix);
-        const existingIds = new Set(snapshotTimelineIds);
-        const suffixIds = suffix
-            .map((message) => message?.id || '')
-            .filter((id) => id.startsWith('msg_') && !existingIds.has(id));
-        return {
-            proven: true,
-            messages,
-            timelineMessageIds: [...snapshotTimelineIds, ...Array.from(new Set(suffixIds))]
-        };
+        return planFullExportSnapshotDelta({
+            existingSnapshotRecords,
+            snapshotTimelineIds,
+            fullExportRecords,
+            repairRequiredMessageIds,
+            appendImmutable: (existing, suffix) => this.buildImmutableSnapshotWithProvenSuffix(existing, suffix),
+        });
     }
 
     private async collectSnapshotRepairRequiredMessageIds(sessionId: string): Promise<string[]> {
