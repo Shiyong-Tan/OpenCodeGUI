@@ -4607,198 +4607,48 @@ function reconcileAssistantUpgradeFallbackWithAuthoritativeMap(sessionId, sessio
 }
 
 const UNDO_TIMEOUT_MS = 10000;
+const createUndoRequestController = window.__ocUndo?.createUndoRequestController;
+if (typeof createUndoRequestController !== 'function') {
+    throw new Error('Undo request controller is unavailable');
+}
+const undoRequestController = createUndoRequestController({
+    getSession: (sessionId) => getSessionState(sessionId),
+    getActiveSessionId: () => activeSessionId,
+    getSessionRegistryInfo: (sessionId) => ({ size: sessionsById.size, hasSession: sessionsById.has(sessionId) }),
+    isPersistenceArtifact: (id, message) => isHydrationPersistenceArtifact(id, message),
+    upsertMessage: (session, message) => upsertMessage(session, message),
+    assertInvariants: (sessionId, reason) => assertInvariants(sessionId, reason),
+    render: () => window.__oc?.renderFromState?.(),
+    postMessage: (message) => vscode.postMessage(message),
+    setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+    clearTimeout: (handle) => clearTimeout(handle),
+    now: () => Date.now(),
+    random: () => Math.random(),
+    timeoutMs: UNDO_TIMEOUT_MS
+});
 
 function isUndoRangeVisibleMessageId(session, id) {
-    if (typeof id !== 'string' || !id.startsWith('msg_')) return false;
-    if (session?.hiddenSet instanceof Set && session.hiddenSet.has(id)) return false;
-    const message = session?.messagesById instanceof Map ? session.messagesById.get(id) : null;
-    if (isHydrationPersistenceArtifact(id, message)) return false;
-    const kind = message?.meta?.kind;
-    if (kind === 'undoNotice' || kind === 'snapshotNotice' || kind === 'changeList') return false;
-    return true;
+    return undoRequestController.isRangeVisibleMessageId(session, id);
 }
 
 function buildUndoVisibleRangeSnapshot(session, anchorMsgId) {
-    const timeline = Array.isArray(session?.timeline) ? session.timeline : [];
-    const visibleMessageIds = [];
-    for (const id of timeline) {
-        if (isUndoRangeVisibleMessageId(session, id)) {
-            visibleMessageIds.push(id);
-        }
-    }
-    const anchorIndex = visibleMessageIds.indexOf(anchorMsgId);
-    const forwardMessageIdsFromAnchor = anchorIndex >= 0
-        ? visibleMessageIds.slice(anchorIndex)
-        : [];
-    return { visibleMessageIds, anchorIndex, forwardMessageIdsFromAnchor };
+    return undoRequestController.buildVisibleRangeSnapshot(session, anchorMsgId);
 }
 
 function suspendUndoTimeoutForConflictCard(payload) {
-    if (!payload || typeof payload.operationId !== 'string' || !payload.operationId) return false;
-    const kind = typeof payload.kind === 'string' ? payload.kind : '';
-    if (kind && kind !== 'undo') return false;
-    const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId : activeSessionId;
-    const session = getSessionState(sessionId);
-    const pending = session?.pendingUndo;
-    if (!pending || pending.clientOpId !== payload.operationId) return false;
-
-    if (pending.timeoutId) {
-        clearTimeout(pending.timeoutId);
-        pending.timeoutId = null;
-    }
-    pending.status = 'waiting-conflict-decision';
-    pending.conflictId = typeof payload.conflictId === 'string' ? payload.conflictId : '';
-    pending.conflictKind = kind || 'undo';
-
-    vscode.postMessage({
-        type: 'ui-debug',
-        payload: ['undo', 'timeout-suspended-conflict', 'clientOpId', pending.clientOpId, 'sessionId', sessionId || 'null', 'conflictId', pending.conflictId || 'null']
-    });
-    return true;
+    return undoRequestController.suspendTimeoutForConflictCard(payload);
 }
 
 function handleUndoToMessage(sessionId, targetMessageId) {
-    try {
-        vscode.postMessage({ type: 'ui-debug', payload: ['[WV][UNDO_FUNC_ENTER]', 'sessionId', sessionId || 'NULL', 'typeof', typeof sessionId, 'targetMessageId', targetMessageId || 'NULL', 'activeSessionId', activeSessionId || 'NULL'] });
-        
-        const session = getSessionState(sessionId);
-        vscode.postMessage({ type: 'ui-debug', payload: ['[WV][UNDO_AFTER_GET_SESSION]', 'hasSession', !!session, 'sessionType', typeof session] });
-        
-        if (!session) {
-            vscode.postMessage({ type: 'ui-debug', payload: ['[WV][UNDO_FUNC_NO_SESSION]', 'sessionId', sessionId || 'NULL', 'activeSessionId', activeSessionId || 'NULL', 'mapSize', sessionsById.size, 'hasSession', sessionsById.has(sessionId)] });
-            return;
-        }
-        
-        const target = session.messagesById.get(targetMessageId);
-        if (!target) {
-            vscode.postMessage({ type: 'ui-debug', payload: ['undo', 'target-not-found', targetMessageId, 'sessionId', sessionId] });
-            return;
-        }
-
-        const opId = `op_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        const serverId = targetMessageId;
-
-        const noticeKey = `system:undo:${serverId}`;
-        session.undoNoticeKeyByOpId.set(opId, noticeKey);
-        session.lastUndoNoticeKey = noticeKey;
-
-        session.pendingUndo = {
-            clientOpId: opId,
-            ackOpId: null,
-            anchorKey: targetMessageId,
-            anchorServerId: serverId,
-            noticeKey,
-            ts: Date.now(),
-            status: 'waiting-response',
-            timeoutId: null
-        };
-
-        session.pendingUndoByNoticeKey = session.pendingUndoByNoticeKey || new Map();
-        session.pendingUndoByNoticeKey.set(noticeKey, {
-            clientOpId: opId,
-            anchorKey: targetMessageId,
-            anchorServerId: serverId,
-            noticeKey: noticeKey,
-            createdAt: Date.now()
-        });
-
-        vscode.postMessage({
-            type: 'ui-debug',
-            payload: ['WV', 'undo', 'send', 'clientOpId', opId, 'anchorKey', targetMessageId, 'serverId', serverId, 'noticeKey', noticeKey, 'sessionId', sessionId]
-        });
-        vscode.postMessage({ type: 'ui-debug', payload: ['undo.send', 'clientOpId', opId, 'noticeKey', noticeKey, 'anchorMsgId', targetMessageId, 'sessionId', sessionId] });
-        vscode.postMessage({ type: 'ui-debug', payload: ['WV', 'undo', 'pending', 'noticeKey', noticeKey, 'clientOpId', opId, 'sessionId', sessionId] });
-        vscode.postMessage({ type: 'ui-debug', payload: ['[WV][UNDO_PRE_SEND]', 'sessionId', sessionId || 'NULL', 'opId', opId || 'NULL', 'serverId', serverId || 'NULL', 'typeof_sessionId', typeof sessionId, 'typeof_opId', typeof opId, 'typeof_serverId', typeof serverId] });
-        const undoRangeSnapshot = buildUndoVisibleRangeSnapshot(session, serverId);
-        vscode.postMessage({
-            type: 'ui-debug',
-            payload: ['[WV][UNDO_RANGE_TX]', `sessionId=${sessionId || 'null'}`, `opId=${opId || 'null'}`, `anchorIndex=${undoRangeSnapshot.anchorIndex}`, `visibleCount=${undoRangeSnapshot.visibleMessageIds.length}`, `forwardCount=${undoRangeSnapshot.forwardMessageIdsFromAnchor.length}`]
-        });
-        const undoMessage = {
-            type: 'undoToMessage',
-            sessionId,
-            operationId: opId,
-            messageId: serverId,
-            visibleMessageIds: undoRangeSnapshot.visibleMessageIds,
-            anchorIndex: undoRangeSnapshot.anchorIndex,
-            forwardMessageIdsFromAnchor: undoRangeSnapshot.forwardMessageIdsFromAnchor
-        };
-        vscode.postMessage({ type: 'ui-debug', payload: ['[WV][UNDO_MSG_OBJ]', JSON.stringify(undoMessage)] });
-        
-        // Send a test ping immediately before undoToMessage to verify channel is working
-        vscode.postMessage({ type: 'ping' });
-        
-        vscode.postMessage(undoMessage);
-        vscode.postMessage({ type: 'ui-debug', payload: ['[WV][UNDO_POST_SEND]', 'sent'] });
-
-        session.pendingUndo.timeoutId = setTimeout(() => handleUndoTimeout(sessionId, opId), UNDO_TIMEOUT_MS);
-    } catch (error) {
-        vscode.postMessage({ type: 'ui-debug', payload: ['[WV][UNDO_ERROR]', 'error', String(error), 'message', error?.message || 'unknown', 'stack', error?.stack || 'no-stack'] });
-        throw error;
-    }
+    return undoRequestController.handleUndoToMessage(sessionId, targetMessageId);
 }
 
 function handleUndoTimeout(sessionId, clientOpId) {
-    const session = getSessionState(sessionId);
-    if (!session || !session.pendingUndo) return;
-    if (session.pendingUndo.clientOpId !== clientOpId) {
-        vscode.postMessage({
-            type: 'ui-debug',
-            payload: ['undo', 'timeout-skip', 'clientOpId', clientOpId || 'null', 'stillPending', false]
-        });
-        return;
-    }
-
-    if (session.pendingUndo.status === 'waiting-conflict-decision') {
-        vscode.postMessage({
-            type: 'ui-debug',
-            payload: ['undo', 'timeout-skip-conflict', 'clientOpId', clientOpId || 'null', 'sessionId', sessionId || 'null']
-        });
-        return;
-    }
-
-    const { clientOpId: opId, anchorKey } = session.pendingUndo;
-    const now = Date.now();
-    const elapsed = now - session.pendingUndo.ts;
-
-    if (elapsed < UNDO_TIMEOUT_MS) return;
-
-    if (!session.pendingUndo || session.pendingUndo.clientOpId !== clientOpId) {
-        vscode.postMessage({
-            type: 'ui-debug',
-            payload: ['undo', 'timeout-skip', 'clientOpId', clientOpId || 'null', 'stillPending', false]
-        });
-        return;
-    }
-
-    const timeoutKey = `system:undo-timeout:${opId}`;
-    upsertMessage(session, {
-        id: timeoutKey,
-        role: 'system',
-        text: 'Undo request timed out (code state losts.).',
-        meta: { kind: 'undoTimeout', opId, anchorKey }
-    });
-    if (!session.timeline.includes(timeoutKey)) {
-        session.timeline.push(timeoutKey);
-    }
-
-    const stillPending = Boolean(session.pendingUndo && session.pendingUndo.clientOpId === opId);
-    session.pendingUndo = null;
-
-    if (session.pendingUndoByNoticeKey?.size) {
-        for (const [key, pending] of session.pendingUndoByNoticeKey.entries()) {
-            if (pending?.clientOpId === opId) {
-                session.pendingUndoByNoticeKey.delete(key);
-            }
-        }
-    }
-
-    vscode.postMessage({ type: 'ui-debug', payload: ['undo', 'timeout', 'clientOpId', opId, 'elapsed', elapsed, 'sessionId', sessionId, 'stillPending', stillPending] });
-    window.__oc?.renderFromState?.();
+    return undoRequestController.handleTimeout(sessionId, clientOpId);
 }
 
 function createOperationId() {
-    return `op_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    return undoRequestController.createOperationId();
 }
 
 /**
@@ -4806,70 +4656,15 @@ function createOperationId() {
  * Sends restore request to extension, which will respond with restoredSegment message
  */
 function handleRestoreSegment(sessionId, segmentId) {
-    const session = getSessionState(sessionId);
-    if (!session) {
-        vscode.postMessage({
-            type: 'ui-debug',
-            payload: ['[WV][RESTORE_DROP]', 'session-not-found', `sessionId=${sessionId || 'null'}`]
-        });
-        return;
-    }
-    
-    // Extract noticeKey from segmentId (format may be seg:system:undo:msg_xxx or system:undo:msg_xxx)
-    const noticeKey = segmentId.startsWith('seg:') 
-        ? segmentId.slice(4) 
-        : segmentId;
-    
-    const segment = session.segmentsByNoticeKey.get(noticeKey);
-    if (!segment) {
-        vscode.postMessage({
-            type: 'ui-debug',
-            payload: ['[WV][RESTORE_DROP]', 'segment-not-found', `noticeKey=${noticeKey}`]
-        });
-        return;
-    }
-    
-    const operationId = createOperationId();
-
-    // Send restore request to extension
-    vscode.postMessage({
-        type: 'restoreSegment',
-        sessionId,
-        operationId,
-        noticeKey: segment.noticeKey,
-        anchorMsgId: segment.anchorMsgId,
-        endMsgId: segment.endMsgId
-    });
-    
-    vscode.postMessage({
-        type: 'ui-debug',
-        payload: ['[WV][SEG_RESTORE_SEND]',
-            `sessionId=${sessionId || 'null'}`,
-            `opId=${operationId || 'null'}`,
-            `noticeKey=${noticeKey}`,
-            `anchorMsgId=${segment.anchorMsgId || 'null'}`,
-            `endMsgId=${segment.endMsgId || 'null'}`,
-            'type=restoreSegment']
-    });
+    return undoRequestController.handleRestoreSegment(sessionId, segmentId);
 }
 
 function handleToggleSegment(sessionId, segmentId) {
-    const session = getSessionState(sessionId);
-    if (!session) return;
-    // segmentId is the noticeKey
-    const segment = session.segmentsByNoticeKey.get(segmentId);
-    if (!segment) return;
-    segment.collapsed = !segment.collapsed;
-    assertInvariants(sessionId, 'toggleSegment');
+    return undoRequestController.handleToggleSegment(sessionId, segmentId);
 }
 
 function toggleUndoSegmentPlaceholder(sessionId, noticeKey) {
-    const session = getSessionState(sessionId);
-    if (!session || !noticeKey) return null;
-    const segment = session.segmentsByNoticeKey.get(noticeKey);
-    if (!segment) return null;
-    segment.collapsed = !segment.collapsed;
-    return segment;
+    return undoRequestController.togglePlaceholder(sessionId, noticeKey);
 }
 
 const FILE_REF_RE = /([A-Za-z0-9_./-]+\.[A-Za-z0-9]+):(\d{1,6})(?::(\d{1,6}))?/g;

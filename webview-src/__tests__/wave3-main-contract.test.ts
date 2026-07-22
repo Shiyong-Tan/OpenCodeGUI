@@ -215,6 +215,15 @@ describe('undo segment placeholder presentation revisions', () => {
     const session = { segmentsByNoticeKey: new Map([['system:undo:msg-a', liveSegment]]) };
     const context = vm.createContext({
       getSessionState: (sessionId: string) => sessionId === 'session-a' ? session : null,
+      undoRequestController: {
+        togglePlaceholder: (sessionId: string, noticeKey: string) => {
+          const targetSession = sessionId === 'session-a' ? session : null;
+          const segment = targetSession?.segmentsByNoticeKey.get(noticeKey);
+          if (!segment) return null;
+          segment.collapsed = !segment.collapsed;
+          return segment;
+        },
+      },
     });
     vm.runInContext(`${toggle}; globalThis.toggle = toggleUndoSegmentPlaceholder;`, context);
 

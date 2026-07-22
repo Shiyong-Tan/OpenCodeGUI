@@ -2,6 +2,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vm from 'vm';
 
+const createUndoRequestController = require('../../../webview-src/undo/undo-request-controller').createUndoRequestController;
+
 function createHarnessSegmentTopology(debug: (payload: string[]) => void) {
     const resolveMessageId = (session: any, id: unknown): string | null => {
         if (typeof id !== 'string') return null;
@@ -117,16 +119,22 @@ function loadUndoSenderHarness() {
         Set,
         Array,
         activeSessionId: 'ses_A',
+        sessionsById: sessions,
         vscode: {
             postMessage: (message: any) => posts.push(message),
         },
         getSessionState: (sessionId: string) => sessions.get(sessionId),
+        upsertMessage: (session: any, message: any) => session.messagesById.set(message.id, message),
+        assertInvariants: jest.fn(),
         setTimeout: jest.fn(),
         clearTimeout: jest.fn(),
         logTimelineSnapshot: jest.fn(),
         window: {
             __oc: {
                 renderFromState,
+            },
+            __ocUndo: {
+                createUndoRequestController,
             },
         },
     };
