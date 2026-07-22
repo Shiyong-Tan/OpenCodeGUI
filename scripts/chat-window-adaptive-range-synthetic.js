@@ -431,11 +431,43 @@ function runAliasOwner() {
 }
 
 function runSimpleOwner(name) {
-  if (name === WORKFLOW_OWNER_NAMES.search) return executeNamedOwner(name, { Uint16Array, Math, Number, String }, [(visit) => visit('named search owner'), 2200, true]);
+  if (name === WORKFLOW_OWNER_NAMES.search) {
+    const collectBounded = (produce, cap = 2200, normalizeWhitespace = false) => {
+      const chunks = [];
+      let length = 0;
+      produce((chunk) => {
+        if (length >= cap) return false;
+        const value = String(chunk || '');
+        if (!value) return true;
+        const remaining = cap - length;
+        const accepted = value.slice(0, remaining);
+        chunks.push(accepted);
+        length += accepted.length;
+        return length < cap;
+      });
+      const text = chunks.join('');
+      return normalizeWhitespace ? text.replace(/\s+/g, ' ').trim() : text;
+    };
+    return executeNamedOwner(name, {
+      Uint16Array, Math, Number, String,
+      window: { __ocFeatures: { collectBoundedSmartSearchText: collectBounded } },
+    }, [(visit) => visit('named search owner'), 2200, true]);
+  }
   if (name === WORKFLOW_OWNER_NAMES.undo) return executeNamedOwner(name, {}, ['Undo applied. named owner']);
   if (name === WORKFLOW_OWNER_NAMES.changeList) return executeNamedOwner(name, {}, [{ id: 'system:changeList:named', meta: { kind: 'changeList' } }]);
-  if (name === WORKFLOW_OWNER_NAMES.subagent) return executeNamedOwner(name, {}, ['Named Subagent (@worker)']);
-  if (name === WORKFLOW_OWNER_NAMES.streamFinal) return executeNamedOwner(name, { Array }, [[{ status: 'sending', appendUserMsgId: 'append-final' }]]);
+  if (name === WORKFLOW_OWNER_NAMES.subagent) return executeNamedOwner(name, {
+    window: { __ocFeatures: { cleanSearchSubagentTitle: (title) => String(title || '').replace(/\s*[（(]\s*@[^()]*[)）]\s*$/i, '').trim() || 'Subagent' } },
+  }, ['Named Subagent (@worker)']);
+  if (name === WORKFLOW_OWNER_NAMES.streamFinal) return executeNamedOwner(name, {
+    Array,
+    appendSnapshotController: {
+      normalizeItemsForFinalize: (items) => ({
+        items: Array.isArray(items) ? items.map((item) => item?.status === 'sending' && item?.appendUserMsgId
+          ? { ...item, status: 'applied' } : item) : [],
+        changed: Array.isArray(items) && items.some((item) => item?.status === 'sending' && item?.appendUserMsgId),
+      }),
+    },
+  }, [[{ status: 'sending', appendUserMsgId: 'append-final' }]]);
   if (name === WORKFLOW_OWNER_NAMES.anchor) return executeNamedOwner(name, { vscode: { postMessage: () => undefined } }, [
     { nextOrder: 9, timeline: ['anchor'], messagesById: new Map([['anchor', { order: 4 }]]) }, 'anchor',
   ]);

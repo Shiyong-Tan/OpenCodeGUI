@@ -8,6 +8,8 @@ import { createTanStackVirtualAdapter, type VirtualizerConstructor } from '../re
 import { getSafeShellSpec } from '../rendering/safe-shell-spec';
 import { decideChatWindowAdaptivePolicy } from '../rendering/chat-window-adaptive-policy';
 import { createSegmentTopology } from '../features/segments/segment-topology';
+import { collectLoadedTextSearchKeys, collectSmartSearchMessages } from '../features/search/search-corpus';
+import { createSessionRenderScheduler } from '../continuation/session-render-scheduler';
 
 const { createAtomicScenarioExecutor, createRealTransactionHarness } = require('../../scripts/chat-window-adaptive-range-harness.js');
 
@@ -454,8 +456,8 @@ describe('Wave 3 main-script window contract', () => {
     expect(source).toContain('chatWindowState.anchorKey === oldKey');
     expect(source).toContain('sessionSearch.rekey(oldKey, newKey);');
     expect(source).toContain('rendering.restoreKeyedScrollAnchor');
-    expect(extractFunction('function collectSmartSearchMessages()')).toContain('session.timeline');
-    expect(source).toContain('ensureChatWindowKeyMounted(targetKey, \'search\')');
+    expect(extractFunction('function collectSmartSearchMessages()')).toContain('window.__ocFeatures.collectSmartSearchMessages');
+    expect(source).toContain("ensureKeyMounted: (key) => ensureChatWindowKeyMounted(key, 'search')");
   });
 
   test('programmatic correction is not user scroll and pinned/unpinned behavior is explicit', () => {
@@ -770,36 +772,19 @@ describe('B4S-R3 recovered anonymous owner behavior matrices', () => {
     return normalized;
   };
 
-  test('unchanged named bodies remain byte-equivalent to the recovered anonymous oracle', () => {
-    const recoveredBodies = {
-      primarySend: extractOwnedBlock("sendBtn.addEventListener('click', () =>", recoveredSource).body,
-      chatScroll: extractOwnedBlock("chatContainer.addEventListener('scroll', () =>", recoveredSource).body,
-      sessionId: extractOwnedBlock("case 'sessionId':", recoveredSource).body,
-      aliasMigration: extractOwnedBlock('rekeyKeyedChatPresentation = (oldKey, newKey, sessionId) =>', recoveredSource).body,
-    };
+  test('named owners preserve reviewed orchestration while delegating extracted feature state', () => {
     const namedBodies = {
       primarySend: extractOwnedBlock('function handlePrimarySendClick()').body,
       chatScroll: extractOwnedBlock('function handleChatContainerScroll()').body,
       sessionId: extractOwnedBlock('function handleSessionIdMessage(message)').body,
       aliasMigration: extractOwnedBlock('function applyKeyedChatPresentationAliasMigration(oldKey, newKey, sessionId)').body,
     };
-    const hashes: Record<string, string> = {};
-    for (const key of ['primarySend', 'chatScroll', 'aliasMigration'] as const) {
-      const recovered = normalizeRelocatedBody(recoveredBodies[key]);
-      const named = normalizeRelocatedBody(namedBodies[key]);
-      const reviewedCore = key === 'chatScroll'
-        ? named
-          .replace('    chatWindowState.userScrollActiveUntil = Date.now() + 180;\n', '')
-          .replace('updateChatJumpBottomButton();\n', '')
-        : named;
-      expect(reviewedCore).toBe(recovered);
-      hashes[key] = sourceHash(named);
-    }
-    expect(hashes).toEqual({
-      primarySend: '07055fcfd53bb336cbb82f742475f19dbd9392ea9efd809679dd2b5016c02b18',
-      chatScroll: '7f8e2785b6c6d6b78e929ad9f8fe4b0b7e07c1e906f6a3aca3b3682fa09fcb7b',
-      aliasMigration: '6b108292ce3305c164a1bec10689b6fdcdd06cd310cc921ef5bee351f028a2ff',
-    });
+    expect(namedBodies.primarySend).toContain('buildComposerSubmission({');
+    expect(namedBodies.primarySend).toContain('getAttachmentStateController()');
+    expect(namedBodies.primarySend).toContain('getComposerContextStateController()');
+    expect(namedBodies.aliasMigration).toContain('sessionSearch.rekey(oldKey, newKey);');
+    expect(namedBodies.chatScroll).not.toContain('scheduleRenderFromState');
+    expect(namedBodies.sessionId).toContain('transitionActiveSessionPresentationOwner(prevSessionId, sessionId);');
   });
 
   test('recovered anonymous source slices retain reviewed hashes and singular ownership', () => {
@@ -889,6 +874,11 @@ describe('B4S-R3 recovered anonymous owner behavior matrices', () => {
       const newRoot: any = { dataset: { renderUnitKey: 'new' }, matches: () => false, querySelector: () => null };
       const roots = new Map<string, any>(kind === 'cached-only' ? [['old', oldRoot]] : []);
       const state = { sessionId: kind === 'mismatch' ? 'other' : 's', items: [{ key: 'old' }, { key: 'keep' }], roots };
+      const searchState: any = { windowTargetKey: 'old', fullMatchKeys: ['old', 'keep'] };
+      Object.defineProperty(searchState, 'rekey', { enumerable: false, value: (oldKey: string, newKey: string) => {
+        if (searchState.windowTargetKey === oldKey) searchState.windowTargetKey = newKey;
+        searchState.fullMatchKeys = searchState.fullMatchKeys.map((key: string) => key === oldKey ? newKey : key);
+      } });
       const sandbox = vm.createContext({
         KEYED_CHAT_RECONCILE_ENABLED: kind !== 'disabled', keyedChatReconcileState: state,
         keyedChatFailedSessionId: '', activeSessionId: 'active',
@@ -899,7 +889,7 @@ describe('B4S-R3 recovered anonymous owner behavior matrices', () => {
           return null;
         },
         chatWindowState: { adapter: { migrateKey: (oldKey: string, newKey: string) => trace.push(`migrate:${oldKey}:${newKey}`) }, anchorKey: 'old' },
-        sessionSearch: { windowTargetKey: 'old', fullMatchKeys: ['old', 'keep'] }, Map,
+        sessionSearch: searchState, Map,
       });
       vm.runInContext(`let assigned; assigned = (oldKey, newKey, sessionId) => {${body}}; globalThis.__owner = assigned;`, sandbox);
       const identity = (sandbox as any).__owner;
@@ -939,6 +929,11 @@ describe('B4S-R3 recovered anonymous owner behavior matrices', () => {
         baselinePreparing: false, isSendBlockedByPendingState: () => false,
         logSegmentState: () => trace.push('logSegment'), selectedMode: 'plan', pendingContextItems: [], pendingFileRefs: [], attachments: [],
         isImageAttachment: () => false, Date: { now: () => 100 }, messageCounter: 0,
+        getComposerContextStateController: () => ({ clear: () => undefined }),
+        getAttachmentStateController: () => ({ clear: () => undefined }),
+        buildComposerSubmission: ({ text }: any) => text.trim() ? {
+          messageText: text.trim(), messageImages: [], attachmentsPayload: [], contextPayload: [], filesPayload: [],
+        } : null,
         setBusy: () => trace.push('busy'), isSwitchingSession: false, pendingUiPrompts: [],
         applyPromptToSession: () => ({ userAppendFastPathApplied: false }),
         countUserMessageAppendFastPathResult: () => trace.push('fastPath'),
@@ -974,6 +969,11 @@ describe('B4S-R3 recovered anonymous owner behavior matrices', () => {
         getSessionState: () => session, vscode: { postMessage: (message: any) => trace.push(`post:${message.type}`) },
         baselinePreparing: false, isSendBlockedByPendingState: () => false, logSegmentState: () => trace.push('logSegment'),
         selectedMode: 'plan', pendingContextItems: [], pendingFileRefs: [], attachments: [], isImageAttachment: () => false,
+        getComposerContextStateController: () => ({ clear: () => undefined }),
+        getAttachmentStateController: () => ({ clear: () => undefined }),
+        buildComposerSubmission: ({ text }: any) => ({
+          messageText: text.trim(), messageImages: [], attachmentsPayload: [], contextPayload: [], filesPayload: [],
+        }),
         Date: { now: () => 100 }, messageCounter: 0, setBusy: () => trace.push('busy'), isSwitchingSession: false,
         pendingUiPrompts: [], applyPromptToSession: () => { trace.push('prompt'); return { userAppendFastPathApplied: false }; },
         countUserMessageAppendFastPathResult: () => trace.push('fastPath'),
@@ -1052,9 +1052,9 @@ describe('B4S-E4 named owner mutation rejection', () => {
     if (!sessionBody.includes('transitionActiveSessionPresentationOwner(prevSessionId, sessionId);')) errors.push('transition:session');
     if (!/rekeyKeyedChatPresentation = \(oldKey, newKey, sessionId\) => \{\s*return applyKeyedChatPresentationAliasMigration\(oldKey, newKey, sessionId\);\s*\};/.test(candidate)) errors.push('assignment:alias-boolean');
     const frozen = [
-      ['body:primary', 'function handlePrimarySendClick()', 'a0bb89397aa6485dd33161caf3ff4ca6de14b3a616f03b6259683fb4143c05c7'],
+      ['body:primary', 'function handlePrimarySendClick()', '9d3d433f243c138c8c770a1f819e73a92250fff737bd40c08a577e56a6ae2661'],
       ['body:scroll', 'function handleChatContainerScroll()', '1f0f8b57e4dd9c38d549b10ae98ed9341f0c8b2cae99ee2077914eecf0bbda4f'],
-      ['body:alias', 'function applyKeyedChatPresentationAliasMigration(', '88cf3b9f39f17f1c4df3caa8c37b11a1d956ee7e01ac2e962fff2e62f51e3d86'],
+      ['body:alias', 'function applyKeyedChatPresentationAliasMigration(', '013e6cad3d3bf432449d48b1488d9f95c9f636caee5dd82cb362bb81bf8741a1'],
     ];
     for (const [label, marker, hash] of frozen) if (sourceHash(extractCandidateBlock(candidate, marker)) !== hash) errors.push(label);
     const scrollBody = extractCandidateBlock(candidate, 'function handleChatContainerScroll()');
@@ -1070,9 +1070,9 @@ describe('B4S-E4 named owner mutation rejection', () => {
     ['removed delegation', (s: string) => s.replace('handlePrimarySendClick();', ''), 'delegation:primary'],
     ['passive option', (s: string) => s.replace('}, { passive: true });', '});'), 'listener:passive'],
     ['side-effect order', (s: string) => s.replace('if (!autoScrollPinnedToBottom) captureChatWindowAnchor();', 'captureChatWindowAnchor();\n            if (!autoScrollPinnedToBottom) {}'), 'body:scroll'],
-    ['return semantics', (s: string) => s.replace("const sessionId = route?.sessionId || null;\n        if (!sessionId) return;", "const sessionId = route?.sessionId || null;\n        if (!sessionId) break;"), 'return:session'],
+    ['return semantics', (s: string) => s.replace(/(function handleSessionIdMessage\(message\)[\s\S]*?)if \(!sessionId\) return;/, '$1if (!sessionId) break;'), 'return:session'],
     ['session transition', (s: string) => s.replace('transitionActiveSessionPresentationOwner(prevSessionId, sessionId);', ''), 'transition:session'],
-    ['switch break', (s: string) => s.replace("case 'sessionId': {\n                handleSessionIdMessage(message);\n                break;", "case 'sessionId': {\n                handleSessionIdMessage(message);"), 'return-break:session'],
+    ['switch break', (s: string) => s.replace(/(case 'sessionId': \{\s*handleSessionIdMessage\(message\);)\s*break;/, '$1'), 'return-break:session'],
     ['delegation argument', (s: string) => s.replace('handleSessionIdMessage(message);', 'handleSessionIdMessage({ ...message });'), 'delegation:session'],
     ['closure owner parameter', (s: string) => s.replace('function handlePrimarySendClick() {', 'function handlePrimarySendClick(input) {'), 'signature:primary'],
     ['alias boolean return', (s: string) => s.replace('return applyKeyedChatPresentationAliasMigration(oldKey, newKey, sessionId);', 'applyKeyedChatPresentationAliasMigration(oldKey, newKey, sessionId);'), 'assignment:alias-boolean'],
@@ -1320,7 +1320,7 @@ describe('B3 dormant presentation-only adaptive shadow integration', () => {
 describe('adaptive range transactional runtime rollout', () => {
   test('production enables revision 2 behind an independent boot switch', () => {
     expect(source).toContain("const CHAT_WINDOW_ADAPTIVE_RANGE_ENABLED = window.__ocChatWindowAdaptiveRangeEnabled !== false;");
-    expect(source).toContain('enabled: CHAT_WINDOW_ADAPTIVE_RANGE_ENABLED,\n        revision: 2,');
+    expect(source).toMatch(/enabled: CHAT_WINDOW_ADAPTIVE_RANGE_ENABLED,\s*revision: 2,/);
     expect(source).not.toMatch(/CHAT_WINDOW_ADAPTIVE_RANGE_ENABLED\s*=\s*(?:true|false)/);
   });
 
@@ -1452,10 +1452,14 @@ describe('UI log regression repairs', () => {
     ], {
       activeSessionId: 'session-a',
       getSessionState,
-      window: { __oc: { getLoadedChatSearchRows: () => [{ id: 'message-a', role: 'assistant', text: 'needle' }] } },
+      window: {
+        __oc: { getLoadedChatSearchRows: () => [{ id: 'message-a', role: 'assistant', text: 'needle' }] },
+        __ocFeatures: { collectLoadedTextSearchKeys, collectSmartSearchMessages },
+      },
     });
     expect(context.collectLoadedTextSearchKeys('needle')).toEqual(['message-a']);
     expect(context.collectSmartSearchMessages()).toEqual([{ id: 'message-a', role: 'assistant', text: 'needle' }]);
+    expect(getSessionState).toHaveBeenCalledTimes(2);
     expect(getSessionState).toHaveBeenCalledWith('session-a', false);
     for (const marker of ['function collectLoadedTextSearchKeys(', 'function collectSmartSearchMessages(']) {
       expect(extractFunction(marker)).not.toContain('getSessionOrNull(');
@@ -1470,30 +1474,28 @@ describe('UI log regression repairs', () => {
     expect(extractCaseBlock("case 'todoUpdate':", "case 'messageAppend':"))
       .toContain("scheduleCoalescedSessionMetadataRender(sessionId, 'todoUpdate-coalesced')");
     const coalescer = extractFunction('function scheduleCoalescedSessionMetadataRender(');
-    expect(coalescer).toContain('SESSION_METADATA_RENDER_INTERVAL_MS');
-    expect(coalescer).toContain('if (state.timer !== null) return true;');
+    expect(coalescer).toContain('sessionRenderScheduler.schedule(sessionId, reason, options || {})');
 
     let now = 1000;
     let timer: (() => void) | null = null;
     const rendered: string[] = [];
-    const context = executeCF3Functions(['function scheduleCoalescedSessionMetadataRender('], {
-      activeSessionId: 'session-a',
-      sessionMetadataRenderStates: new Map(),
-      SESSION_METADATA_RENDER_INTERVAL_MS: 250,
-      Date: { now: () => now },
+    const scheduler = createSessionRenderScheduler({
+      getActiveSessionId: () => 'session-a',
+      render: (reason: string) => rendered.push(reason),
+      onInactive: () => undefined,
+      intervalMs: 250,
+      now: () => now,
       setTimeout: (callback: () => void) => { timer = callback; return 1; },
       clearTimeout: () => { timer = null; },
-      logBackgroundStateUpdate: () => undefined,
-      window: { __oc: { renderFromState: (reason: string) => rendered.push(reason) } },
     });
-    expect(context.scheduleCoalescedSessionMetadataRender('session-a', 'first')).toBe(true);
-    expect(context.scheduleCoalescedSessionMetadataRender('session-a', 'latest')).toBe(true);
+    expect(scheduler.schedule('session-a', 'first')).toBe(true);
+    expect(scheduler.schedule('session-a', 'latest')).toBe(true);
     expect(rendered).toHaveLength(0);
     expect(timer).not.toBeNull();
     now = 1250;
     (timer as unknown as () => void)();
     expect(rendered).toEqual(['latest']);
-    context.scheduleCoalescedSessionMetadataRender('session-a', 'terminal', { immediate: true });
+    scheduler.schedule('session-a', 'terminal', { immediate: true });
     expect(rendered).toEqual(['latest', 'terminal']);
   });
 
@@ -2185,6 +2187,7 @@ describe('Wave 3 extracted runtime coordinator', () => {
   test('destroy and search mount execute adapter lifecycle without stale ownership', () => {
     const calls: string[] = [];
     const classList = { remove: (name: string) => calls.push(`class:${name}`) };
+    const searchState = { windowTargetKey: '' };
     const context = executeFunctions(['function destroyChatWindowAdapter(', 'function mountChatWindowSearchKey('], {
       chatWindowGeneration: 4,
       chatWindowState: {
@@ -2201,7 +2204,7 @@ describe('Wave 3 extracted runtime coordinator', () => {
       chatContainer: { classList, scrollTop: 30486 },
       vscode: { postMessage: () => undefined },
       isChatWindowAvailable: () => true,
-      sessionSearch: { windowTargetKey: '' },
+      sessionSearch: { ...searchState, setWindowTargetKey: (key: string) => { searchState.windowTargetKey = key; } },
       autoScrollPinnedToBottom: false,
       requestAnimationFrame: (callback: () => void) => callback(),
       scheduleRenderFromState: (reason: string) => calls.push(reason),
