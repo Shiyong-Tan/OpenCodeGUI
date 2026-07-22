@@ -1,17 +1,8 @@
-import type { CommitPendingTurnChangesResult } from '../OpenCodeClient';
 import type { ChangeListRecord } from './ChangeListInjection';
 import type { GitRepoRef, SessionMap } from '../undo/types';
+import type { FinalizeTurnIdentity } from '../continuation/TurnIdentityResolver';
 
-export type FinalizeTurnIdentity = {
-    sessionId: string;
-    reqId?: string;
-    clientMessageId?: string;
-    userMessageId?: string;
-    assistantMessageId?: string;
-    rootUserMessageId?: string;
-    latestAppendUserMessageId?: string;
-    commitResult?: CommitPendingTurnChangesResult;
-};
+export type { FinalizeTurnIdentity } from '../continuation/TurnIdentityResolver';
 
 export type ChangeListMessageTarget = {
     postMessage(message: unknown): unknown;

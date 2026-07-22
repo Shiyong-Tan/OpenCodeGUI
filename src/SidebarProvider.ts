@@ -16,7 +16,7 @@ import type { SmartSearchMessage } from './search/SmartSearchService';
 import { injectChangeListRecords, type ChangeListRecord, type SessionMessage } from './changes/ChangeListInjection';
 import { ChangeListStore } from './changes/ChangeListStore';
 import { DiffFileViewer } from './changes/DiffFileViewer';
-import { ChangeListEmitter, type FinalizeTurnIdentity } from './changes/ChangeListEmitter';
+import { ChangeListEmitter } from './changes/ChangeListEmitter';
 import { hydrateUndoSegments, serializeUndoSegments, type SegmentState } from './undo/UndoSegmentPersistence';
 import { resolveUndoUiVisibleRange, sanitizeUndoRangeMessageIds } from './undo/UndoRangeResolver';
 import {
@@ -28,6 +28,10 @@ import {
 } from './history/SnapshotDeltaPlanner';
 import { SnapshotStore } from './history/SnapshotStore';
 import { AppendSnapshotMetaStore, type AppendSnapshotMetaRoot } from './continuation/AppendSnapshotMetaStore';
+import {
+    buildFinalizeTurnIdentity as resolveFinalizeTurnIdentity,
+    type FinalizeTurnIdentity,
+} from './continuation/TurnIdentityResolver';
 
 type CanceledTurnRecord = {
     opId?: string;
@@ -3820,25 +3824,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private buildFinalizeTurnIdentity(sessionId: string, partial: Partial<FinalizeTurnIdentity> = {}): FinalizeTurnIdentity {
-        const rootUserMessageId = partial.rootUserMessageId
-            || (typeof (this.client as any).getAppendRootUserMsgId === 'function' ? this.client.getAppendRootUserMsgId(sessionId) : undefined)
-            || (typeof (this.client as any).getCurrentTurnUserMsgId === 'function' ? this.client.getCurrentTurnUserMsgId(sessionId) : undefined);
-        const latestAppendUserMessageId = partial.latestAppendUserMessageId
-            || (typeof (this.client as any).getLatestAppendUserMsgId === 'function' ? this.client.getLatestAppendUserMsgId(sessionId) : undefined);
-        const userMessageId = partial.userMessageId
-            || latestAppendUserMessageId
-            || rootUserMessageId
-            || (typeof (this.client as any).getCurrentTurnUserMsgId === 'function' ? this.client.getCurrentTurnUserMsgId(sessionId) : undefined);
-        const assistantMessageId = partial.assistantMessageId
-            || (typeof (this.client as any).getTurnAssistantMsgId === 'function' ? this.client.getTurnAssistantMsgId(sessionId) : undefined);
-        return {
-            ...partial,
-            sessionId,
-            userMessageId,
-            assistantMessageId,
-            rootUserMessageId: rootUserMessageId || userMessageId,
-            latestAppendUserMessageId
-        };
+        return resolveFinalizeTurnIdentity(this.client, sessionId, partial);
     }
 
     private async resolveAuthoritativeFilesForCommit(identityInput: FinalizeTurnIdentity | string): Promise<AuthoritativeDiffFileSetResult> {
