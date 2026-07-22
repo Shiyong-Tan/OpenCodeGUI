@@ -133,6 +133,12 @@ export function createSessionSearchState() {
     setMountedActiveIndex(index: number): void {
       activeIndex = Number.isSafeInteger(index) ? index : -1;
     },
+    clearMountedMatches(): void {
+      matches = [];
+    },
+    appendMountedMatch(value: unknown): void {
+      if (value != null) matches.push(value);
+    },
     beginSmartSearch(requestId: string): boolean {
       if (!query.trim() || smartInFlight || !requestId) return false;
       mode = 'smart';

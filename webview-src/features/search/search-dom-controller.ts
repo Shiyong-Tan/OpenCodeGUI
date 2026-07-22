@@ -16,6 +16,10 @@ type SearchStateLike = {
   activeKeyIndex: number;
   windowTargetKey: string;
   clearTextMatches(): void;
+  clearMountedMatches(): void;
+  appendMountedMatch(value: unknown): void;
+  setMountedActiveIndex(index: number): void;
+  setWindowTargetKey(key: unknown): void;
   setTextMatchKeys(values: unknown, jumpToFirst?: boolean): void;
   setSmartResults(messageIds: unknown): string;
   navigate(delta: number): { mode: 'text' | 'smart'; targetKey: string } | null;
@@ -80,7 +84,7 @@ export function createSessionSearchDomController(options: {
     for (const parent of parents) parent.normalize?.();
     const semanticHits = Array.from(options.document.querySelectorAll('.session-search-semantic-hit'));
     for (const hit of semanticHits) hit.classList.remove('session-search-semantic-hit', 'active');
-    options.state.matches = [];
+    options.state.clearMountedMatches();
   };
 
   const updateControls = (): void => {
@@ -156,7 +160,7 @@ export function createSessionSearchDomController(options: {
       mark.dataset.searchIndex = String(options.state.matches.length);
       const owner = (node as ChildNode).parentElement?.closest?.('[data-render-unit-key], [data-message-id], [data-segment-key]') as HTMLElement | null;
       mark.dataset.searchKey = owner?.dataset?.renderUnitKey || owner?.dataset?.messageId || owner?.dataset?.segmentKey || '';
-      options.state.matches.push(mark);
+      options.state.appendMountedMatch(mark);
       fragment.appendChild(mark);
       cursor = index + query.length;
       index = lower.indexOf(queryLower, cursor);
@@ -174,7 +178,7 @@ export function createSessionSearchDomController(options: {
     }
     const mountedForKey = options.state.matches.filter((mark) => mark?.dataset?.searchKey === targetKey);
     const target = mountedForKey[Math.min(targetOccurrence, Math.max(0, mountedForKey.length - 1))] || null;
-    options.state.activeIndex = target ? options.state.matches.indexOf(target) : -1;
+    options.state.setMountedActiveIndex(target ? options.state.matches.indexOf(target) : -1);
     if (scroll && target) options.onManualScroll();
     updateActiveHit({ scroll });
   };
@@ -196,12 +200,12 @@ export function createSessionSearchDomController(options: {
       ? options.state.fullMatchKeys[options.state.activeKeyIndex]
       : '';
     if (targetKey && !keyedRoot(targetKey) && options.ensureKeyMounted(targetKey)) {
-      options.state.windowTargetKey = targetKey;
+      options.state.setWindowTargetKey(targetKey);
       return;
     }
     const chat = options.document.getElementById('chat');
     if (!chat) {
-      options.state.activeIndex = -1;
+      options.state.setMountedActiveIndex(-1);
       updateControls();
       return;
     }
@@ -231,11 +235,11 @@ export function createSessionSearchDomController(options: {
     clearHighlights();
     const requestedKey = options.state.setSmartResults(messageIds);
     if (requestedKey && !keyedRoot(requestedKey) && options.ensureKeyMounted(requestedKey)) {
-      options.state.windowTargetKey = requestedKey;
+      options.state.setWindowTargetKey(requestedKey);
       updateControls();
       return;
     }
-    options.state.matches = [];
+    options.state.clearMountedMatches();
     const seen = new Set<string>();
     for (const id of options.state.smartMessageIds) {
       if (typeof id !== 'string' || !id || seen.has(id)) continue;
@@ -245,7 +249,7 @@ export function createSessionSearchDomController(options: {
       const element = options.document.querySelector(`[data-message-id="${escaped}"], [data-segment-key="${escaped}"]`);
       if (!element) continue;
       element.classList.add('session-search-semantic-hit');
-      options.state.matches.push(element);
+      options.state.appendMountedMatch(element);
     }
     updateActiveHit({ scroll });
   };
@@ -267,7 +271,7 @@ export function createSessionSearchDomController(options: {
     }
     const total = options.state.matches.length;
     if (!total) return;
-    options.state.activeIndex = (options.state.activeIndex + delta + total) % total;
+    options.state.setMountedActiveIndex((options.state.activeIndex + delta + total) % total);
     updateActiveHit({ scroll: true });
   };
 

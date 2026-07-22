@@ -11608,7 +11608,7 @@ function shouldHideDcpUiMessage(message) {
         chatWindowState.pendingScrollKey = '';
         chatWindowState.pendingScrollAttempts = 0;
         if (targetKey && sessionSearch.windowTargetKey === targetKey) {
-            sessionSearch.windowTargetKey = '';
+            sessionSearch.clearWindowTargetKey(targetKey);
         }
     }
 
@@ -12667,7 +12667,7 @@ function shouldHideDcpUiMessage(message) {
         const sessionId = activeSessionId || '__no_session__';
         const keys = chatWindowState.allUnits.map((unit) => unit.key);
         if (!chatLocalHistoryController.revealToKey(sessionId, keys, targetKey)) return false;
-        sessionSearch.windowTargetKey = targetKey;
+        sessionSearch.setWindowTargetKey(targetKey);
         autoScrollPinnedToBottom = false;
         chatWindowState.activityBelow = true;
         if (chatWindowState.pendingScrollKey !== targetKey) {
@@ -15450,7 +15450,7 @@ function appendMessageImages(parentEl, message) {
             }
             case 'smartSessionSearchError': {
                 if (!sessionSearch.failSmartSearch(message.requestId)) break;
-                sessionSearch.matches = [];
+                sessionSearch.clearMountedMatches();
                 updateSessionSearchControls();
                 break;
             }
