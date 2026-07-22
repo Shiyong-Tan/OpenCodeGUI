@@ -2842,164 +2842,42 @@ function resolveSnapshotMessageKey(session, key) {
     return key;
 }
 
+const appendSnapshotController = window.__ocContinuation.createAppendSnapshotController({
+    resolveMessageKey: resolveSnapshotMessageKey,
+    getSession: (sessionId) => getSessionState(sessionId),
+    postMessage: (message) => vscode.postMessage(message)
+});
+
 function sanitizeAppendSnapshotItem(item, session) {
-    if (!item || typeof item !== 'object') return null;
-    const out = {};
-    const copyString = (name, maxLen = 20000) => {
-        const value = item[name];
-        if (typeof value === 'string' && value.length > 0) out[name] = value.slice(0, maxLen);
-    };
-    copyString('clientMessageId', 512);
-    copyString('status', 64);
-    copyString('reason', 1000);
-    copyString('text', 20000);
-    const appendUserMsgId = resolveSnapshotMessageKey(session, item.appendUserMsgId) || item.appendUserMsgId;
-    if (typeof appendUserMsgId === 'string' && appendUserMsgId.length && !appendUserMsgId.startsWith('local-') && !appendUserMsgId.startsWith('tmp:')) {
-        out.appendUserMsgId = appendUserMsgId;
-    }
-    const rootUserMsgId = resolveSnapshotMessageKey(session, item.rootUserMsgId) || item.rootUserMsgId;
-    if (typeof rootUserMsgId === 'string' && rootUserMsgId.length && !rootUserMsgId.startsWith('local-') && !rootUserMsgId.startsWith('tmp:')) {
-        out.rootUserMsgId = rootUserMsgId;
-    }
-    if (typeof item.createdAt === 'number' && Number.isFinite(item.createdAt)) out.createdAt = item.createdAt;
-    if (typeof item.updatedAt === 'number' && Number.isFinite(item.updatedAt)) out.updatedAt = item.updatedAt;
-    return Object.keys(out).length ? out : null;
+    return appendSnapshotController.sanitizeItem(item, session);
 }
 
 function sanitizeAppendSnapshotItems(items, session) {
-    if (!Array.isArray(items)) return [];
-    const out = [];
-    const seen = new Set();
-    for (const item of items) {
-        const sanitized = sanitizeAppendSnapshotItem(item, session);
-        if (!sanitized) continue;
-        const dedupeKey = sanitized.clientMessageId || sanitized.appendUserMsgId || `${out.length}`;
-        if (seen.has(dedupeKey)) continue;
-        seen.add(dedupeKey);
-        out.push(sanitized);
-    }
-    return out;
+    return appendSnapshotController.sanitizeItems(items, session);
 }
 
 function normalizeAppendItemsForFinalize(items) {
-    if (!Array.isArray(items)) return { items: [], changed: false };
-    let changed = false;
-    const normalized = items.map((item) => {
-        if (!item || typeof item !== 'object') return item;
-        if (item.status === 'applied' || item.status === 'failed' || item.status === 'rejected') {
-            return item;
-        }
-        if (item.status === 'seen' || ((item.status === 'queued' || item.status === 'sending') && item.appendUserMsgId)) {
-            changed = true;
-            return { ...item, status: 'applied' };
-        }
-        if (item.status === 'sending' || item.status === 'queued') {
-            changed = true;
-            return { ...item, status: 'failed', reason: item.reason || 'append-not-acknowledged' };
-        }
-        return item;
-    });
-    return { items: normalized, changed };
+    return appendSnapshotController.normalizeItemsForFinalize(items);
 }
 
 function normalizeSessionAppendItemsForFinalize(session) {
-    if (!session || !(session.messagesById instanceof Map)) return false;
-    let changed = false;
-    for (const message of session.messagesById.values()) {
-        if (!message || message.role !== 'user') continue;
-        if (!Array.isArray(message.meta?.appendedPrompts)) continue;
-        const result = normalizeAppendItemsForFinalize(message.meta.appendedPrompts);
-        if (!result.changed) continue;
-        message.meta = { ...(message.meta || {}), appendedPrompts: result.items };
-        changed = true;
-    }
-    return changed;
+    return appendSnapshotController.normalizeSessionForFinalize(session);
 }
 
 function collectAppendSnapshotMetadata(session) {
-    if (!session || !(session.messagesById instanceof Map)) return [];
-    const entries = [];
-    const seenRoots = new Set();
-    for (const message of session.messagesById.values()) {
-        if (!message || message.role !== 'user') continue;
-        const items = sanitizeAppendSnapshotItems(message.meta?.appendedPrompts, session);
-        if (!items.length) continue;
-        const rootMessageId = resolveSnapshotMessageKey(session, message.id) || message.id;
-        if (typeof rootMessageId !== 'string' || !rootMessageId.length || rootMessageId.startsWith('local-') || rootMessageId.startsWith('tmp:')) continue;
-        if (seenRoots.has(rootMessageId)) continue;
-        seenRoots.add(rootMessageId);
-        entries.push({ rootMessageId, appendRootUserKey: rootMessageId, meta: { appendedPrompts: items } });
-    }
-    return entries;
+    return appendSnapshotController.collect(session);
 }
 
 function hasProtectedInflightAppendRoot(session) {
-    if (!session || !(session.messagesById instanceof Map)) return false;
-    if (session.backendTurnInFlight !== true) return false;
-    if (session.turnFullyFinalized === true) return false;
-    if (session.canceledActiveTurn === true) return false;
-    if (typeof session.finalAssistantLock?.assistantMsgId === 'string' && session.finalAssistantLock.assistantMsgId.length) return false;
-
-    const key = session.appendRootUserKey;
-    if (typeof key !== 'string' || !key.length) return false;
-
-    const candidates = new Set([key]);
-    const resolved = resolveSnapshotMessageKey(session, key);
-    if (typeof resolved === 'string' && resolved.length) candidates.add(resolved);
-    const mappedServer = session.clientKeyToServerId?.get?.(key);
-    if (typeof mappedServer === 'string' && mappedServer.length) candidates.add(mappedServer);
-    const mappedClient = session.serverIdToClientKey?.get?.(key);
-    if (typeof mappedClient === 'string' && mappedClient.length) candidates.add(mappedClient);
-
-    for (const candidate of candidates) {
-        const message = session.messagesById.get(candidate);
-        if (message?.role === 'user') return true;
-    }
-    return false;
+    return appendSnapshotController.hasProtectedInflightRoot(session);
 }
 
 function syncAppendSnapshotMetadata(sessionId, reason = 'unknown') {
-    if (typeof sessionId !== 'string' || !sessionId.length) return;
-    const session = getSessionState(sessionId);
-    if (!session) return;
-    const roots = collectAppendSnapshotMetadata(session);
-    if (!roots.length) return;
-    vscode.postMessage({ type: 'appendSnapshotMeta', sessionId, roots, reason });
-    vscode.postMessage({
-        type: 'ui-debug',
-        payload: ['[WV][APPEND_SNAPSHOT_META]', `sessionId=${sessionId}`, `reason=${reason}`, `rootCount=${roots.length}`, `appendCount=${roots.reduce((sum, root) => sum + (Array.isArray(root.meta?.appendedPrompts) ? root.meta.appendedPrompts.length : 0), 0)}`]
-    });
+    appendSnapshotController.sync(sessionId, reason);
 }
 
 function restoreAppendHydrationMetadata(sessionId, session) {
-    if (!session || !(session.messagesById instanceof Map)) return { rootCount: 0, appendCount: 0, restoredRootUserKey: '' };
-    let rootCount = 0;
-    let appendCount = 0;
-    let restoredRootUserKey = '';
-    const protectInflightAppendRoot = hasProtectedInflightAppendRoot(session);
-    const shouldNormalizeFinalizedAppendItems = session.turnFullyFinalized === true;
-    for (const message of session.messagesById.values()) {
-        if (!message || message.role !== 'user') continue;
-        let items = sanitizeAppendSnapshotItems(message.meta?.appendedPrompts, session);
-        if (!items.length) continue;
-        if (shouldNormalizeFinalizedAppendItems) {
-            items = normalizeAppendItemsForFinalize(items).items;
-        }
-        message.meta = { ...(message.meta || {}), appendedPrompts: items };
-        rootCount++;
-        appendCount += items.length;
-        if (!restoredRootUserKey && typeof message.id === 'string' && message.id.length && !message.id.startsWith('local-') && !message.id.startsWith('tmp:')) {
-            restoredRootUserKey = message.id;
-        }
-    }
-    if (restoredRootUserKey && !protectInflightAppendRoot) session.appendRootUserKey = restoredRootUserKey;
-    if (rootCount > 0) {
-        vscode.postMessage({
-            type: 'ui-debug',
-            payload: ['[WV][APPEND_HYDRATE_META]', `sessionId=${sessionId || 'null'}`, `rootCount=${rootCount}`, `appendCount=${appendCount}`, `appendRootUserKey=${restoredRootUserKey || 'null'}`]
-        });
-    }
-    return { rootCount, appendCount, restoredRootUserKey };
+    return appendSnapshotController.restore(sessionId, session);
 }
 
 function getPresentationMessageKeyVariants(session, key) {

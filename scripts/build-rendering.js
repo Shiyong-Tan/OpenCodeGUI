@@ -35,23 +35,31 @@ const undoOptions = {
   outfile: path.join(root, 'media', 'undo.bundle.js'),
 };
 
+const continuationOptions = {
+  ...options,
+  entryPoints: [path.join(root, 'webview-src', 'continuation', 'index.ts')],
+  outfile: path.join(root, 'media', 'continuation.bundle.js'),
+};
+
 async function run() {
   if (watch) {
-    const [renderingContext, featureContext, undoContext] = await Promise.all([
+    const [renderingContext, featureContext, undoContext, continuationContext] = await Promise.all([
       esbuild.context(options),
       esbuild.context(featureOptions),
       esbuild.context(undoOptions),
+      esbuild.context(continuationOptions),
     ]);
-    await Promise.all([renderingContext.watch(), featureContext.watch(), undoContext.watch()]);
-    console.log('Watching webview rendering, feature, and undo seams...');
+    await Promise.all([renderingContext.watch(), featureContext.watch(), undoContext.watch(), continuationContext.watch()]);
+    console.log('Watching webview rendering, feature, undo, and continuation seams...');
     return;
   }
   if (!development) {
     fs.rmSync(`${options.outfile}.map`, { force: true });
     fs.rmSync(`${featureOptions.outfile}.map`, { force: true });
     fs.rmSync(`${undoOptions.outfile}.map`, { force: true });
+    fs.rmSync(`${continuationOptions.outfile}.map`, { force: true });
   }
-  await Promise.all([esbuild.build(options), esbuild.build(featureOptions), esbuild.build(undoOptions)]);
+  await Promise.all([esbuild.build(options), esbuild.build(featureOptions), esbuild.build(undoOptions), esbuild.build(continuationOptions)]);
 }
 
 run().catch((error) => {

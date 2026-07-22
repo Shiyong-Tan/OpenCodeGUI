@@ -25,6 +25,7 @@ describe('Wave 1 build and package contracts', () => {
     expect(buildScript).toContain("outfile: path.join(root, 'media', 'rendering.bundle.js')");
     expect(buildScript).toContain("outfile: path.join(root, 'media', 'features.bundle.js')");
     expect(buildScript).toContain("outfile: path.join(root, 'media', 'undo.bundle.js')");
+    expect(buildScript).toContain("outfile: path.join(root, 'media', 'continuation.bundle.js')");
     const watchAll = read('scripts/watch-all.js');
     expect(watchAll).toContain("'--watch', '-p', './'");
     expect(watchAll).toContain("path.join(root, 'scripts', 'build-rendering.js'), '--watch'");
@@ -43,18 +44,20 @@ describe('Wave 1 build and package contracts', () => {
     expect(read('.gitignore')).toContain('media/rendering.bundle.js');
     expect(read('.gitignore')).toContain('media/features.bundle.js');
     expect(read('.gitignore')).toContain('media/undo.bundle.js');
+    expect(read('.gitignore')).toContain('media/continuation.bundle.js');
     const vscodeIgnore = read('.vscodeignore');
     expect(vscodeIgnore).toContain('webview-src/**');
     expect(vscodeIgnore).toContain('*.map');
     expect(vscodeIgnore).not.toContain('media/rendering.bundle.js');
   });
 
-  test('provider resolves and loads rendering, feature, and undo bundles before legacy main.js without CSP or nonce', () => {
+  test('provider resolves and loads modular bundles before legacy main.js without CSP or nonce', () => {
     const provider = read('src/SidebarProvider.ts');
     expect(provider).toContain('vscode.Uri.joinPath(this._extensionUri, "media", "rendering.bundle.js")');
     expect(provider).toContain('vscode.Uri.joinPath(this._extensionUri, "media", "features.bundle.js")');
     expect(provider).toContain('vscode.Uri.joinPath(this._extensionUri, "media", "undo.bundle.js")');
-    expect(provider).toMatch(/<script src="\$\{renderingScriptUri\}"><\/script>\s*<script src="\$\{featureScriptUri\}"><\/script>\s*<script src="\$\{undoScriptUri\}"><\/script>\s*<script src="\$\{scriptUri\}"><\/script>/);
+    expect(provider).toContain('vscode.Uri.joinPath(this._extensionUri, "media", "continuation.bundle.js")');
+    expect(provider).toMatch(/<script src="\$\{renderingScriptUri\}"><\/script>\s*<script src="\$\{featureScriptUri\}"><\/script>\s*<script src="\$\{undoScriptUri\}"><\/script>\s*<script src="\$\{continuationScriptUri\}"><\/script>\s*<script src="\$\{scriptUri\}"><\/script>/);
     expect(provider).not.toMatch(/Content-Security-Policy|nonce=/);
   });
 

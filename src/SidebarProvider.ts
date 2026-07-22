@@ -9053,6 +9053,9 @@ ${attachmentLines.join('\n')}`
         const undoScriptUri = webview.asWebviewUri(
             vscode.Uri.joinPath(this._extensionUri, "media", "undo.bundle.js")
         );
+        const continuationScriptUri = webview.asWebviewUri(
+            vscode.Uri.joinPath(this._extensionUri, "media", "continuation.bundle.js")
+        );
         const styleMainUri = webview.asWebviewUri(
             vscode.Uri.joinPath(this._extensionUri, "media", "main.css")
         );
@@ -9203,6 +9206,7 @@ ${attachmentLines.join('\n')}`
                 <script src="${renderingScriptUri}"></script>
                 <script src="${featureScriptUri}"></script>
                 <script src="${undoScriptUri}"></script>
+                <script src="${continuationScriptUri}"></script>
                 <script src="${scriptUri}"></script>
             </body>
             </html>`;

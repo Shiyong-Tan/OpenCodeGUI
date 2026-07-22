@@ -20,6 +20,12 @@ if (!files.some((file) => file.endsWith('media/rendering.bundle.js'))) {
 if (!files.some((file) => file.endsWith('media/features.bundle.js'))) {
   throw new Error('VSIX package contents omit media/features.bundle.js');
 }
+if (!files.some((file) => file.endsWith('media/undo.bundle.js'))) {
+  throw new Error('VSIX package contents omit media/undo.bundle.js');
+}
+if (!files.some((file) => file.endsWith('media/continuation.bundle.js'))) {
+  throw new Error('VSIX package contents omit media/continuation.bundle.js');
+}
 for (const file of files) {
   if (file.includes('webview-src/') || file.endsWith('rendering.bundle.js.map') || file.endsWith('features.bundle.js.map')) {
     throw new Error(`Development-only file would be packaged: ${file}`);
