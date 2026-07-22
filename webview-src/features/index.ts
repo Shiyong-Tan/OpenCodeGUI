@@ -26,6 +26,7 @@ import {
 import { createSmartSearchRequestController } from './search/smart-search-request-controller';
 import { createChangeListRenderer, deriveChangeListPresentation } from './change-list/change-list-renderer';
 import { createChangeListEventController } from './change-list/change-list-events';
+import { planChangeListMaterialization } from './change-list/change-list-planner';
 
 export const FEATURE_FACADE_VERSION = 1 as const;
 
@@ -72,6 +73,7 @@ const facade = Object.freeze({
   createChangeListRenderer,
   deriveChangeListPresentation,
   createChangeListEventController,
+  planChangeListMaterialization,
 });
 
 declare global {

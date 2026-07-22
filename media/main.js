@@ -275,6 +275,10 @@ const changeListEventController = createChangeListEventController({
     postDebug: (payload) => vscode.postMessage({ type: 'ui-debug', payload }),
     now: () => Date.now()
 });
+const planChangeListMaterialization = window.__ocFeatures?.planChangeListMaterialization;
+if (typeof planChangeListMaterialization !== 'function') {
+    throw new Error('Change list materialization planner is unavailable');
+}
 const createSegmentTopology = window.__ocUndo?.createSegmentTopology;
 if (typeof createSegmentTopology !== 'function') {
     throw new Error('Segment topology is unavailable');
@@ -2691,66 +2695,17 @@ function materializeInjectedChangeLists(session, rawSessionMessages, source = 's
     if (!session || !Array.isArray(rawSessionMessages) || !rawSessionMessages.length) {
         return { seen: 0, alreadyTimeline: 0, materialized: 0, insertedAfter: 0, appended: 0, skippedNoFiles: 0 };
     }
-
-    const stats = { seen: 0, alreadyTimeline: 0, materialized: 0, insertedAfter: 0, appended: 0, skippedNoFiles: 0 };
-    const findNearestPriorTimelineId = (index) => {
-        for (let i = index - 1; i >= 0; i--) {
-            const priorId = rawSessionMessages[i]?.id;
-            if (typeof priorId !== 'string' || !priorId.length) continue;
-            const stablePriorId = toStableMessageKey(session, priorId) || priorId;
-            if (session.timeline.includes(stablePriorId)) return stablePriorId;
-        }
-        return '';
-    };
-
-    rawSessionMessages.forEach((item, index) => {
-        if (!isChangeListSessionMessage(item)) return;
-        stats.seen++;
-        const id = item.id;
-        const files = Array.isArray(item.meta?.files)
-            ? item.meta.files.filter((file) => typeof file === 'string' && file.length)
-            : [];
-        if (!files.length) {
-            stats.skippedNoFiles++;
-            return;
-        }
-
-        const existing = session.messagesById.get(id);
-        const message = {
-            ...(existing || {}),
-            id,
-            role: item.role || existing?.role || 'system',
-            text: typeof item.text === 'string' ? item.text : (existing?.text || ''),
-            meta: {
-                ...(existing?.meta || {}),
-                ...(item.meta || {}),
-                kind: 'changeList',
-                files
-            },
-            order: existing?.order ?? session.nextOrder++
-        };
-        session.messagesById.set(id, message);
-
-        if (session.timeline.includes(id)) {
-            stats.alreadyTimeline++;
-            return;
-        }
-
-        const anchorId = typeof message.meta?.stableAnchorMessageId === 'string' && session.timeline.includes(message.meta.stableAnchorMessageId)
-            ? message.meta.stableAnchorMessageId
-            : (typeof message.meta?.anchorMessageId === 'string'
-                ? (toStableMessageKey(session, message.meta.anchorMessageId) || message.meta.anchorMessageId)
-                : findNearestPriorTimelineId(index));
-        if (anchorId && session.timeline.includes(anchorId)) {
-            const anchorIndex = session.timeline.indexOf(anchorId);
-            session.timeline.splice(anchorIndex + 1, 0, id);
-            stats.insertedAfter++;
-        } else {
-            session.timeline.push(id);
-            stats.appended++;
-        }
-        stats.materialized++;
+    const plan = planChangeListMaterialization({
+        rawMessages: rawSessionMessages,
+        messagesById: session.messagesById,
+        timeline: session.timeline,
+        nextOrder: session.nextOrder,
+        toStableMessageKey: (messageId) => toStableMessageKey(session, messageId)
     });
+    for (const message of plan.messages) session.messagesById.set(message.id, message);
+    session.timeline = [...plan.timeline];
+    session.nextOrder = plan.nextOrder;
+    const stats = plan.stats;
 
     if (stats.seen || stats.materialized) {
         vscode.postMessage({

@@ -15,6 +15,7 @@ describe('webview feature facade', () => {
     expect(typeof facade.createModelState).toBe('function');
     expect(typeof facade.createAttachmentState).toBe('function');
     expect(typeof facade.createHeaderState).toBe('function');
+    expect(typeof facade.planChangeListMaterialization).toBe('function');
     expect(windowObject.__ocRendering).toBeUndefined();
   });
 });
