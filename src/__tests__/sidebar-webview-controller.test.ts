@@ -29,6 +29,13 @@ describe('SidebarWebviewController', () => {
     expect(controllerSource).toContain('host.handleSnapshotTimelineIds(data.payload)');
   });
 
+  test('reapplies cached append metadata to every selected-session hydration payload', () => {
+    expect(controllerSource).toContain('const restoreCachedAppendMetadata = (messages: SessionMessage[])');
+    expect(controllerSource).toContain('const snapshotMessages = restoreCachedAppendMetadata(snapshotFormatted.messages)');
+    expect(controllerSource).toContain('const mergedMessages = restoreCachedAppendMetadata(mergedMessagesRaw)');
+    expect(controllerSource).toContain('const fullMessages = restoreCachedAppendMetadata(formatted.messages)');
+  });
+
   test('registers message, visibility, and disposal lifecycles once', () => {
     const callbacks: Record<string, Function> = {};
     const webview: any = {

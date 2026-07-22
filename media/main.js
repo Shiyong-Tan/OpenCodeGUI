@@ -14601,12 +14601,13 @@ function appendMessageImages(parentEl, message) {
                             ]
                         );
                     }
-                    if (preservedLive.missingIds.length || preservedLive.fieldNames.length || skippedTimelineArtifacts || skippedBackingArtifacts || skippedCanonicalTimeline || skippedCanonicalBacking || skippedCanonicalFields) {
+                    if (preservedLive.missingIds.length || preservedLive.mergedIds?.length || preservedLive.fieldNames.length || skippedTimelineArtifacts || skippedBackingArtifacts || skippedCanonicalTimeline || skippedCanonicalBacking || skippedCanonicalFields) {
                         vscode.postMessage({
                             type: 'ui-debug',
                             payload: ['[WV][HYDRATE_PRESERVE_VOLATILE]',
                                 `sessionId=${sessionId}`,
                                 `preservedIds=${preservedLive.missingIds.length}`,
+                                `mergedIds=${preservedLive.mergedIds?.length || 0}`,
                                 `skippedArtifacts=${skippedTimelineArtifacts + skippedBackingArtifacts}`,
                                 `skippedSnapshotChangeListTimeline=${skippedTimelineArtifacts}`,
                                 `skippedSnapshotChangeListBacking=${skippedBackingArtifacts}`,

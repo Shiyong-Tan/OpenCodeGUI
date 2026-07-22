@@ -999,6 +999,23 @@ ${attachmentLines.join('\n')}`
                             liveWebview.postMessage({ ...payload, phase });
                             return true;
                         };
+                        const restoreCachedAppendMetadata = (messages: SessionMessage[]): SessionMessage[] => {
+                            const messagesById = new Map<string, SessionMessage>();
+                            const cloned = messages.map((message) => {
+                                const copy = {
+                                    ...message,
+                                    meta: message?.meta && typeof message.meta === 'object'
+                                        ? { ...message.meta }
+                                        : message?.meta
+                                };
+                                if (typeof copy.id === 'string' && copy.id) messagesById.set(copy.id, copy);
+                                return copy;
+                            });
+                            host.applyAppendSnapshotMeta(targetSessionId, messagesById);
+                            return cloned.map((message) => (
+                                typeof message.id === 'string' ? (messagesById.get(message.id) || message) : message
+                            ));
+                        };
                             const workspaceFolder = host.client.getWorkspaceRoot() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
                             if (workspaceFolder) {
                                 const workspaceKey = host.getWorkspaceKeyForRoot(workspaceFolder);
@@ -1048,7 +1065,7 @@ ${attachmentLines.join('\n')}`
                                     title: snapPayload.title || baseTitle,
                                     messages: Array.isArray(snapPayload.messages) ? snapPayload.messages : []
                                 });
-                                const snapshotMessages = snapshotFormatted.messages;
+                                const snapshotMessages = restoreCachedAppendMetadata(snapshotFormatted.messages);
                                 baseTitle = snapshotFormatted.title || baseTitle;
                                 baseMessages = snapshotMessages;
                                 snapshotTimelineIds = host.getSnapshotTimelineIds(snapPayload, snapshotMessages);
@@ -1119,9 +1136,10 @@ ${attachmentLines.join('\n')}`
                                 throw new Error('snapshot-boundary-unproven');
                             }
                             const appendMessages = continuity.suffix;
-                            const mergedMessages = snapshotIds.length > 0
+                            const mergedMessagesRaw = snapshotIds.length > 0
                                 ? host.buildImmutableSnapshotWithProvenSuffix(baseMessages, appendMessages)
                                 : formatted.messages;
+                            const mergedMessages = restoreCachedAppendMetadata(mergedMessagesRaw);
                             const newIds = appendMessages
                                 .map((message: SessionMessage) => (typeof message?.id === 'string' ? message.id : ''))
                                 .filter((id: string): id is string => Boolean(id));
@@ -1206,6 +1224,7 @@ ${attachmentLines.join('\n')}`
                             );
                         }
                         const formatted = await host.injectChangeLists(targetSessionId, { title: formattedRaw.title, messages: fullDelta.messages });
+                        const fullMessages = restoreCachedAppendMetadata(formatted.messages);
 
                         // host.uiDebugChannel.appendLine(
                         //     `[EXT][SEG_HYDRATE_LOAD] sessionId=${data.sessionId} found=${segments.length} ` +
@@ -1226,7 +1245,7 @@ ${attachmentLines.join('\n')}`
                             type: 'sessionData',
                             sessionId: targetSessionId,
                             title: formatted.title,
-                            messages: formatted.messages,
+                            messages: fullMessages,
                             segments,
                                 meta: {
                                     timelineMessageIds: fullDelta.timelineMessageIds,
@@ -1236,7 +1255,7 @@ ${attachmentLines.join('\n')}`
                                 }
                             };
                         const sent = postSessionData(sessionPayload, 'full');
-                        if (sent && formatted.messages.length > 0) {
+                        if (sent && fullMessages.length > 0) {
                             sessionDataSent = true;
                         }
                         if (sent) {

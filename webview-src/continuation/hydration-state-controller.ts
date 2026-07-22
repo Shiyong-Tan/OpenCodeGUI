@@ -100,14 +100,49 @@ export function createHydrationStateController(options: HydrationStateController
   }
 
   function restore(session: any, preserved: any) {
-    const empty = { missingIds: [], fieldNames: [], skippedArtifacts: { timeline: 0, backing: 0 }, skippedCanonicalizedVolatile: { timeline: 0, backing: 0, fields: 0 } };
+    const empty = { missingIds: [], mergedIds: [], fieldNames: [], skippedArtifacts: { timeline: 0, backing: 0 }, skippedCanonicalizedVolatile: { timeline: 0, backing: 0, fields: 0 } };
     if (!session || !preserved) return empty;
     const hydratedIds = new Set(Array.isArray(session.timeline) ? session.timeline : []);
     const hydratedBackingIds = new Set(session.messagesById instanceof Map ? session.messagesById.keys() : []);
     const missingIds: string[] = [];
+    const mergedIds: string[] = [];
     const skippedArtifacts = { timeline: 0, backing: 0 };
     const skippedCanonicalizedVolatile = { timeline: 0, backing: 0, fields: 0 };
     let hasCanonicalizedVolatileDuplicate = false;
+    const preservedTurnIsActive = preserved.backendTurnInFlight === true && preserved.turnFullyFinalized === false;
+    const activeMessageIds = new Set([
+      preserved.thinkingId,
+      preserved.currentTurnAssistantKey,
+      preserved.currentTurnAssistantMsgId,
+      preserved.lastTurnUserId,
+      preserved.lastTurnAssistantId,
+      preserved.appendRootUserKey,
+      preserved.pendingAssistantUpgrade?.tmpKey,
+      preserved.pendingAssistantUpgrade?.assistantMsgId,
+    ].filter((id) => typeof id === 'string' && id.length));
+    const mergeCollidingActiveMessage = (id: string, preservedMessage: any) => {
+      if (!preservedTurnIsActive || !activeMessageIds.has(id) || !preservedMessage) return;
+      const hydratedMessage = session.messagesById.get(id);
+      if (!hydratedMessage || hydratedMessage.role !== preservedMessage.role) return;
+      const preservedMeta = preservedMessage.meta && typeof preservedMessage.meta === 'object' ? preservedMessage.meta : {};
+      const hydratedMeta = hydratedMessage.meta && typeof hydratedMessage.meta === 'object' ? hydratedMessage.meta : {};
+      const preservedText = typeof preservedMessage.text === 'string' ? preservedMessage.text : '';
+      const hydratedText = typeof hydratedMessage.text === 'string' ? hydratedMessage.text : '';
+      const shouldKeepLiveAssistantMeta = preservedMessage.role === 'assistant';
+      const shouldKeepLiveText = shouldKeepLiveAssistantMeta && preservedText.length >= hydratedText.length;
+      const shouldKeepAppendMeta = preservedMessage.role === 'user' && Array.isArray(preservedMeta.appendedPrompts);
+      if (!shouldKeepLiveAssistantMeta && !shouldKeepAppendMeta) return;
+      session.messagesById.set(id, {
+        ...hydratedMessage,
+        ...(shouldKeepLiveText ? { text: preservedText } : {}),
+        meta: {
+          ...hydratedMeta,
+          ...(shouldKeepLiveAssistantMeta ? preservedMeta : {}),
+          ...(shouldKeepAppendMeta ? { appendedPrompts: preservedMeta.appendedPrompts } : {}),
+        },
+      });
+      mergedIds.push(id);
+    };
     const isHydrated = (id: unknown) => typeof id === 'string' && (hydratedIds.has(id) || hydratedBackingIds.has(id));
     const canonicalizedHydratedId = (id: unknown, message: any) => {
       if (typeof id !== 'string' || (!id.startsWith('local-') && !id.startsWith('tmp:'))) return null;
@@ -134,7 +169,11 @@ export function createHydrationStateController(options: HydrationStateController
       missingIds.push(id);
     }
     for (const [id, preservedMessage] of preserved.messagesById.entries()) {
-      if (!id || session.messagesById.has(id)) continue;
+      if (!id) continue;
+      if (session.messagesById.has(id)) {
+        mergeCollidingActiveMessage(id, preservedMessage);
+        continue;
+      }
       if (isPersistenceArtifact(id, preservedMessage)) {
         skippedArtifacts.backing++;
         continue;
@@ -217,7 +256,7 @@ export function createHydrationStateController(options: HydrationStateController
       for (const value of preservedSet.values()) session[name].add(value);
       fieldNames.push(name);
     }
-    return { missingIds, fieldNames: Array.from(new Set(fieldNames)), skippedArtifacts, skippedCanonicalizedVolatile };
+    return { missingIds, mergedIds: Array.from(new Set(mergedIds)), fieldNames: Array.from(new Set(fieldNames)), skippedArtifacts, skippedCanonicalizedVolatile };
   }
 
   return Object.freeze({
