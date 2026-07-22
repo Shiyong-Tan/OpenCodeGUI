@@ -32,4 +32,45 @@ describe('message renderer module', () => {
     expect(append).toHaveBeenCalledTimes(1);
     expect(append).toHaveBeenCalledWith(root);
   });
+
+  test('returns when changelist rendering produces no root', () => {
+    const append = jest.fn();
+    const host = {
+      activeSessionId: 'session-a',
+      getSessionState: () => ({}),
+      changeListRenderer: { render: () => null },
+      appendChatRenderRoot: append,
+    };
+
+    expect(() => renderMessageElement(host, {
+      id: 'change-empty', role: 'system', meta: { kind: 'changeList' },
+    }, new Set())).not.toThrow();
+    expect(append).not.toHaveBeenCalled();
+  });
+
+  test('returns before appending a blank user message', () => {
+    const append = jest.fn();
+    const createElement = jest.fn(() => ({
+      classList: { add: jest.fn() },
+      dataset: {},
+      appendChild: jest.fn(),
+    }));
+    const previousDocument = (global as any).document;
+    (global as any).document = { createElement };
+    const host = {
+      activeSessionId: 'session-a',
+      getSessionState: () => ({}),
+      stripAttachmentManifest: (text: string) => text,
+      stripSystemInjections: (text: string) => text,
+      appendMessageToChat: append,
+    };
+
+    try {
+      renderMessageElement(host, { id: 'blank-user', role: 'user', text: '   ' }, new Set());
+      expect(append).not.toHaveBeenCalled();
+      expect(createElement).toHaveBeenCalledTimes(2);
+    } finally {
+      (global as any).document = previousDocument;
+    }
+  });
 });
