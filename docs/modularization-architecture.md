@@ -47,6 +47,26 @@ It does not own messages, segments, changelists, hidden state or active turns. T
 message renderer receives live getters from `media/main.js`, preventing session or
 undo state from being captured at module initialization.
 
+### Message renderer capability boundary
+
+`webview-src/rendering/message-renderer.ts` receives a bounded
+`MessageRendererHost`, not the global Webview object. The ordinary-JavaScript
+`media/main.js` facade supplies live read-only capability getters for the
+renderer's message, session, segment, append, undo, DOM, and presentation
+needs. Renderer dependencies are type-checked in TypeScript and the real
+facade shape is covered by a runtime contract.
+
+The renderer records a message ID only after its root is accepted by the
+append capability; rejected, missing, thrown, and early-return paths remain
+retryable. Segment-toggle and undo rerenders use the explicit
+`requestRerender` capability, and duplicate-render warnings use the explicit
+`logWarning` capability. The renderer does not access the global rerender
+backchannel or `console` directly.
+
+This boundary does not alter virtual transaction/coordinator ownership:
+`media/main.js` remains the owner of virtual reconciliation, measurements,
+scroll anchors, safe-shell behavior, and recovery/prepare-commit-abort logic.
+
 ## Critical invariants
 
 - Snapshot data is applied first. Only a proven newer suffix may be appended; an
