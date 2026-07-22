@@ -27,6 +27,7 @@ import {
     getSnapshotTimelineIds as deriveSnapshotTimelineIds,
 } from './history/SnapshotDeltaPlanner';
 import { SnapshotStore } from './history/SnapshotStore';
+import { AppendSnapshotMetaStore, type AppendSnapshotMetaRoot } from './continuation/AppendSnapshotMetaStore';
 
 type CanceledTurnRecord = {
     opId?: string;
@@ -70,14 +71,6 @@ type PersistedRevertedSegment = {
     conflicts: ConflictDetail[];
     discarded?: boolean;
     updatedAt: number;
-};
-
-type AppendSnapshotMetaRoot = {
-    rootMessageId: string;
-    appendRootUserKey?: string;
-    meta: {
-        appendedPrompts: Array<Record<string, unknown>>;
-    };
 };
 
 type LocalQuestionRequest = {
@@ -256,7 +249,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private task1DoneVisibleCount = 0;
     private task1FalseDoneEvents = 0;
     private appendSubmitInFlightBySession = new Set<string>();
-    private appendSnapshotMetaBySession = new Map<string, Map<string, AppendSnapshotMetaRoot>>();
+    private readonly appendSnapshotMetaStore: AppendSnapshotMetaStore;
 
     private cleanSubagentTitle(title?: string): string {
         const raw = typeof title === 'string' ? title.trim() : '';
@@ -3291,88 +3284,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private sanitizeAppendSnapshotItems(items: unknown): Array<Record<string, unknown>> {
-        if (!Array.isArray(items)) return [];
-        const out: Array<Record<string, unknown>> = [];
-        const seen = new Set<string>();
-        for (const raw of items) {
-            if (!raw || typeof raw !== 'object') continue;
-            const item = raw as Record<string, unknown>;
-            const sanitized: Record<string, unknown> = {};
-            const copyString = (name: string, maxLen = 20000) => {
-                const value = item[name];
-                if (typeof value === 'string' && value.length > 0) sanitized[name] = value.slice(0, maxLen);
-            };
-            copyString('clientMessageId', 512);
-            copyString('appendUserMsgId', 512);
-            copyString('rootUserMsgId', 512);
-            copyString('status', 64);
-            copyString('reason', 1000);
-            copyString('text', 20000);
-            for (const name of ['createdAt', 'updatedAt']) {
-                const value = item[name];
-                if (typeof value === 'number' && Number.isFinite(value)) sanitized[name] = value;
-            }
-            if (!Object.keys(sanitized).length) continue;
-            const key = String(sanitized.clientMessageId || sanitized.appendUserMsgId || out.length);
-            if (seen.has(key)) continue;
-            seen.add(key);
-            out.push(sanitized);
-        }
-        return out;
+        return this.appendSnapshotMetaStore.sanitizeItems(items);
     }
 
     private sanitizeAppendSnapshotMetaPayload(payload: any): Map<string, AppendSnapshotMetaRoot> {
-        const out = new Map<string, AppendSnapshotMetaRoot>();
-        const roots = Array.isArray(payload?.roots) ? payload.roots : [];
-        for (const root of roots) {
-            if (!root || typeof root !== 'object') continue;
-            const rootMessageId = typeof root.rootMessageId === 'string' ? root.rootMessageId : '';
-            if (!rootMessageId || rootMessageId.startsWith('local-') || rootMessageId.startsWith('tmp:')) continue;
-            const appendedPrompts = this.sanitizeAppendSnapshotItems(root.meta?.appendedPrompts);
-            if (!appendedPrompts.length) continue;
-            out.set(rootMessageId, {
-                rootMessageId,
-                appendRootUserKey: typeof root.appendRootUserKey === 'string' ? root.appendRootUserKey : rootMessageId,
-                meta: { appendedPrompts }
-            });
-        }
-        return out;
+        return this.appendSnapshotMetaStore.sanitizePayload(payload);
     }
 
     private cacheAppendSnapshotMeta(payload: any): void {
-        const sessionId = typeof payload?.sessionId === 'string' ? payload.sessionId : '';
-        if (!sessionId) return;
-        const incoming = this.sanitizeAppendSnapshotMetaPayload(payload);
-        if (!incoming.size) return;
-        const existing = this.appendSnapshotMetaBySession.get(sessionId) || new Map<string, AppendSnapshotMetaRoot>();
-        for (const [rootMessageId, entry] of incoming.entries()) {
-            existing.set(rootMessageId, entry);
-        }
-        this.appendSnapshotMetaBySession.set(sessionId, existing);
-        const appendCount = Array.from(existing.values()).reduce((sum, root) => sum + root.meta.appendedPrompts.length, 0);
-        this.uiDebugChannel.appendLine(`[EXT][APPEND_SNAPSHOT_META] cache sessionId=${sessionId} rootCount=${existing.size} appendCount=${appendCount} reason=${typeof payload?.reason === 'string' ? payload.reason : 'unknown'}`);
+        this.appendSnapshotMetaStore.cache(payload);
     }
 
     private applyAppendSnapshotMeta(sessionId: string, messagesById: Map<string, SessionMessage>): number {
-        const cached = this.appendSnapshotMetaBySession.get(sessionId);
-        if (!cached?.size) return 0;
-        let merged = 0;
-        for (const [rootMessageId, entry] of cached.entries()) {
-            const message = messagesById.get(rootMessageId);
-            if (!message || message.role !== 'user') continue;
-            const existingMeta = message.meta && typeof message.meta === 'object' ? message.meta : {};
-            message.meta = {
-                ...existingMeta,
-                appendedPrompts: entry.meta.appendedPrompts,
-                appendRootUserKey: entry.appendRootUserKey || rootMessageId
-            };
-            messagesById.set(rootMessageId, message);
-            merged++;
-        }
-        if (merged > 0) {
-            this.uiDebugChannel.appendLine(`[EXT][APPEND_SNAPSHOT_META] merge sessionId=${sessionId} rootCount=${merged}`);
-        }
-        return merged;
+        return this.appendSnapshotMetaStore.apply(sessionId, messagesById);
     }
 
     private async appendSnapshotIncremental(
@@ -4043,6 +3967,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         });
         this.client.setStorage(this._context.globalState);
         this.uiDebugChannel = vscode.window.createOutputChannel('OpenCode UI Debug');
+        this.appendSnapshotMetaStore = new AppendSnapshotMetaStore(
+            (line) => this.uiDebugChannel.appendLine(line)
+        );
         this.client.setUiDebugChannel(this.uiDebugChannel);
         this.attachmentStorage = new AttachmentStorageService({
             globalStoragePath: this._context.globalStoragePath,
