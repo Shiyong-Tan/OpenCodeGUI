@@ -251,6 +251,16 @@ const sessionSearchInteractionController = createSessionSearchInteractionControl
     setTimeout: (callback, delay) => setTimeout(callback, delay),
     clearTimeout: (handle) => clearTimeout(handle)
 });
+const createChangeListRenderer = window.__ocFeatures?.createChangeListRenderer;
+if (typeof createChangeListRenderer !== 'function') {
+    throw new Error('Change list renderer is unavailable');
+}
+const changeListRenderer = createChangeListRenderer({
+    document,
+    getSessionId: () => activeSessionId,
+    openFile: (path, sessionId) => vscode.postMessage({ type: 'openFileAtLocation', path, sessionId: sessionId || null }),
+    openDiff: (path, sessionId, commitHead, commitBase) => postOpenGitDiff(path, sessionId, commitHead, commitBase)
+});
 const shownQuestionCallIds = new Set();
 const sentQuestionCallIds = new Set();
 const questionOverlayQueue = [];
@@ -7263,132 +7273,11 @@ function renderMessageElement(message, renderedSet) {
     }
 
         if (message.meta?.kind === 'changeList') {
-            const files = Array.isArray(message.meta?.files) ? message.meta.files : [];
-            if (!files.length) return;
-            const commitHead = typeof message.meta?.commitHead === 'string' ? message.meta.commitHead : undefined;
-            const commitBase = typeof message.meta?.commitBase === 'string' ? message.meta.commitBase : undefined;
-            const statsByPath = message.meta?.statsByPath && typeof message.meta.statsByPath === 'object'
-                ? message.meta.statsByPath
-                : {};
-
-        const container = document.createElement('div');
-        container.className = 'conflict-card change-list-card';
-        container.style.textAlign = 'left';
-        container.dataset.messageId = message.id;
-
-        const header = document.createElement('div');
-        header.className = 'conflict-card-header';
-        header.textContent = `Changed files (${files.length})`;
-        container.appendChild(header);
-
-        if (message.meta?.reverted === true) {
-            const revertedNotice = document.createElement('div');
-            revertedNotice.className = 'change-list-reverted';
-            revertedNotice.textContent = 'Changes reverted by Undo.';
-            container.appendChild(revertedNotice);
+            const container = changeListRenderer.render(message);
+            if (!container) return;
+            appendChatRenderRoot(container);
+            return;
         }
-
-        const list = document.createElement('div');
-        list.className = 'conflict-card-list';
-
-        let maxStatDigits = 1;
-        for (const rawPath of files) {
-            if (typeof rawPath !== 'string' || !rawPath.length) continue;
-            const normalized = rawPath.replace(/\\/g, '/');
-            const stats = statsByPath[normalized];
-            if (!stats) continue;
-            const candidates = [stats.additions, stats.deletions];
-            for (const value of candidates) {
-                if (!Number.isFinite(value)) continue;
-                const digits = Math.max(1, String(Math.abs(value)).length);
-                if (digits > maxStatDigits) maxStatDigits = digits;
-            }
-        }
-        list.style.setProperty('--delta-col-width', `${maxStatDigits + 1}ch`);
-
-        for (const rawPath of files) {
-            if (typeof rawPath !== 'string' || !rawPath.length) continue;
-            const normalized = rawPath.replace(/\\/g, '/');
-            const parts = normalized.split('/');
-            const base = parts.pop() || normalized;
-            const dir = parts.length ? `${parts.join('/')}/` : '';
-
-            const details = document.createElement('details');
-            details.className = 'conflict-card-item';
-
-            const summary = document.createElement('summary');
-            summary.style.textAlign = 'left';
-            summary.addEventListener('click', () => {
-                if (/\.md$/i.test(normalized)) {
-                    vscode.postMessage({
-                        type: 'openFileAtLocation',
-                        path: normalized,
-                        sessionId: activeSessionId || null
-                    });
-                    return;
-                }
-                postOpenGitDiff(normalized, activeSessionId, commitHead, commitBase);
-            });
-
-            const baseSpan = document.createElement('span');
-            baseSpan.className = 'conflict-card-file';
-            baseSpan.textContent = base;
-
-            const dirSpan = document.createElement('span');
-            dirSpan.className = 'conflict-card-path';
-            dirSpan.textContent = dir;
-
-            const nameWrap = document.createElement('span');
-            nameWrap.className = 'conflict-card-name';
-            nameWrap.appendChild(baseSpan);
-            if (dir) {
-                const pathSep = document.createElement('span');
-                pathSep.className = 'conflict-card-path-sep';
-                pathSep.textContent = '|';
-                nameWrap.appendChild(pathSep);
-                nameWrap.appendChild(dirSpan);
-            }
-
-            const stats = statsByPath[normalized];
-            const showStats = stats && (Number.isFinite(stats.additions) || Number.isFinite(stats.deletions));
-            let statsWrap = null;
-            if (showStats) {
-                statsWrap = document.createElement('span');
-                statsWrap.className = 'change-list-stats';
-
-                const deltaWrap = document.createElement('span');
-                deltaWrap.className = 'change-delta';
-
-                const addSpan = document.createElement('span');
-                addSpan.className = 'delta plus';
-                addSpan.textContent = Number.isFinite(stats.additions) ? `+${stats.additions}` : '';
-                deltaWrap.appendChild(addSpan);
-
-                const sep = document.createElement('span');
-                sep.className = 'sep';
-                sep.textContent = '|';
-                deltaWrap.appendChild(sep);
-
-                const delSpan = document.createElement('span');
-                delSpan.className = 'delta minus';
-                delSpan.textContent = Number.isFinite(stats.deletions) ? `-${stats.deletions}` : '';
-                deltaWrap.appendChild(delSpan);
-
-                statsWrap.appendChild(deltaWrap);
-            }
-
-            summary.appendChild(nameWrap);
-            if (statsWrap) {
-                summary.appendChild(statsWrap);
-            }
-            details.appendChild(summary);
-            list.appendChild(details);
-        }
-
-        container.appendChild(list);
-        appendChatRenderRoot(container);
-        return;
-    }
 
         if (message.meta?.kind === 'undoSegmentPlaceholder' || message.id.startsWith('system:undo-seg:')) {
             const session = getSessionOrNull(activeSessionId);

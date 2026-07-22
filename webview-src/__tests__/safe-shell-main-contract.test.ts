@@ -5,6 +5,7 @@ import { collectBoundedSmartSearchText, createLinearSearchMatcher } from '../fea
 import {
   cleanSearchSubagentTitle,
   formatSearchSubagentModel,
+  getLoadedSessionSearchText,
   pickSearchAgentMode,
   visitLoadedChatSearchChunks as visitSearchChunks,
 } from '../features/search/search-corpus';
@@ -202,7 +203,19 @@ function createHarness(options: { appendable?: boolean; undoAllowed?: boolean; b
   const session: any = { messagesById: new Map(), backendTurnInFlight: true };
   const deps: any = {
     document,
-    window: { __ocRendering: { getSafeShellSpec }, __oc: { renderFromState: jest.fn() } },
+    window: {
+      __ocRendering: { getSafeShellSpec },
+      __oc: { renderFromState: jest.fn() },
+      __ocFeatures: {
+        cleanSearchSubagentTitle,
+        formatSearchSubagentModel,
+        pickSearchAgentMode,
+        visitLoadedChatSearchChunks: visitSearchChunks,
+        createLinearSearchMatcher,
+        collectBoundedSmartSearchText,
+        getLoadedSessionSearchText,
+      },
+    },
     get activeSessionId() { return activeSessionId; },
     set activeSessionId(value: string) { activeSessionId = value; },
     keyedChatRenderCapture: null,
@@ -1278,7 +1291,7 @@ describe('A1S.4 explicit subagent safe shell main contract', () => {
 describe('A1S.5 explicit change-list safe shell main contract', () => {
   const selection = { mode: 'safe-shell', family: 'change-list' };
 
-  test('A1S.5-RED-1 bounds adversarial files at eight per page before the unchanged full rich loops', () => {
+  test('A1S.5-RED-1 bounds adversarial files at eight per page before delegating full rich rendering', () => {
     const hugePath = `${'huge/'.repeat(20_000)}README.md`;
     const files = Array.from({ length: 100_000 }, (_, index) => index === 0 ? hugePath : `src\\file-${index}.ts`);
     const message = {
@@ -1289,7 +1302,8 @@ describe('A1S.5 explicit change-list safe shell main contract', () => {
     const detached = extractFunction('function renderDetachedKeyedUnit(');
     expect(detached).toContain('renderSafeShellChangeList(session, unit, presentationSelection)');
     expect(detached.indexOf('renderSafeShellChangeList')).toBeLessThan(detached.indexOf('renderMessageElement(unit.value.message, renderedSet);'));
-    expect(owner.match(/for \(const rawPath of files\)/g)).toHaveLength(2);
+    expect(owner).toContain('changeListRenderer.render(message)');
+    expect(owner).not.toMatch(/for \(const rawPath of files\)/);
 
     const harness = createHarness();
     const normal = renderChangeList(harness, message);

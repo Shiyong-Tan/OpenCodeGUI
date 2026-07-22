@@ -24,6 +24,7 @@ import {
   visitLoadedChatSearchChunks,
 } from './search/search-corpus';
 import { createSmartSearchRequestController } from './search/smart-search-request-controller';
+import { createChangeListRenderer, deriveChangeListPresentation } from './change-list/change-list-renderer';
 
 export const FEATURE_FACADE_VERSION = 1 as const;
 
@@ -67,6 +68,8 @@ const facade = Object.freeze({
   pickSearchAgentMode,
   visitLoadedChatSearchChunks,
   createSmartSearchRequestController,
+  createChangeListRenderer,
+  deriveChangeListPresentation,
 });
 
 declare global {
