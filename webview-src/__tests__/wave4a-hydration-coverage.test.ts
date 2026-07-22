@@ -155,7 +155,7 @@ describe('Wave 4A hydration coverage', () => {
     expect(extractFunction('function handleLiveTurnHistory(')).toContain('applyPayloadHydrationCoverage(sessionId, message);');
     expect(extractFunction('function handleLiveTurnResume(')).not.toContain('applyPayloadHydrationCoverage');
     expect(extractFunction('function handleLiveTurnHistory(')).toMatch(/session-mismatch[\s\S]*getSessionState\(sessionId, true\)[\s\S]*applyPayloadHydrationCoverage/);
-    expect(source).toContain("hydrationCoverage: 'deltaContinuityUnknown'");
+    expect(createSessionState().hydrationCoverage).toBe('deltaContinuityUnknown');
   });
 
   test('extension coverage is path-aware and completion requires continuity or full authority', () => {

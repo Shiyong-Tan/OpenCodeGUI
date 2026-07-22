@@ -858,270 +858,45 @@ function getSessionState(sessionId, create = false) {
     return sessionStore.get(sessionId, create);
 }
 
+const hydrationStateController = window.__ocContinuation.createHydrationStateController({
+    toStableMessageKey,
+    now: () => Date.now()
+});
+
 function cloneSessionMap(value) {
-    return value instanceof Map ? new Map(value) : new Map();
+    return hydrationStateController.cloneMap(value);
 }
 
 function cloneSessionSet(value) {
-    return value instanceof Set ? new Set(value) : new Set();
+    return hydrationStateController.cloneSet(value);
 }
 
 function clonePlainSessionValue(value) {
-    if (value && typeof value === 'object') {
-        if (Array.isArray(value)) return value.slice();
-        return { ...value };
-    }
-    return value;
+    return hydrationStateController.clonePlainValue(value);
 }
 
 function cloneMessageForHydrationPreserve(message) {
-    if (!message || typeof message !== 'object') return message;
-    return {
-        ...message,
-        meta: message.meta && typeof message.meta === 'object' ? { ...message.meta } : message.meta
-    };
+    return hydrationStateController.cloneMessage(message);
 }
 
 function isHydrationPersistenceArtifact(id, message) {
-    if (typeof id === 'string' && (id.startsWith('system:snapshot:') || id.startsWith('system:changeList:'))) {
-        return true;
-    }
-    const kind = message?.meta?.kind;
-    return kind === 'snapshotNotice' || kind === 'changeList';
+    return hydrationStateController.isPersistenceArtifact(id, message);
 }
 
 function findMappedHydrationMsgId(map, key, matchValue = false) {
-    if (!(map instanceof Map) || typeof key !== 'string' || !key.length) return null;
-    if (!matchValue) {
-        const mapped = map.get(key);
-        return typeof mapped === 'string' && mapped.startsWith('msg_') ? mapped : null;
-    }
-    for (const [mapped, value] of map.entries()) {
-        if (value === key && typeof mapped === 'string' && mapped.startsWith('msg_')) {
-            return mapped;
-        }
-    }
-    return null;
+    return hydrationStateController.findMappedMessageId(map, key, matchValue);
 }
 
 function resolvePreservedHydrationCanonicalId(session, preserved, id, message) {
-    if (typeof id !== 'string' || !id.length) return null;
-    if (id.startsWith('msg_')) return id;
-    if (id.startsWith('local-')) {
-        return findMappedHydrationMsgId(preserved?.clientKeyToServerId, id)
-            || findMappedHydrationMsgId(session?.clientKeyToServerId, id)
-            || findMappedHydrationMsgId(preserved?.serverIdToClientKey, id, true)
-            || findMappedHydrationMsgId(session?.serverIdToClientKey, id, true)
-            || findMappedHydrationMsgId(preserved?.serverIdToKey, id, true)
-            || findMappedHydrationMsgId(session?.serverIdToKey, id, true)
-            || toStableMessageKey(session, id)
-            || null;
-    }
-    if (id.startsWith('tmp:')) {
-        const preservedPending = preserved?.pendingAssistantUpgrade;
-        const sessionPending = session?.pendingAssistantUpgrade;
-        const pendingAssistantId =
-            (preservedPending?.tmpKey === id && typeof preservedPending.assistantMsgId === 'string' && preservedPending.assistantMsgId.startsWith('msg_') && preservedPending.assistantMsgId) ||
-            (sessionPending?.tmpKey === id && typeof sessionPending.assistantMsgId === 'string' && sessionPending.assistantMsgId.startsWith('msg_') && sessionPending.assistantMsgId) ||
-            null;
-        if (pendingAssistantId) return pendingAssistantId;
-        const finalAssistantId =
-            (typeof preserved?.finalAssistantLock?.assistantMsgId === 'string' && preserved.finalAssistantLock.assistantMsgId.startsWith('msg_') && preserved.finalAssistantLock.assistantMsgId) ||
-            (typeof session?.finalAssistantLock?.assistantMsgId === 'string' && session.finalAssistantLock.assistantMsgId.startsWith('msg_') && session.finalAssistantLock.assistantMsgId) ||
-            (typeof preserved?.earlyFinalAssistantId === 'string' && preserved.earlyFinalAssistantId.startsWith('msg_') && preserved.earlyFinalAssistantId) ||
-            (typeof session?.earlyFinalAssistantId === 'string' && session.earlyFinalAssistantId.startsWith('msg_') && session.earlyFinalAssistantId) ||
-            null;
-        if (message?.role === 'assistant' && finalAssistantId) return finalAssistantId;
-    }
-    return null;
+    return hydrationStateController.resolveCanonicalId(session, preserved, id, message);
 }
 
 function captureVolatileHydrationState(session) {
-    if (!session) return null;
-    return {
-        messagesById: cloneSessionMap(session.messagesById),
-        timeline: Array.isArray(session.timeline) ? session.timeline.slice() : [],
-        messageIndexMap: cloneSessionMap(session.messageIndexMap),
-        serverIdToKey: cloneSessionMap(session.serverIdToKey),
-        clientKeyToServerId: cloneSessionMap(session.clientKeyToServerId),
-        serverIdToClientKey: cloneSessionMap(session.serverIdToClientKey),
-        hiddenControlUserIds: cloneSessionSet(session.hiddenControlUserIds),
-        assistantUpgradeSeen: cloneSessionSet(session.assistantUpgradeSeen),
-        pendingAssistantUpgrade: clonePlainSessionValue(session.pendingAssistantUpgrade),
-        finalAssistantLock: clonePlainSessionValue(session.finalAssistantLock),
-        thinkingId: session.thinkingId,
-        currentTurnAssistantKey: session.currentTurnAssistantKey,
-        currentTurnAssistantMsgId: session.currentTurnAssistantMsgId,
-        lastTurnUserId: session.lastTurnUserId,
-        lastTurnAssistantId: session.lastTurnAssistantId,
-        cancelledTurn: session.cancelledTurn,
-        canceledActiveTurn: session.canceledActiveTurn,
-        activeTurnOpId: session.activeTurnOpId,
-        backendTurnInFlight: session.backendTurnInFlight,
-        awaitingFinalMapBind: session.awaitingFinalMapBind,
-        streamMode: session.streamMode,
-        earlyFinalAssistantId: session.earlyFinalAssistantId,
-        turnFullyFinalized: session.turnFullyFinalized,
-        appendRootUserKey: session.appendRootUserKey,
-        appendComposerFor: session.appendComposerFor,
-        appendComposerDrafts: cloneSessionMap(session.appendComposerDrafts),
-        inputDraft: session.inputDraft,
-        backgroundSubagentIndicatorVisible: session.backgroundSubagentIndicatorVisible,
-        backgroundSubagentIndicatorUntil: session.backgroundSubagentIndicatorUntil,
-        backgroundSubagentIndicatorAnchorId: session.backgroundSubagentIndicatorAnchorId
-    };
+    return hydrationStateController.capture(session);
 }
 
 function restoreVolatileHydrationState(session, preserved) {
-    if (!session || !preserved) return { missingIds: [], fieldNames: [], skippedArtifacts: { timeline: 0, backing: 0 }, skippedCanonicalizedVolatile: { timeline: 0, backing: 0, fields: 0 } };
-
-    const hydratedIds = new Set(Array.isArray(session.timeline) ? session.timeline : []);
-    const hydratedBackingIds = new Set(session.messagesById instanceof Map ? session.messagesById.keys() : []);
-    const missingIds = [];
-    const skippedArtifacts = { timeline: 0, backing: 0 };
-    const skippedCanonicalizedVolatile = { timeline: 0, backing: 0, fields: 0 };
-    let hasCanonicalizedVolatileDuplicate = false;
-    const isHydrated = (id) => typeof id === 'string' && (hydratedIds.has(id) || hydratedBackingIds.has(id));
-    const canonicalizedHydratedId = (id, message) => {
-        if (typeof id !== 'string' || (!id.startsWith('local-') && !id.startsWith('tmp:'))) return null;
-        const canonicalId = resolvePreservedHydrationCanonicalId(session, preserved, id, message);
-        return canonicalId && canonicalId.startsWith('msg_') && isHydrated(canonicalId) ? canonicalId : null;
-    };
-    for (const id of preserved.timeline) {
-        if (typeof id !== 'string' || !id.length || hydratedIds.has(id)) continue;
-        const preservedMessage = preserved.messagesById.get(id);
-        if (!preservedMessage) continue;
-        if (isHydrationPersistenceArtifact(id, preservedMessage)) {
-            skippedArtifacts.timeline++;
-            continue;
-        }
-        if (canonicalizedHydratedId(id, preservedMessage)) {
-            skippedCanonicalizedVolatile.timeline++;
-            hasCanonicalizedVolatileDuplicate = true;
-            continue;
-        }
-        session.messagesById.set(id, cloneMessageForHydrationPreserve(preservedMessage));
-        session.timeline.push(id);
-        hydratedIds.add(id);
-        hydratedBackingIds.add(id);
-        missingIds.push(id);
-    }
-
-    for (const [id, preservedMessage] of preserved.messagesById.entries()) {
-        if (!id || session.messagesById.has(id)) continue;
-        if (isHydrationPersistenceArtifact(id, preservedMessage)) {
-            skippedArtifacts.backing++;
-            continue;
-        }
-        if (canonicalizedHydratedId(id, preservedMessage)) {
-            skippedCanonicalizedVolatile.backing++;
-            hasCanonicalizedVolatileDuplicate = true;
-            continue;
-        }
-        session.messagesById.set(id, cloneMessageForHydrationPreserve(preservedMessage));
-        hydratedBackingIds.add(id);
-    }
-
-    const fieldNames = [];
-    const fieldReferencesCanonicalHydratedVolatile = (value) => {
-        if (typeof value === 'string') {
-            return Boolean(canonicalizedHydratedId(value, preserved.messagesById.get(value)));
-        }
-        if (value && typeof value === 'object') {
-            for (const candidate of [value.tmpKey, value.localKey, value.messageId, value.msgId, value.assistantMsgId, value.userMsgId, value.rootUserMessageId]) {
-                if (typeof candidate === 'string' && canonicalizedHydratedId(candidate, preserved.messagesById.get(candidate))) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    };
-    const shouldSkipStaleInFlightField = (name) => {
-        if (!hasCanonicalizedVolatileDuplicate) return false;
-        const staleInFlightFields = new Set([
-            'pendingAssistantUpgrade',
-            'thinkingId',
-            'currentTurnAssistantKey',
-            'currentTurnAssistantMsgId',
-            'lastTurnUserId',
-            'lastTurnAssistantId',
-            'activeTurnOpId',
-            'backendTurnInFlight',
-            'awaitingFinalMapBind',
-            'streamMode',
-            'appendRootUserKey'
-        ]);
-        if (!staleInFlightFields.has(name)) return false;
-        if (fieldReferencesCanonicalHydratedVolatile(preserved[name])) return true;
-        return ['activeTurnOpId', 'backendTurnInFlight', 'awaitingFinalMapBind', 'streamMode'].includes(name)
-            && session.turnFullyFinalized !== false
-            && session.backendTurnInFlight !== true;
-    };
-    const preserveField = (name, shouldPreserve) => {
-        if (!shouldPreserve) return;
-        if (shouldSkipStaleInFlightField(name)) {
-            skippedCanonicalizedVolatile.fields++;
-            return;
-        }
-        session[name] = clonePlainSessionValue(preserved[name]);
-        fieldNames.push(name);
-    };
-
-    preserveField('pendingAssistantUpgrade', Boolean(preserved.pendingAssistantUpgrade));
-    preserveField('finalAssistantLock', Boolean(preserved.finalAssistantLock));
-    preserveField('thinkingId', Boolean(preserved.thinkingId));
-    preserveField('currentTurnAssistantKey', Boolean(preserved.currentTurnAssistantKey));
-    preserveField('currentTurnAssistantMsgId', Boolean(preserved.currentTurnAssistantMsgId));
-    preserveField('lastTurnUserId', Boolean(preserved.lastTurnUserId));
-    preserveField('lastTurnAssistantId', Boolean(preserved.lastTurnAssistantId));
-    preserveField('cancelledTurn', preserved.cancelledTurn === true);
-    preserveField('canceledActiveTurn', preserved.canceledActiveTurn === true);
-    preserveField('activeTurnOpId', Boolean(preserved.activeTurnOpId));
-    preserveField('backendTurnInFlight', preserved.backendTurnInFlight === true);
-    preserveField('awaitingFinalMapBind', preserved.awaitingFinalMapBind === true);
-    preserveField('streamMode', Boolean(preserved.streamMode));
-    preserveField('earlyFinalAssistantId', Boolean(preserved.earlyFinalAssistantId));
-    preserveField('turnFullyFinalized', preserved.turnFullyFinalized === false);
-    preserveField('appendRootUserKey', Boolean(preserved.appendRootUserKey));
-    preserveField('appendComposerFor', Boolean(preserved.appendComposerFor));
-    preserveField('inputDraft', typeof preserved.inputDraft === 'string' && preserved.inputDraft.length > 0);
-    preserveField('backgroundSubagentIndicatorVisible', preserved.backgroundSubagentIndicatorVisible === true);
-    preserveField('backgroundSubagentIndicatorUntil', typeof preserved.backgroundSubagentIndicatorUntil === 'number' && preserved.backgroundSubagentIndicatorUntil > Date.now());
-    preserveField('backgroundSubagentIndicatorAnchorId', Boolean(preserved.backgroundSubagentIndicatorAnchorId));
-
-    if (preserved.messageIndexMap.size) {
-        if (!(session.messageIndexMap instanceof Map)) session.messageIndexMap = new Map();
-        for (const [key, value] of preserved.messageIndexMap.entries()) {
-            if (!session.messageIndexMap.has(key)) session.messageIndexMap.set(key, value);
-        }
-        fieldNames.push('messageIndexMap');
-    }
-    for (const [name, preservedMap] of [
-        ['serverIdToKey', preserved.serverIdToKey],
-        ['clientKeyToServerId', preserved.clientKeyToServerId],
-        ['serverIdToClientKey', preserved.serverIdToClientKey],
-        ['appendComposerDrafts', preserved.appendComposerDrafts]
-    ]) {
-        if (!preservedMap.size) continue;
-        if (!(session[name] instanceof Map)) session[name] = new Map();
-        for (const [key, value] of preservedMap.entries()) {
-            if (!session[name].has(key)) session[name].set(key, value);
-        }
-        fieldNames.push(name);
-    }
-    for (const [name, preservedSet] of [
-        ['hiddenControlUserIds', preserved.hiddenControlUserIds],
-        ['assistantUpgradeSeen', preserved.assistantUpgradeSeen]
-    ]) {
-        if (!preservedSet.size) continue;
-        if (!(session[name] instanceof Set)) session[name] = new Set();
-        for (const value of preservedSet.values()) {
-            session[name].add(value);
-        }
-        fieldNames.push(name);
-    }
-
-    return { missingIds, fieldNames: Array.from(new Set(fieldNames)), skippedArtifacts, skippedCanonicalizedVolatile };
+    return hydrationStateController.restore(session, preserved);
 }
 
 function postLiveTurnResumeReconcileDiagnostic(marker, sessionId, reason, extra = []) {
