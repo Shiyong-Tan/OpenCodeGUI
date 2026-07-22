@@ -1,4 +1,3 @@
-import * as net from 'net';
 import * as https from 'https';
 import * as path from 'path';
 import * as crypto from 'crypto';
@@ -19,10 +18,11 @@ import { ModelQuotaService } from './models/ModelQuotaService';
 import type { ModelInfo, ModelQuota } from './models/types';
 import { OpenCodeCommandResolver } from './transport/OpenCodeCommandResolver';
 import { OpenCodeProcessRunner } from './transport/OpenCodeProcessRunner';
-import { OpenCodeHttpClient, type ServerConnection, type ServerFetchOptions, type ServerLock } from './transport/OpenCodeHttpClient';
+import { OpenCodeHttpClient, type ServerConnection, type ServerFetchOptions } from './transport/OpenCodeHttpClient';
 import { OpenCodeServerLockStore } from './transport/OpenCodeServerLockStore';
 import { OpenCodeEventStream } from './transport/OpenCodeEventStream';
 import { OpenCodeServerProcess } from './transport/OpenCodeServerProcess';
+import { OpenCodeServerController } from './transport/OpenCodeServerController';
 export type { ModelInfo, ModelQuota, ModelQuotaRow } from './models/types';
 
 export type AgentInfo = {
@@ -448,16 +448,10 @@ export class OpenCodeClient {
     private readonly serverLocks: OpenCodeServerLockStore;
     private readonly eventStream: OpenCodeEventStream;
     private readonly serverProcessManager: OpenCodeServerProcess;
+    private readonly serverController: OpenCodeServerController;
     public static outputChannel = vscode.window.createOutputChannel("OpenCode CLI");
-    private serverBaseUrl?: string;
-    private serverPort?: number;
-    private serverStartPromise?: Promise<void>;
-    private serverReadyPromise?: Promise<void>;
-    private serverReadyResolve?: () => void;
-    private serverReadyReject?: (error: Error) => void;
     private workspaceRoot: string;
     private storage?: vscode.Memento;
-    private serverPassword?: string;
     private readonly eventListeners = new Set<(event: ChatEvent) => void>();
     private currentSessionId?: string;
     private messageIndexById = new Map<string, number>();
@@ -786,10 +780,23 @@ export class OpenCodeClient {
             log: (message) => this.logUiDebug(message),
         });
         this.serverProcessManager = new OpenCodeServerProcess();
+        this.serverController = new OpenCodeServerController({
+            locks: this.serverLocks,
+            process: this.serverProcessManager,
+            buildServeSpawn: (args) => this.buildServeSpawn(args),
+            fetchHealth: (conn, timeoutMs) => this.serverFetch(
+                '/global/health',
+                { method: 'GET' },
+                { opName: 'health', retry: false, timeoutMs, conn, skipReady: true },
+            ),
+            stopEventStream: () => this.eventStream?.stop(),
+            log: (message) => this.logUiDebug(message),
+            showError: (message) => { void vscode.window.showErrorMessage(message); },
+        });
         this.httpClient = new OpenCodeHttpClient({
-            waitUntilReady: () => this.waitForServerReady(),
+            waitUntilReady: () => this.serverController.waitUntilReady(),
             getConnection: (forceRefresh) => this.getServerConn(forceRefresh),
-            migrateUnauthorized: (lock) => this.migrateServerPort(lock, '401'),
+            migrateUnauthorized: (lock) => this.serverController.migratePort(lock, '401'),
             recoverTransport: () => this.ensureServer(),
             log: (message) => this.logUiDebug(message),
         });
@@ -823,19 +830,11 @@ export class OpenCodeClient {
         this.workspaceRoot = newRoot;
         this.gitUndo = new GitUndoEngine(this.workspaceRoot, (message) => this.logUiDebug(message));
         this.gitUndoAvailable = false;
-        this.serverProcessManager.detach();
-        this.serverBaseUrl = undefined;
-        this.serverPort = undefined;
-        this.serverPassword = undefined;
-        this.serverStartPromise = undefined;
-        this.serverReadyPromise = undefined;
-        this.serverReadyResolve = undefined;
-        this.serverReadyReject = undefined;
-        this.eventStream.stop();
+        this.serverController.resetForWorkspaceChange();
     }
 
     public getServerPid(): number | undefined {
-        return this.serverProcessManager.getPid();
+        return this.serverController.getPid();
     }
 
 
@@ -844,23 +843,8 @@ export class OpenCodeClient {
     }
 
     public async ensureServer(): Promise<void> {
-        if (this.serverBaseUrl) {
-            await this.waitForServerReady();
-            if (!this.eventStream.isActive()) {
-                this.connectEventStream();
-            }
-            return;
-        }
-        if (!this.serverStartPromise) {
-            this.serverStartPromise = this.ensureServerForWorkspace(this.workspaceRoot, 'ensure');
-        }
-        try {
-            await this.serverStartPromise;
-        } catch (error) {
-            this.serverStartPromise = undefined;
-            throw error;
-        }
-        await this.waitForServerReady();
+        await this.serverController.ensure(this.workspaceRoot);
+        await this.serverController.waitUntilReady();
         if (!this.eventStream.isActive()) {
             this.connectEventStream();
         }
@@ -4903,58 +4887,8 @@ export class OpenCodeClient {
         return `${text.length}:${hash.toString(16)}`;
     }
 
-    private getServerBaseUrl(): string {
-        if (!this.serverBaseUrl) {
-            throw new Error('OpenCode server is not initialized.');
-        }
-        return this.serverBaseUrl;
-    }
-
-    private async writeServerLock(lock: ServerLock, workspaceRoot: string, logUpdate: boolean): Promise<number> {
-        return this.serverLocks.write(lock, workspaceRoot, logUpdate);
-    }
-
-    private updateServerLockCache(lock: ServerLock, mtimeMs: number): void {
-        this.serverLocks.updateCache(lock, mtimeMs);
-    }
-
-    private async readOrCreateServerLock(workspaceRoot: string): Promise<{ lock: ServerLock; mtimeMs: number }> {
-        return this.serverLocks.readOrCreate(workspaceRoot);
-    }
-
     private async getServerConn(forceRefresh = false): Promise<ServerConnection> {
         return this.serverLocks.getConnection(forceRefresh);
-    }
-
-    private buildAuthHeader(password: string): string {
-        return this.serverLocks.buildAuthHeader(password);
-    }
-
-    private initServerReadyPromise(): void {
-        if (this.serverReadyPromise) return;
-        this.serverReadyPromise = new Promise((resolve, reject) => {
-            this.serverReadyResolve = resolve;
-            this.serverReadyReject = reject;
-        });
-    }
-
-    private markServerReady(): void {
-        this.serverReadyResolve?.();
-        this.serverReadyResolve = undefined;
-        this.serverReadyReject = undefined;
-    }
-
-    private failServerReady(error: Error): void {
-        this.serverReadyReject?.(error);
-        this.serverReadyResolve = undefined;
-        this.serverReadyReject = undefined;
-        this.serverReadyPromise = undefined;
-    }
-
-    private async waitForServerReady(): Promise<void> {
-        if (this.serverReadyPromise) {
-            await this.serverReadyPromise;
-        }
     }
 
     private async serverFetch(
@@ -4966,177 +4900,16 @@ export class OpenCodeClient {
     }
 
     private async checkServerHealth(port: number, password: string, timeoutMs = 1000): Promise<'ok' | 'unauthorized' | 'timeout' | 'connrefused' | 'unreachable'> {
-        const conn: ServerConnection = {
-            host: '127.0.0.1',
-            port,
-            baseUrl: `http://127.0.0.1:${port}`,
-            authHeader: this.buildAuthHeader(password),
-            lock: { workspaceRoot: this.workspaceRoot, port, password, updatedAt: new Date().toISOString() }
-        };
-        try {
-            const response = await this.serverFetch('/global/health', { method: 'GET' }, { opName: 'health', retry: false, timeoutMs, conn, skipReady: true });
-            if (response.status === 200) return 'ok';
-            if (response.status === 401) return 'unauthorized';
-            return 'unreachable';
-        } catch (error) {
-            if ((error as Error)?.name === 'AbortError') return 'timeout';
-            const err = error as NodeJS.ErrnoException;
-            if (err && err.code === 'ECONNREFUSED') return 'connrefused';
-            return 'unreachable';
-        }
-    }
-
-    private async ensureServerForWorkspace(workspaceRoot: string, reason: string): Promise<void> {
-        if (this.serverBaseUrl) {
-            return;
-        }
-        const { lock, mtimeMs } = await this.readOrCreateServerLock(workspaceRoot);
-        this.updateServerLockCache(lock, mtimeMs);
-        const initialHealth = await this.checkServerHealth(lock.port, lock.password, 1000);
-        this.logUiDebug(`EXT: server.health.try | port=${lock.port} | result=${initialHealth}`);
-
-        if (initialHealth === 'ok') {
-            this.serverBaseUrl = `http://127.0.0.1:${lock.port}`;
-            this.serverPort = lock.port;
-            this.serverPassword = lock.password;
-            this.updateServerLockCache(lock, mtimeMs);
-            this.initServerReadyPromise();
-            this.markServerReady();
-            this.logUiDebug(`EXT: server.reuse | port=${lock.port}`);
-            return;
-        }
-
-        if (initialHealth === 'unauthorized') {
-            await this.migrateServerPort(lock, '401');
-            return;
-        }
-
-        await this.startServerWithLock(lock);
-    }
-
-    private async migrateServerPort(lock: ServerLock, reason: '401' | 'EADDRINUSE'): Promise<void> {
-        const startPort = lock.port;
-        for (const candidate of this.serverLocks.getMigrationPorts(lock.workspaceRoot)) {
-            const result = await this.checkServerHealth(candidate, lock.password, 1000);
-            this.logUiDebug(`EXT: server.health.try | port=${candidate} | result=${result}`);
-            if (result === 'ok') {
-                lock.port = candidate;
-                const mtimeMs = await this.writeServerLock(lock, lock.workspaceRoot, candidate !== startPort);
-                this.serverBaseUrl = `http://127.0.0.1:${candidate}`;
-                this.serverPort = candidate;
-                this.serverPassword = lock.password;
-                this.updateServerLockCache(lock, mtimeMs);
-                this.logUiDebug(`EXT: server.reuse | port=${candidate}`);
-                if (candidate !== startPort) {
-                    this.logUiDebug(`EXT: server.migrate | fromPort=${startPort} | toPort=${candidate} | reason=${reason}`);
-                }
-                return;
-            }
-            if (result === 'unauthorized') {
-                continue;
-            }
-            lock.port = candidate;
-            const mtimeMs = await this.writeServerLock(lock, lock.workspaceRoot, candidate !== startPort);
-            this.updateServerLockCache(lock, mtimeMs);
-            if (candidate !== startPort) {
-                this.logUiDebug(`EXT: server.migrate | fromPort=${startPort} | toPort=${candidate} | reason=${reason}`);
-            }
-            await this.startServerWithLock(lock);
-            return;
-        }
-
-        const message = `OpenCode server failed to find available port in range ${this.serverLocks.portBase}-${this.serverLocks.portBase + this.serverLocks.portRange - 1}.`;
-        vscode.window.showErrorMessage(message);
-        throw new Error(message);
-    }
-
-    private async startServerWithLock(lock: ServerLock): Promise<void> {
-        const port = lock.port;
-        this.initServerReadyPromise();
-        const spawnSpec = await this.buildServeSpawn(['serve', '--port', String(port), '--hostname', '127.0.0.1']);
-        const serverPid = this.serverProcessManager.start(spawnSpec, this.workspaceRoot, lock.password);
-        this.serverPort = port;
-        this.serverBaseUrl = `http://127.0.0.1:${port}`;
-        this.serverPassword = lock.password;
-        this.logUiDebug(`EXT: server.start | port=${port} | pid=${serverPid || 'null'}`);
-
-        try {
-            await this.waitForServerHealthy(port, lock.password);
-            this.markServerReady();
-        } catch (error) {
-            const err = error as (Error & { code?: string });
-            if (err?.code === 'UNAUTHORIZED') {
-                await this.migrateServerPort(lock, '401');
-                return;
-            }
-            const health = await this.checkServerHealth(port, lock.password, 1000);
-            if (health === 'unauthorized') {
-                await this.migrateServerPort(lock, '401');
-                return;
-            }
-            this.serverBaseUrl = undefined;
-            this.serverPort = undefined;
-            this.serverProcessManager.clearRememberedPid();
-            this.serverPassword = undefined;
-            this.failServerReady(error as Error);
-            throw error;
-        }
+        return this.serverController.checkHealth(this.workspaceRoot, port, password, timeoutMs);
     }
 
     public async shutdownServer(): Promise<void> {
-        await this.serverProcessManager.shutdown();
-        this.serverBaseUrl = undefined;
-        this.serverPort = undefined;
-        this.serverPassword = undefined;
-        this.serverStartPromise = undefined;
-        this.serverReadyPromise = undefined;
-        this.serverReadyResolve = undefined;
-        this.serverReadyReject = undefined;
-        this.eventStream.stop();
+        await this.serverController.shutdown();
     }
 
     private async buildServeSpawn(args: string[]): Promise<{ command: string; args: string[] }> {
         const bin = await this.resolveBin();
         return this.buildSpawn(bin, args);
-    }
-
-    private async waitForServerHealthy(port: number, password: string): Promise<void> {
-        const maxAttempts = 10;
-        const baseDelay = 300;
-        const maxDelay = 3000;
-        const timeoutMs = 2000;
-        for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-            const result = await this.checkServerHealth(port, password, timeoutMs);
-            if (result === 'ok') return;
-            if (result === 'unauthorized') {
-                const err = new Error('OpenCode server unauthorized.');
-                (err as Error & { code?: string }).code = 'UNAUTHORIZED';
-                throw err;
-            }
-            const delay = Math.min(baseDelay * (2 ** attempt), maxDelay);
-            await new Promise((resolve) => setTimeout(resolve, delay));
-        }
-        throw new Error('OpenCode server failed to start.');
-    }
-
-    private async findAvailablePort(start: number, end: number): Promise<number> {
-        for (let port = start; port <= end; port++) {
-            if (await this.isPortAvailable(port)) {
-                return port;
-            }
-        }
-        throw new Error(`No available port found between ${start} and ${end}.`);
-    }
-
-    private async isPortAvailable(port: number): Promise<boolean> {
-        return new Promise((resolve) => {
-            const server = net.createServer();
-            server.once('error', () => resolve(false));
-            server.once('listening', () => {
-                server.close(() => resolve(true));
-            });
-            server.listen(port, '127.0.0.1');
-        });
     }
 
     private async requestJson<T>(method: string, path: string, body?: any): Promise<T> {
@@ -7385,7 +7158,7 @@ export class OpenCodeClient {
     }
 
     private getBaseUrlForLog(): string {
-        const base = this.serverBaseUrl || '';
+        const base = this.serverController.getBaseUrl();
         return base.replace(/\/$/, '');
     }
 
