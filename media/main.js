@@ -261,6 +261,20 @@ const changeListRenderer = createChangeListRenderer({
     openFile: (path, sessionId) => vscode.postMessage({ type: 'openFileAtLocation', path, sessionId: sessionId || null }),
     openDiff: (path, sessionId, commitHead, commitBase) => postOpenGitDiff(path, sessionId, commitHead, commitBase)
 });
+const createChangeListEventController = window.__ocFeatures?.createChangeListEventController;
+if (typeof createChangeListEventController !== 'function') {
+    throw new Error('Change list event controller is unavailable');
+}
+const changeListEventController = createChangeListEventController({
+    getSession: (sessionId, create) => getSessionState(sessionId, create),
+    discardAllSegments: (sessionId, reason, mode) => discardAllSegments(sessionId, reason, mode),
+    toStableMessageKey: (session, messageId) => toStableMessageKey(session, messageId),
+    upsertMessage: (session, message) => upsertMessage(session, message),
+    placeMessageAfterAnchor: (session, messageId, anchorMessageId, reason) => placeMessageAfterAnchor(session, messageId, anchorMessageId, reason),
+    renderIfActive: (sessionId, reason, options) => renderIfActive(sessionId, reason, options),
+    postDebug: (payload) => vscode.postMessage({ type: 'ui-debug', payload }),
+    now: () => Date.now()
+});
 const shownQuestionCallIds = new Set();
 const sentQuestionCallIds = new Set();
 const questionOverlayQueue = [];
@@ -16979,80 +16993,13 @@ function appendMessageImages(parentEl, message) {
             case 'diffFileList': {
                 const route = resolveEventSessionId(message, 'diffFileList');
                 if (!route) break;
-                const sessionId = route.sessionId;
-                discardAllSegments(sessionId, 'file-change-detected', selectedMode || 'unknown');
-                const files = Array.isArray(message.files)
-                    ? message.files.filter((item) => typeof item === 'string' && item.length)
-                    : [];
-                if (!files.length) break;
-                const commitHead = typeof message.commitHead === 'string' ? message.commitHead : '';
-                const commitBase = typeof message.commitBase === 'string' ? message.commitBase : '';
-                const changeListId = typeof message.changeListId === 'string' && message.changeListId.length
-                    ? message.changeListId
-                    : (commitHead ? `system:changeList:${commitHead}` : `changes:${Date.now()}`);
-                const statsByPath = message.statsByPath && typeof message.statsByPath === 'object'
-                    ? message.statsByPath
-                    : {};
-                const session = getSessionState(sessionId, true);
-                const existing = session.messagesById.get(changeListId);
-                const anchorMessageId = typeof message.anchorMessageId === 'string' && message.anchorMessageId.length
-                    ? message.anchorMessageId
-                    : '';
-                const stableAnchorMessageId = anchorMessageId
-                    ? (toStableMessageKey(session, anchorMessageId) || anchorMessageId)
-                    : '';
-                const existingFiles = existing?.meta?.kind === 'changeList' && Array.isArray(existing.meta.files)
-                    ? existing.meta.files.filter((item) => typeof item === 'string' && item.length)
-                    : [];
-                const mergedFiles = files;
-                const mergedFileSet = new Set(mergedFiles);
-                const mergedStats = Object.fromEntries(
-                    Object.entries(statsByPath).filter(([path]) => mergedFileSet.has(path))
-                );
-                upsertMessage(session, {
-                    id: changeListId,
-                    role: 'system',
-                    text: '',
-                    meta: {
-                        kind: 'changeList',
-                        files: mergedFiles,
-                        source: message.source || 'git',
-                        scope: message.scope || 'turn',
-                        commitHead: commitHead || undefined,
-                        commitBase: commitBase || undefined,
-                        reverted: message.reverted === true,
-                        statsByPath: mergedStats,
-                        anchorMessageId: anchorMessageId || existing?.meta?.anchorMessageId,
-                        stableAnchorMessageId: stableAnchorMessageId || existing?.meta?.stableAnchorMessageId
-                    }
-                });
-                vscode.postMessage({
-                    type: 'ui-debug',
-                    payload: ['[WV][DIFF_FILE_LIST]', `sessionId=${sessionId}`, `changeListId=${changeListId}`, `incomingFileCount=${files.length}`, `existingFileCount=${existingFiles.length}`, `finalFileCount=${mergedFiles.length}`]
-                });
-                if (stableAnchorMessageId) {
-                    placeMessageAfterAnchor(session, changeListId, stableAnchorMessageId, 'diffFileList');
-                }
-                renderIfActive(sessionId, 'diffFileList', { scroll: true });
+                changeListEventController.handleDiffFileList(route.sessionId, message, selectedMode || 'unknown');
                 break;
             }
             case 'changeListUpdate': {
                 const route = resolveEventSessionId(message, 'changeListUpdate');
                 if (!route) break;
-                const sessionId = route.sessionId;
-                const commitHead = typeof message.commitHead === 'string' ? message.commitHead : '';
-                if (!commitHead) break;
-                const session = getSessionState(sessionId, true);
-                let updated = false;
-                for (const msg of session.messagesById.values()) {
-                    if (msg?.meta?.kind === 'changeList' && msg.meta.commitHead === commitHead) {
-                        msg.meta.reverted = message.reverted === true;
-                        updated = true;
-                    }
-                }
-                if (updated) {
-                    renderIfActive(sessionId, 'changeListUpdate');
-                }
+                changeListEventController.handleChangeListUpdate(route.sessionId, message);
                 break;
             }
             case 'todoUpdate': {
