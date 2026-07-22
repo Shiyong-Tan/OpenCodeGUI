@@ -19,6 +19,7 @@ import {
 } from './copilotSpeedMapping';
 import { ModelQuotaService } from './models/ModelQuotaService';
 import type { ModelInfo, ModelQuota } from './models/types';
+import { OpenCodeCommandResolver } from './transport/OpenCodeCommandResolver';
 export type { ModelInfo, ModelQuota, ModelQuotaRow } from './models/types';
 
 export type AgentInfo = {
@@ -453,6 +454,7 @@ const COPILOT_SPEED_MULTIPLIER_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
 export class OpenCodeClient {
     private readonly modelQuotaService: ModelQuotaService;
+    private readonly commandResolver: OpenCodeCommandResolver;
     public static outputChannel = vscode.window.createOutputChannel("OpenCode CLI");
     private currentChild?: cp.ChildProcess;
     private serverProcess?: cp.ChildProcess;
@@ -475,8 +477,6 @@ export class OpenCodeClient {
     private readonly serverLockFile = 'server.lock.json';
     private readonly serverPortBase = 42000;
     private readonly serverPortRange = 256;
-    private resolvedBin?: string;
-    private useCmdWrapper = false;
     private currentSessionId?: string;
     private messageIndexById = new Map<string, number>();
     private messageOrder: string[] = [];
@@ -794,6 +794,7 @@ export class OpenCodeClient {
 
     constructor() {
         this.modelQuotaService = new ModelQuotaService({ log: (message) => this.logUiDebug(message) });
+        this.commandResolver = new OpenCodeCommandResolver((message) => OpenCodeClient.outputChannel.appendLine(message));
         this.workspaceRoot = this.resolveWorkspaceRoot();
         this.gitUndo = new GitUndoEngine(this.workspaceRoot, (message) => this.logUiDebug(message));
     }
@@ -3675,192 +3676,11 @@ export class OpenCodeClient {
     }
 
     private resolveBin(): Promise<string> {
-        if (this.resolvedBin) {
-            return Promise.resolve(this.resolvedBin);
-        }
-        const isWin = process.platform === 'win32';
-        const resolver = isWin ? 'where' : 'which';
-        const target = isWin ? 'opencode.cmd' : 'opencode';
-        return new Promise((resolve, reject) => {
-            const resolveEnv = this.buildResolverEnv();
-            const rawPath = resolveEnv.Path || resolveEnv.PATH || '';
-            const pathEntries = rawPath
-                .split(';')
-                .map((entry) => entry.trim())
-                .filter(Boolean);
-            const npmPathPresent = pathEntries.some((entry) => /\\AppData\\Roaming\\npm$/i.test(entry));
-            OpenCodeClient.outputChannel.appendLine(
-                `[RESOLVE_BIN] platform=${process.platform} resolver=${resolver} target=${target} pathEntries=${pathEntries.length} npmPathPresent=${npmPathPresent}`
-            );
-            if (!npmPathPresent) {
-                const tail = pathEntries.slice(-8).join(';');
-                OpenCodeClient.outputChannel.appendLine(`[RESOLVE_BIN] pathTail=${tail}`);
-            }
-
-            cp.exec(`${resolver} ${target}`, { encoding: 'utf-8', env: resolveEnv }, (err: cp.ExecException | null, stdout: string, stderr: string) => {
-                if (err) {
-                    OpenCodeClient.outputChannel.appendLine(
-                        `[RESOLVE_BIN] primary.error code=${String((err as NodeJS.ErrnoException).code ?? '')} message=${err.message}`
-                    );
-                }
-                if (stdout) {
-                    OpenCodeClient.outputChannel.appendLine(`[RESOLVE_BIN] primary.stdout=${stdout.trim()}`);
-                }
-                if (stderr) {
-                    OpenCodeClient.outputChannel.appendLine(`[RESOLVE_BIN] primary.stderr=${stderr.trim()}`);
-                }
-                if (err || !stdout) {
-                    if (isWin && target === 'opencode.cmd') {
-                        cp.exec(`${resolver} opencode`, { encoding: 'utf-8', env: resolveEnv }, (fallbackErr: cp.ExecException | null, fallbackOut: string, fallbackErrOut: string) => {
-                            if (fallbackErr) {
-                                OpenCodeClient.outputChannel.appendLine(
-                                    `[RESOLVE_BIN] fallback.error code=${String((fallbackErr as NodeJS.ErrnoException).code ?? '')} message=${fallbackErr.message}`
-                                );
-                            }
-                            if (fallbackOut) {
-                                OpenCodeClient.outputChannel.appendLine(`[RESOLVE_BIN] fallback.stdout=${fallbackOut.trim()}`);
-                            }
-                            if (fallbackErrOut) {
-                                OpenCodeClient.outputChannel.appendLine(`[RESOLVE_BIN] fallback.stderr=${fallbackErrOut.trim()}`);
-                            }
-                            if (fallbackErr || !fallbackOut) {
-                                reject('Could not find "opencode" on PATH. Please install it or add it to your PATH.');
-                                return;
-                            }
-                            const lines = fallbackOut.split(/\r?\n/).map((line: string) => line.trim()).filter(Boolean);
-                            if (!lines.length) {
-                                reject('Could not find "opencode" on PATH. Please install it or add it to your PATH.');
-                                return;
-                            }
-                            const resolved = this.resolveWindowsCmd(lines[0]);
-                            if (!resolved) {
-                                reject('Could not find "opencode" on PATH. Please install it or add it to your PATH.');
-                                return;
-                            }
-                            this.resolvedBin = resolved;
-                            this.useCmdWrapper = this.shouldUseCmdWrapper(resolved);
-                            resolve(resolved);
-                        });
-                        return;
-                    }
-                    reject('Could not find "opencode" on PATH. Please install it or add it to your PATH.');
-                    return;
-                }
-                const lines = stdout.split(/\r?\n/).map((line: string) => line.trim()).filter(Boolean);
-                if (!lines.length) {
-                    reject('Could not find "opencode" on PATH. Please install it or add it to your PATH.');
-                    return;
-                }
-                const resolved = isWin ? this.resolveWindowsCmd(lines[0]) : lines[0];
-                if (!resolved) {
-                    reject('Could not find "opencode" on PATH. Please install it or add it to your PATH.');
-                    return;
-                }
-                this.resolvedBin = resolved;
-                this.useCmdWrapper = this.shouldUseCmdWrapper(resolved);
-                resolve(resolved);
-            });
-        });
-    }
-
-    private buildResolverEnv(): NodeJS.ProcessEnv {
-        const env = { ...process.env };
-        if (process.platform !== 'win32') {
-            return env;
-        }
-
-        const processPath = process.env.Path || process.env.PATH || '';
-        const userPath = this.readWindowsRegistryPath('HKCU\\Environment', 'Path');
-        const machinePath = this.readWindowsRegistryPath('HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment', 'Path');
-        const merged = this.mergeWindowsPaths(processPath, userPath, machinePath);
-
-        env.Path = merged;
-        env.PATH = merged;
-        return env;
-    }
-
-    private readWindowsRegistryPath(key: string, valueName: string): string {
-        try {
-            const cmd = `reg query "${key}" /v ${valueName}`;
-            const out = cp.execSync(cmd, { encoding: 'utf-8', windowsHide: true });
-            const lines = out.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-            const row = lines.find((line) => line.includes('REG_EXPAND_SZ') || line.includes('REG_SZ'));
-            if (!row) return '';
-            const parts = row.split(/\s{2,}/).map((part) => part.trim()).filter(Boolean);
-            const raw = parts[parts.length - 1] || '';
-            return raw.replace(/%([^%]+)%/g, (_m, name) => process.env[name] || process.env[name.toUpperCase()] || '');
-        } catch {
-            return '';
-        }
-    }
-
-    private mergeWindowsPaths(...paths: string[]): string {
-        const seen = new Set<string>();
-        const merged: string[] = [];
-        for (const raw of paths) {
-            if (!raw) continue;
-            for (const piece of raw.split(';')) {
-                const entry = piece.trim();
-                if (!entry) continue;
-                const key = entry.toLowerCase();
-                if (seen.has(key)) continue;
-                seen.add(key);
-                merged.push(entry);
-            }
-        }
-        return merged.join(';');
-    }
-
-    private resolveWindowsCmd(resolvedPath: string): string | undefined {
-        const ext = path.extname(resolvedPath).toLowerCase();
-        if (ext === '.cmd' || ext === '.exe' || ext === '.bat') {
-            return resolvedPath;
-        }
-        const cmdPath = `${resolvedPath}.cmd`;
-        if (fs.existsSync(cmdPath)) {
-            return cmdPath;
-        }
-        const exePath = `${resolvedPath}.exe`;
-        if (fs.existsSync(exePath)) {
-            return exePath;
-        }
-        const batPath = `${resolvedPath}.bat`;
-        if (fs.existsSync(batPath)) {
-            return batPath;
-        }
-        return undefined;
-    }
-
-    private shouldUseCmdWrapper(bin: string): boolean {
-        if (process.platform !== 'win32') return false;
-        const ext = path.extname(bin).toLowerCase();
-        return ext === '.cmd' || ext === '.bat';
+        return this.commandResolver.resolve();
     }
 
     private buildSpawn(bin: string, args: string[], stdinText?: string): { command: string; args: string[] } {
-        const multilineArg = args.find((arg) => arg.includes('\n'));
-        if (this.useCmdWrapper && multilineArg && !stdinText) {
-            const filtered = args.filter((arg) => arg !== multilineArg && arg !== '--');
-            const psArgs = filtered.map((arg) => this.psQuote(arg)).join(' ');
-            const message = this.psHereString(multilineArg);
-            const invocation = psArgs ? `& ${this.psQuote(bin)} ${psArgs} -- $msg` : `& ${this.psQuote(bin)} -- $msg`;
-            const command = `$msg = ${message}\n${invocation}`;
-            return { command: 'powershell.exe', args: ['-NoProfile', '-Command', command] };
-        }
-        if (this.useCmdWrapper) {
-            return { command: 'cmd.exe', args: ['/c', bin, ...args] };
-        }
-        return { command: bin, args };
-    }
-
-    private psQuote(value: string): string {
-        const escaped = value.replace(/'/g, "''");
-        return `'${escaped}'`;
-    }
-
-    private psHereString(value: string): string {
-        const escaped = value.replace(/'@/g, "'`@");
-        return `@'\n${escaped}\n'@`;
+        return this.commandResolver.buildSpawn(bin, args, stdinText);
     }
 
     private extractFilesFromEvent(parsed: any): FileSnapshot[] {
