@@ -1952,46 +1952,25 @@ const SINGLE_IN_FLIGHT_FALLBACK_EVENTS = new Set([
     // Intentionally empty for Slice 3: no legacy streaming event was proven to need fallback.
 ]);
 
+const sessionEventRouter = window.__ocContinuation.createSessionEventRouter({
+    entries: () => sessionStore.entries(),
+    getActiveSessionId: () => activeSessionId,
+    postDebug: (payload) => vscode.postMessage({ type: 'ui-debug', payload }),
+    warn: (message, payload) => console.warn(message, payload),
+    render: (reason) => window.__oc?.renderFromState?.(reason),
+    scroll: (force, fallback) => {
+        if (typeof window.__oc?.scrollToBottom === 'function') window.__oc.scrollToBottom(force);
+        else if (typeof fallback === 'function') fallback(force);
+    },
+    singleInFlightFallbackEvents: SINGLE_IN_FLIGHT_FALLBACK_EVENTS
+});
+
 function findSingleInFlightSessionId() {
-    let found = '';
-    for (const [sessionId, session] of sessionStore.entries()) {
-        if (!session) continue;
-        if (session.backendTurnInFlight === true || session.turnFullyFinalized === false) {
-            if (found) return '';
-            found = sessionId;
-        }
-    }
-    return found;
+    return sessionEventRouter.findSingleInFlightSessionId();
 }
 
 function resolveEventSessionId(message, eventName, options = {}) {
-    const sessionId =
-        message?.sessionID ||
-        message?.sessionId ||
-        message?.part?.sessionID ||
-        message?.part?.sessionId ||
-        '';
-    let resolvedSessionId = sessionId;
-    let source = sessionId ? 'payload' : '';
-    if (!resolvedSessionId && options?.allowSingleInFlightFallback === true && SINGLE_IN_FLIGHT_FALLBACK_EVENTS.has(eventName)) {
-        resolvedSessionId = findSingleInFlightSessionId();
-        source = resolvedSessionId ? 'single-in-flight' : '';
-    }
-    if (!resolvedSessionId) {
-        vscode.postMessage({
-            type: 'ui-debug',
-            payload: ['[WV][SESSION_ROUTE_DROP]', `event=${eventName || 'unknown'}`, 'reason=missing-session', `activeSessionId=${activeSessionId || 'null'}`]
-        });
-        console.warn(`[SessionGate] drop event=${eventName} missing sessionID`, message);
-        return null;
-    }
-    const isActive = resolvedSessionId === activeSessionId;
-    const shouldRender = options?.render === false ? false : isActive;
-    vscode.postMessage({
-        type: 'ui-debug',
-        payload: ['[WV][SESSION_ROUTE]', `event=${eventName || 'unknown'}`, `sessionId=${resolvedSessionId}`, `source=${source || 'unknown'}`, `active=${isActive ? 'true' : 'false'}`, `shouldRender=${shouldRender ? 'true' : 'false'}`]
-    });
-    return { sessionId: resolvedSessionId, source: source || 'unknown', isActive, shouldRender };
+    return sessionEventRouter.resolveEventRoute(message, eventName, options);
 }
 
 function getEventSessionId(message, eventName) {
@@ -2000,147 +1979,27 @@ function getEventSessionId(message, eventName) {
 }
 
 function resolveParentVisibleSubagentRoute(message, eventName) {
-    const parentSessionId = typeof message?.parentSessionId === 'string' ? message.parentSessionId : '';
-    const agentSessionId = typeof message?.agentSessionId === 'string' ? message.agentSessionId : '';
-    const displayTarget = typeof message?.displayTarget === 'string' ? message.displayTarget : '';
-    const isActiveParent = parentSessionId === activeSessionId;
-    const baseLog = [
-        '[WV][SUBAGENT_ROUTE]',
-        `event=${eventName || 'unknown'}`,
-        `parentSessionId=${parentSessionId || 'null'}`,
-        `agentSessionId=${agentSessionId || 'null'}`,
-        `displayTarget=${displayTarget || 'null'}`,
-        `activeSessionId=${activeSessionId || 'null'}`,
-        `isActiveParent=${isActiveParent ? 'true' : 'false'}`
-    ];
-    if (!parentSessionId) {
-        vscode.postMessage({
-            type: 'ui-debug',
-            payload: [...baseLog, 'shouldRender=false', 'decision=drop', 'reason=missing-parentSessionId']
-        });
-        console.warn(`[WV][SUBAGENT_ROUTE] drop event=${eventName || 'unknown'} reason=missing-parentSessionId`, message);
-        return null;
-    }
-    if (displayTarget !== 'parent') {
-        vscode.postMessage({
-            type: 'ui-debug',
-            payload: [...baseLog, 'shouldRender=false', 'decision=drop', 'reason=displayTarget-not-parent']
-        });
-        console.warn(`[WV][SUBAGENT_ROUTE] drop event=${eventName || 'unknown'} reason=displayTarget-not-parent parentSessionId=${parentSessionId}`, message);
-        return null;
-    }
-    const shouldRender = isActiveParent;
-    vscode.postMessage({
-        type: 'ui-debug',
-        payload: [
-            ...baseLog,
-            `shouldRender=${shouldRender ? 'true' : 'false'}`,
-            `decision=${shouldRender ? 'render' : 'state-only'}`
-        ]
-    });
-    return { parentSessionId, agentSessionId, displayTarget, isActiveParent, shouldRender };
+    return sessionEventRouter.resolveParentRoute(message, eventName);
 }
 
 function resolveAgentLaneSubagentRoute(message, eventName) {
-    const parentSessionId = typeof message?.parentSessionId === 'string' ? message.parentSessionId : '';
-    const agentSessionId = typeof message?.agentSessionId === 'string' ? message.agentSessionId : '';
-    const payloadSessionId =
-        (typeof message?.sessionID === 'string' && message.sessionID) ||
-        (typeof message?.sessionId === 'string' && message.sessionId) ||
-        (typeof message?.part?.sessionID === 'string' && message.part.sessionID) ||
-        (typeof message?.part?.sessionId === 'string' && message.part.sessionId) ||
-        '';
-    const displayTarget = typeof message?.displayTarget === 'string' ? message.displayTarget : '';
-    const isActiveAgent = agentSessionId === activeSessionId;
-    const baseLog = [
-        '[WV][SUBAGENT_ROUTE]',
-        `event=${eventName || 'unknown'}`,
-        `parentSessionId=${parentSessionId || 'null'}`,
-        `agentSessionId=${agentSessionId || 'null'}`,
-        `sessionId=${payloadSessionId || 'null'}`,
-        `displayTarget=${displayTarget || 'null'}`,
-        `activeSessionId=${activeSessionId || 'null'}`,
-        `isActiveParent=${parentSessionId && parentSessionId === activeSessionId ? 'true' : 'false'}`,
-        `isActiveAgent=${isActiveAgent ? 'true' : 'false'}`
-    ];
-    if (displayTarget !== 'agent-lane') {
-        vscode.postMessage({
-            type: 'ui-debug',
-            payload: [...baseLog, 'shouldRender=false', 'decision=drop', 'reason=displayTarget-not-agent-lane']
-        });
-        console.warn(`[WV][SUBAGENT_ROUTE] drop event=${eventName || 'unknown'} reason=displayTarget-not-agent-lane displayTarget=${displayTarget || 'null'}`, message);
-        return null;
-    }
-    if (!agentSessionId) {
-        vscode.postMessage({
-            type: 'ui-debug',
-            payload: [...baseLog, 'shouldRender=false', 'decision=drop', 'reason=missing-agentSessionId']
-        });
-        console.warn(`[WV][SUBAGENT_ROUTE] drop event=${eventName || 'unknown'} reason=missing-agentSessionId`, message);
-        return null;
-    }
-    const shouldRender = isActiveAgent;
-    vscode.postMessage({
-        type: 'ui-debug',
-        payload: [
-            ...baseLog,
-            `targetSessionId=${agentSessionId}`,
-            `shouldRender=${shouldRender ? 'true' : 'false'}`,
-            `decision=${shouldRender ? 'render-agent-lane' : 'state-only-agent-lane'}`,
-            payloadSessionId && payloadSessionId !== agentSessionId ? 'note=sessionId-ignored-agentSessionId-authoritative' : 'note=agentSessionId-authoritative'
-        ]
-    });
-    return {
-        sessionId: agentSessionId,
-        parentSessionId,
-        agentSessionId,
-        displayTarget,
-        source: 'agent-lane',
-        isActive: isActiveAgent,
-        isActiveAgent,
-        shouldRender
-    };
+    return sessionEventRouter.resolveAgentLaneRoute(message, eventName);
 }
 
 function resolveContentEventRoute(message, eventName) {
-    if (message?.displayTarget === 'agent-lane') {
-        return resolveAgentLaneSubagentRoute(message, eventName);
-    }
-    return resolveEventSessionId(message, eventName);
+    return sessionEventRouter.resolveContentRoute(message, eventName);
 }
 
 function retainAgentLaneParentAssociation(session, route) {
-    if (!session || !route || route.displayTarget !== 'agent-lane') return;
-    if (!session.meta) session.meta = {};
-    session.meta.agentSessionId = route.agentSessionId;
-    if (route.parentSessionId) {
-        session.meta.parentSessionId = route.parentSessionId;
-    }
+    sessionEventRouter.retainAgentLaneParentAssociation(session, route);
 }
 
 function logBackgroundStateUpdate(sessionId, reason, options = {}) {
-    if (!sessionId || sessionId === activeSessionId) return;
-    vscode.postMessage({
-        type: 'ui-debug',
-        payload: ['[WV][BACKGROUND_STATE_UPDATE]', `event=${reason || 'unknown'}`, `sessionId=${sessionId}`, `activeSessionId=${activeSessionId || 'null'}`, ...(Array.isArray(options.extra) ? options.extra : [])]
-    });
+    sessionEventRouter.logBackgroundStateUpdate(sessionId, reason, options);
 }
 
 function renderIfActive(sessionId, reason, options = {}) {
-    const isActive = Boolean(sessionId && sessionId === activeSessionId);
-    if (!isActive) {
-        logBackgroundStateUpdate(sessionId, reason, options);
-        return false;
-    }
-    window.__oc?.renderFromState?.(reason);
-    if (options.scroll === true) {
-        if (typeof window.__oc?.scrollToBottom === 'function') {
-            window.__oc.scrollToBottom(options.forceScroll === true);
-        } else if (typeof options.scrollFallback === 'function') {
-            options.scrollFallback(options.forceScroll === true);
-        }
-    }
-    return true;
+    return sessionEventRouter.renderIfActive(sessionId, reason, options);
 }
 
 function scheduleCoalescedSessionMetadataRender(sessionId, reason, options) {
