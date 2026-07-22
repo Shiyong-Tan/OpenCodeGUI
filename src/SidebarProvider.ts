@@ -718,7 +718,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private readonly smartSearch: SmartSearchService;
     private uiTimelineBySession = new Map<string, string[]>();
     private lastSnapshotPayloadBySession = new Map<string, any>();
-    private lastEmittedChangeListHeadBySession = new Map<string, string>();
     private changeListStore?: ChangeListStore;
     private readonly diffFileViewer: DiffFileViewer;
     private readonly changeListEmitter: ChangeListEmitter;
@@ -4122,217 +4121,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         await this.changeListEmitter.emit(identity, webview);
     }
 
-    private async emitDiffFileListLegacy(identity: FinalizeTurnIdentity, webview: { postMessage(message: unknown): unknown }): Promise<void> {
-        const sessionId = identity.sessionId;
-        if (!this.gitUndoEnabled || !sessionId) return;
-        const repo = await this.resolveInternalRepo(sessionId);
-        if (!repo) return;
-        let displayHeadCommit: string | null = null;
-        let displayBaseCommit: string | null = null;
-        const commitResult = identity.commitResult;
-        const canBindCommit = commitResult?.status === 'committed'
-            && !!commitResult.msgToBaseCommit
-            && !!commitResult.msgToCommit;
-        const bindBaseCommit = canBindCommit ? commitResult!.msgToBaseCommit! : null;
-        const bindHeadCommit = canBindCommit ? commitResult!.msgToCommit! : null;
-        const turnCommitBase = commitResult?.msgToBaseCommit || this.client.getLastTurnCommitBase(sessionId) || null;
-        for (let attempt = 0; attempt < 5; attempt++) {
-            displayHeadCommit = bindHeadCommit || await this.getInternalHeadCommit(repo);
-            if (displayHeadCommit && turnCommitBase) {
-                displayBaseCommit = turnCommitBase;
-            } else if (displayHeadCommit) {
-                displayBaseCommit = await this.getInternalParentCommit(repo, displayHeadCommit);
-            }
-            if (displayHeadCommit && displayBaseCommit) break;
-            await this.waitMs(100);
-        }
-        if (displayHeadCommit && !displayBaseCommit) {
-            this.uiDebugChannel.appendLine('EXT: diff.skip | reason=baseline-only');
-            return;
-        }
-        if (!displayHeadCommit || !displayBaseCommit) {
-            return;
-        }
-        if (commitResult && !canBindCommit) {
-            this.uiDebugChannel?.appendLine(`[EXT][COMMIT_BIND] suppress | sessionId=${sessionId} | status=${commitResult.status} | reason=${commitResult.reason || 'no-committed-result'} | msgToBaseCommit=${commitResult.msgToBaseCommit || 'null'} | msgToCommit=${commitResult.msgToCommit || 'null'}`);
-        } else if (!commitResult) {
-            this.uiDebugChannel?.appendLine(`[EXT][COMMIT_BIND] suppress | sessionId=${sessionId} | reason=missing-commit-result | displayHead=${displayHeadCommit} | displayBase=${displayBaseCommit}`);
-        }
-        const currentSet = await this.getInternalDiffFileSet(repo, displayBaseCommit, displayHeadCommit);
-        const gitDiffFiles = Array.from(currentSet).sort();
-        const rootUserMessageId = identity.rootUserMessageId || identity.userMessageId;
-        const latestAppendUserMessageId = identity.latestAppendUserMessageId;
-        const assistantMessageId = identity.assistantMessageId;
-        const hasAuthoritativeHelper = typeof (this.client as any).getAuthoritativeDiffFileSet === 'function';
-        if ((!this.isResolvableMessageId(rootUserMessageId) || !this.isResolvableMessageId(assistantMessageId)) && hasAuthoritativeHelper) {
-            this.uiDebugChannel?.appendLine(`[EXT][TURN_BIND] phase=defer_diff_list | sessionId=${sessionId} | reqId=${identity.reqId || 'null'} | reason=missing-final-bind | userMessageId=${identity.userMessageId || 'null'} | assistantMessageId=${assistantMessageId || 'null'} | rootUserMessageId=${rootUserMessageId || 'null'} | latestAppendUserMessageId=${latestAppendUserMessageId || 'null'}`);
-            return;
-        }
-        const authResult = hasAuthoritativeHelper
-            ? await this.client.getAuthoritativeDiffFileSet({
-                sessionId,
-                rootUserMessageId,
-                latestAppendUserMessageId: this.isResolvableMessageId(latestAppendUserMessageId) ? latestAppendUserMessageId : undefined
-            })
-            : {
-                files: gitDiffFiles,
-                queriedIds: [] as string[],
-                missingIds: [] as string[],
-                source: 'message-summary-diffs' as const
-            };
-        if (!hasAuthoritativeHelper) {
-            this.uiDebugChannel?.appendLine(`[EXT][AUTH_DIFF] detail.drop | sessionId=${sessionId} | reason=helper-unavailable-test-double | fallback=git-diff`);
-        }
-        const files = authResult.files;
-        this.uiDebugChannel?.appendLine(`[EXT][AUTH_DIFF] compare | sessionId=${sessionId} | queriedIds=${authResult.queriedIds.join(',') || 'none'} | authCount=${files.length} | gitDiffCount=${gitDiffFiles.length} | source=${authResult.source}`);
-        if (!files.length) return;
-        const alreadyEmitted = this.client.wasChangeListEmitted(sessionId);
-        const lastEmittedHead = this.lastEmittedChangeListHeadBySession.get(sessionId);
-        if (alreadyEmitted && lastEmittedHead === displayHeadCommit) {
-            this.uiDebugChannel.appendLine(
-                `[LATE_DIFF] change-list already emitted for same head | sessionId=${sessionId} head=${displayHeadCommit} skipping=true`
-            );
-            return;
-        }
-        if (!alreadyEmitted) {
-            if (!this.client.markChangeListEmitted(sessionId, 'emit-diff-list')) {
-                return;
-            }
-        } else {
-            this.uiDebugChannel.appendLine(
-                `[LATE_DIFF] re-emitting change-list for advanced head | sessionId=${sessionId} prevHead=${lastEmittedHead || 'null'} nextHead=${displayHeadCommit}`
-            );
-        }
-        const statsByPath = await this.getInternalDiffStats(repo, displayBaseCommit, displayHeadCommit);
-        const existingRecords = await this.readChangeLists(sessionId);
-        const matchedExisting = existingRecords.find((item) => item.commitHead === displayHeadCommit);
-        const ownershipMap = await this.readPersistedSessionMap(sessionId);
-        const currentTurnAnchorCandidates = new Set<string>();
-        for (const candidate of [assistantMessageId, latestAppendUserMessageId, rootUserMessageId, identity.userMessageId]) {
-            if (this.isResolvableMessageId(candidate)) {
-                currentTurnAnchorCandidates.add(candidate);
-            }
-        }
-        const matchedExistingAnchorMessageId = matchedExisting?.anchorMessageId;
-        const resolvedMatchedExistingAnchorMessageId = matchedExistingAnchorMessageId
-            ? await this.resolveCurrentVisibleOwnerMessageId(sessionId, matchedExistingAnchorMessageId)
-            : undefined;
-        const existingAnchorMatchesCurrentTurn = !!matchedExistingAnchorMessageId && (
-            currentTurnAnchorCandidates.has(matchedExistingAnchorMessageId)
-            || (!!resolvedMatchedExistingAnchorMessageId && currentTurnAnchorCandidates.has(resolvedMatchedExistingAnchorMessageId))
-        );
-        const anchorSeedMessageId = assistantMessageId
-            || (existingAnchorMatchesCurrentTurn ? (resolvedMatchedExistingAnchorMessageId || matchedExistingAnchorMessageId) : undefined)
-            || latestAppendUserMessageId
-            || rootUserMessageId
-            || identity.userMessageId
-            || undefined;
-        const anchorMessageId = await this.resolveCurrentVisibleOwnerMessageId(
-            sessionId,
-            anchorSeedMessageId
-        );
-        let mergedFiles = [...files];
-        let mergedStatsByPath = { ...statsByPath };
-        let changeListId = displayHeadCommit ? `system:changeList:${displayHeadCommit}` : `changes:${Date.now()}`;
-        const postFinalOverlay = typeof (this.client as any).getPostFinalWatchOverlay === 'function'
-            ? this.client.getPostFinalWatchOverlay(sessionId)
-            : { files: [], statsByPath: {} };
-        const currentOwnerMsgId = ownershipMap?.continuation?.currentOwnerMsgId;
-        const predecessorOwnerMsgId = ownershipMap?.continuation?.predecessorOwnerMsgId;
-        const currentOwnerIsContinuation = Array.isArray(ownershipMap?.entries)
-            && !!currentOwnerMsgId
-            && ownershipMap!.entries.some((entry) => {
-                const entryOwner = entry.finalAssistantMsgId || entry.assistantMsgId;
-                return entryOwner === currentOwnerMsgId
-                    && typeof entry.turnKey === 'string'
-                    && entry.turnKey.startsWith('cont:');
-            });
-        if (currentOwnerIsContinuation && anchorMessageId && currentOwnerMsgId === anchorMessageId && predecessorOwnerMsgId) {
-            const recordsForOwner: ChangeListRecord[] = [];
-            for (const record of existingRecords) {
-                const resolvedRecordAnchor = await this.resolveCurrentVisibleOwnerMessageId(sessionId, record.anchorMessageId);
-                if (resolvedRecordAnchor === anchorMessageId) {
-                    recordsForOwner.push(record);
-                }
-            }
-            if (recordsForOwner.length) {
-                const primary = recordsForOwner.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))[0];
-                changeListId = primary.id || changeListId;
-                const orderedFiles = [
-                    ...files
-                ].filter((item): item is string => typeof item === 'string' && item.length > 0);
-                mergedFiles = Array.from(new Set(orderedFiles));
-                mergedStatsByPath = recordsForOwner.reduce((acc, record) => ({
-                    ...acc,
-                    ...(record.statsByPath || {})
-                }), { ...mergedStatsByPath });
-            }
-        }
-        const overlayApplies = Array.isArray(postFinalOverlay.files)
-            && postFinalOverlay.files.length > 0
-            && (
-                !postFinalOverlay.ownerMsgId
-                || postFinalOverlay.ownerMsgId === anchorMessageId
-                || postFinalOverlay.ownerMsgId === predecessorOwnerMsgId
-                || postFinalOverlay.ownerMsgId === currentOwnerMsgId
-            );
-        if (overlayApplies) {
-            mergedStatsByPath = {
-                ...postFinalOverlay.statsByPath,
-                ...mergedStatsByPath
-            };
-        }
-        this.uiDebugChannel?.appendLine(`[EXT][COMMIT_BIND] created | sessionId=${sessionId} anchorMessageId=${anchorMessageId || 'null'} userMessageId=${identity.userMessageId || 'null'} assistantMessageId=${assistantMessageId || 'null'} rootUserMessageId=${rootUserMessageId || 'null'} latestAppendUserMessageId=${latestAppendUserMessageId || 'null'} displayHead=${displayHeadCommit} displayBase=${displayBaseCommit} msgToCommit=${bindHeadCommit || 'null'} msgToBaseCommit=${bindBaseCommit || 'null'} bind=${String(canBindCommit)} fileCount=${mergedFiles.length} source=${authResult.source}`);
-        webview.postMessage({
-            type: 'diffFileList',
-            sessionId,
-            files: mergedFiles,
-            source: authResult.source,
-            scope: 'turn',
-            commitHead: displayHeadCommit,
-            commitBase: displayBaseCommit,
-            statsByPath: mergedStatsByPath,
-            anchorMessageId,
-            changeListId
-        });
-        if (anchorMessageId && canBindCommit && bindHeadCommit && bindBaseCommit) {
-            await this.upsertChangeList(sessionId, {
-                id: changeListId,
-                commitHead: bindHeadCommit,
-                commitBase: bindBaseCommit,
-                files: mergedFiles,
-                statsByPath: mergedStatsByPath,
-                anchorMessageId,
-                userMessageId: identity.userMessageId,
-                rootUserMessageId,
-                latestAppendUserMessageId,
-                assistantMessageId,
-                createdAt: Date.now()
-            }, { preserveAuthoritativeFiles: true });
-            const topologyMessageIds = Array.from(new Set([
-                rootUserMessageId,
-                latestAppendUserMessageId,
-                identity.userMessageId,
-                assistantMessageId
-            ].filter((id): id is string => this.isResolvableMessageId(id))));
-            const topologyResult = typeof (this.client as any).bindCommitToMessageIds === 'function'
-                ? await (this.client as any).bindCommitToMessageIds(sessionId, {
-                    messageIds: topologyMessageIds,
-                    commitHash: bindHeadCommit,
-                    baseCommit: bindBaseCommit,
-                    reason: latestAppendUserMessageId ? 'append-commit-bind' : 'commit-bind'
-                })
-                : { ok: false, boundIds: [] };
-            this.uiDebugChannel?.appendLine(`[EXT][APPEND_BIND_TOPOLOGY] sessionId=${sessionId} | rootUserMessageId=${rootUserMessageId || 'null'} | latestAppendUserMessageId=${latestAppendUserMessageId || 'null'} | userMessageId=${identity.userMessageId || 'null'} | assistantMessageId=${assistantMessageId || 'null'} | msgToCommit=${bindHeadCommit} | msgToBaseCommit=${bindBaseCommit} | bound=${topologyResult.boundIds?.join(',') || 'none'} | ok=${String(topologyResult.ok)}`);
-            this.uiDebugChannel?.appendLine(`[EXT][COMMIT_BIND] bound | sessionId=${sessionId} | changeListId=${changeListId} | anchorMessageId=${anchorMessageId} | userMessageId=${identity.userMessageId || 'null'} | assistantMessageId=${assistantMessageId} | rootUserMessageId=${rootUserMessageId} | latestAppendUserMessageId=${latestAppendUserMessageId || 'null'} | msgToCommit=${bindHeadCommit} | msgToBaseCommit=${bindBaseCommit} | fileCount=${mergedFiles.length}`);
-            await this.client.updateSessionBaseCommitAfterBind(sessionId, bindHeadCommit);
-        } else {
-            this.uiDebugChannel?.appendLine(`[EXT][COMMIT_BIND] not-bound | sessionId=${sessionId} | anchorMessageId=${anchorMessageId || 'null'} | bind=${String(canBindCommit)} | status=${commitResult?.status || 'missing'} | reason=${commitResult?.reason || 'no-committed-result'}`);
-        }
-        this.lastEmittedChangeListHeadBySession.set(sessionId, displayHeadCommit);
-        this.uiDebugChannel?.appendLine(`[EXT][DIFF_LIST] sessionId=${sessionId} count=${files.length} anchor=${anchorMessageId || 'null'} source=${authResult.source}`);
-    }
-
     /**
      * Wrapper for emitDiffFileList that retries until anchor message ID is ready.
      * Prevents race condition where anchor is still tmp: during finalization.
@@ -4400,9 +4188,23 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 diffText,
             ),
         });
-        this.changeListEmitter = new ChangeListEmitter(
-            (identity, target) => this.emitDiffFileListLegacy(identity, target),
-        );
+        this.changeListEmitter = new ChangeListEmitter({
+            isEnabled: () => this.gitUndoEnabled,
+            getClient: () => this.client,
+            resolveRepo: (sessionId) => this.resolveInternalRepo(sessionId),
+            getHead: (repo) => this.getInternalHeadCommit(repo),
+            getParent: (repo, commit) => this.getInternalParentCommit(repo, commit),
+            getDiffFileSet: (repo, baseCommit, headCommit) => this.getInternalDiffFileSet(repo, baseCommit, headCommit),
+            getDiffStats: (repo, baseCommit, headCommit) => this.getInternalDiffStats(repo, baseCommit, headCommit),
+            isResolvableMessageId: (messageId): messageId is string => this.isResolvableMessageId(messageId),
+            readRecords: (sessionId) => this.readChangeLists(sessionId),
+            readSessionMap: (sessionId) => this.readPersistedSessionMap(sessionId),
+            resolveVisibleOwner: (sessionId, messageId) => this.resolveCurrentVisibleOwnerMessageId(sessionId, messageId),
+            upsertRecord: (sessionId, record, options) => this.upsertChangeList(sessionId, record, options),
+            log: (line) => this.uiDebugChannel?.appendLine(line),
+            now: () => Date.now(),
+            wait: (delayMs) => this.waitMs(delayMs),
+        });
         this.client.setStorage(this._context.globalState);
         this.uiDebugChannel = vscode.window.createOutputChannel('OpenCode UI Debug');
         this.client.setUiDebugChannel(this.uiDebugChannel);
