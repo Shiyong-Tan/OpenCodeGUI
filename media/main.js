@@ -224,6 +224,19 @@ const sessionSearchDomController = createSessionSearchDomController({
     collectTextMatchKeys: (query) => collectLoadedTextSearchKeys(query),
     ensureKeyMounted: (key) => ensureChatWindowKeyMounted(key, 'search')
 });
+const createSmartSearchRequestController = window.__ocFeatures?.createSmartSearchRequestController;
+if (typeof createSmartSearchRequestController !== 'function') {
+    throw new Error('Smart Search request controller is unavailable');
+}
+const smartSearchRequestController = createSmartSearchRequestController({
+    state: sessionSearch,
+    clearHighlights: () => clearSessionSearchHighlights(),
+    updateControls: () => updateSessionSearchControls(),
+    collectMessages: () => collectSmartSearchMessages(),
+    getSessionId: () => activeSessionId || '',
+    postMessage: (message) => vscode.postMessage(message),
+    createRequestId: () => `smart-search-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+});
 const createSessionSearchInteractionController = window.__ocFeatures?.createSessionSearchInteractionController;
 if (typeof createSessionSearchInteractionController !== 'function') {
     throw new Error('Session search interaction controller is unavailable');
@@ -233,7 +246,7 @@ const sessionSearchInteractionController = createSessionSearchInteractionControl
     dom: sessionSearchDomController,
     refresh: (options) => refreshSessionSearchHighlights(options),
     navigate: (delta) => goToSessionSearchMatch(delta),
-    runSmart: () => runSmartSessionSearch(),
+    runSmart: () => smartSearchRequestController.run(),
     requestAnimationFrame: (callback) => requestAnimationFrame(callback),
     setTimeout: (callback, delay) => setTimeout(callback, delay),
     clearTimeout: (handle) => clearTimeout(handle)
@@ -6375,29 +6388,6 @@ function collectSmartSearchMessages() {
 
 function applySmartSessionSearchResults(messageIds, { scroll = true } = {}) {
     sessionSearchDomController.applySmartResults(messageIds, { scroll });
-}
-
-function runSmartSessionSearch() {
-    const query = String(sessionSearch.query || '').trim();
-    if (!query || sessionSearch.smartInFlight) return;
-    const messages = collectSmartSearchMessages();
-    if (!messages.length) {
-        clearSessionSearchHighlights();
-        sessionSearch.setEmptySmartResults();
-        updateSessionSearchControls();
-        return;
-    }
-    const requestId = `smart-search-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    if (!sessionSearch.beginSmartSearch(requestId)) return;
-    clearSessionSearchHighlights();
-    updateSessionSearchControls();
-    vscode.postMessage({
-        type: 'smartSessionSearch',
-        requestId,
-        sessionId: activeSessionId || '',
-        query,
-        messages
-    });
 }
 
 document.addEventListener('DOMContentLoaded', () => {

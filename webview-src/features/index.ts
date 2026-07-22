@@ -23,6 +23,7 @@ import {
   pickSearchAgentMode,
   visitLoadedChatSearchChunks,
 } from './search/search-corpus';
+import { createSmartSearchRequestController } from './search/smart-search-request-controller';
 
 export const FEATURE_FACADE_VERSION = 1 as const;
 
@@ -65,6 +66,7 @@ const facade = Object.freeze({
   getLoadedSessionSearchText,
   pickSearchAgentMode,
   visitLoadedChatSearchChunks,
+  createSmartSearchRequestController,
 });
 
 declare global {

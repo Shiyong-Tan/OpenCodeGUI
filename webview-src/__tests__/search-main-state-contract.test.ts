@@ -38,4 +38,11 @@ describe('session search production state ownership', () => {
     expect(source).toContain('window.__ocFeatures.visitLoadedChatSearchChunks(');
     expect(source).toContain("getAppendItems: (message) => typeof getAppendItems === 'function' ? getAppendItems(message) : []");
   });
+
+  it('delegates Smart request correlation and protocol posting to the request controller', () => {
+    expect(source).toContain('const smartSearchRequestController = createSmartSearchRequestController({');
+    expect(source).toContain('runSmart: () => smartSearchRequestController.run(),');
+    expect(source).not.toContain('function runSmartSessionSearch()');
+    expect(source).not.toContain("type: 'smartSessionSearch',\n        requestId");
+  });
 });
