@@ -26,6 +26,7 @@ import {
     getMaxMessageIndex as findMaxMessageIndex,
     getSnapshotTimelineIds as deriveSnapshotTimelineIds,
 } from './history/SnapshotDeltaPlanner';
+import { SnapshotStore } from './history/SnapshotStore';
 
 type CanceledTurnRecord = {
     opId?: string;
@@ -683,6 +684,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private readonly smartSearch: SmartSearchService;
     private uiTimelineBySession = new Map<string, string[]>();
     private lastSnapshotPayloadBySession = new Map<string, any>();
+    private snapshotStore?: SnapshotStore;
     private changeListStore?: ChangeListStore;
     private readonly diffFileViewer: DiffFileViewer;
     private readonly changeListEmitter: ChangeListEmitter;
@@ -2632,25 +2634,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private getSnapshotFile(sessionId: string): string {
-        return pathModule.join(this.getSnapshotDir(), `${sessionId}.json`);
+        return this.getSnapshotStore().getFile(sessionId);
+    }
+
+    private getSnapshotStore(): SnapshotStore {
+        if (!this.snapshotStore) {
+            this.snapshotStore = new SnapshotStore({
+                getDirectory: () => this.getSnapshotDir(),
+                ensureDir: (directory) => this.ensureDir(directory),
+            });
+        }
+        return this.snapshotStore;
     }
 
     private async writeSnapshotAtomic(sessionId: string, payloadObj: unknown): Promise<number> {
-        const dir = this.getSnapshotDir();
-        await this.ensureDir(dir);
-        const filePath = this.getSnapshotFile(sessionId);
-        const tmpPath = `${filePath}.tmp`;
-        const text = JSON.stringify(payloadObj, null, 2);
-        await fs.promises.writeFile(tmpPath, text, 'utf-8');
-        await fs.promises.rename(tmpPath, filePath);
-        return Buffer.byteLength(text, 'utf-8');
+        return this.getSnapshotStore().writeAtomic(sessionId, payloadObj);
     }
 
     private async readSnapshot(sessionId: string): Promise<{ obj: any; bytes: number } | null> {
-        const filePath = this.getSnapshotFile(sessionId);
-        if (!fs.existsSync(filePath)) return null;
-        const text = await fs.promises.readFile(filePath, 'utf-8');
-        return { obj: JSON.parse(text), bytes: Buffer.byteLength(text, 'utf-8') };
+        return this.getSnapshotStore().read(sessionId);
     }
 
     private getCanceledTurnsDir(): string {
