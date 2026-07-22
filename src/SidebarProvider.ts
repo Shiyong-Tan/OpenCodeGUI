@@ -18,6 +18,7 @@ import { ChangeListStore } from './changes/ChangeListStore';
 import { DiffFileViewer } from './changes/DiffFileViewer';
 import { ChangeListEmitter, type FinalizeTurnIdentity } from './changes/ChangeListEmitter';
 import { hydrateUndoSegments, serializeUndoSegments, type SegmentState } from './undo/UndoSegmentPersistence';
+import { resolveUndoUiVisibleRange, sanitizeUndoRangeMessageIds } from './undo/UndoRangeResolver';
 
 type CanceledTurnRecord = {
     opId?: string;
@@ -441,15 +442,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private sanitizeUndoRangeMessageIds(value: unknown): string[] {
-        if (!Array.isArray(value)) return [];
-        const ids: string[] = [];
-        const seen = new Set<string>();
-        for (const raw of value) {
-            if (typeof raw !== 'string' || !raw.startsWith('msg_') || seen.has(raw)) continue;
-            seen.add(raw);
-            ids.push(raw);
-        }
-        return ids;
+        return sanitizeUndoRangeMessageIds(value);
     }
 
     private resolveUndoUiVisibleRange(
@@ -458,26 +451,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         canonicalMessageIds: string[],
         extAnchorIndex: number
     ): { messageIds: string[]; source: 'webview-visible' | 'extension-canonical' | 'fallback'; uiAnchorIndex: number; extAnchorIndex: number } {
-        const uiAnchorIndex = typeof data?.anchorIndex === 'number' && Number.isFinite(data.anchorIndex)
-            ? data.anchorIndex
-            : -1;
-        const explicitForward = this.sanitizeUndoRangeMessageIds(data?.forwardMessageIdsFromAnchor);
-        if (explicitForward.length && explicitForward[0] === anchorMessageId) {
-            return { messageIds: explicitForward, source: 'webview-visible', uiAnchorIndex, extAnchorIndex };
-        }
-
-        const visibleMessageIds = this.sanitizeUndoRangeMessageIds(data?.visibleMessageIds);
-        if (visibleMessageIds.length && uiAnchorIndex >= 0 && uiAnchorIndex < visibleMessageIds.length && visibleMessageIds[uiAnchorIndex] === anchorMessageId) {
-            return { messageIds: visibleMessageIds.slice(uiAnchorIndex), source: 'webview-visible', uiAnchorIndex, extAnchorIndex };
-        }
-
-        const fallbackIds = canonicalMessageIds.length ? canonicalMessageIds : [anchorMessageId];
-        return {
-            messageIds: fallbackIds,
-            source: explicitForward.length || visibleMessageIds.length ? 'fallback' : 'extension-canonical',
-            uiAnchorIndex,
-            extAnchorIndex
-        };
+        return resolveUndoUiVisibleRange({ data, anchorMessageId, canonicalMessageIds, extAnchorIndex });
     }
 
     private transitionSubagentState(sessionId: string, entry: { state?: SubagentLifecycleState; isDone?: boolean; finalReason?: string; lastEventAt?: number }, to: SubagentLifecycleState, reason: string): void {
