@@ -22,6 +22,7 @@ import { OpenCodeCommandResolver } from './transport/OpenCodeCommandResolver';
 import { OpenCodeProcessRunner } from './transport/OpenCodeProcessRunner';
 import { OpenCodeHttpClient, type ServerConnection, type ServerFetchOptions, type ServerLock } from './transport/OpenCodeHttpClient';
 import { OpenCodeServerLockStore } from './transport/OpenCodeServerLockStore';
+import { OpenCodeEventStream } from './transport/OpenCodeEventStream';
 export type { ModelInfo, ModelQuota, ModelQuotaRow } from './models/types';
 
 export type AgentInfo = {
@@ -445,6 +446,7 @@ export class OpenCodeClient {
     private readonly processRunner: OpenCodeProcessRunner;
     private readonly httpClient: OpenCodeHttpClient;
     private readonly serverLocks: OpenCodeServerLockStore;
+    private readonly eventStream: OpenCodeEventStream;
     public static outputChannel = vscode.window.createOutputChannel("OpenCode CLI");
     private serverProcess?: cp.ChildProcess;
     private serverBaseUrl?: string;
@@ -457,9 +459,6 @@ export class OpenCodeClient {
     private storage?: vscode.Memento;
     private serverPid?: number;
     private serverPassword?: string;
-    private eventStreamAbort?: AbortController;
-    private eventStreamActive = false;
-    private eventStreamBackoffMs = 1000;
     private readonly eventListeners = new Set<(event: ChatEvent) => void>();
     private currentSessionId?: string;
     private messageIndexById = new Map<string, number>();
@@ -596,7 +595,6 @@ export class OpenCodeClient {
     private readonly assistantTextCacheMax = 4000;
     private serverStatus: ServerStatus = 'connected';
     private serverStatusHandler?: (status: ServerStatus, reason?: string) => void;
-    private eventStreamFailCount = 0;
     private eventStreamFailureInFlight = false;
     private lastRestartAt = 0;
     private restartWindowStart = 0;
@@ -795,6 +793,23 @@ export class OpenCodeClient {
             recoverTransport: () => this.ensureServer(),
             log: (message) => this.logUiDebug(message),
         });
+        this.eventStream = new OpenCodeEventStream({
+            open: (signal) => this.serverFetch('/event', { method: 'GET', signal }, { opName: 'event', retry: false, noTimeout: true }),
+            onPayload: (payload) => this.handleServerEvent(payload),
+            onOpen: () => {
+                this.updateServerStatus('connected', 'event-stream-open');
+            },
+            onClosed: () => {
+                this.logUiDebug('EXT: event.closed');
+                this.triggerImmediateResyncForAwaitingFinals('event-stream-close');
+            },
+            onError: (failureCount) => {
+                this.updateServerStatus('reconnecting', 'event-stream-error');
+                this.logUiDebug(`EXT: event.fail | count=${failureCount}`);
+                this.triggerImmediateResyncForAwaitingFinals('event-stream-error');
+            },
+            onRepeatedFailure: () => { void this.handleEventStreamFailure(); },
+        });
         this.workspaceRoot = this.resolveWorkspaceRoot();
         this.gitUndo = new GitUndoEngine(this.workspaceRoot, (message) => this.logUiDebug(message));
     }
@@ -817,8 +832,7 @@ export class OpenCodeClient {
         this.serverReadyPromise = undefined;
         this.serverReadyResolve = undefined;
         this.serverReadyReject = undefined;
-        this.eventStreamAbort?.abort();
-        this.eventStreamActive = false;
+        this.eventStream.stop();
     }
 
     public getServerPid(): number | undefined {
@@ -833,7 +847,7 @@ export class OpenCodeClient {
     public async ensureServer(): Promise<void> {
         if (this.serverBaseUrl) {
             await this.waitForServerReady();
-            if (!this.eventStreamActive) {
+            if (!this.eventStream.isActive()) {
                 this.connectEventStream();
             }
             return;
@@ -848,7 +862,7 @@ export class OpenCodeClient {
             throw error;
         }
         await this.waitForServerReady();
-        if (!this.eventStreamActive) {
+        if (!this.eventStream.isActive()) {
             this.connectEventStream();
         }
     }
@@ -5135,8 +5149,7 @@ export class OpenCodeClient {
         this.serverReadyPromise = undefined;
         this.serverReadyResolve = undefined;
         this.serverReadyReject = undefined;
-        this.eventStreamAbort?.abort();
-        this.eventStreamActive = false;
+        this.eventStream.stop();
     }
 
     private async buildServeSpawn(args: string[]): Promise<{ command: string; args: string[] }> {
@@ -5195,69 +5208,7 @@ export class OpenCodeClient {
     }
 
     private connectEventStream(): void {
-        if (this.eventStreamActive) return;
-        this.eventStreamActive = true;
-        this.eventStreamAbort?.abort();
-        this.eventStreamAbort = new AbortController();
-        const signal = this.eventStreamAbort.signal;
-
-        const start = async () => {
-            try {
-                const response = await this.serverFetch('/event', { method: 'GET', signal }, { opName: 'event', retry: false, noTimeout: true });
-                if (!response.ok || !response.body) {
-                    throw new Error(`Event stream failed: ${response.status}`);
-                }
-                this.eventStreamFailCount = 0;
-                this.updateServerStatus('connected', 'event-stream-open');
-                this.eventStreamBackoffMs = 1000;
-                const reader = response.body.getReader();
-                let buffer = '';
-                let streamClosed = false;
-                while (true) {
-                    const { value, done } = await reader.read();
-                    if (done) {
-                        streamClosed = true;
-                        break;
-                    }
-                    buffer += new TextDecoder('utf-8').decode(value, { stream: true });
-                    const lines = buffer.split(/\r?\n/);
-                    buffer = lines.pop() || '';
-                    for (const line of lines) {
-                        if (!line.startsWith('data:')) continue;
-                        const payload = line.slice(5).trim();
-                        if (!payload) continue;
-                        this.handleServerEvent(payload);
-                    }
-                }
-                if (streamClosed) {
-                    this.logUiDebug('EXT: event.closed');
-                    this.triggerImmediateResyncForAwaitingFinals('event-stream-close');
-                }
-            } catch (error) {
-                if ((error as Error).name === 'AbortError') return;
-                this.eventStreamFailCount += 1;
-                this.updateServerStatus('reconnecting', 'event-stream-error');
-                this.logUiDebug(`EXT: event.fail | count=${this.eventStreamFailCount}`);
-                this.triggerImmediateResyncForAwaitingFinals('event-stream-error');
-                if (this.eventStreamFailCount >= 3) {
-                    void this.handleEventStreamFailure();
-                }
-            }
-
-            this.eventStreamActive = false;
-            await this.scheduleEventStreamReconnect();
-        };
-
-        void start();
-    }
-
-    private async scheduleEventStreamReconnect(): Promise<void> {
-        const delay = this.eventStreamBackoffMs;
-        this.eventStreamBackoffMs = Math.min(this.eventStreamBackoffMs * 2, 30000);
-        await new Promise((resolve) => setTimeout(resolve, delay));
-        if (!this.eventStreamActive) {
-            this.connectEventStream();
-        }
+        this.eventStream.connect();
     }
 
     private async handleEventStreamFailure(): Promise<void> {
