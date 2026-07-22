@@ -32,6 +32,7 @@ import {
     buildFinalizeTurnIdentity as resolveFinalizeTurnIdentity,
     type FinalizeTurnIdentity,
 } from './continuation/TurnIdentityResolver';
+import { TurnFinalizationCoordinator } from './continuation/TurnFinalizationCoordinator';
 
 type CanceledTurnRecord = {
     opId?: string;
@@ -254,6 +255,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private task1FalseDoneEvents = 0;
     private appendSubmitInFlightBySession = new Set<string>();
     private readonly appendSnapshotMetaStore: AppendSnapshotMetaStore;
+    private readonly turnFinalizationCoordinator: TurnFinalizationCoordinator;
 
     private cleanSubagentTitle(title?: string): string {
         const raw = typeof title === 'string' ? title.trim() : '';
@@ -585,44 +587,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private async finalizeResolvedTurn(sessionId: string | undefined, webview: vscode.Webview, assistantMsgId?: string): Promise<void> {
-        if (!sessionId) return;
-        const doneAssistantMsgId = assistantMsgId || this.client.getTurnAssistantMsgId(sessionId) || undefined;
-        webview.postMessage({
-            type: 'chatDone',
-            sessionId,
-            assistantMsgId: doneAssistantMsgId,
-            lastAssistantMsgId: doneAssistantMsgId
-        });
-        this.emitTurnFinalizePhase(webview, sessionId, 'stream_done');
-        this.postMessageIndexMap(webview);
-        const commitResult = await this.commitPendingTurnChangesFromAuthoritativeFiles(this.buildFinalizeTurnIdentity(sessionId, {
-            assistantMessageId: doneAssistantMsgId,
-            reqId: 'finalizeResolvedTurn'
-        }));
-        if (doneAssistantMsgId) {
-            await this.client.finalizeTurnBindingFromResolvedAssistant(sessionId, doneAssistantMsgId);
-        }
-        this.emitTurnFinalizePhase(webview, sessionId, 'commit_done');
-        await this.resolvePendingUserUpgrade(sessionId, webview);
-        this.emitTurnFinalizePhase(webview, sessionId, 'upgrade_done');
-        if (doneAssistantMsgId) {
-            await this.client.promoteContinuationOwner(sessionId, doneAssistantMsgId);
-            await this.client.consolidateCurrentContinuationOwner(sessionId);
-        }
-        this.postMessageIndexMap(webview);
-        const finalizeIdentity = this.buildFinalizeTurnIdentity(sessionId, {
-            assistantMessageId: doneAssistantMsgId,
-            commitResult,
-            reqId: 'finalizeResolvedTurn'
-        });
-        await this.emitDiffFileListWithRetry(finalizeIdentity, webview);
-        await this.writeFinalizeSnapshotFromCanonicalSession(finalizeIdentity);
-        this.sendInFlightBySession.delete(sessionId);
-        webview.postMessage({ type: 'turnInFlight', sessionId, inFlight: false });
-        this.client.finishTurn(sessionId);
-        this.syncTurnInFlightAfterFinalize(sessionId, webview, 'finalizeResolvedTurn');
-        this.emitTurnFinalizePhase(webview, sessionId, 'finalize_done');
-        await this.runPendingSendInitGuardCompensation(sessionId, webview, 'finalizeResolvedTurn');
+        await this.turnFinalizationCoordinator.finalize(sessionId, webview, assistantMsgId);
     }
 
     private getRecentSessionIdForWorkspace(workspaceRoot: string | undefined): string | undefined {
@@ -3956,6 +3921,23 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.appendSnapshotMetaStore = new AppendSnapshotMetaStore(
             (line) => this.uiDebugChannel.appendLine(line)
         );
+        this.turnFinalizationCoordinator = new TurnFinalizationCoordinator({
+            getAssistantMessageId: (sessionId) => this.client.getTurnAssistantMsgId(sessionId),
+            emitPhase: (target, sessionId, phase) => this.emitTurnFinalizePhase(target as vscode.Webview, sessionId, phase),
+            postMessageIndexMap: (target) => this.postMessageIndexMap(target as vscode.Webview),
+            buildIdentity: (sessionId, partial) => this.buildFinalizeTurnIdentity(sessionId, partial),
+            commitChanges: (identity) => this.commitPendingTurnChangesFromAuthoritativeFiles(identity),
+            finalizeBinding: (sessionId, messageId) => this.client.finalizeTurnBindingFromResolvedAssistant(sessionId, messageId),
+            resolvePendingUserUpgrade: (sessionId, target) => this.resolvePendingUserUpgrade(sessionId, target as vscode.Webview),
+            promoteContinuationOwner: (sessionId, messageId) => this.client.promoteContinuationOwner(sessionId, messageId),
+            consolidateContinuationOwner: (sessionId) => this.client.consolidateCurrentContinuationOwner(sessionId),
+            emitChangeList: (identity, target) => this.emitDiffFileListWithRetry(identity, target as vscode.Webview),
+            writeSnapshot: (identity) => this.writeFinalizeSnapshotFromCanonicalSession(identity),
+            clearSendInFlight: (sessionId) => { this.sendInFlightBySession.delete(sessionId); },
+            finishTurn: (sessionId) => this.client.finishTurn(sessionId),
+            syncTurnInFlight: (sessionId, target, reason) => this.syncTurnInFlightAfterFinalize(sessionId, target as vscode.Webview, reason),
+            runSendInitCompensation: (sessionId, target, reason) => this.runPendingSendInitGuardCompensation(sessionId, target as vscode.Webview, reason),
+        });
         this.client.setUiDebugChannel(this.uiDebugChannel);
         this.attachmentStorage = new AttachmentStorageService({
             globalStoragePath: this._context.globalStoragePath,
