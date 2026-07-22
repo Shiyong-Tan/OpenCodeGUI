@@ -46,9 +46,4 @@ describe('OpenCodeEventMapper', () => {
     }]);
     expect(calls).toEqual(['normalized-log', 'status-detail', 'idle-store', 'idle-log', 'mark-final']);
   });
-
-  test('requires exact canonical append-successor admission before bypassing the finished guard', () => {
-    const host: any = { normalizeEvent: (_t: string, props: any) => ({ sessionId: props.info.sessionID, messageId: props.info.id, parentId: props.info.parentID, type: 'message.updated', lane: 'unknown' }), tryBindAppendSuccessor: () => undefined, getActiveAppendSuccessor: () => undefined, isActiveAppendSuccessorEvent: () => false, logUiDebug: jest.fn(), turnFinishedBySession: new Set(['ses']), resolveBackgroundPulseTarget: () => undefined };
-    expect(mapServerEventToChatEvents(host, 'message.updated', { info: { sessionID: 'ses', id: 'msg', parentID: 'msg_parent', role: 'assistant' } }, 'sse')).toEqual([]);
-  });
 });

@@ -211,10 +211,4 @@ describe('OpenCodeClient subagent lane classification', () => {
             mode: 'coder',
         })]);
     });
-
-    it('does not infer append successor ownership from the active session', () => {
-        const client = new OpenCodeClient() as any; client.currentSessionId = 'ses_current';
-        expect(client.tryBindAppendSuccessor('ses_current', 'msg_successor', 'msg_parent')).toBeUndefined();
-        expect(client.classifyEventLane('ses_current')).toBe('unknown');
-    });
 });
