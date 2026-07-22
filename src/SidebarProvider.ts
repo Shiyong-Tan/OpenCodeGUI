@@ -33,6 +33,7 @@ import {
     type FinalizeTurnIdentity,
 } from './continuation/TurnIdentityResolver';
 import { TurnFinalizationCoordinator } from './continuation/TurnFinalizationCoordinator';
+import { ActiveTurnTracker, type ActiveTurnSnapshot as WebviewLivenessActiveTurnSnapshot } from './continuation/ActiveTurnTracker';
 
 type CanceledTurnRecord = {
     opId?: string;
@@ -191,18 +192,6 @@ type SendInitOptions = {
         activeTurn: WebviewLivenessActiveTurnSnapshot;
     };
 };
-type WebviewLivenessActiveTurnSnapshot = {
-    streaming: boolean;
-    finalizing: boolean;
-    active: boolean;
-    fresh: boolean;
-    source: string;
-    turnId?: string;
-    updatedAt: number;
-    ageMs: number;
-    freshnessWindowMs: number;
-};
-
 type SendInitGuardCompensationEntry = {
     sessionId: string;
     panelId: string;
@@ -693,7 +682,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private webviewCommandReloadEpisodeIds = new Set<string>();
     private webviewCommandReloadGeneration = 0;
     private webviewHandshakeLifecycle = 0;
-    private webviewActiveTurnUpdatedAtBySession = new Map<string, number>();
+    private readonly activeTurnTracker: ActiveTurnTracker;
     private sendInitGuardCompensationByKey = new Map<string, SendInitGuardCompensationEntry>();
     private sendInitGuardSpentCompensationByKey = new Map<string, SendInitGuardCompensationEntry>();
     private liveTurnResumePostedByKey = new Set<string>();
@@ -719,45 +708,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private describeWebviewLivenessFlags(sessionId: string | undefined): string {
-        const flags = this.getWebviewLivenessActiveTurnFlags(sessionId);
-        return `streaming=${String(flags.streaming)} | finalizing=${String(flags.finalizing)} | activeTurnFresh=${String(flags.fresh)} | activeTurnSource=${flags.source} | activeTurnId=${flags.turnId || 'none'} | activeTurnAgeMs=${flags.ageMs} | activeTurnFreshnessWindowMs=${flags.freshnessWindowMs}`;
+        return this.activeTurnTracker.describe(sessionId);
     }
 
     private markWebviewActiveTurnUpdated(sessionId: string | undefined, source: string): void {
         if (!sessionId) return;
-        this.webviewActiveTurnUpdatedAtBySession.set(sessionId, Date.now());
+        this.activeTurnTracker.mark(sessionId);
         this.uiDebugChannel?.appendLine(`EXT: webviewAutoRescue.activeTurn.mark | source=${source} | sessionId=${sessionId} | ${this.describeWebviewLivenessFlags(sessionId)}`);
     }
 
     private getWebviewLivenessActiveTurnFlags(sessionId: string | undefined): WebviewLivenessActiveTurnSnapshot {
-        const streaming = Boolean(sessionId && this.sendInFlightBySession.has(sessionId));
-        const finalizing = Boolean(sessionId && this.pendingAssistantMessageIdBySession.has(sessionId));
-        const active = streaming || finalizing;
-        const updatedAt = sessionId ? (this.webviewActiveTurnUpdatedAtBySession.get(sessionId) || 0) : 0;
-        const now = Date.now();
-        const ageMs = updatedAt > 0 ? now - updatedAt : Number.POSITIVE_INFINITY;
-        const freshnessWindowMs = this.webviewActiveTurnFreshnessWindowMs;
-        const turnId = sessionId
-            ? (this.pendingAssistantMessageIdBySession.get(sessionId) || this.pendingLocalKeyBySession.get(sessionId))
-            : undefined;
-        const source = streaming && finalizing
-            ? 'sendInFlightBySession+pendingAssistantMessageIdBySession'
-            : streaming
-                ? 'sendInFlightBySession'
-                : finalizing
-                    ? 'pendingAssistantMessageIdBySession'
-                    : 'none';
-        return {
-            streaming,
-            finalizing,
-            active,
-            fresh: active && updatedAt > 0 && ageMs >= 0 && ageMs <= freshnessWindowMs,
-            source,
-            turnId,
-            updatedAt,
-            ageMs: Number.isFinite(ageMs) ? ageMs : -1,
-            freshnessWindowMs
-        };
+        return this.activeTurnTracker.snapshot(sessionId);
     }
 
     private getSendInitGuardCompensationKey(sessionId: string, panelId: string, webviewInstanceId: string | undefined): string {
@@ -3921,6 +3882,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.appendSnapshotMetaStore = new AppendSnapshotMetaStore(
             (line) => this.uiDebugChannel.appendLine(line)
         );
+        this.activeTurnTracker = new ActiveTurnTracker({
+            isStreaming: (sessionId) => this.sendInFlightBySession.has(sessionId),
+            getPendingAssistantId: (sessionId) => this.pendingAssistantMessageIdBySession.get(sessionId),
+            getPendingLocalKey: (sessionId) => this.pendingLocalKeyBySession.get(sessionId),
+            freshnessWindowMs: this.webviewActiveTurnFreshnessWindowMs,
+        });
         this.turnFinalizationCoordinator = new TurnFinalizationCoordinator({
             getAssistantMessageId: (sessionId) => this.client.getTurnAssistantMsgId(sessionId),
             emitPhase: (target, sessionId, phase) => this.emitTurnFinalizePhase(target as vscode.Webview, sessionId, phase),
