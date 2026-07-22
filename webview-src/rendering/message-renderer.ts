@@ -10,6 +10,7 @@ export function renderMessageElement(
         console.warn('[Render] duplicate message skipped', message.id);
         return;
     }
+    renderedSet.add(message.id);
     const session = host.getSessionState(host.activeSessionId);
     const finalAssistantId = typeof session?.finalAssistantLock?.assistantMsgId === 'string'
         ? session.finalAssistantLock.assistantMsgId
@@ -35,7 +36,7 @@ export function renderMessageElement(
         if (message.meta?.kind === 'changeList') {
             const container = host.changeListRenderer.render(message);
             if (!container) return;
-            if (host.appendChatRenderRoot(container) === true) renderedSet.add(message.id);
+            host.appendChatRenderRoot(container);
             return;
         }
 
@@ -160,7 +161,7 @@ export function renderMessageElement(
 
             content.appendChild(card);
             div.appendChild(content);
-            if (host.appendChatRenderRoot(div) === true) renderedSet.add(message.id);
+            host.appendChatRenderRoot(div);
             return;
         }
 
@@ -505,12 +506,12 @@ export function renderMessageElement(
             }
             if (!host.gitUndoEnabled) {
                 div.appendChild(actions);
-                if (host.appendMessageToChat(div, message) === true) renderedSet.add(message.id);
+                host.appendMessageToChat(div, message);
                 return;
             }
             if (isAppendableActiveUserMessage) {
                 div.appendChild(actions);
-                if (host.appendMessageToChat(div, message) === true) renderedSet.add(message.id);
+                host.appendMessageToChat(div, message);
                 return;
             }
             const undoBtn = document.createElement('button');
@@ -584,6 +585,6 @@ export function renderMessageElement(
             }
             div.appendChild(todoCard);
         }
-        if (host.appendMessageToChat(div, message) === true) renderedSet.add(message.id);
+        host.appendMessageToChat(div, message);
     
 }
