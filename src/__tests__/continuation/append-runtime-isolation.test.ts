@@ -38,6 +38,7 @@ import * as vm from 'vm';
 import { OpenCodeClient } from '../../OpenCodeClient';
 import { SidebarProvider } from '../../SidebarProvider';
 import { OpenCodeDiffProvider } from '../../OpenCodeDiffProvider';
+const createAppendSnapshotController = require('../../../webview-src/continuation/append-snapshot-controller').createAppendSnapshotController;
 
 const createdClients: OpenCodeClient[] = [];
 const createdProviders: Array<{ dispose: () => Promise<void> }> = [];
@@ -208,6 +209,7 @@ function loadAppendSnapshotMetaHarness() {
         Number,
         Array,
         Object,
+        window: { __ocContinuation: { createAppendSnapshotController } },
         vscode: {
             postMessage: (message: any) => posts.push(message),
         },
@@ -252,6 +254,11 @@ function loadAppendChatDoneHarness() {
         assertInvariants: jest.fn(),
         syncAppendSnapshotMetadata,
     };
+    context.appendSnapshotController = createAppendSnapshotController({
+        resolveMessageKey: (_session: any, key: unknown) => typeof key === 'string' ? key : null,
+        getSession: (sessionId: string) => sessions.get(sessionId),
+        postMessage: (message: any) => posts.push(message),
+    });
     vm.createContext(context);
     vm.runInContext(`${source.slice(normalizeStart, collectStart)}\n${source.slice(chatDoneStart, chatDoneEnd)}
 this.handleChatDone = handleChatDone;
@@ -276,6 +283,7 @@ function loadAppendPresentationHarness() {
         Number,
         Array,
         Object,
+        window: { __ocContinuation: { createAppendSnapshotController } },
         vscode: {
             postMessage: (message: any) => posts.push(message),
         },

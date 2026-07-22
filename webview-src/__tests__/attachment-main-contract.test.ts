@@ -18,10 +18,10 @@ describe('composer attachment production ownership', () => {
     expect(source).toContain('getAttachmentStateController().clear();');
   });
 
-  it('delegates send payload and image derivation to attachment state', () => {
-    expect(source).toContain('attachmentState.getMessageImages();');
-    expect(source).toContain('attachmentState.getPayload();');
-    expect(source).toContain('attachmentState.hasNonImage();');
+  it('delegates send payload and image derivation to the composer submission module', () => {
+    expect(source).toContain('const submission = buildComposerSubmission({');
+    expect(source).toContain('attachments: attachmentState');
+    expect(source).toContain('const { messageText, messageImages, attachmentsPayload, contextPayload, filesPayload } = submission;');
   });
 
   it('delegates attachment DOM ownership to the composer controller', () => {

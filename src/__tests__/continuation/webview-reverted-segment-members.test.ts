@@ -3,6 +3,9 @@ import * as path from 'path';
 import * as vm from 'vm';
 
 const createUndoRequestController = require('../../../webview-src/undo/undo-request-controller').createUndoRequestController;
+const createSessionEventRouter = require('../../../webview-src/continuation/session-event-router').createSessionEventRouter;
+const createSessionRenderScheduler = require('../../../webview-src/continuation/session-render-scheduler').createSessionRenderScheduler;
+const createAppendSnapshotController = require('../../../webview-src/continuation/append-snapshot-controller').createAppendSnapshotController;
 
 function createHarnessSegmentTopology(debug: (payload: string[]) => void) {
     const resolveMessageId = (session: any, id: unknown): string | null => {
@@ -120,6 +123,17 @@ function loadUndoSenderHarness() {
         Array,
         activeSessionId: 'ses_A',
         sessionsById: sessions,
+        sessionStore: {
+            entries: () => sessions.entries(),
+            getRegistryInfo: (sessionId: string) => ({ size: sessions.size, hasSession: sessions.has(sessionId) }),
+        },
+        hydrationStateController: {
+            isPersistenceArtifact: (id: unknown, message: any) => (
+                (typeof id === 'string' && (id.startsWith('system:snapshot:') || id.startsWith('system:changeList:')))
+                || message?.meta?.kind === 'snapshotNotice'
+                || message?.meta?.kind === 'changeList'
+            ),
+        },
         vscode: {
             postMessage: (message: any) => posts.push(message),
         },
@@ -135,6 +149,11 @@ function loadUndoSenderHarness() {
             },
             __ocUndo: {
                 createUndoRequestController,
+            },
+            __ocContinuation: {
+                createSessionEventRouter,
+                createSessionRenderScheduler,
+                createAppendSnapshotController,
             },
         },
     };

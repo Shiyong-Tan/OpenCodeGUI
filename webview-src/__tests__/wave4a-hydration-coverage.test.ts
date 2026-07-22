@@ -7,6 +7,7 @@ import {
   type HydrationCoverage,
 } from '../rendering/local-history-window';
 import { createSessionState } from '../continuation/session-store';
+import { buildFullExportSnapshotDelta } from '../../src/history/SnapshotDeltaPlanner';
 
 const source = fs.readFileSync(path.join(process.cwd(), 'media', 'main.js'), 'utf8');
 const providerSource = fs.readFileSync(path.join(process.cwd(), 'src', 'SidebarProvider.ts'), 'utf8');
@@ -203,12 +204,15 @@ describe('Wave 4A hydration coverage', () => {
     expect(sendInitRecent).toMatch(/snapshotTimelineIds\.length > 0 && continuity\.proven[\s\S]*\? 'authoritativeHistoryComplete'[\s\S]*: 'deltaContinuityUnknown'/);
     expect(sendInitRecent).toMatch(/fullDelta\.proven \? 'authoritativeHistoryComplete' : 'deltaContinuityUnknown'/);
 
-    const fullDeltaHelper = extractProviderRange(
-      'private buildFullExportSnapshotDelta(',
-      'private enforceUserAssistantPairs(',
-    );
-    expect(fullDeltaHelper).toMatch(/snapshotTimelineIds\.length === 0[\s\S]*proven: true/);
-    expect(fullDeltaHelper).toMatch(/boundaryIndexes\.length !== 1[\s\S]*proven: false/);
+    const appendImmutable = (existing: any[], suffix: any[]) => [...existing, ...suffix];
+    expect(buildFullExportSnapshotDelta({
+      existingSnapshotRecords: [], snapshotTimelineIds: [],
+      fullExportRecords: [{ id: 'msg_a', role: 'user', text: 'a' }], appendImmutable,
+    })).toMatchObject({ proven: true, timelineMessageIds: ['msg_a'] });
+    expect(buildFullExportSnapshotDelta({
+      existingSnapshotRecords: [{ id: 'msg_a', role: 'user', text: 'a' }], snapshotTimelineIds: ['msg_a'],
+      fullExportRecords: [{ id: 'msg_a', role: 'user', text: 'a' }, { id: 'msg_a', role: 'user', text: 'duplicate' }], appendImmutable,
+    })).toMatchObject({ proven: false, timelineMessageIds: ['msg_a'] });
     expect(providerSource).not.toMatch(/localExhaust|revealStart[\s\S]{0,120}authoritativeHistoryComplete/);
   });
 

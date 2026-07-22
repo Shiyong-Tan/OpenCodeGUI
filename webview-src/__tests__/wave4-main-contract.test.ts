@@ -465,7 +465,10 @@ describe('Wave 4 main-script local older contract', () => {
         allUnits: [{ key: 'old-key' }],
         adapter: { scrollToKey: () => { calls += 1; return calls >= 3; } },
       },
-      sessionSearch: { windowTargetKey: 'old-key' },
+      sessionSearch: {
+        windowTargetKey: 'old-key',
+        clearWindowTargetKey() { this.windowTargetKey = ''; },
+      },
       keyedRootForKey: () => null,
       vscode: { postMessage: (message: unknown) => diagnostics.push(message) },
     });
