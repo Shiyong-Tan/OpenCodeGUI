@@ -14,6 +14,7 @@ import { SmartSearchSessionRegistry } from './search/SmartSearchSessionRegistry'
 import { SmartSearchService } from './search/SmartSearchService';
 import type { SmartSearchMessage } from './search/SmartSearchService';
 import { injectChangeListRecords, type ChangeListRecord, type SessionMessage } from './changes/ChangeListInjection';
+import { ChangeListStore } from './changes/ChangeListStore';
 
 type CanceledTurnRecord = {
     opId?: string;
@@ -727,6 +728,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private uiTimelineBySession = new Map<string, string[]>();
     private lastSnapshotPayloadBySession = new Map<string, any>();
     private lastEmittedChangeListHeadBySession = new Map<string, string>();
+    private changeListStore?: ChangeListStore;
     private assistantTextBufferBySession = new Map<string, string>();
     private pendingSnapshotUserTextBySession = new Map<string, string>();
     private lastKnownModels: ModelInfo[] = [];
@@ -2694,10 +2696,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return { obj: JSON.parse(text), bytes: Buffer.byteLength(text, 'utf-8') };
     }
 
-    private getChangeListDir(): string {
-        return pathModule.join(this.getOpencodeDataDir(), 'sessionChangeLists');
-    }
-
     private getCanceledTurnsDir(): string {
         return pathModule.join(this.getOpencodeDataDir(), 'sessionCanceledTurns');
     }
@@ -2708,51 +2706,28 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return pathModule.join(this._context.globalStoragePath, kind, workspaceKey);
     }
 
-    private getLegacyChangeListPath(sessionId: string): string {
-        return pathModule.join(this.getLegacyWorkspaceDataDir('sessionChangeLists'), `${sessionId}.json`);
-    }
-
     private getLegacyCanceledTurnsPath(sessionId: string): string {
         return pathModule.join(this.getLegacyWorkspaceDataDir('sessionCanceledTurns'), `${sessionId}.json`);
-    }
-
-    private getChangeListPath(sessionId: string): string {
-        return pathModule.join(this.getChangeListDir(), `${sessionId}.json`);
     }
 
     private getCanceledTurnsPath(sessionId: string): string {
         return pathModule.join(this.getCanceledTurnsDir(), `${sessionId}.json`);
     }
 
+    private getChangeListStore(): ChangeListStore {
+        if (!this.changeListStore) {
+            this.changeListStore = new ChangeListStore({
+                getDataDir: () => pathModule.join(this.getOpencodeDataDir(), 'sessionChangeLists'),
+                getLegacyDir: () => this.getLegacyWorkspaceDataDir('sessionChangeLists'),
+                ensureDir: (dir) => this.ensureDir(dir),
+                log: (line) => this.uiDebugChannel.appendLine(line),
+            });
+        }
+        return this.changeListStore;
+    }
+
     private async readChangeLists(sessionId: string): Promise<ChangeListRecord[]> {
-        const filePath = this.getChangeListPath(sessionId);
-        if (!fs.existsSync(filePath)) {
-            const legacyPath = this.getLegacyChangeListPath(sessionId);
-            if (fs.existsSync(legacyPath)) {
-                try {
-                    const text = await fs.promises.readFile(legacyPath, 'utf-8');
-                    const parsed = JSON.parse(text);
-                    const records = Array.isArray(parsed) ? parsed : [];
-                    if (records.length > 0) {
-                        await this.writeChangeLists(sessionId, records);
-                        this.uiDebugChannel.appendLine(
-                            `[EXT][CHANGELIST_MIGRATED] sessionId=${sessionId} from=${legacyPath} to=${filePath} records=${records.length}`
-                        );
-                    }
-                    return records;
-                } catch {
-                    return [];
-                }
-            }
-            return [];
-        }
-        try {
-            const text = await fs.promises.readFile(filePath, 'utf-8');
-            const parsed = JSON.parse(text);
-            return Array.isArray(parsed) ? parsed : [];
-        } catch {
-            return [];
-        }
+        return this.getChangeListStore().read(sessionId);
     }
 
     private async readCanceledTurns(sessionId: string): Promise<CanceledTurnRecord[]> {
@@ -2787,38 +2762,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private async writeChangeLists(sessionId: string, records: ChangeListRecord[]): Promise<void> {
-        const dir = this.getChangeListDir();
-        await this.ensureDir(dir);
-        const filePath = this.getChangeListPath(sessionId);
-        const tmpPath = `${filePath}.tmp`;
-        const text = JSON.stringify(records, null, 2);
-        let lastError: unknown;
-        for (let attempt = 1; attempt <= 2; attempt++) {
-            try {
-                await fs.promises.writeFile(tmpPath, text, 'utf-8');
-                await fs.promises.rename(tmpPath, filePath);
-                if (!fs.existsSync(filePath)) {
-                    throw new Error(`change-list file missing after rename (attempt=${attempt})`);
-                }
-                this.uiDebugChannel.appendLine(
-                    `[EXT][CHANGELIST_WRITE_OK] sessionId=${sessionId} file=${filePath} records=${records.length} bytes=${Buffer.byteLength(text, 'utf-8')} attempt=${attempt}`
-                );
-                return;
-            } catch (error) {
-                lastError = error;
-                this.uiDebugChannel.appendLine(
-                    `[EXT][CHANGELIST_WRITE_FAIL] sessionId=${sessionId} file=${filePath} attempt=${attempt} err=${String(error)}`
-                );
-                try {
-                    if (fs.existsSync(tmpPath)) {
-                        await fs.promises.unlink(tmpPath);
-                    }
-                } catch {
-                    // Best effort tmp cleanup.
-                }
-            }
-        }
-        throw (lastError instanceof Error ? lastError : new Error(String(lastError)));
+        await this.getChangeListStore().write(sessionId, records);
     }
 
     private async writeCanceledTurns(sessionId: string, records: CanceledTurnRecord[]): Promise<void> {
