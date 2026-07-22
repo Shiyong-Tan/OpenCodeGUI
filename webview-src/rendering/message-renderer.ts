@@ -41,6 +41,7 @@ export interface MessageRendererHost {
     readonly renderNestedInvalidSegmentElement: (session: SessionState, segment: Message) => RenderElement;
     readonly renderNestedMessageElement: (message: Message) => RenderElement;
     readonly renderUserMarkdown: (container: RenderElement, markdown: string) => void;
+    readonly requestRerender: (reason?: string) => void;
     readonly sanitizeMergedSegmentSnapshot: (segment: Message) => Message | null;
     readonly scheduleClearAppendHover: (key: string) => void;
     readonly selectedMode: string | null;
@@ -168,7 +169,7 @@ export function renderMessageElement(
                     type: 'ui-debug',
                     payload: ['[WV][SEG_TOGGLE]', `noticeKey=${noticeKey || 'null'}`, `collapsed=${liveSegment.collapsed}`, `invalidated=${invalidated}`]
                 });
-                (window as any).__oc?.renderFromState?.();
+                host.requestRerender();
             });
             actions.appendChild(toggleBtn);
 
@@ -603,7 +604,7 @@ export function renderMessageElement(
                 });
                 host.discardAllSegments(sessionId, 'undo', host.selectedMode || 'unknown', { anchorMsgId: verdict.msgId });
                 host.handleUndoToMessage(sessionId, verdict.msgId);
-                (window as any).__oc?.renderFromState?.();
+                host.requestRerender();
                 host.logSessionState(sessionId, 'UI_UNDO_TO_MESSAGE');
             });
             actions.appendChild(undoBtn);

@@ -12,7 +12,7 @@ const capabilityNames: Array<keyof MessageRendererHost> = [
   'handleUndoToMessage', 'invalidateKeyedChatUnitPresentation', 'isBusy',
   'keyedFollowingTurnDividerOverride', 'logSessionState', 'pickMode', 'renderAssistantMarkdown',
   'renderMarkdownInto', 'renderNestedInvalidSegmentElement', 'renderNestedMessageElement',
-  'renderUserMarkdown', 'sanitizeMergedSegmentSnapshot', 'scheduleClearAppendHover', 'selectedMode',
+  'renderUserMarkdown', 'requestRerender', 'sanitizeMergedSegmentSnapshot', 'scheduleClearAppendHover', 'selectedMode',
   'setAppendHoverActive', 'shouldShowBackgroundSubagentIndicator', 'stripAttachmentManifest',
   'stripSystemInjections', 'subagentTextExpandedByKey', 'toggleUndoSegmentPlaceholder', 'vscode',
 ];
@@ -39,7 +39,8 @@ describe('message renderer host facade', () => {
       handleUndoToMessage: callable, invalidateKeyedChatUnitPresentation: callable, isBusy: true,
       keyedFollowingTurnDividerOverride: null, logSessionState: callable, pickMode: callable,
       renderAssistantMarkdown: callable, renderMarkdownInto: callable, renderNestedInvalidSegmentElement: callable,
-      renderNestedMessageElement: callable, renderUserMarkdown: callable, sanitizeMergedSegmentSnapshot: callable,
+      renderNestedMessageElement: callable, renderUserMarkdown: callable, window: { __oc: { renderFromState: callable } },
+      sanitizeMergedSegmentSnapshot: callable,
       scheduleClearAppendHover: callable, selectedMode: 'build', setAppendHoverActive: callable,
       shouldShowBackgroundSubagentIndicator: callable, stripAttachmentManifest: callable,
       stripSystemInjections: callable, subagentTextExpandedByKey: new Map(),
@@ -52,6 +53,8 @@ describe('message renderer host facade', () => {
     expect(host.appendMessageToChat).toBe(callable);
     expect(host.getSessionState).toBe(callable);
     expect(host.vscode.postMessage).toBe(callable);
+    host.requestRerender('renderer-contract');
+    expect(callable).toHaveBeenCalledWith('renderer-contract');
     expect(host.activeSessionId).toBe('session-a');
     (context as any).activeSessionId = activeSessionId = 'session-b';
     expect(host.activeSessionId).toBe(activeSessionId);

@@ -6345,6 +6345,7 @@ const renderMessageElementHost = Object.freeze({
     get renderNestedInvalidSegmentElement() { return renderNestedInvalidSegmentElement; },
     get renderNestedMessageElement() { return renderNestedMessageElement; },
     get renderUserMarkdown() { return renderUserMarkdown; },
+    get requestRerender() { return (reason) => window.__oc?.renderFromState?.(reason); },
     get sanitizeMergedSegmentSnapshot() { return sanitizeMergedSegmentSnapshot; },
     get scheduleClearAppendHover() { return scheduleClearAppendHover; },
     get selectedMode() { return selectedMode; },
