@@ -508,6 +508,7 @@ describe('W5A snapshot export and finalize contracts', () => {
 describe('W5A paths and guards', () => {
     const providerSource = fs.readFileSync(path.join(process.cwd(), 'src', 'SidebarProvider.ts'), 'utf8');
     const initializerSource = fs.readFileSync(path.join(process.cwd(), 'src', 'history', 'SidebarSessionInitializer.ts'), 'utf8');
+    const controllerSource = fs.readFileSync(path.join(process.cwd(), 'src', 'webview', 'SidebarWebviewController.ts'), 'utf8');
 
     it('site E surrounds recent hydration with session, epoch, liveness, and exact-webview identity guards', () => {
         const siteStart = initializerSource.indexOf('const recentSelectionEpoch = host.sessionSelectionEpoch');
@@ -556,7 +557,8 @@ describe('W5A paths and guards', () => {
         ];
 
         for (const [startMarker, endMarker] of familyRanges) {
-            const ownerSource = startMarker.includes('host.sessionSelectionEpoch') ? initializerSource : providerSource;
+            const ownerSource = startMarker.includes('host.sessionSelectionEpoch')
+                ? initializerSource : (startMarker.includes('case "selectSession"') ? controllerSource : providerSource);
             const start = ownerSource.indexOf(startMarker);
             const end = ownerSource.indexOf(endMarker, start);
             expect(start).toBeGreaterThanOrEqual(0);

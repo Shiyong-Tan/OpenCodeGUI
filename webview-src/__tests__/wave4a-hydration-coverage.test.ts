@@ -12,6 +12,7 @@ import { buildFullExportSnapshotDelta } from '../../src/history/SnapshotDeltaPla
 const source = fs.readFileSync(path.join(process.cwd(), 'media', 'main.js'), 'utf8');
 const providerSource = fs.readFileSync(path.join(process.cwd(), 'src', 'SidebarProvider.ts'), 'utf8');
 const initializerSource = fs.readFileSync(path.join(process.cwd(), 'src', 'history', 'SidebarSessionInitializer.ts'), 'utf8');
+const controllerSource = fs.readFileSync(path.join(process.cwd(), 'src', 'webview', 'SidebarWebviewController.ts'), 'utf8');
 
 function extractFunction(marker: string): string {
   const start = source.indexOf(marker);
@@ -39,6 +40,14 @@ function extractInitializerRange(startMarker: string, endMarker: string): string
   const end = initializerSource.indexOf(endMarker, start);
   expect(end).toBeGreaterThan(start);
   return initializerSource.slice(start, end);
+}
+
+function extractControllerRange(startMarker: string, endMarker: string): string {
+  const start = controllerSource.indexOf(startMarker);
+  expect(start).toBeGreaterThanOrEqual(0);
+  const end = controllerSource.indexOf(endMarker, start);
+  expect(end).toBeGreaterThan(start);
+  return controllerSource.slice(start, end);
 }
 
 describe('Wave 4A hydration coverage', () => {
@@ -200,8 +209,8 @@ describe('Wave 4A hydration coverage', () => {
     expect(softRescue).toMatch(/snapshotTimelineIds\.length > 0 && !continuity\.proven[\s\S]*phase: 'snapshot'[\s\S]*throw new Error\('snapshot-boundary-unproven'\)/);
     expect(softRescue).toMatch(/fullDelta\.proven[\s\S]*\? 'authoritativeHistoryComplete'[\s\S]*: 'deltaContinuityUnknown'/);
 
-    const selectSession = extractProviderRange('case "selectSession"', 'case "clipboardImage"');
-    expect(selectSession).toContain('this.resetUiState(targetSessionId);');
+    const selectSession = extractControllerRange('case "selectSession"', 'case "clipboardImage"');
+    expect(selectSession).toContain('host.resetUiState(targetSessionId);');
     expect(selectSession).toMatch(/snapshotIds\.length > 0 && !continuity\.proven[\s\S]*repair-disabled-safe-snapshot[\s\S]*throw new Error\('snapshot-boundary-unproven'\)/);
     expect(selectSession).toMatch(/snapshotIds\.length > 0[\s\S]*\? 'authoritativeHistoryComplete'[\s\S]*: 'deltaContinuityUnknown'/);
     expect(selectSession).toMatch(/fullDelta\.proven[\s\S]*\? 'authoritativeHistoryComplete'[\s\S]*: 'deltaContinuityUnknown'/);

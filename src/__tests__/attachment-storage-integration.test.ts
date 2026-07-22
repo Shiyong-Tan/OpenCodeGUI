@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 const source = fs.readFileSync(path.join(process.cwd(), 'src', 'SidebarProvider.ts'), 'utf8');
+const controllerSource = fs.readFileSync(path.join(process.cwd(), 'src', 'webview', 'SidebarWebviewController.ts'), 'utf8');
 
 describe('SidebarProvider attachment storage integration', () => {
   it('constructs one service with workspace, storage, and logging dependencies', () => {
@@ -12,9 +13,9 @@ describe('SidebarProvider attachment storage integration', () => {
   });
 
   it('routes storage, MIME, manifest, cleanup, and disposal through the service', () => {
-    expect(source).toContain('this.attachmentStorage.saveAttachment(targetSessionId, attachment, reqId)');
-    expect(source).toContain('this.attachmentStorage.saveClipboardImage(data.dataUrl, data.mime)');
-    expect(source).toContain('this.attachmentStorage.buildAttachmentManifest(savedAttachments)');
+    expect(controllerSource).toContain('host.attachmentStorage.saveAttachment(targetSessionId, attachment, reqId)');
+    expect(controllerSource).toContain('host.attachmentStorage.saveClipboardImage(data.dataUrl, data.mime)');
+    expect(controllerSource).toContain('host.attachmentStorage.buildAttachmentManifest(savedAttachments)');
     expect(source).toContain("this.attachmentStorage.scheduleCleanup('activate');");
     expect(source).toContain('this.attachmentStorage.startCleanupTimer();');
     expect(source).toContain('this.attachmentStorage.dispose();');
