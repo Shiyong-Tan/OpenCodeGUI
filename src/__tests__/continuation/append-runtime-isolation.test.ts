@@ -291,7 +291,8 @@ function loadAppendPresentationHarness() {
     vm.createContext(context);
     vm.runInContext(`${source.slice(stableStart, stableEnd)}
 this.buildAppendChildPresentationIndex = buildAppendChildPresentationIndex;
-this.isAppendChildTopLevelUser = isAppendChildTopLevelUser;`, context);
+this.isAppendChildTopLevelUser = isAppendChildTopLevelUser;
+this.isAppendChainTopLevelAssistantHidden = isAppendChainTopLevelAssistantHidden;`, context);
     return { context, posts };
 }
 
@@ -807,6 +808,121 @@ describe('append runtime isolation', () => {
         expect(topLevelRendered).toEqual(['msg_root_A', 'msg_assistant_A']);
         expect(session.messagesById.has('msg_append_child_A')).toBe(true);
         expect(session.timeline).toContain('msg_append_child_A');
+    });
+
+    it('keeps the current in-flight assistant visible when append presentation hides assistants parented to the root', () => {
+        const { context } = loadAppendPresentationHarness();
+        const session = {
+            messagesById: new Map<string, any>([
+                ['msg_root_A', {
+                    id: 'msg_root_A',
+                    role: 'user',
+                    text: 'root prompt',
+                    meta: {
+                        appendedPrompts: [{
+                            clientMessageId: 'append-client-1',
+                            appendUserMsgId: 'msg_append_child_A',
+                            text: 'follow-up text',
+                            status: 'queued',
+                        }],
+                    },
+                }],
+                ['msg_append_child_A', { id: 'msg_append_child_A', role: 'user', text: 'follow-up text', meta: {} }],
+                ['msg_assistant_A', {
+                    id: 'msg_assistant_A',
+                    role: 'assistant',
+                    text: 'working',
+                    parentId: 'msg_root_A',
+                    meta: {},
+                }],
+            ]),
+            timeline: ['msg_root_A', 'msg_assistant_A', 'msg_append_child_A'],
+            clientKeyToServerId: new Map<string, string>(),
+            serverIdToClientKey: new Map<string, string>(),
+            backendTurnInFlight: true,
+            turnFullyFinalized: false,
+            canceledActiveTurn: false,
+            currentTurnAssistantKey: 'msg_assistant_A',
+            currentTurnAssistantMsgId: 'msg_assistant_A',
+            thinkingId: 'msg_assistant_A',
+        };
+
+        const appendIndex = context.buildAppendChildPresentationIndex(session);
+
+        expect(context.isAppendChainTopLevelAssistantHidden(
+            session,
+            session.messagesById.get('msg_assistant_A'),
+            'msg_assistant_A',
+            appendIndex,
+        )).toBe(false);
+
+        session.backendTurnInFlight = false;
+        session.turnFullyFinalized = true;
+
+        expect(context.isAppendChainTopLevelAssistantHidden(
+            session,
+            session.messagesById.get('msg_assistant_A'),
+            'msg_assistant_A',
+            appendIndex,
+        )).toBe(true);
+    });
+
+    it('keeps an aliased current in-flight assistant visible without exposing other append-chain assistants', () => {
+        const { context } = loadAppendPresentationHarness();
+        const session = {
+            messagesById: new Map<string, any>([
+                ['msg_root_A', {
+                    id: 'msg_root_A',
+                    role: 'user',
+                    text: 'root prompt',
+                    meta: {
+                        appendedPrompts: [{
+                            clientMessageId: 'append-client-1',
+                            appendUserMsgId: 'msg_append_child_A',
+                            text: 'follow-up text',
+                            status: 'queued',
+                        }],
+                    },
+                }],
+                ['msg_append_child_A', { id: 'msg_append_child_A', role: 'user', text: 'follow-up text', meta: {} }],
+                ['msg_assistant_old', {
+                    id: 'msg_assistant_old',
+                    role: 'assistant',
+                    text: 'older result',
+                    parentId: 'msg_root_A',
+                    meta: {},
+                }],
+                ['msg_assistant_active', {
+                    id: 'msg_assistant_active',
+                    role: 'assistant',
+                    text: 'working',
+                    parentId: 'msg_root_A',
+                    meta: {},
+                }],
+            ]),
+            timeline: ['msg_root_A', 'msg_assistant_old', 'msg_assistant_active', 'msg_append_child_A'],
+            clientKeyToServerId: new Map<string, string>([['local-assistant-active', 'msg_assistant_active']]),
+            serverIdToClientKey: new Map<string, string>([['msg_assistant_active', 'local-assistant-active']]),
+            backendTurnInFlight: true,
+            turnFullyFinalized: false,
+            canceledActiveTurn: false,
+            currentTurnAssistantKey: 'local-assistant-active',
+        };
+
+        const appendIndex = context.buildAppendChildPresentationIndex(session);
+
+        expect(context.isAppendChainTopLevelAssistantHidden(
+            session,
+            session.messagesById.get('msg_assistant_active'),
+            'msg_assistant_active',
+            appendIndex,
+        )).toBe(false);
+        expect(context.isAppendChainTopLevelAssistantHidden(
+            session,
+            session.messagesById.get('msg_assistant_old'),
+            'msg_assistant_old',
+            appendIndex,
+        )).toBe(true);
     });
 
     it('normalizes all append roots on chatDone and re-syncs append snapshot metadata', () => {

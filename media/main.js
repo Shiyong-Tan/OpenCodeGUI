@@ -2588,6 +2588,32 @@ function isAppendChildTopLevelUser(session, msg, id, appendChildPresentationInde
 
 function isAppendChainTopLevelAssistantHidden(session, msg, id, appendChildPresentationIndex) {
     if (!session || !msg || msg.role !== 'assistant') return false;
+    if (session.backendTurnInFlight === true && session.turnFullyFinalized !== true && session.canceledActiveTurn !== true) {
+        const messageKeys = new Set();
+        if (typeof id === 'string' && id.length) {
+            addPresentationKeyVariants(session, messageKeys, id);
+        }
+        if (typeof msg.id === 'string' && msg.id.length) {
+            addPresentationKeyVariants(session, messageKeys, msg.id);
+        }
+
+        const activeAssistantKeys = [
+            session.currentTurnAssistantKey,
+            session.currentTurnAssistantMsgId,
+            session.thinkingId,
+            session.pendingAssistantUpgrade?.tmpKey,
+            session.pendingAssistantUpgrade?.assistantMsgId,
+            session.appendFollowupIdentity?.assistantMsgId,
+        ];
+        for (const activeKey of activeAssistantKeys) {
+            if (typeof activeKey !== 'string' || !activeKey.length) continue;
+            for (const candidate of getPresentationMessageKeyVariants(session, activeKey)) {
+                if (messageKeys.has(candidate)) return false;
+            }
+            if (messageKeys.has(activeKey)) return false;
+        }
+    }
+
     const index = appendChildPresentationIndex instanceof Map
         ? appendChildPresentationIndex
         : buildAppendChildPresentationIndex(session);
