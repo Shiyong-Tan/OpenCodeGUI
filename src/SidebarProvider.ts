@@ -3912,6 +3912,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     `[EXT][SESSION_ACTOR_ERROR] sessionId=${event.sessionId || 'none'} type=${event.type} error=${String(error)}`,
                 );
             },
+            onDrop: (event, reason) => {
+                this.uiDebugChannel.appendLine(
+                    `[EXT][SESSION_ACTOR_DROP] sessionId=${event.sessionId || 'none'} type=${event.type} reason=${reason}`,
+                );
+            },
         });
         this.turnFinalizationCoordinator = new TurnFinalizationCoordinator({
             getAssistantMessageId: (sessionId) => this.client.getTurnAssistantMsgId(sessionId),

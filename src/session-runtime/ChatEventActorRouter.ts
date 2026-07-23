@@ -15,6 +15,7 @@ type ChatEventActorState = Readonly<{
 export type ChatEventActorRouterOptions = Readonly<{
     handle(event: ChatEvent): Promise<void> | void;
     onError?(event: ChatEvent, error: unknown): void;
+    onDrop?(event: ChatEvent, reason: 'missing-session-owner'): void;
 }>;
 
 function resolveActorOwner(event: ChatEvent): string | undefined {
@@ -61,11 +62,7 @@ export class ChatEventActorRouter {
         if (this.disposed) return;
         const ownerSessionId = resolveActorOwner(event);
         if (!ownerSessionId) {
-            try {
-                await this.options.handle(event);
-            } catch (error) {
-                this.options.onError?.(event, error);
-            }
+            this.options.onDrop?.(event, 'missing-session-owner');
             return;
         }
         const sequence = (this.sequenceByOwner.get(ownerSessionId) || 0) + 1;

@@ -56,4 +56,18 @@ describe('production chat event actor router', () => {
         expect(errors).toEqual(['Error: bad-event']);
         expect(handled).toEqual(['good']);
     });
+
+    test('drops ownerless asynchronous events before the compatibility handler', async () => {
+        const handled = jest.fn();
+        const onDrop = jest.fn();
+        const router = new ChatEventActorRouter({ handle: handled, onDrop });
+
+        await router.route({ type: 'text', text: 'ownerless' });
+
+        expect(handled).not.toHaveBeenCalled();
+        expect(onDrop).toHaveBeenCalledWith(
+            expect.objectContaining({ type: 'text', text: 'ownerless' }),
+            'missing-session-owner',
+        );
+    });
 });
