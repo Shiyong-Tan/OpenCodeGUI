@@ -6,8 +6,7 @@ import type { SessionMessage } from '../changes/ChangeListInjection';
 import { serializeUndoSegments, type SegmentState } from '../undo/UndoSegmentPersistence';
 import { captureCancelTurnOwner } from './CancelTurnOwner';
 import type { UtilityCommandHandler } from './controllers/UtilityCommandController';
-
-type HydrationCoverage = 'authoritativeHistoryComplete' | 'deltaContinuityUnknown' | 'repairInProgress' | 'repairError';
+import type { SessionCommandHandler } from './controllers/SessionCommandController';
 
 /** Owns Webview command registration and protocol dispatch for SidebarProvider. */
 export function resolveSidebarWebviewView(
@@ -15,7 +14,8 @@ export function resolveSidebarWebviewView(
     webviewView: vscode.WebviewView,
     context: vscode.WebviewViewResolveContext,
     _token: vscode.CancellationToken,
-    utilityCommandHandler: UtilityCommandHandler
+    utilityCommandHandler: UtilityCommandHandler,
+    sessionCommandHandler: SessionCommandHandler
 ): void {
         host._view = webviewView;
         const panelId = `panel-${++host.webviewLivenessPanelSeq}`;
@@ -47,6 +47,10 @@ export function resolveSidebarWebviewView(
 
             const utilityHandling = utilityCommandHandler(data, activeWebview, webviewView.webview);
             if (utilityHandling !== false && await utilityHandling) {
+                return;
+            }
+            const sessionHandling = sessionCommandHandler(data, activeWebview, webviewView.webview);
+            if (sessionHandling !== false && await sessionHandling) {
                 return;
             }
 
@@ -613,11 +617,6 @@ ${attachmentLines.join('\n')}`
                     host.cacheAppendSnapshotMeta(data);
                     break;
                 }
-                case "refreshSessions": {
-                    // 使用 webviewView.webview（最新实例），而不是 activeWebview
-                    await host.refreshSessions(webviewView.webview, data.requestId || '');
-                    break;
-                }
                 case "registerTmpKey": {
                     if (typeof data.sessionId !== 'string' || typeof data.tmpKey !== 'string') break;
                     if (!data.tmpKey.startsWith('tmp:')) break;
@@ -791,326 +790,6 @@ ${attachmentLines.join('\n')}`
                     host.uiDebugChannel.appendLine(
                         `[EXT][SEG_DELETE_SAVE] sessionId=${sessionId} before=${before} after=${after}`
                     );
-                    break;
-                }
-                case "deleteSession": {
-                    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
-                    const opId = typeof data.opId === 'string' ? data.opId : '';
-                    if (!sessionId) {
-                        break;
-                    }
-                    const liveWebview = host._view?.webview || activeWebview;
-                    liveWebview.postMessage({ type: 'sessionDeleteStarted', sessionId, opId });
-
-                    try {
-                        const children = await host.client.getSessionChildren(sessionId);
-                        if (children.length > 0) {
-                            host.uiDebugChannel.appendLine(
-                                `[EXT][SESSION_DELETE_CHILDREN] sessionId=${sessionId} count=${children.length}`
-                            );
-                        }
-
-                        let deletedOnServer = false;
-                        try {
-                            deletedOnServer = await host.client.deleteSession(sessionId);
-                        } catch (error) {
-                            const text = String(error || '');
-                            if (/\b404\b/.test(text) || text.includes('NotFoundError')) {
-                                deletedOnServer = true;
-                            } else {
-                                throw error;
-                            }
-                        }
-
-                        if (!deletedOnServer) {
-                            throw new Error('Delete session returned false');
-                        }
-
-                        await host.cleanupDeletedSessionArtifacts(sessionId);
-                        await host.clearRecentSessionIfMatches(sessionId);
-
-                        host.clearSelectedSessionAfterDelete(sessionId);
-
-                        await host.refreshSessions(liveWebview, `delete-${Date.now()}`);
-                        liveWebview.postMessage({ type: 'sessionDeleted', sessionId, opId });
-                    } catch (error) {
-                        host.uiDebugChannel.appendLine(
-                            `[EXT][SESSION_DELETE_FAIL] sessionId=${sessionId} opId=${opId || 'null'} err=${String(error)}`
-                        );
-                        vscode.window.showErrorMessage(`Failed to delete session: ${error}`);
-                        liveWebview.postMessage({
-                            type: 'sessionDeleteFailed',
-                            sessionId,
-                            opId,
-                            reason: String(error)
-                        });
-                    }
-                    break;
-                }
-                case "selectSession": {
-                    if (!data.sessionId) return;
-                    const targetSessionId = data.sessionId;
-                    const selectionEpoch = host.startSessionSelection(targetSessionId);
-                    try {
-                        host.adoptSessionSelection(targetSessionId);
-                        let sessionDataSent = false;
-                        const isCurrentSelection = () =>
-                            host.isSessionSelectionCurrent(targetSessionId, selectionEpoch);
-                        const postSessionData = (payload: any, phase: 'snapshot' | 'recent' | 'full') => {
-                            if (!isCurrentSelection()) {
-                                host.uiDebugChannel.appendLine(
-                                    `[EXT][SESSION_LOAD_STALE] sessionId=${targetSessionId} phase=${phase}`
-                                );
-                                return false;
-                            }
-                            const liveWebview = host._view?.webview || activeWebview;
-                            liveWebview.postMessage({ ...payload, phase });
-                            return true;
-                        };
-                        const restoreCachedAppendMetadata = (messages: SessionMessage[]): SessionMessage[] => {
-                            const messagesById = new Map<string, SessionMessage>();
-                            const cloned = messages.map((message) => {
-                                const copy = {
-                                    ...message,
-                                    meta: message?.meta && typeof message.meta === 'object'
-                                        ? { ...message.meta }
-                                        : message?.meta
-                                };
-                                if (typeof copy.id === 'string' && copy.id) messagesById.set(copy.id, copy);
-                                return copy;
-                            });
-                            host.applyAppendSnapshotMeta(targetSessionId, messagesById);
-                            return cloned.map((message) => (
-                                typeof message.id === 'string' ? (messagesById.get(message.id) || message) : message
-                            ));
-                        };
-                        await host.persistRecentSessionSelection(targetSessionId);
-                        const segments = await host.hydrateSessionUndoPresentation(
-                            targetSessionId,
-                            activeWebview
-                        );
-
-                        let baseTitle = 'Session';
-                        let baseMessages: SessionMessage[] = [];
-                        let snapPayload: any = null;
-                        let snapshotTimelineIds: string[] = [];
-
-                        const snapshotStart = Date.now();
-                        try {
-                            const snap = await host.readSnapshot(targetSessionId);
-                            if (snap?.obj?.sessionData) {
-                                snapPayload = snap.obj.sessionData;
-                                const snapshotFormatted = await host.injectChangeLists(targetSessionId, {
-                                    title: snapPayload.title || baseTitle,
-                                    messages: Array.isArray(snapPayload.messages) ? snapPayload.messages : []
-                                });
-                                const snapshotMessages = restoreCachedAppendMetadata(snapshotFormatted.messages);
-                                baseTitle = snapshotFormatted.title || baseTitle;
-                                baseMessages = snapshotMessages;
-                                snapshotTimelineIds = host.getSnapshotTimelineIds(snapPayload, snapshotMessages);
-                                const payload = {
-                                    type: 'sessionData',
-                                    sessionId: targetSessionId,
-                                    title: baseTitle,
-                                    messages: snapshotMessages,
-                                    segments,
-                                    meta: {
-                                        ...(snapPayload.meta || {}),
-                                        source: 'snapshot',
-                                        timelineMessageIds: snapshotTimelineIds,
-                                        hydrationCoverage: 'deltaContinuityUnknown' as HydrationCoverage
-                                    }
-                                };
-                                const sent = postSessionData(payload, 'snapshot');
-                                if (sent && snapshotMessages.length > 0) {
-                                    sessionDataSent = true;
-                                }
-                                host.uiDebugChannel.appendLine(
-                                    `[EXT][SNAP_LOAD_HIT] sessionId=${targetSessionId} file=${host.getSnapshotFile(targetSessionId)} bytes=${snap.bytes} costMs=${Date.now() - snapshotStart}`
-                                );
-                            } else {
-                                host.uiDebugChannel.appendLine(
-                                    `[EXT][SNAP_LOAD_MISS] sessionId=${targetSessionId} file=${host.getSnapshotFile(targetSessionId)} costMs=${Date.now() - snapshotStart}`
-                                );
-                            }
-                        } catch (err) {
-                            host.uiDebugChannel.appendLine(
-                                `[EXT][SNAP_LOAD_FAIL] sessionId=${targetSessionId} err=${String(err)} costMs=${Date.now() - snapshotStart}`
-                            );
-                        }
-
-                        let recentFailedReason = '';
-                        const recentStart = Date.now();
-                        try {
-                            const recentExport = await host.client.exportSessionRecent(targetSessionId, host.recentSessionLoadLimit);
-                            if (!isCurrentSelection()) {
-                                break;
-                            }
-
-                            const formattedRaw = host.formatSession(recentExport);
-                            const formatted = await host.injectChangeLists(targetSessionId, formattedRaw);
-                            if (!isCurrentSelection()) {
-                                break;
-                            }
-
-                            if (formatted.title) {
-                                baseTitle = formatted.title;
-                            }
-
-                            const snapshotIds = snapshotTimelineIds;
-                            const snapshotIdSet = new Set<string>(snapshotIds);
-                            const snapshotMaxMessageIndex = host.getMaxMessageIndex(baseMessages);
-                            const continuity = host.classifyRecentAppendCandidates(snapshotIdSet, snapshotMaxMessageIndex, formatted.messages);
-                            if (snapshotIds.length > 0 && !continuity.proven) {
-                                if (!host.snapshotDeltaContinuityRepairEnabled) {
-                                    host.uiDebugChannel.appendLine(`[EXT][SESSION_RECENT_SKIP] sessionId=${targetSessionId} reason=repair-disabled-safe-snapshot`);
-                                    break;
-                                }
-                                postSessionData({
-                                    type: 'hydrationCoverage',
-                                    sessionId: targetSessionId,
-                                    hydrationCoverage: 'repairInProgress' as HydrationCoverage
-                                }, 'recent');
-                                sessionDataSent = false;
-                                throw new Error('snapshot-boundary-unproven');
-                            }
-                            const appendMessages = continuity.suffix;
-                            const mergedMessagesRaw = snapshotIds.length > 0
-                                ? host.buildImmutableSnapshotWithProvenSuffix(baseMessages, appendMessages)
-                                : formatted.messages;
-                            const mergedMessages = restoreCachedAppendMetadata(mergedMessagesRaw);
-                            const newIds = appendMessages
-                                .map((message: SessionMessage) => (typeof message?.id === 'string' ? message.id : ''))
-                                .filter((id: string): id is string => Boolean(id));
-                            const sessionPayload = {
-                                type: 'sessionData',
-                                sessionId: targetSessionId,
-                                title: baseTitle,
-                                messages: mergedMessages,
-                                segments,
-                                meta: {
-                                    timelineMessageIds: [...snapshotIds, ...newIds],
-                                    hydrationCoverage: (snapshotIds.length > 0
-                                        ? 'authoritativeHistoryComplete'
-                                        : 'deltaContinuityUnknown') as HydrationCoverage
-                                }
-                            };
-                            const sent = postSessionData(sessionPayload, 'recent');
-                            if (sent && mergedMessages.length > 0) {
-                                sessionDataSent = true;
-                                baseMessages = mergedMessages;
-                            }
-
-                            host.uiDebugChannel.appendLine(
-                                `[EXT][SESSION_RECENT_OK] sessionId=${targetSessionId} limit=${host.recentSessionLoadLimit} merged=${mergedMessages.length} costMs=${Date.now() - recentStart}`
-                            );
-
-                            if (sent) {
-                                host.uiDebugChannel.appendLine(`[EXT][SNAP_SAVE_SKIP] sessionId=${targetSessionId} reason=selectSession:recent disabled=incremental-only`);
-                            }
-                        } catch (err) {
-                            recentFailedReason = host.extractLastLine(String(err));
-                            host.uiDebugChannel.appendLine(
-                                `[EXT][SESSION_RECENT_FAIL] sessionId=${targetSessionId} limit=${host.recentSessionLoadLimit} err=${recentFailedReason || 'null'} costMs=${Date.now() - recentStart}`
-                            );
-                        }
-
-                        if (sessionDataSent || !isCurrentSelection()) {
-                            break;
-                        }
-
-                        let normalized = { ok: false, data: null as any, stderrLastLine: '' };
-
-                        try {
-                            const exportResult = await host.client.exportSession(targetSessionId);
-                            if (exportResult && typeof exportResult.code === 'number') {
-                                normalized.ok = exportResult.code === 0;
-                                normalized.stderrLastLine = host.extractLastLine(exportResult.stderr);
-                                normalized.data = exportResult.data ?? exportResult;
-                            } else {
-                                normalized.ok = true;
-                                normalized.data = exportResult;
-                            }
-                        } catch (err) {
-                            normalized.ok = false;
-                            normalized.stderrLastLine = host.extractLastLine(String(err));
-                        }
-
-                        if (!normalized.ok) {
-                            host.uiDebugChannel.appendLine(`[EXT][EXPORT_FAIL] sessionId=${targetSessionId} stderrLastLine=${normalized.stderrLastLine || recentFailedReason || 'null'}`);
-                            const liveWebview = host._view?.webview || activeWebview;
-                            liveWebview.postMessage({
-                                type: 'sessionLoadFailed',
-                                payload: {
-                                    sessionId: targetSessionId,
-                                    reason: 'export_failed_no_snapshot',
-                                    stderrLastLine: normalized.stderrLastLine || recentFailedReason || ''
-                                }
-                            });
-                            return;
-                        }
-
-                        const exportData = normalized.data;
-                        const formattedRaw = host.formatSession(exportData);
-                        const snapshotIds = snapshotTimelineIds;
-                        const repairRequiredMessageIds = await host.collectSnapshotRepairRequiredMessageIds(targetSessionId);
-                        const fullDelta = host.buildFullExportSnapshotDelta(
-                            baseMessages, snapshotIds, formattedRaw.messages, repairRequiredMessageIds
-                        );
-                        if (fullDelta.repairedSnapshot) {
-                            await host.persistStructurallyRepairedSnapshot(
-                                targetSessionId, formattedRaw.title, fullDelta.messages, fullDelta.timelineMessageIds, segments
-                            );
-                        }
-                        const formatted = await host.injectChangeLists(targetSessionId, { title: formattedRaw.title, messages: fullDelta.messages });
-                        const fullMessages = restoreCachedAppendMetadata(formatted.messages);
-
-                        // host.uiDebugChannel.appendLine(
-                        //     `[EXT][SEG_HYDRATE_LOAD] sessionId=${data.sessionId} found=${segments.length} ` +
-                        //     `keys=[${(segMap ? Array.from(segMap.keys()) : []).join(', ')}]`
-                        // );
-                        // 
-                        // host.uiDebugChannel.appendLine(
-                        //     `[EXT][SEG_HYDRATE_SEND] sessionId=${data.sessionId} count=${segments.length} reason=selectSession`
-                        // );
-                        // 
-                        // const timelineMsgCount = formatted.messages.filter((m) => typeof m.id === 'string' && m.id.startsWith('msg_')).length;
-                        // host.uiDebugChannel.appendLine(
-                        //     `sessionData.send | sessionId | ${data.sessionId} | messagesCount | ${formatted.messages.length} | ` +
-                        //     `timelineMsgCount | ${timelineMsgCount} | segmentsCount | ${segments.length}`
-                        // );
-
-                        const sessionPayload = {
-                            type: 'sessionData',
-                            sessionId: targetSessionId,
-                            title: formatted.title,
-                            messages: fullMessages,
-                            segments,
-                                meta: {
-                                    timelineMessageIds: fullDelta.timelineMessageIds,
-                                    hydrationCoverage: (fullDelta.proven
-                                        ? 'authoritativeHistoryComplete'
-                                        : 'deltaContinuityUnknown') as HydrationCoverage
-                                }
-                            };
-                        const sent = postSessionData(sessionPayload, 'full');
-                        if (sent && fullMessages.length > 0) {
-                            sessionDataSent = true;
-                        }
-                        if (sent) {
-                            host.uiDebugChannel.appendLine(`[EXT][SNAP_SAVE_SKIP] sessionId=${targetSessionId} reason=selectSession:full disabled=incremental-only`);
-                        }
-                        } catch (error) {
-                            vscode.window.showErrorMessage(`Failed to load session: ${error}`);
-                            host.postAddResponse(activeWebview, `Error: ${error}`, { sessionId: targetSessionId });
-                        }
-                        break;
-                }
-
-                case "newSession": {
-                    const sessionId = await host.prepareNewSession();
-                    activeWebview.postMessage({ type: 'newSession', sessionId });
-                    await host.initializeNewSessionBaseline(activeWebview);
                     break;
                 }
                 case "undoToMessage": {
@@ -1837,10 +1516,6 @@ ${attachmentLines.join('\n')}`
                             : null,
                         sessionId
                     });
-                    break;
-                }
-                case "snapshotTimelineIds": {
-                    await host.handleSnapshotTimelineIds(data.payload);
                     break;
                 }
                 case "ui-debug": {

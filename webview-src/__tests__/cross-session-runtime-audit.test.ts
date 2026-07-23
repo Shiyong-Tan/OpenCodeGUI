@@ -254,6 +254,7 @@ describe('cross-session runtime repository audit', () => {
 
   test('synthetic assistant responses never borrow the selected session', () => {
     const controller = read('src', 'webview', 'SidebarWebviewController.ts');
+    const sessionController = read('src', 'webview', 'controllers', 'SessionCommandController.ts');
     const initializer = read('src', 'history', 'SidebarSessionInitializer.ts');
     const postResponseStart = provider.indexOf('private postAddResponse(');
     const postResponse = provider.slice(
@@ -270,6 +271,10 @@ describe('cross-session runtime repository audit', () => {
         expect(call).toContain('sessionId');
       }
     }
+    expect(sessionController).toMatch(
+      /this\.host\.postAddResponse\(activeWebview,[\s\S]*?\{\s*sessionId: targetSessionId,\s*\}/,
+    );
+    expect(sessionController).not.toContain('currentSessionId');
   });
 
   test('owned Webview commands do not fall back to Extension selection', () => {

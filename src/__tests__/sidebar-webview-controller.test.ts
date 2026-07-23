@@ -15,27 +15,34 @@ import { resolveSidebarWebviewView } from '../webview/SidebarWebviewController';
 const controllerSource = fs.readFileSync(
   path.join(process.cwd(), 'src', 'webview', 'SidebarWebviewController.ts'), 'utf8',
 );
+const sessionControllerSource = fs.readFileSync(
+  path.join(process.cwd(), 'src', 'webview', 'controllers', 'SessionCommandController.ts'), 'utf8',
+);
 
 describe('SidebarWebviewController', () => {
   test('SidebarProvider retains only the VS Code compatibility delegation', () => {
     const source = fs.readFileSync(path.join(process.cwd(), 'src', 'SidebarProvider.ts'), 'utf8');
-    expect(source).toMatch(/public resolveWebviewView\([\s\S]*?return resolveSidebarWebviewView\([\s\S]*?this\.utilityCommandHandler[\s\S]*?\);\s*}/);
+    expect(source).toMatch(/public resolveWebviewView\([\s\S]*?return resolveSidebarWebviewView\([\s\S]*?this\.utilityCommandHandler[\s\S]*?this\.sessionCommandHandler[\s\S]*?\);\s*}/);
   });
 
   test('keeps the major protocol owners in one command dispatcher', () => {
-    for (const command of ['selectSession', 'sendMessage', 'undoToMessage', 'restoreSegment', 'snapshotTimelineIds']) {
+    for (const command of ['sendMessage', 'undoToMessage', 'restoreSegment']) {
       expect(controllerSource).toContain(`case "${command}"`);
+    }
+    for (const command of ['selectSession', 'snapshotTimelineIds']) {
+      expect(sessionControllerSource).toContain(`case '${command}'`);
     }
     expect(controllerSource).toContain('const utilityHandling = utilityCommandHandler(data, activeWebview, webviewView.webview)');
     expect(controllerSource).toContain('utilityHandling !== false && await utilityHandling');
-    expect(controllerSource).toContain('host.handleSnapshotTimelineIds(data.payload)');
+    expect(controllerSource).toContain('const sessionHandling = sessionCommandHandler(data, activeWebview, webviewView.webview)');
+    expect(sessionControllerSource).toContain('this.host.handleSnapshotTimelineIds(data.payload)');
   });
 
   test('reapplies cached append metadata to every selected-session hydration payload', () => {
-    expect(controllerSource).toContain('const restoreCachedAppendMetadata = (messages: SessionMessage[])');
-    expect(controllerSource).toContain('const snapshotMessages = restoreCachedAppendMetadata(snapshotFormatted.messages)');
-    expect(controllerSource).toContain('const mergedMessages = restoreCachedAppendMetadata(mergedMessagesRaw)');
-    expect(controllerSource).toContain('const fullMessages = restoreCachedAppendMetadata(formatted.messages)');
+    expect(sessionControllerSource).toContain('const restoreCachedAppendMetadata = (messages: SessionMessage[])');
+    expect(sessionControllerSource).toContain('const snapshotMessages = restoreCachedAppendMetadata(snapshotFormatted.messages)');
+    expect(sessionControllerSource).toContain('const mergedMessages = restoreCachedAppendMetadata(mergedMessagesRaw)');
+    expect(sessionControllerSource).toContain('const fullMessages = restoreCachedAppendMetadata(formatted.messages)');
   });
 
   test('registers message, visibility, and disposal lifecycles once', () => {
@@ -56,7 +63,14 @@ describe('SidebarWebviewController', () => {
       _getHtmlForWebview: () => '<html></html>',
       startWebviewLivenessProbes: jest.fn(), stopWebviewLivenessProbes: jest.fn(), triggerWebviewLivenessProbe: jest.fn(),
     };
-    resolveSidebarWebviewView(host, view, {} as any, {} as any, async () => false);
+    resolveSidebarWebviewView(
+      host,
+      view,
+      {} as any,
+      {} as any,
+      async () => false,
+      async () => false,
+    );
     expect(host._view).toBe(view);
     expect(webview.options).toEqual({ enableScripts: true, localResourceRoots: [{}] });
     expect(webview.html).toBe('<html></html>');

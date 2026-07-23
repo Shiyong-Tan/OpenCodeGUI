@@ -19,6 +19,10 @@ import {
     createUtilityCommandHandler,
     type UtilityCommandHandler,
 } from './webview/controllers/UtilityCommandController';
+import {
+    createSessionCommandHandler,
+    type SessionCommandHandler,
+} from './webview/controllers/SessionCommandController';
 import type { SmartSearchMessage } from './search/SmartSearchService';
 import { injectChangeListRecords, type ChangeListRecord, type SessionMessage } from './changes/ChangeListInjection';
 import { ChangeListStore } from './changes/ChangeListStore';
@@ -635,6 +639,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private readonly smartSearchSessions: SmartSearchSessionRegistry;
     private readonly smartSearch: SmartSearchService;
     private readonly utilityCommandHandler: UtilityCommandHandler;
+    private readonly sessionCommandHandler: SessionCommandHandler;
     private uiTimelineBySession = new Map<string, string[]>();
     private lastSnapshotPayloadBySession = new Map<string, any>();
     private snapshotStore?: SnapshotStore;
@@ -4111,6 +4116,71 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             respondPermission: (input) => this.client.respondPermission(input),
             getWorkspaceRootPath: () => this.getWorkspaceRootPath(),
         });
+        this.sessionCommandHandler = createSessionCommandHandler({
+            getLiveWebview: (fallback) => this._view?.webview || fallback,
+            log: (message) => this.uiDebugChannel.appendLine(message),
+            refreshSessions: (webview, requestId) => this.refreshSessions(webview, requestId),
+            getSessionChildren: (sessionId) => this.client.getSessionChildren(sessionId),
+            deleteSession: (sessionId) => this.client.deleteSession(sessionId),
+            cleanupDeletedSessionArtifacts: (sessionId) => this.cleanupDeletedSessionArtifacts(sessionId),
+            clearRecentSessionIfMatches: (sessionId) => this.clearRecentSessionIfMatches(sessionId),
+            clearSelectedSessionAfterDelete: (sessionId) => this.clearSelectedSessionAfterDelete(sessionId),
+            startSessionSelection: (sessionId) => this.startSessionSelection(sessionId),
+            adoptSessionSelection: (sessionId) => this.adoptSessionSelection(sessionId),
+            isSessionSelectionCurrent: (sessionId, epoch) =>
+                this.isSessionSelectionCurrent(sessionId, epoch),
+            applyAppendSnapshotMeta: (sessionId, messagesById) =>
+                this.applyAppendSnapshotMeta(sessionId, messagesById),
+            persistRecentSessionSelection: (sessionId) => this.persistRecentSessionSelection(sessionId),
+            hydrateSessionUndoPresentation: (sessionId, webview) =>
+                this.hydrateSessionUndoPresentation(sessionId, webview),
+            readSnapshot: (sessionId) => this.readSnapshot(sessionId),
+            injectChangeLists: (sessionId, formatted) => this.injectChangeLists(sessionId, formatted),
+            getSnapshotTimelineIds: (sessionData, messages) =>
+                this.getSnapshotTimelineIds(sessionData, messages),
+            getSnapshotFile: (sessionId) => this.getSnapshotFile(sessionId),
+            exportSessionRecent: (sessionId, limit) =>
+                this.client.exportSessionRecent(sessionId, limit),
+            getRecentSessionLoadLimit: () => this.recentSessionLoadLimit,
+            formatSession: (exportData) => this.formatSession(exportData),
+            getMaxMessageIndex: (messages) => this.getMaxMessageIndex(messages),
+            classifyRecentAppendCandidates: (snapshotIds, maxIndex, messages) =>
+                this.classifyRecentAppendCandidates(snapshotIds, maxIndex, messages),
+            isSnapshotDeltaContinuityRepairEnabled: () =>
+                this.snapshotDeltaContinuityRepairEnabled,
+            buildImmutableSnapshotWithProvenSuffix: (baseMessages, suffix) =>
+                this.buildImmutableSnapshotWithProvenSuffix(baseMessages, suffix),
+            extractLastLine: (text) => this.extractLastLine(text),
+            exportSession: (sessionId) => this.client.exportSession(sessionId),
+            collectSnapshotRepairRequiredMessageIds: (sessionId) =>
+                this.collectSnapshotRepairRequiredMessageIds(sessionId),
+            buildFullExportSnapshotDelta: (baseMessages, snapshotIds, fullMessages, repairIds) =>
+                this.buildFullExportSnapshotDelta(
+                    baseMessages,
+                    snapshotIds,
+                    fullMessages,
+                    repairIds
+                ),
+            persistStructurallyRepairedSnapshot: (
+                sessionId,
+                title,
+                messages,
+                timelineMessageIds,
+                segments
+            ) => this.persistStructurallyRepairedSnapshot(
+                sessionId,
+                title,
+                messages,
+                timelineMessageIds,
+                segments
+            ),
+            postAddResponse: (webview, value, meta) =>
+                this.postAddResponse(webview, value, meta),
+            prepareNewSession: () => this.prepareNewSession(),
+            initializeNewSessionBaseline: (webview) =>
+                this.initializeNewSessionBaseline(webview),
+            handleSnapshotTimelineIds: (payload) => this.handleSnapshotTimelineIds(payload),
+        });
         this.userOwnedSessionsLoaded = this.loadUserOwnedSessions();
         this.client.setServerStatusHandler((status, reason) => {
             this.sendServerStatus(status, reason);
@@ -4237,7 +4307,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             webviewView,
             context,
             _token,
-            this.utilityCommandHandler
+            this.utilityCommandHandler,
+            this.sessionCommandHandler
         );
     }
 

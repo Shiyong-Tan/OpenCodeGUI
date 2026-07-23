@@ -158,7 +158,14 @@ function createHarness(overrides: Record<string, unknown> = {}) {
         respondPermission: (input) => host.client.respondPermission(input),
         getWorkspaceRootPath: () => host.getWorkspaceRootPath(),
     });
-    resolveSidebarWebviewView(host, view, {} as any, {} as any, utilityCommandHandler);
+    resolveSidebarWebviewView(
+        host,
+        view,
+        {} as any,
+        {} as any,
+        utilityCommandHandler,
+        async () => false,
+    );
     return {
         host,
         view,

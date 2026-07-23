@@ -12,7 +12,7 @@ import { buildFullExportSnapshotDelta } from '../../src/history/SnapshotDeltaPla
 const source = fs.readFileSync(path.join(process.cwd(), 'media', 'main.js'), 'utf8');
 const providerSource = fs.readFileSync(path.join(process.cwd(), 'src', 'SidebarProvider.ts'), 'utf8');
 const initializerSource = fs.readFileSync(path.join(process.cwd(), 'src', 'history', 'SidebarSessionInitializer.ts'), 'utf8');
-const controllerSource = fs.readFileSync(path.join(process.cwd(), 'src', 'webview', 'SidebarWebviewController.ts'), 'utf8');
+const controllerSource = fs.readFileSync(path.join(process.cwd(), 'src', 'webview', 'controllers', 'SessionCommandController.ts'), 'utf8');
 
 function extractFunction(marker: string): string {
   const start = source.indexOf(marker);
@@ -209,8 +209,11 @@ describe('Wave 4A hydration coverage', () => {
     expect(softRescue).toMatch(/snapshotTimelineIds\.length > 0 && !continuity\.proven[\s\S]*phase: 'snapshot'[\s\S]*throw new Error\('snapshot-boundary-unproven'\)/);
     expect(softRescue).toMatch(/fullDelta\.proven[\s\S]*\? 'authoritativeHistoryComplete'[\s\S]*: 'deltaContinuityUnknown'/);
 
-    const selectSession = extractControllerRange('case "selectSession"', 'case "newSession"');
-    expect(selectSession).toContain('host.adoptSessionSelection(targetSessionId);');
+    const selectSession = extractControllerRange(
+      'private async selectSession(',
+      'private async newSession(',
+    );
+    expect(selectSession).toContain('this.host.adoptSessionSelection(targetSessionId);');
     const adoptSelection = extractProviderRange(
       'private adoptSessionSelection(',
       'private isSessionSelectionCurrent(',
