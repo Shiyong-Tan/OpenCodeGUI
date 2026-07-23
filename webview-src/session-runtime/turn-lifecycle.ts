@@ -147,6 +147,28 @@ export function createTurnLifecycleController(options: { now?(): number } = {}) 
       return next;
     },
 
+    cancel(session: TurnLifecycleSession): WebviewTurnLifecycle {
+      const current = infer(session);
+      const next: WebviewTurnLifecycle = {
+        ...current,
+        phase: 'cancelled',
+        backendInFlight: false,
+      };
+      project(session, next, now());
+      return next;
+    },
+
+    fail(session: TurnLifecycleSession): WebviewTurnLifecycle {
+      const current = infer(session);
+      const next: WebviewTurnLifecycle = {
+        ...current,
+        phase: 'failed',
+        backendInFlight: false,
+      };
+      project(session, next, now());
+      return next;
+    },
+
     canAcceptAssistantActivity(
       session: TurnLifecycleSession,
       assistantId?: string | null,

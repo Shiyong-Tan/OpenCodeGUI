@@ -1938,7 +1938,7 @@ function clearBackgroundSubagentIndicator(session) {
     session.pendingAssistantUpgrade = null;
     session.lastAssistantUpgradeFallback = null;
     session.awaitingFinalMapBind = false;
-    session.backendTurnInFlight = false;
+    turnLifecycleController.cancel(session);
     session.currentTurnAssistantKey = null;
     session.currentTurnAssistantMsgId = null;
     session.streamMode = null;
@@ -1946,7 +1946,6 @@ function clearBackgroundSubagentIndicator(session) {
         session.assistantUpgradeSeen.clear();
     }
     session.activeTurnOpId = null;
-    session.turnFullyFinalized = true;
     window.__oc?.renderFromState?.();
     updateSendGate();
 }
@@ -3666,6 +3665,10 @@ function setSendEnabled(enabled) {
 const selectAssistantUpgradeCandidate = window.__ocContinuation?.selectAssistantUpgradeCandidate;
 if (typeof selectAssistantUpgradeCandidate !== 'function') {
     throw new Error('Assistant binding selector is unavailable');
+}
+const turnLifecycleController = window.__ocContinuation?.createTurnLifecycleController?.();
+if (!turnLifecycleController) {
+    throw new Error('Turn lifecycle controller is unavailable');
 }
 
 function attemptAssistantUpgrade(sessionId, payload, source) {
@@ -12448,13 +12451,11 @@ function applyPromptToSession(sessionId, payload) {
     session.currentTurnAssistantMsgId = null;
     session.currentTurnAssistantKey = null;
     session.earlyFinalAssistantId = null;
-    session.finalAssistantLock = null;
     session.pendingAssistantUpgrade = null;
     session.lastAssistantUpgradeFallback = null;
     session.awaitingFinalMapBind = false;
     session.streamMode = null;
-    session.backendTurnInFlight = false;
-    session.turnFullyFinalized = false;
+    turnLifecycleController.start(session);
     if (session.seenDiffKeys instanceof Set) {
         session.seenDiffKeys.clear();
     }
@@ -12863,12 +12864,16 @@ function handleChatDone(sessionId, message) {
         }
     }
     if (resolvedFinal && typeof resolvedFinal === 'string') {
+        const finalAcceptance = turnLifecycleController.acceptMainFinal(session, resolvedFinal);
+        if (!finalAcceptance.accepted) {
+            vscode.postMessage({
+                type: 'ui-debug',
+                payload: ['[WV][FINAL_LOCK_REJECTED]', `sessionId=${sessionId}`, `assistantMsgId=${resolvedFinal}`, `reason=${finalAcceptance.reason}`]
+            });
+            return;
+        }
         session.streamMode = null;
         session.earlyFinalAssistantId = resolvedFinal;
-        session.finalAssistantLock = {
-            assistantMsgId: resolvedFinal,
-            ts: Date.now()
-        };
         stabilizeTimelineAfterFinal(session, resolvedFinal, 'chatDone');
         const finalizedAssistant = session.messagesById.get(resolvedFinal) || null;
         if (finalizedAssistant?.meta?.liveTurnResume === true) {
@@ -13684,8 +13689,8 @@ function appendMessageImages(parentEl, message) {
         session.currentTurnAssistantKey = assistantKey;
         session.currentTurnAssistantMsgId = assistantMessageId || assistantKey;
         session.canceledActiveTurn = false;
-        session.backendTurnInFlight = true;
-        session.turnFullyFinalized = false;
+        turnLifecycleController.start(session);
+        turnLifecycleController.setBackendInFlight(session, true);
         if (tmpAssistantKey && assistantMessageId && tmpAssistantKey !== assistantMessageId) {
             session.pendingAssistantUpgrade = {
                 tmpKey: tmpAssistantKey,
@@ -14334,6 +14339,7 @@ function appendMessageImages(parentEl, message) {
                     session.pendingAssistantUpgrade = null;
                     session.lastAssistantUpgradeFallback = null;
                     session.awaitingFinalMapBind = false;
+                    session.turnLifecycle = undefined;
                     session.backendTurnInFlight = false;
                     session.turnFullyFinalized = true;
                     session.earlyFinalAssistantId = null;
@@ -14840,8 +14846,11 @@ function appendMessageImages(parentEl, message) {
                         session.timeline.splice(userIndex + 1, 0, successor.id);
                     }
                     session.appendFollowupIdentity = { ...followup };
-                    session.backendTurnInFlight = true;
-                    session.turnFullyFinalized = false;
+                    const followupLifecycle = turnLifecycleController.setBackendInFlight(session, true);
+                    if (followupLifecycle.phase !== 'active') {
+                        vscode.postMessage({ type: 'ui-debug', payload: ['append-followup', 'drop-terminal-turn', followupLifecycle.phase] });
+                        break;
+                    }
                     session.snapshotFinalizeReady = false;
                     session.currentTurnAssistantKey = successor.id;
                     session.currentTurnAssistantMsgId = successor.id;
@@ -14850,9 +14859,13 @@ function appendMessageImages(parentEl, message) {
                     renderIfActive(sessionId, 'append-followup-start', { scroll: true });
                     break;
                 }
-                session.backendTurnInFlight = Boolean(message?.inFlight);
+                const turnLifecycle = turnLifecycleController.setBackendInFlight(session, Boolean(message?.inFlight));
+                if (message?.inFlight && turnLifecycle.phase !== 'active') {
+                    vscode.postMessage({ type: 'ui-debug', payload: ['turnInFlight', 'drop-terminal-turn', turnLifecycle.phase, sessionId] });
+                    updateSendGate();
+                    break;
+                }
                 if (message?.inFlight) {
-                    session.turnFullyFinalized = false;
                     session.snapshotFinalizeReady = false;
                     const ownerMsgId = typeof message?.ownerMsgId === 'string' ? message.ownerMsgId : null;
                     if (ownerMsgId && session.messagesById.has(ownerMsgId)) {
@@ -15057,7 +15070,7 @@ function appendMessageImages(parentEl, message) {
                     });
                     break;
                 }
-                if (session?.turnFullyFinalized === true && session?.backendTurnInFlight !== true) {
+                if (session && !turnLifecycleController.canAcceptAssistantActivity(session, message.assistantMsgId || message.messageId)) {
                     vscode.postMessage({
                         type: 'ui-debug',
                         payload: ['assistantMessageMeta', 'drop-turnSealed', `sessionId=${sessionId}`]
@@ -15161,7 +15174,7 @@ function appendMessageImages(parentEl, message) {
                     });
                     break;
                 }
-                if (session?.turnFullyFinalized === true && session?.backendTurnInFlight !== true) {
+                if (session && !turnLifecycleController.canAcceptAssistantActivity(session, message.assistantMsgId)) {
                     vscode.postMessage({
                         type: 'ui-debug',
                         payload: ['chatChunk', 'drop-turnSealed', `sessionId=${sessionId}`]
@@ -15183,8 +15196,7 @@ function appendMessageImages(parentEl, message) {
                 if (!session.meta) session.meta = {};
                 session.meta.turnFinalizePhase = message.phase || '';
                 if (message.phase === 'finalize_done') {
-                    session.turnFullyFinalized = true;
-                    session.backendTurnInFlight = false;
+                    turnLifecycleController.completeEffects(session);
                     session.snapshotFinalizeReady = true;
                     const pendingEpoch = typeof session.snapshotPendingEpoch === 'number' ? session.snapshotPendingEpoch : 0;
                     const emittedEpoch = typeof session.snapshotEmittedEpoch === 'number' ? session.snapshotEmittedEpoch : 0;
@@ -15528,7 +15540,7 @@ function appendMessageImages(parentEl, message) {
                     });
                     break;
                 }
-                if (session?.turnFullyFinalized === true && session?.backendTurnInFlight !== true) {
+                if (session && !turnLifecycleController.canAcceptAssistantActivity(session, message?.message?.id)) {
                     vscode.postMessage({
                         type: 'ui-debug',
                         payload: ['messageAppend', 'drop-turnSealed', `sessionId=${sessionId}`]

@@ -72,4 +72,16 @@ describe('webview single-session turn lifecycle', () => {
     expect(session.turnFullyFinalized).toBe(true);
     expect(session.backendTurnInFlight).toBe(false);
   });
+
+  test('seals cancelled and failed turns', () => {
+    const cancelled: any = {};
+    controller.start(cancelled);
+    expect(controller.cancel(cancelled).phase).toBe('cancelled');
+    expect(controller.canAcceptAssistantActivity(cancelled)).toBe(false);
+
+    const failed: any = {};
+    controller.start(failed);
+    expect(controller.fail(failed).phase).toBe('failed');
+    expect(controller.canAcceptAssistantActivity(failed)).toBe(false);
+  });
 });
