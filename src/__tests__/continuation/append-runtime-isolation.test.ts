@@ -941,6 +941,73 @@ describe('append runtime isolation', () => {
         )).toBe(true);
     });
 
+    it('keeps the predecessor visible until an append successor has presentable content', () => {
+        const { context } = loadAppendPresentationHarness();
+        const session = {
+            messagesById: new Map<string, any>([
+                ['msg_root', {
+                    id: 'msg_root',
+                    role: 'user',
+                    text: 'root prompt',
+                    meta: {
+                        appendedPrompts: [{
+                            clientMessageId: 'append-client',
+                            appendUserMsgId: 'msg_append',
+                            text: 'follow up',
+                            status: 'sending',
+                        }],
+                    },
+                }],
+                ['msg_predecessor', {
+                    id: 'msg_predecessor',
+                    role: 'assistant',
+                    text: 'running task',
+                    parentId: 'msg_root',
+                    meta: {},
+                }],
+                ['msg_append', { id: 'msg_append', role: 'user', text: 'follow up', meta: {} }],
+                ['msg_successor', {
+                    id: 'msg_successor',
+                    role: 'assistant',
+                    text: '',
+                    parentId: 'msg_append',
+                    meta: { isThinking: true, statusText: '' },
+                }],
+            ]),
+            timeline: ['msg_root', 'msg_predecessor', 'msg_append', 'msg_successor'],
+            clientKeyToServerId: new Map<string, string>(),
+            serverIdToClientKey: new Map<string, string>(),
+            backendTurnInFlight: true,
+            turnFullyFinalized: false,
+            canceledActiveTurn: false,
+            currentTurnAssistantKey: 'msg_successor',
+            currentTurnAssistantMsgId: 'msg_successor',
+            thinkingId: 'msg_successor',
+            appendFollowupIdentity: {
+                predecessorAssistantMsgId: 'msg_predecessor',
+                appendUserMsgId: 'msg_append',
+                assistantMsgId: 'msg_successor',
+            },
+        };
+        const appendIndex = context.buildAppendChildPresentationIndex(session);
+
+        expect(context.isAppendChainTopLevelAssistantHidden(
+            session, session.messagesById.get('msg_predecessor'), 'msg_predecessor', appendIndex,
+        )).toBe(false);
+        expect(context.isAppendChainTopLevelAssistantHidden(
+            session, session.messagesById.get('msg_successor'), 'msg_successor', appendIndex,
+        )).toBe(true);
+
+        session.messagesById.get('msg_successor').text = 'OK';
+
+        expect(context.isAppendChainTopLevelAssistantHidden(
+            session, session.messagesById.get('msg_predecessor'), 'msg_predecessor', appendIndex,
+        )).toBe(true);
+        expect(context.isAppendChainTopLevelAssistantHidden(
+            session, session.messagesById.get('msg_successor'), 'msg_successor', appendIndex,
+        )).toBe(false);
+    });
+
     it('normalizes all append roots on chatDone and re-syncs append snapshot metadata', () => {
         const { context, sessions, syncAppendSnapshotMetadata } = loadAppendChatDoneHarness();
         const session = {

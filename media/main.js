@@ -2662,6 +2662,31 @@ function isAppendChildTopLevelUser(session, msg, id, appendChildPresentationInde
 
 function isAppendChainTopLevelAssistantHidden(session, msg, id, appendChildPresentationIndex) {
     if (!session || !msg || msg.role !== 'assistant') return false;
+    const followup = session.appendFollowupIdentity;
+    const successor = followup?.assistantMsgId ? session.messagesById.get(followup.assistantMsgId) : null;
+    const successorPresentationPending = Boolean(
+        successor
+        && !(typeof successor.text === 'string' && successor.text.trim())
+        && !(typeof successor.meta?.statusText === 'string' && successor.meta.statusText.trim())
+    );
+    if (successorPresentationPending) {
+        const messageKeys = new Set();
+        if (typeof id === 'string' && id.length) addPresentationKeyVariants(session, messageKeys, id);
+        if (typeof msg.id === 'string' && msg.id.length) addPresentationKeyVariants(session, messageKeys, msg.id);
+        const matchesFollowupKey = (key) => {
+            if (typeof key !== 'string' || !key.length) return false;
+            if (messageKeys.has(key)) return true;
+            for (const candidate of getPresentationMessageKeyVariants(session, key)) {
+                if (messageKeys.has(candidate)) return true;
+            }
+            return false;
+        };
+        // Keep the predecessor presentation in place until the successor has
+        // content. This makes the handoff visually atomic instead of flashing
+        // an empty canonical bubble between the running and final states.
+        if (matchesFollowupKey(followup.assistantMsgId)) return true;
+        if (matchesFollowupKey(followup.predecessorAssistantMsgId)) return false;
+    }
     if (session.backendTurnInFlight === true && session.turnFullyFinalized !== true && session.canceledActiveTurn !== true) {
         const messageKeys = new Set();
         if (typeof id === 'string' && id.length) {
@@ -12205,6 +12230,15 @@ function applyPromptToSession(sessionId, payload) {
 
     session.currentTurnAssistantMsgId = null;
     session.currentTurnAssistantKey = null;
+    // A completed turn can receive late metadata that restores its canonical
+    // assistant as the transient thinking alias. A new prompt always owns a
+    // fresh temporary assistant; never reuse that stale alias across turns.
+    const staleThinkingAssistant = session.thinkingId ? session.messagesById.get(session.thinkingId) : null;
+    if (staleThinkingAssistant?.meta) {
+        staleThinkingAssistant.meta.isThinking = false;
+        staleThinkingAssistant.meta.statusText = null;
+    }
+    session.thinkingId = null;
     session.earlyFinalAssistantId = null;
     session.pendingAssistantUpgrade = null;
     session.awaitingFinalMapBind = false;
