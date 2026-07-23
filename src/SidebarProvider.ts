@@ -15,6 +15,10 @@ import { SmartSearchService } from './search/SmartSearchService';
 import { handleSidebarChatEvent } from './events/SidebarChatEventHandler';
 import { initializeSidebarSession } from './history/SidebarSessionInitializer';
 import { resolveSidebarWebviewView } from './webview/SidebarWebviewController';
+import {
+    createUtilityCommandHandler,
+    type UtilityCommandHandler,
+} from './webview/controllers/UtilityCommandController';
 import type { SmartSearchMessage } from './search/SmartSearchService';
 import { injectChangeListRecords, type ChangeListRecord, type SessionMessage } from './changes/ChangeListInjection';
 import { ChangeListStore } from './changes/ChangeListStore';
@@ -630,6 +634,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private readonly attachmentStorage: AttachmentStorageService;
     private readonly smartSearchSessions: SmartSearchSessionRegistry;
     private readonly smartSearch: SmartSearchService;
+    private readonly utilityCommandHandler: UtilityCommandHandler;
     private uiTimelineBySession = new Map<string, string[]>();
     private lastSnapshotPayloadBySession = new Map<string, any>();
     private snapshotStore?: SnapshotStore;
@@ -3978,6 +3983,34 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             getSelectedModel: () => this.selectedModel,
             log: (message) => this.uiDebugChannel.appendLine(message)
         });
+        this.utilityCommandHandler = createUtilityCommandHandler({
+            getLiveWebview: (fallback) => this._view?.webview || fallback,
+            log: (message) => this.uiDebugChannel.appendLine(message),
+            applyModelSelection: (value, webview) => this.applyUtilityModelSelection(value, webview),
+            applyModeSelection: (value) => this.applyUtilityModeSelection(value),
+            applyVariantSelection: (value) => this.applyUtilityVariantSelection(value),
+            pickCompactionModelId: () => this.client.pickFreeModel(
+                this.lastKnownModels,
+                this.selectedModel
+            )?.fullId,
+            parseModelRef: (fullId) => this.parseModelRef(fullId) || undefined,
+            summarizeSession: (sessionId, options) => this.client.summarizeSession(sessionId, options),
+            fetchSessionUsage: (sessionId) => this.client.fetchSessionUsage(sessionId),
+            postAddResponse: (webview, value, meta) => this.postAddResponse(webview, value, meta),
+            refreshModels: (webview) => this.refreshModels(webview),
+            runSmartSearch: (sessionId, query, messages) => this.smartSearch.run(sessionId, query, messages),
+            listWorkspaceFiles: (query) => this.listWorkspaceFiles(query),
+            saveClipboardImage: (dataUrl, mime) => this.attachmentStorage.saveClipboardImage(dataUrl, mime),
+            getImageMimeFromName: (name) => this.attachmentStorage.getImageMimeFromName(name),
+            isImageFileName: (name) => this.attachmentStorage.isImageFileName(name),
+            isGitUndoEnabled: () => this.gitUndoEnabled,
+            openGitDiffForFile: (sessionId, filePath, webview, commitHead, commitBase) =>
+                this.openGitDiffForFile(sessionId, filePath, webview, commitHead, commitBase),
+            sendToolResult: (input) => this.client.sendToolResult(input),
+            resolveLocalQuestion: (callId, result) => this.resolveUtilityLocalQuestion(callId, result),
+            respondPermission: (input) => this.client.respondPermission(input),
+            getWorkspaceRootPath: () => this.getWorkspaceRootPath(),
+        });
         this.userOwnedSessionsLoaded = this.loadUserOwnedSessions();
         this.client.setServerStatusHandler((status, reason) => {
             this.sendServerStatus(status, reason);
@@ -4099,7 +4132,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         context: vscode.WebviewViewResolveContext,
         _token: vscode.CancellationToken
     ): void {
-        return resolveSidebarWebviewView(this, webviewView, context, _token);
+        return resolveSidebarWebviewView(
+            this,
+            webviewView,
+            context,
+            _token,
+            this.utilityCommandHandler
+        );
     }
 
     private async sendInit(webview: vscode.Webview, options: SendInitOptions = {}): Promise<void> {

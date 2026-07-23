@@ -35,9 +35,14 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { resolveSidebarWebviewView } from '../webview/SidebarWebviewController';
+import { createUtilityCommandHandler } from '../webview/controllers/UtilityCommandController';
 
 const controllerSource = fs.readFileSync(
     path.join(process.cwd(), 'src', 'webview', 'SidebarWebviewController.ts'),
+    'utf8',
+);
+const utilityControllerSource = fs.readFileSync(
+    path.join(process.cwd(), 'src', 'webview', 'controllers', 'UtilityCommandController.ts'),
     'utf8',
 );
 
@@ -116,6 +121,8 @@ function createHarness(overrides: Record<string, unknown> = {}) {
             isImageFileName: jest.fn(() => true),
         },
         client: {
+            summarizeSession: jest.fn(async () => undefined),
+            fetchSessionUsage: jest.fn(async () => undefined),
             sendToolResult: jest.fn(async () => undefined),
             respondPermission: jest.fn(async () => undefined),
         },
@@ -126,11 +133,37 @@ function createHarness(overrides: Record<string, unknown> = {}) {
         getWorkspaceRootPath: jest.fn(() => path.resolve('workspace')),
         ...overrides,
     };
-    resolveSidebarWebviewView(host, view, {} as any, {} as any);
+    const utilityCommandHandler = createUtilityCommandHandler({
+        getLiveWebview: (fallback) => host._view?.webview || fallback,
+        log: (message) => host.uiDebugChannel.appendLine(message),
+        applyModelSelection: (value, targetWebview) => host.applyUtilityModelSelection(value, targetWebview),
+        applyModeSelection: (value) => host.applyUtilityModeSelection(value),
+        applyVariantSelection: (value) => host.applyUtilityVariantSelection(value),
+        pickCompactionModelId: () => undefined,
+        parseModelRef: () => undefined,
+        summarizeSession: (sessionId, options) => host.client.summarizeSession(sessionId, options),
+        fetchSessionUsage: (sessionId) => host.client.fetchSessionUsage(sessionId),
+        postAddResponse: (targetWebview, value, meta) => host.postAddResponse(targetWebview, value, meta),
+        refreshModels: (targetWebview) => host.refreshModels(targetWebview),
+        runSmartSearch: (sessionId, query, messages) => host.smartSearch.run(sessionId, query, messages),
+        listWorkspaceFiles: (query) => host.listWorkspaceFiles(query),
+        saveClipboardImage: (dataUrl, mime) => host.attachmentStorage.saveClipboardImage(dataUrl, mime),
+        getImageMimeFromName: (name) => host.attachmentStorage.getImageMimeFromName(name),
+        isImageFileName: (name) => host.attachmentStorage.isImageFileName(name),
+        isGitUndoEnabled: () => host.gitUndoEnabled,
+        openGitDiffForFile: (sessionId, filePath, targetWebview, commitHead, commitBase) =>
+            host.openGitDiffForFile(sessionId, filePath, targetWebview, commitHead, commitBase),
+        sendToolResult: (input) => host.client.sendToolResult(input),
+        resolveLocalQuestion: (callId, result) => host.resolveUtilityLocalQuestion(callId, result),
+        respondPermission: (input) => host.client.respondPermission(input),
+        getWorkspaceRootPath: () => host.getWorkspaceRootPath(),
+    });
+    resolveSidebarWebviewView(host, view, {} as any, {} as any, utilityCommandHandler);
     return {
         host,
         view,
         posts,
+        utilityCommandHandler,
         get messageRegistrations() { return messageRegistrations; },
         send: async (data: any) => {
             if (!messageHandler) throw new Error('message handler unavailable');
@@ -140,32 +173,54 @@ function createHarness(overrides: Record<string, unknown> = {}) {
 }
 
 describe('utility command family characterization', () => {
-    test('routes utility-owned mutable state through bounded provider domain methods', () => {
+    test('routes utility-owned mutable state through a provider-composed narrow controller host', () => {
         const providerSource = fs.readFileSync(
             path.join(process.cwd(), 'src', 'SidebarProvider.ts'),
             'utf8',
         );
-        expect(controllerSource).toContain('host.applyUtilityModelSelection(data.value, activeWebview)');
-        expect(controllerSource).toContain('host.applyUtilityModeSelection(data.value)');
-        expect(controllerSource).toContain('host.applyUtilityVariantSelection(data.value)');
-        expect(controllerSource).toContain('host.resolveUtilityLocalQuestion(callId, data?.result)');
-        expect(controllerSource).not.toMatch(/host\.selected(Model|Mode|Variant)\s*=/);
-        expect(controllerSource).not.toContain('host.pendingLocalQuestionRequests.');
+        expect(providerSource).toContain('this.utilityCommandHandler = createUtilityCommandHandler({');
+        expect(providerSource).not.toContain('createUtilityCommandHandler(this)');
+        expect(controllerSource).toContain('const utilityHandling = utilityCommandHandler(data, activeWebview, webviewView.webview)');
+        expect(controllerSource).toContain('utilityHandling !== false && await utilityHandling');
+        expect(utilityControllerSource).toContain('this.host.applyModelSelection(data.value, activeWebview)');
+        expect(utilityControllerSource).toContain('this.host.applyModeSelection(data.value)');
+        expect(utilityControllerSource).toContain('this.host.applyVariantSelection(data.value)');
+        expect(utilityControllerSource).toContain('this.host.resolveLocalQuestion(callId, data?.result)');
+        for (const forbidden of [
+            'sendInFlightBySession',
+            'pendingAssistantTmpKeyBySession',
+            'undoSegmentsBySession',
+            'webviewLivenessCurrent',
+            'pendingConflictStore',
+        ]) expect(utilityControllerSource).not.toContain(forbidden);
         for (const method of [
             'applyUtilityModelSelection', 'applyUtilityModeSelection',
             'applyUtilityVariantSelection', 'resolveUtilityLocalQuestion',
         ]) expect(providerSource).toMatch(new RegExp(`private (?:async )?${method}\\b`));
     });
 
-    test('keeps every utility command in the single top-level dispatcher', () => {
+    test('extracts every utility command while retaining one top-level message registration', () => {
         const commands = [
             'setModel', 'compactSession', 'setMode', 'setVariant', 'refreshModels',
             'smartSessionSearch', 'listWorkspaceFiles', 'ping', 'reloadWindow',
             'clipboardImage', 'selectAttachments', 'openGitDiff', 'toolResult',
             'localQuestionResult', 'permissionResult', 'openFileAtLocation',
         ];
-        for (const command of commands) expect(controllerSource).toContain(`case "${command}"`);
+        for (const command of commands) {
+            expect(utilityControllerSource).toContain(`case '${command}'`);
+            expect(controllerSource).not.toContain(`case "${command}"`);
+        }
         expect(createHarness().messageRegistrations).toBe(1);
+    });
+
+    test('declines non-utility commands synchronously without adding an async boundary', () => {
+        const harness = createHarness();
+        const result = harness.utilityCommandHandler(
+            { type: 'sendMessage' },
+            harness.view.webview,
+            harness.view.webview,
+        );
+        expect(result).toBe(false);
     });
 
     test('persists model, normalized mode, and variant with their existing keys and order', async () => {

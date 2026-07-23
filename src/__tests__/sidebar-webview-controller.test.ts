@@ -19,13 +19,15 @@ const controllerSource = fs.readFileSync(
 describe('SidebarWebviewController', () => {
   test('SidebarProvider retains only the VS Code compatibility delegation', () => {
     const source = fs.readFileSync(path.join(process.cwd(), 'src', 'SidebarProvider.ts'), 'utf8');
-    expect(source).toMatch(/public resolveWebviewView\([\s\S]*?return resolveSidebarWebviewView\(this, webviewView, context, _token\);\s*}/);
+    expect(source).toMatch(/public resolveWebviewView\([\s\S]*?return resolveSidebarWebviewView\([\s\S]*?this\.utilityCommandHandler[\s\S]*?\);\s*}/);
   });
 
   test('keeps the major protocol owners in one command dispatcher', () => {
-    for (const command of ['selectSession', 'sendMessage', 'undoToMessage', 'restoreSegment', 'smartSessionSearch', 'snapshotTimelineIds']) {
+    for (const command of ['selectSession', 'sendMessage', 'undoToMessage', 'restoreSegment', 'snapshotTimelineIds']) {
       expect(controllerSource).toContain(`case "${command}"`);
     }
+    expect(controllerSource).toContain('const utilityHandling = utilityCommandHandler(data, activeWebview, webviewView.webview)');
+    expect(controllerSource).toContain('utilityHandling !== false && await utilityHandling');
     expect(controllerSource).toContain('host.handleSnapshotTimelineIds(data.payload)');
   });
 
@@ -54,7 +56,7 @@ describe('SidebarWebviewController', () => {
       _getHtmlForWebview: () => '<html></html>',
       startWebviewLivenessProbes: jest.fn(), stopWebviewLivenessProbes: jest.fn(), triggerWebviewLivenessProbe: jest.fn(),
     };
-    resolveSidebarWebviewView(host, view, {} as any, {} as any);
+    resolveSidebarWebviewView(host, view, {} as any, {} as any, async () => false);
     expect(host._view).toBe(view);
     expect(webview.options).toEqual({ enableScripts: true, localResourceRoots: [{}] });
     expect(webview.html).toBe('<html></html>');

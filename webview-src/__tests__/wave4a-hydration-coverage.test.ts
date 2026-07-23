@@ -209,7 +209,7 @@ describe('Wave 4A hydration coverage', () => {
     expect(softRescue).toMatch(/snapshotTimelineIds\.length > 0 && !continuity\.proven[\s\S]*phase: 'snapshot'[\s\S]*throw new Error\('snapshot-boundary-unproven'\)/);
     expect(softRescue).toMatch(/fullDelta\.proven[\s\S]*\? 'authoritativeHistoryComplete'[\s\S]*: 'deltaContinuityUnknown'/);
 
-    const selectSession = extractControllerRange('case "selectSession"', 'case "clipboardImage"');
+    const selectSession = extractControllerRange('case "selectSession"', 'case "newSession"');
     expect(selectSession).toContain('host.resetUiState(targetSessionId);');
     expect(selectSession).toMatch(/snapshotIds\.length > 0 && !continuity\.proven[\s\S]*repair-disabled-safe-snapshot[\s\S]*throw new Error\('snapshot-boundary-unproven'\)/);
     expect(selectSession).toMatch(/snapshotIds\.length > 0[\s\S]*\? 'authoritativeHistoryComplete'[\s\S]*: 'deltaContinuityUnknown'/);

@@ -552,7 +552,7 @@ describe('W5A paths and guards', () => {
             ['private async postLiveTurnHistoryForSendInitGuardDefer', 'private logSendInitGuardCompensation'],
             ['private async repostSessionDataForSendInitGuardCompensation', 'private async runPendingSendInitGuardCompensation'],
             ['private async repostActiveSessionDataForWebviewSoftRescue', 'private async executeWebviewAutoRescueSoftRescue'],
-            ['case "selectSession"', 'case "clipboardImage"'],
+            ['case "selectSession"', 'case "newSession"'],
             ['const recentSelectionEpoch = host.sessionSelectionEpoch', '[EXT][SNAP_SAVE_SKIP] sessionId=${recentSessionId} reason=sendInit:recent'],
         ];
 

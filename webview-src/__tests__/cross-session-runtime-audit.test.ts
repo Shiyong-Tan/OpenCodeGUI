@@ -275,16 +275,11 @@ describe('cross-session runtime repository audit', () => {
   test('owned Webview commands do not fall back to Extension selection', () => {
     const client = read('src', 'OpenCodeClient.ts');
     const controller = read('src', 'webview', 'SidebarWebviewController.ts');
+    const utilityController = read('src', 'webview', 'controllers', 'UtilityCommandController.ts');
     for (const command of [
-      'compactSession',
       'undoSegmentUpsert',
       'undoSegmentRemove',
       'undoSegmentDelete',
-      'openGitDiff',
-      'toolResult',
-      'permissionResult',
-      'clipboardImage',
-      'selectAttachments',
     ]) {
       const start = controller.indexOf(`case "${command}":`);
       expect(start).toBeGreaterThanOrEqual(0);
@@ -292,6 +287,20 @@ describe('cross-session runtime repository audit', () => {
       const block = controller.slice(start, end > start ? end : undefined);
       expect(block).not.toContain(': host.currentSessionId');
       expect(block).not.toContain('|| host.currentSessionId');
+    }
+    for (const command of [
+      'compactSession',
+      'openGitDiff',
+      'toolResult',
+      'permissionResult',
+      'clipboardImage',
+      'selectAttachments',
+    ]) {
+      const start = utilityController.indexOf(`case '${command}':`);
+      expect(start).toBeGreaterThanOrEqual(0);
+      const end = utilityController.indexOf("\n            case '", start + 10);
+      const block = utilityController.slice(start, end > start ? end : undefined);
+      expect(block).not.toContain('currentSessionId');
     }
     expect(client).toContain('options: { model?: string; variant?: string; sessionId: string;');
     expect(client).toContain("const sessionId = options.sessionId.trim();");

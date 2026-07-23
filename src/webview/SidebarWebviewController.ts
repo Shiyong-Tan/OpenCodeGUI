@@ -1,12 +1,11 @@
 import * as vscode from 'vscode';
-import * as fs from 'fs';
 import * as pathModule from 'path';
 import { OpenCodeClient } from '../OpenCodeClient';
 import type { AttachmentPayload, SavedAttachment } from '../attachments/AttachmentStorageService';
 import type { SessionMessage } from '../changes/ChangeListInjection';
-import type { SmartSearchMessage } from '../search/SmartSearchService';
 import { serializeUndoSegments, type SegmentState } from '../undo/UndoSegmentPersistence';
 import { captureCancelTurnOwner } from './CancelTurnOwner';
+import type { UtilityCommandHandler } from './controllers/UtilityCommandController';
 
 type HydrationCoverage = 'authoritativeHistoryComplete' | 'deltaContinuityUnknown' | 'repairInProgress' | 'repairError';
 
@@ -15,7 +14,8 @@ export function resolveSidebarWebviewView(
     host: any,
     webviewView: vscode.WebviewView,
     context: vscode.WebviewViewResolveContext,
-    _token: vscode.CancellationToken
+    _token: vscode.CancellationToken,
+    utilityCommandHandler: UtilityCommandHandler
 ): void {
         host._view = webviewView;
         const panelId = `panel-${++host.webviewLivenessPanelSeq}`;
@@ -43,6 +43,11 @@ export function resolveSidebarWebviewView(
             // Diagnostic logging for undoToMessage
             if (data.type === 'undoToMessage') {
                 host.uiDebugChannel.appendLine(`[EXT][UNDO_ENTRY] type=${data.type} messageId=${data.messageId || 'NULL'} sessionId=${data.sessionId || 'NULL'} operationId=${data.operationId || 'NULL'} hasMessageId=${!!data.messageId}`);
+            }
+
+            const utilityHandling = utilityCommandHandler(data, activeWebview, webviewView.webview);
+            if (utilityHandling !== false && await utilityHandling) {
+                return;
             }
 
             switch (data.type) {
@@ -608,135 +613,9 @@ ${attachmentLines.join('\n')}`
                     host.cacheAppendSnapshotMeta(data);
                     break;
                 }
-                case "setModel": {
-                    await host.applyUtilityModelSelection(data.value, activeWebview);
-                    break;
-                }
-                case "compactSession": {
-                    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
-                    if (!sessionId) {
-                        host.uiDebugChannel.appendLine('[EXT][ADD_RESPONSE_DROP] reason=missing-session-owner source=compactSession');
-                        break;
-                    }
-                    const model = host.client.pickFreeModel(host.lastKnownModels, host.selectedModel);
-                    if (!model) {
-                        host.postAddResponse(activeWebview, 'Compaction skipped: no free model available.', { sessionId });
-                        break;
-                    }
-                    const modelRef = host.parseModelRef(model.fullId);
-                    if (!modelRef) {
-                        host.postAddResponse(activeWebview, `Compaction skipped: invalid model id ${model.fullId}.`, { sessionId });
-                        break;
-                    }
-                    activeWebview.postMessage({ type: 'compactionState', sessionId, running: true });
-                    try {
-                        await host.client.summarizeSession(sessionId, {
-                            providerID: modelRef.providerID,
-                            modelID: modelRef.modelID,
-                            auto: false
-                        });
-                        host.postAddResponse(activeWebview, `Compaction started (${model.fullId}).`, { sessionId });
-                    } catch (error) {
-                        host.postAddResponse(activeWebview, `Compaction failed: ${error}`, { sessionId });
-                    } finally {
-                        const liveWebview = host._view?.webview || activeWebview;
-                        liveWebview.postMessage({ type: 'compactionState', sessionId, running: false });
-                        const refreshedUsage = await host.client.fetchSessionUsage(sessionId);
-                        if (refreshedUsage) {
-                            liveWebview.postMessage({
-                                type: 'sessionUsage',
-                                sessionId,
-                                used: refreshedUsage.used,
-                                size: refreshedUsage.size,
-                                amount: refreshedUsage.amount
-                            });
-                        }
-                    }
-                    break;
-                }
-                case "setMode": {
-                    await host.applyUtilityModeSelection(data.value);
-                    break;
-                }
-                case "setVariant": {
-                    await host.applyUtilityVariantSelection(data.value);
-                    break;
-                }
-                case "refreshModels": {
-                    await host.refreshModels(activeWebview);
-                    break;
-                }
-                case "smartSessionSearch": {
-                    const requestId = typeof data.requestId === 'string' ? data.requestId : '';
-                    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
-                    const query = typeof data.query === 'string' ? data.query : '';
-                    const messages: SmartSearchMessage[] = Array.isArray(data.messages)
-                        ? data.messages
-                            .filter((item: any) => item && typeof item.id === 'string' && typeof item.text === 'string')
-                            .map((item: any) => ({
-                                id: item.id,
-                                role: typeof item.role === 'string' ? item.role : 'unknown',
-                                text: item.text
-                            }))
-                        : [];
-                    const liveWebview = host._view?.webview || activeWebview;
-                    if (!sessionId) {
-                        host.uiDebugChannel.appendLine(`EXT: smartSearch.drop | requestId=${requestId || 'null'} | reason=missing-session-owner`);
-                        break;
-                    }
-                    try {
-                        const result = await host.smartSearch.run(
-                            sessionId,
-                            query,
-                            messages
-                        );
-                        host.uiDebugChannel.appendLine(
-                            `EXT: smartSearch.done | requestId=${requestId || 'null'} | model=${result.modelId || 'default'} | results=${result.messageIds.length}`
-                        );
-                        liveWebview.postMessage({
-                            type: 'smartSessionSearchResult',
-                            requestId,
-                            sessionId,
-                            messageIds: result.messageIds,
-                            modelId: result.modelId
-                        });
-                    } catch (error) {
-                        host.uiDebugChannel.appendLine(`EXT: smartSearch.fail | requestId=${requestId || 'null'} | err=${String(error)}`);
-                        liveWebview.postMessage({
-                            type: 'smartSessionSearchError',
-                            requestId,
-                            sessionId,
-                            error: String(error)
-                        });
-                    }
-                    break;
-                }
                 case "refreshSessions": {
                     // 使用 webviewView.webview（最新实例），而不是 activeWebview
                     await host.refreshSessions(webviewView.webview, data.requestId || '');
-                    break;
-                }
-                case "listWorkspaceFiles": {
-                    const requestId = typeof data.requestId === 'string' ? data.requestId : '';
-                    const query = typeof data.query === 'string' ? data.query : '';
-                    const files = await host.listWorkspaceFiles(query);
-                    const liveWebview = host._view?.webview || activeWebview;
-                    liveWebview.postMessage({
-                        type: 'workspaceFileResults',
-                        requestId,
-                        query,
-                        files
-                    });
-                    break;
-                }
-                case "ping": {
-                    const liveWebview = host._view?.webview || webviewView.webview;
-                    liveWebview.postMessage({ type: 'pong', ts: data.ts });
-                    break;
-                }
-                case "reloadWindow": {
-                    host.uiDebugChannel.appendLine('EXT: reloadWindow.requested');
-                    await vscode.commands.executeCommand('workbench.action.reloadWindow');
                     break;
                 }
                 case "registerTmpKey": {
@@ -1267,82 +1146,6 @@ ${attachmentLines.join('\n')}`
                         break;
                 }
 
-                case "clipboardImage": {
-                    if (!data.dataUrl || !data.mime) return;
-                    const attachmentSessionId = typeof data.sessionId === 'string' && data.sessionId
-                        ? data.sessionId
-                        : '';
-                    if (!attachmentSessionId) {
-                        host.uiDebugChannel.appendLine('[EXT][ATTACHMENT_DROP] type=clipboardImage reason=missing-session-owner');
-                        break;
-                    }
-                    try {
-                        const saved = await host.attachmentStorage.saveClipboardImage(data.dataUrl, data.mime);
-                        activeWebview.postMessage({
-                            type: 'attachmentAdded',
-                            id: saved.id,
-                            name: saved.name,
-                            filePath: saved.filePath,
-                            dataUrl: data.dataUrl,
-                            mime: data.mime,
-                            sessionId: attachmentSessionId
-                        });
-                    } catch (error) {
-                        vscode.window.showErrorMessage(`Failed to save image: ${error}`);
-                        activeWebview.postMessage({
-                            type: 'attachmentError',
-                            value: `Failed to save image: ${error}`,
-                            sessionId: attachmentSessionId
-                        });
-                    }
-                    break;
-                }
-                case "selectAttachments": {
-                    const attachmentSessionId = typeof data.sessionId === 'string' && data.sessionId
-                        ? data.sessionId
-                        : '';
-                    if (!attachmentSessionId) {
-                        host.uiDebugChannel.appendLine('[EXT][ATTACHMENT_DROP] type=selectAttachments reason=missing-session-owner');
-                        break;
-                    }
-                    try {
-                        const picks = await vscode.window.showOpenDialog({
-                            canSelectMany: true,
-                            canSelectFiles: true,
-                            canSelectFolders: false,
-                            openLabel: 'Add attachments'
-                        });
-                        if (!picks || !picks.length) break;
-                        for (const uri of picks) {
-                            const filePath = uri.fsPath;
-                            const name = pathModule.basename(filePath);
-                            const mime = host.attachmentStorage.getImageMimeFromName(name) || 'application/octet-stream';
-                            let dataUrl: string | undefined;
-                            if (host.attachmentStorage.isImageFileName(name)) {
-                                try {
-                                    const buffer = await fs.promises.readFile(filePath);
-                                    dataUrl = `data:${mime};base64,${buffer.toString('base64')}`;
-                                } catch (error) {
-                                    host.uiDebugChannel.appendLine(`[EXT][ATTACH_READ_FAIL] file=${name} err=${String(error)}`);
-                                }
-                            }
-                            const id = `file-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-                            activeWebview.postMessage({
-                                type: 'attachmentAdded',
-                                id,
-                                name,
-                                filePath,
-                                dataUrl,
-                                mime,
-                                sessionId: attachmentSessionId
-                            });
-                        }
-                    } catch (error) {
-                        vscode.window.showErrorMessage(`Failed to add attachments: ${error}`);
-                        activeWebview.postMessage({ type: 'attachmentError', value: `Failed to add attachments: ${error}`, sessionId: attachmentSessionId });
-                    }
-                    break;
-                }
                 case "newSession": {
                     if (host.currentSessionId) {
                         await host.clearPersistedSegment(host.currentSessionId);
@@ -1863,151 +1666,6 @@ ${attachmentLines.join('\n')}`
                         vscode.window.showErrorMessage(`Restore failed: ${error}`);
                         host.uiDebugChannel.appendLine(`[EXT][RESTORE_TX] type=error sessionId=${ownerSessionId} opId=${operationId} noticeKey=${noticeKey || 'null'} anchorMsgId=${anchorMsgId}`);
                         activeWebview.postMessage({ type: 'addResponse', value: `Restore failed: ${error}`, sessionId: ownerSessionId, operationId, meta: { operationId, sessionId: ownerSessionId } });
-                    }
-                    break;
-                }
-                case "openGitDiff": {
-                    if (!data.filePath || typeof data.filePath !== 'string') break;
-                    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
-                    if (!sessionId) {
-                        host.uiDebugChannel.appendLine('[EXT][ADD_RESPONSE_DROP] reason=missing-session-owner source=openGitDiff');
-                        break;
-                    }
-                    if (!host.gitUndoEnabled) {
-                        host.postAddResponse(activeWebview, 'Git diff unavailable: Git not installed or version too old.', { sessionId });
-                        break;
-                    }
-                    try {
-                        const commitHead = typeof data.commitHead === 'string' ? data.commitHead : undefined;
-                        const commitBase = typeof data.commitBase === 'string' ? data.commitBase : undefined;
-                        await host.openGitDiffForFile(sessionId, data.filePath, activeWebview, commitHead, commitBase);
-                    } catch (error) {
-                        vscode.window.showErrorMessage(`Open diff failed: ${error}`);
-                        host.postAddResponse(activeWebview, `Open diff failed: ${error}`, { sessionId });
-                    }
-                    break;
-                }
-                case "toolResult": {
-                    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
-                    const callId = typeof data.callId === 'string' ? data.callId : '';
-                    if (!sessionId || !callId) {
-                        host.uiDebugChannel.appendLine(
-                            `EXT: toolResult.skip | sessionId=${sessionId || 'null'} | callId=${callId || 'null'}`
-                        );
-                        break;
-                    }
-                    try {
-                        await host.client.sendToolResult({
-                            sessionId,
-                            callId,
-                            requestId: typeof data.requestId === 'string' ? data.requestId : undefined,
-                            result: data.result
-                        });
-                        host.uiDebugChannel.appendLine(`EXT: toolResult.sent | sessionId=${sessionId} | callId=${callId}`);
-                    } catch (error) {
-                        host.uiDebugChannel.appendLine(
-                            `EXT: toolResult.fail | sessionId=${sessionId} | callId=${callId} | err=${String(error)}`
-                        );
-                    }
-                    break;
-                }
-                case "localQuestionResult": {
-                    const callId = typeof data.callId === 'string' ? data.callId : '';
-                    const resolution = host.resolveUtilityLocalQuestion(callId, data?.result);
-                    if (!resolution.resolved) {
-                        host.uiDebugChannel.appendLine(`EXT: localQuestionResult.skip | callId=${callId || 'null'} | reason=missing-pending`);
-                        break;
-                    }
-                    host.uiDebugChannel.appendLine(`EXT: localQuestionResult.ok | sessionId=${resolution.sessionId} | callId=${callId}`);
-                    break;
-                }
-                case "permissionResult": {
-                    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
-                    const permissionId = typeof data.permissionId === 'string' ? data.permissionId : '';
-                    const requestId = typeof data.requestId === 'string' ? data.requestId : '';
-                    const response = data.response === 'always' || data.response === 'reject' ? data.response : 'once';
-                    if (!sessionId) {
-                        host.uiDebugChannel.appendLine('EXT: permissionResult.skip | reason=missing-session');
-                        break;
-                    }
-                    const liveWebview = host._view?.webview || activeWebview;
-                    try {
-                        await host.client.respondPermission({
-                            sessionId,
-                            permissionId: permissionId || undefined,
-                            requestId: requestId || undefined,
-                            response
-                        });
-                        host.uiDebugChannel.appendLine(
-                            `EXT: permissionResult.sent | sessionId=${sessionId} permissionId=${permissionId || requestId || 'null'} response=${response}`
-                        );
-                        liveWebview.postMessage({
-                            type: 'permissionResultAck',
-                            sessionId,
-                            permissionId: permissionId || requestId || '',
-                            response
-                        });
-                    } catch (error) {
-                        host.uiDebugChannel.appendLine(
-                            `EXT: permissionResult.fail | sessionId=${sessionId} permissionId=${permissionId || requestId || 'null'} err=${String(error)}`
-                        );
-                        liveWebview.postMessage({
-                            type: 'permissionResultFailed',
-                            sessionId,
-                            permissionId: permissionId || requestId || '',
-                            response,
-                            reason: String(error)
-                        });
-                    }
-                    break;
-                }
-                case "openFileAtLocation": {
-                    const rawPath = typeof data.path === 'string' ? data.path.trim() : '';
-                    const lineNum = Number.isFinite(Number(data.line)) ? Number(data.line) : 1;
-                    const colNum = Number.isFinite(Number(data.col)) ? Number(data.col) : 1;
-                    const line = Math.max(1, Math.floor(lineNum));
-                    const col = Math.max(1, Math.floor(colNum));
-                    if (!rawPath) {
-                        host.uiDebugChannel.appendLine('EXT: openFileAtLocation | error=empty-path');
-                        break;
-                    }
-                    const workspaceRoot = host.getWorkspaceRootPath();
-                    const absPath = pathModule.isAbsolute(rawPath)
-                        ? pathModule.resolve(rawPath)
-                        : pathModule.resolve(pathModule.join(workspaceRoot, rawPath));
-                    const normalizedRoot = pathModule.resolve(workspaceRoot);
-                    const rel = pathModule.relative(normalizedRoot, absPath);
-                    const outsideWorkspace = rel.startsWith('..') || pathModule.isAbsolute(rel);
-                    if (outsideWorkspace) {
-                        host.uiDebugChannel.appendLine(
-                            `EXT: openFileAtLocation | path=${rawPath} | line=${line} | col=${col} | resolvedAbs=${absPath} | error=outside-workspace`
-                        );
-                        break;
-                    }
-                    try {
-                        // Open .md files in preview mode
-                        if (absPath.endsWith('.md')) {
-                            await vscode.commands.executeCommand('markdown.showPreview', vscode.Uri.file(absPath));
-                            host.uiDebugChannel.appendLine(
-                                `EXT: openFileAtLocation | path=${rawPath} | resolvedAbs=${absPath} | opened in markdown preview`
-                            );
-                        } else {
-                            const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(absPath));
-                            const editor = await vscode.window.showTextDocument(doc, { preview: true });
-                            const safeLine = Math.min(Math.max(line - 1, 0), Math.max(doc.lineCount - 1, 0));
-                            const lineText = doc.lineAt(safeLine).text;
-                            const safeCol = Math.min(Math.max(col - 1, 0), lineText.length);
-                            const pos = new vscode.Position(safeLine, safeCol);
-                            editor.selection = new vscode.Selection(pos, pos);
-                            editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
-                            host.uiDebugChannel.appendLine(
-                                `EXT: openFileAtLocation | path=${rawPath} | line=${line} | col=${col} | resolvedAbs=${absPath} | ok`
-                            );
-                        }
-                    } catch (error) {
-                        host.uiDebugChannel.appendLine(
-                            `EXT: openFileAtLocation | path=${rawPath} | line=${line} | col=${col} | resolvedAbs=${absPath} | error=${String(error)}`
-                        );
                     }
                     break;
                 }
