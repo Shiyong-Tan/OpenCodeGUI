@@ -5896,11 +5896,11 @@ export class OpenCodeClient {
 
     public async chat(
         message: string,
-        options: { model?: string; variant?: string; sessionId?: string; continueSession?: boolean; files?: ChatFilePart[]; mode?: string },
+        options: { model?: string; variant?: string; sessionId: string; continueSession?: boolean; files?: ChatFilePart[]; mode?: string },
         onEvent?: (event: ChatEvent) => void
     ): Promise<void> {
         await this.ensureServer();
-        const sessionId = options.sessionId || this.currentSessionId;
+        const sessionId = options.sessionId.trim();
         if (!sessionId) {
             throw new Error('Missing session ID for chat request.');
         }
@@ -6165,13 +6165,13 @@ export class OpenCodeClient {
     }
 
     public async sendToolResult(payload: {
-        sessionId?: string;
+        sessionId: string;
         callId: string;
         requestId?: string;
         result: unknown;
     }): Promise<void> {
         await this.ensureServer();
-        const sessionId = payload.sessionId || this.currentSessionId;
+        const sessionId = payload.sessionId.trim();
         if (!sessionId) {
             throw new Error('Missing session ID for tool result.');
         }
@@ -6196,13 +6196,13 @@ export class OpenCodeClient {
     }
 
     public async respondPermission(payload: {
-        sessionId?: string;
+        sessionId: string;
         permissionId?: string;
         requestId?: string;
         response: PermissionReply;
     }): Promise<void> {
         await this.ensureServer();
-        const sessionId = payload.sessionId || this.currentSessionId;
+        const sessionId = payload.sessionId.trim();
         if (!sessionId) {
             throw new Error('Missing session ID for permission response.');
         }

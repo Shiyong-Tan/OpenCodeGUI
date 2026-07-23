@@ -226,6 +226,7 @@ describe('cross-session runtime repository audit', () => {
   });
 
   test('owned Webview commands do not fall back to Extension selection', () => {
+    const client = read('src', 'OpenCodeClient.ts');
     const controller = read('src', 'webview', 'SidebarWebviewController.ts');
     for (const command of [
       'compactSession',
@@ -245,6 +246,10 @@ describe('cross-session runtime repository audit', () => {
       expect(block).not.toContain(': host.currentSessionId');
       expect(block).not.toContain('|| host.currentSessionId');
     }
+    expect(client).toContain('options: { model?: string; variant?: string; sessionId: string;');
+    expect(client).toContain("const sessionId = options.sessionId.trim();");
+    expect(client).toContain("const sessionId = payload.sessionId.trim();");
+    expect(client).not.toContain('const sessionId = payload.sessionId || this.currentSessionId;');
   });
 
   test('owned liveness and overlay responses do not borrow visible session', () => {
