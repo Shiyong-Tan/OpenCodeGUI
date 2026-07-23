@@ -6,6 +6,7 @@ import type { AttachmentPayload, SavedAttachment } from '../attachments/Attachme
 import type { SessionMessage } from '../changes/ChangeListInjection';
 import type { SmartSearchMessage } from '../search/SmartSearchService';
 import { serializeUndoSegments, type SegmentState } from '../undo/UndoSegmentPersistence';
+import { captureCancelTurnOwner } from './CancelTurnOwner';
 
 type HydrationCoverage = 'authoritativeHistoryComplete' | 'deltaContinuityUnknown' | 'repairInProgress' | 'repairError';
 
@@ -1602,31 +1603,32 @@ ${attachmentLines.join('\n')}`
                     break;
                 }
                 case "cancel": {
-                    const cancelSessionId = typeof data.sessionId === 'string' ? data.sessionId : host.currentSessionId;
+                    const cancelOwner = captureCancelTurnOwner(data, host);
+                    const cancelSessionId = cancelOwner.sessionId;
+                    const pendingLocalKey = cancelOwner.localKey;
+                    const pendingTmpKey = cancelOwner.temporaryAssistantKey;
+                    const pendingAssistant = cancelOwner.assistantMessageId;
                     const shouldRollback = cancelSessionId
                         ? await host.promptCancelRollbackDecision(activeWebview, cancelSessionId)
                         : true;
-                    const restoreLocalKey =
-                        host.pendingClientMessageId
-                        || (cancelSessionId
-                            ? host.pendingLocalKeyBySession.get(cancelSessionId)
-                            : undefined);
+                    const restoreLocalKey = pendingLocalKey;
                     if (cancelSessionId && shouldRollback) {
                         await host.client.revertPendingTurnChangesToCurrentBase(cancelSessionId);
                         const canceledAt = Date.now();
                         const { userMsgId, assistantMsgId } = host.client.getPendingTurnMessageIds(cancelSessionId);
                         await host.upsertCanceledTurn(cancelSessionId, {
-                            opId: typeof data.opId === 'string' ? data.opId : undefined,
-                            localKey: host.pendingClientMessageId,
+                            opId: cancelOwner.operationId,
+                            localKey: pendingLocalKey,
                             userMsgId,
                             assistantMsgId,
                             canceledAt
                         });
                     }
-                    host.client.cancel();
-                    const cancelOpId = typeof data.opId === 'string' ? data.opId : undefined;
                     if (cancelSessionId) {
-                        const pendingLocalKey = host.pendingLocalKeyBySession.get(cancelSessionId);
+                        await host.client.abortSession(cancelSessionId);
+                    }
+                    const cancelOpId = cancelOwner.operationId;
+                    if (cancelSessionId) {
                         if (pendingLocalKey) {
                             host.rawUserTextByLocalKey.delete(pendingLocalKey);
                         }
@@ -1636,29 +1638,29 @@ ${attachmentLines.join('\n')}`
                         host.pendingAssistantTmpKeyBySession.delete(cancelSessionId);
                         activeWebview.postMessage({ type: 'turnInFlight', sessionId: cancelSessionId, inFlight: false });
                     }
-                    if (host.pendingClientMessageId) {
-                        await host.handleAbortedMessage(host.pendingClientMessageId, activeWebview);
-                        const mappedUser = host.clientMessageIdMap.get(host.pendingClientMessageId);
-                        if (mappedUser && mappedUser !== host.pendingClientMessageId) {
+                    if (pendingLocalKey) {
+                        await host.handleAbortedMessage(pendingLocalKey, activeWebview);
+                        const mappedUser = host.clientMessageIdMap.get(pendingLocalKey);
+                        if (mappedUser && mappedUser !== pendingLocalKey) {
                             await host.handleAbortedMessage(mappedUser, activeWebview);
                         }
-                        host.pendingClientMessageId = undefined;
+                        if (host.pendingClientMessageId === pendingLocalKey) {
+                            host.pendingClientMessageId = undefined;
+                        }
                     }
                     if (cancelSessionId) {
-                        const tmpKey = host.pendingAssistantTmpKeyBySession.get(cancelSessionId);
-                        const mappedAssistant = tmpKey ? host.clientMessageIdMap.get(tmpKey) : undefined;
-                        const pendingAssistant = host.pendingAssistantMessageIdBySession.get(cancelSessionId);
-                        if (tmpKey) {
-                            await host.handleAbortedMessage(tmpKey, activeWebview);
-                            host.pendingAssistantTmpKeyBySession.delete(cancelSessionId);
+                        const mappedAssistant = pendingTmpKey ? host.clientMessageIdMap.get(pendingTmpKey) : undefined;
+                        if (pendingTmpKey) {
+                            await host.handleAbortedMessage(pendingTmpKey, activeWebview);
                         }
                         if (pendingAssistant) {
                             await host.handleAbortedMessage(pendingAssistant, activeWebview);
-                            host.pendingAssistantMessageIdBySession.delete(cancelSessionId);
                         }
-                        if (mappedAssistant && mappedAssistant !== tmpKey) {
+                        if (mappedAssistant && mappedAssistant !== pendingTmpKey) {
                             await host.handleAbortedMessage(mappedAssistant, activeWebview);
                         }
+                        host.pendingAssistantTmpKeyBySession.delete(cancelSessionId);
+                        host.pendingAssistantMessageIdBySession.delete(cancelSessionId);
                         host.assistantTextBufferBySession.delete(cancelSessionId);
                     }
                     const draftToRestore = host.consumeDraft(restoreLocalKey);
