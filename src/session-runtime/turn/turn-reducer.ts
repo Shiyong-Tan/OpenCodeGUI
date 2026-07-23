@@ -103,6 +103,20 @@ export function reduceTurnRuntime(
                 phase: state.phase === 'submitted' ? 'streaming' : state.phase,
                 statusText: event.payload.text,
             });
+        case 'assistant-temporary-bound':
+            if (!state.assistant) {
+                return unchanged(state, 'invalid-canonical-id');
+            }
+            if (state.assistant.canonicalId) {
+                return unchanged(state, 'canonical-already-bound');
+            }
+            return applied({
+                ...state,
+                assistant: {
+                    ...state.assistant,
+                    temporaryId: event.payload.temporaryId,
+                },
+            });
         case 'assistant-canonicalized':
             if (!state.assistant || !isCanonicalMessageId(event.payload.canonicalId)) {
                 return unchanged(state, 'invalid-canonical-id');

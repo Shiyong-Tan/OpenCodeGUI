@@ -43,6 +43,7 @@ export type TurnRuntimeEvent =
     }>>
     | TurnEnvelope<'assistant-chunk', Readonly<{ text: string }>>
     | TurnEnvelope<'assistant-status', Readonly<{ text: string }>>
+    | TurnEnvelope<'assistant-temporary-bound', Readonly<{ temporaryId: string }>>
     | TurnEnvelope<'assistant-canonicalized', Readonly<{
         canonicalId: string;
         canonicalIndex?: number;
@@ -67,5 +68,6 @@ export type TurnReduction = Readonly<{
         | 'future-generation-without-start'
         | 'duplicate-start'
         | 'terminal'
+        | 'canonical-already-bound'
         | 'invalid-canonical-id';
 }>;

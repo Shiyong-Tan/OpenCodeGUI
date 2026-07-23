@@ -32,9 +32,14 @@ function start() {
 describe('single-session turn runtime reducer', () => {
     test('keeps stable entity identity while canonicalizing the assistant', () => {
         const started = start();
-        const canonicalized = reduceTurnRuntime(started, owned({
-            type: 'assistant-canonicalized',
+        const rebound = reduceTurnRuntime(started, owned({
+            type: 'assistant-temporary-bound',
             sequence: 2,
+            payload: { temporaryId: 'tmp:A:replacement' },
+        })).state;
+        const canonicalized = reduceTurnRuntime(rebound, owned({
+            type: 'assistant-canonicalized',
+            sequence: 3,
             payload: { canonicalId: 'msg_assistant_A', canonicalIndex: 42 },
         }));
 
