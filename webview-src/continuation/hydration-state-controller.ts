@@ -94,6 +94,7 @@ export function createHydrationStateController(options: HydrationStateController
       streamMode: session.streamMode,
       earlyFinalAssistantId: session.earlyFinalAssistantId,
       turnFullyFinalized: session.turnFullyFinalized,
+      turnLifecycle: clonePlainValue(session.turnLifecycle),
       appendRootUserKey: session.appendRootUserKey,
       appendComposerFor: session.appendComposerFor,
       appendComposerDrafts: cloneMap(session.appendComposerDrafts),
@@ -108,7 +109,14 @@ export function createHydrationStateController(options: HydrationStateController
   }
 
   function restore(session: any, preserved: any) {
-    const empty = { missingIds: [], mergedIds: [], fieldNames: [], skippedArtifacts: { timeline: 0, backing: 0 }, skippedCanonicalizedVolatile: { timeline: 0, backing: 0, fields: 0 } };
+    const empty = {
+      missingIds: [],
+      mergedIds: [],
+      fieldNames: [],
+      skippedArtifacts: { timeline: 0, backing: 0 },
+      skippedCanonicalizedVolatile: { timeline: 0, backing: 0, fields: 0 },
+      skippedDurable: { timeline: 0, backing: 0 },
+    };
     if (!session || !preserved) return empty;
     const hydratedIds = new Set(Array.isArray(session.timeline) ? session.timeline : []);
     const hydratedBackingIds = new Set(session.messagesById instanceof Map ? session.messagesById.keys() : []);
@@ -116,6 +124,7 @@ export function createHydrationStateController(options: HydrationStateController
     const mergedIds: string[] = [];
     const skippedArtifacts = { timeline: 0, backing: 0 };
     const skippedCanonicalizedVolatile = { timeline: 0, backing: 0, fields: 0 };
+    const skippedDurable = { timeline: 0, backing: 0 };
     let hasCanonicalizedVolatileDuplicate = false;
     const preservedTurnIsActive = preserved.backendTurnInFlight === true && preserved.turnFullyFinalized === false;
     const activeMessageIds = new Set([
@@ -165,6 +174,10 @@ export function createHydrationStateController(options: HydrationStateController
         skippedArtifacts.timeline++;
         continue;
       }
+      if (!preservedTurnIsActive || !activeMessageIds.has(id)) {
+        skippedDurable.timeline++;
+        continue;
+      }
       if (canonicalizedHydratedId(id, preservedMessage)) {
         skippedCanonicalizedVolatile.timeline++;
         hasCanonicalizedVolatileDuplicate = true;
@@ -184,6 +197,10 @@ export function createHydrationStateController(options: HydrationStateController
       }
       if (isPersistenceArtifact(id, preservedMessage)) {
         skippedArtifacts.backing++;
+        continue;
+      }
+      if (!preservedTurnIsActive || !activeMessageIds.has(id)) {
+        skippedDurable.backing++;
         continue;
       }
       if (canonicalizedHydratedId(id, preservedMessage)) {
@@ -236,6 +253,7 @@ export function createHydrationStateController(options: HydrationStateController
     preserveField('streamMode', Boolean(preserved.streamMode));
     preserveField('earlyFinalAssistantId', Boolean(preserved.earlyFinalAssistantId));
     preserveField('turnFullyFinalized', preserved.turnFullyFinalized === false);
+    preserveField('turnLifecycle', preservedTurnIsActive && Boolean(preserved.turnLifecycle));
     preserveField('appendRootUserKey', Boolean(preserved.appendRootUserKey));
     preserveField('appendComposerFor', Boolean(preserved.appendComposerFor));
     preserveField('inputDraft', typeof preserved.inputDraft === 'string' && preserved.inputDraft.length > 0);
@@ -269,7 +287,14 @@ export function createHydrationStateController(options: HydrationStateController
       for (const value of preservedSet.values()) session[name].add(value);
       fieldNames.push(name);
     }
-    return { missingIds, mergedIds: Array.from(new Set(mergedIds)), fieldNames: Array.from(new Set(fieldNames)), skippedArtifacts, skippedCanonicalizedVolatile };
+    return {
+      missingIds,
+      mergedIds: Array.from(new Set(mergedIds)),
+      fieldNames: Array.from(new Set(fieldNames)),
+      skippedArtifacts,
+      skippedCanonicalizedVolatile,
+      skippedDurable,
+    };
   }
 
   return Object.freeze({

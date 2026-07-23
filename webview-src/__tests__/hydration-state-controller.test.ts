@@ -12,6 +12,7 @@ describe('hydration volatile state controller', () => {
     before.timeline = ['local-user', 'system:changeList:one'];
     before.messagesById.set('local-user', { id: 'local-user', role: 'user', text: 'live' });
     before.messagesById.set('system:changeList:one', { id: 'system:changeList:one', role: 'system', meta: { kind: 'changeList' } });
+    before.lastTurnUserId = 'local-user';
     before.backendTurnInFlight = true;
     before.turnFullyFinalized = false;
     const preserved = controller.capture(before);
@@ -34,6 +35,7 @@ describe('hydration volatile state controller', () => {
     before.messagesById.set('tmp:assistant', { id: 'tmp:assistant', role: 'assistant', text: 'stream' });
     before.clientKeyToServerId.set('local-user', 'msg_user');
     before.pendingAssistantUpgrade = { tmpKey: 'tmp:assistant', assistantMsgId: 'msg_assistant' };
+    before.lastTurnUserId = 'local-user';
     before.currentTurnAssistantKey = 'tmp:assistant';
     before.backendTurnInFlight = true;
     before.turnFullyFinalized = false;
@@ -50,7 +52,7 @@ describe('hydration volatile state controller', () => {
     expect(hydrated.messagesById.has('local-user')).toBe(false);
     expect(hydrated.messagesById.has('tmp:assistant')).toBe(false);
     expect(hydrated.backendTurnInFlight).toBe(false);
-    expect(result.skippedCanonicalizedVolatile).toEqual({ timeline: 2, backing: 2, fields: 3 });
+    expect(result.skippedCanonicalizedVolatile).toEqual({ timeline: 2, backing: 2, fields: 4 });
   });
 
   test('keeps richer colliding assistant content and append metadata during an active turn', () => {
@@ -131,6 +133,53 @@ describe('hydration volatile state controller', () => {
 
     expect(hydrated.messagesById.get('msg_assistant').text).toBe('authoritative history');
     expect(result.mergedIds).toEqual([]);
+  });
+
+  test('does not resurrect durable cached messages missing from authoritative hydration', () => {
+    const before: any = createSessionState();
+    before.timeline = ['msg_old_user', 'msg_old_assistant'];
+    before.messagesById.set('msg_old_user', {
+      id: 'msg_old_user', role: 'user', text: 'intentionally hidden durable prompt',
+    });
+    before.messagesById.set('msg_old_assistant', {
+      id: 'msg_old_assistant', role: 'assistant', text: 'intentionally hidden durable answer',
+    });
+    before.backendTurnInFlight = false;
+    before.turnFullyFinalized = true;
+    const preserved = controller.capture(before);
+
+    const hydrated: any = createSessionState();
+    const result = controller.restore(hydrated, preserved);
+
+    expect(hydrated.timeline).toEqual([]);
+    expect(hydrated.messagesById.size).toBe(0);
+    expect(result.skippedDurable).toEqual({ timeline: 2, backing: 2 });
+  });
+
+  test('restores only active identities, not unrelated cached history', () => {
+    const before: any = createSessionState();
+    before.timeline = ['msg_history', 'local-user', 'tmp:assistant'];
+    before.messagesById.set('msg_history', {
+      id: 'msg_history', role: 'assistant', text: 'old durable history',
+    });
+    before.messagesById.set('local-user', {
+      id: 'local-user', role: 'user', text: 'active prompt',
+    });
+    before.messagesById.set('tmp:assistant', {
+      id: 'tmp:assistant', role: 'assistant', text: 'active stream',
+    });
+    before.lastTurnUserId = 'local-user';
+    before.currentTurnAssistantKey = 'tmp:assistant';
+    before.backendTurnInFlight = true;
+    before.turnFullyFinalized = false;
+    const preserved = controller.capture(before);
+
+    const hydrated: any = createSessionState();
+    const result = controller.restore(hydrated, preserved);
+
+    expect(hydrated.timeline).toEqual(['local-user', 'tmp:assistant']);
+    expect(hydrated.messagesById.has('msg_history')).toBe(false);
+    expect(result.skippedDurable).toEqual({ timeline: 1, backing: 1 });
   });
 
   test('retains active subagent progress across active-turn hydration only', () => {
