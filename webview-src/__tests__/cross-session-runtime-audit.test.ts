@@ -8,15 +8,26 @@ function read(...parts: string[]): string {
 function extractFunction(source: string, signature: string): string {
   const start = source.indexOf(signature);
   if (start < 0) throw new Error(`missing ${signature}`);
+  let parameterDepth = 0;
+  let bodyStart = -1;
+  for (let index = source.indexOf('(', start); index < source.length; index += 1) {
+    if (source[index] === '(') {
+      parameterDepth += 1;
+    } else if (source[index] === ')') {
+      parameterDepth -= 1;
+    } else if (source[index] === '{' && parameterDepth === 0) {
+      bodyStart = index;
+      break;
+    }
+  }
+  if (bodyStart < 0) throw new Error(`missing body for ${signature}`);
   let depth = 0;
-  let entered = false;
-  for (let index = start; index < source.length; index += 1) {
+  for (let index = bodyStart; index < source.length; index += 1) {
     if (source[index] === '{') {
       depth += 1;
-      entered = true;
     } else if (source[index] === '}') {
       depth -= 1;
-      if (entered && depth === 0) return source.slice(start, index + 1);
+      if (depth === 0) return source.slice(start, index + 1);
     }
   }
   throw new Error(`unterminated ${signature}`);
@@ -52,10 +63,16 @@ describe('cross-session runtime repository audit', () => {
     expect(upgrade).not.toContain('messageIndexMap');
     expect(upgrade).not.toContain('lastAssistantUpgradeFallback');
     expect(upgrade).not.toContain('payloadSession === activeSessionId');
-    expect(upgrade).toContain('replaceKeyEverywhere(currentKey, newKey, payloadSession);');
+    expect(upgrade).toContain('replaceKeyEverywhere(currentKey, newKey, payloadSession, {');
+    expect(upgrade).toContain(
+      "allowCanonicalHandoff: candidateDecision.source === 'final-canonical-handoff'",
+    );
+    expect(upgrade).toContain("allowCanonicalHandoff: source === 'chatDone'");
 
     const rekey = extractFunction(main, 'function replaceKeyEverywhere(');
-    expect(rekey).toContain('messageRekeyController.rekey(session, oldId, newId, sessionId)');
+    expect(rekey).toContain(
+      'messageRekeyController.rekey(session, oldId, newId, sessionId, options)',
+    );
     expect(rekey).not.toContain('session.messagesById.delete');
     expect(rekey).not.toContain('session.timeline =');
     expect(main).not.toContain('session.messagesById.set(');

@@ -21,8 +21,9 @@ describe('stable message identity production integration', () => {
       'const messageRekeyController = window.__ocContinuation?.createMessageRekeyController?.({',
     );
     expect(replacement).toContain(
-      'const result = messageRekeyController.rekey(session, oldId, newId, sessionId);',
+      'const result = messageRekeyController.rekey(session, oldId, newId, sessionId, options);',
     );
+    expect(source).toContain('handoffCanonical: (message, canonicalId)');
     expect(replacement).toContain(
       'getSessionSearchState(sessionId, false)?.rekey(oldId, newId);',
     );

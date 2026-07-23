@@ -28,6 +28,7 @@ describe('assistant binding production integration', () => {
     );
     expect(upgrade).toContain('const candidateDecision = selectAssistantUpgradeCandidate({');
     expect(upgrade).toContain('explicitTemporaryId: typeof tmpKey');
+    expect(upgrade).toContain("allowCanonicalHandoff: source === 'chatDone'");
     expect(upgrade).toContain('const currentKey = candidateDecision.sourceId;');
   });
 
@@ -37,7 +38,7 @@ describe('assistant binding production integration', () => {
     expect(upgrade).not.toContain('messageIndexMap');
     expect(upgrade).not.toContain('tryMapExistsMissingNewKeyFallback');
     expect(upgrade).not.toContain('lastAssistantUpgradeFallback');
-    expect(upgrade).toContain('replaceKeyEverywhere(currentKey, newKey, payloadSession);');
+    expect(upgrade).toContain('allowCanonicalHandoff: candidateDecision.source ===');
     expect(upgrade).toContain("reason = 'owned-identity-bind';");
   });
 });

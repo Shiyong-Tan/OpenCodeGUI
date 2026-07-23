@@ -3228,10 +3228,10 @@ function upsertUndoNotice(session, operationId, startServerId, text, anchorKey, 
     return k;
 }
 
-function replaceKeyEverywhere(oldId, newId, sessionId) {
+function replaceKeyEverywhere(oldId, newId, sessionId, options = {}) {
     const session = getSessionState(sessionId);
     if (!session) return;
-    const result = messageRekeyController.rekey(session, oldId, newId, sessionId);
+    const result = messageRekeyController.rekey(session, oldId, newId, sessionId, options);
     if (!result.accepted) {
         vscode.postMessage({
             type: 'ui-debug',
@@ -3597,6 +3597,7 @@ if (!messageIdentityStore) {
 }
 const messageRekeyController = window.__ocContinuation?.createMessageRekeyController?.({
     bindCanonical: (message, canonicalId) => messageIdentityStore.bindCanonical(message, canonicalId),
+    handoffCanonical: (message, canonicalId) => messageIdentityStore.handoffCanonical(message, canonicalId),
     rebindTurnCanonical: (session, oldId, newId) => turnLifecycleController.rebindCanonical(session, oldId, newId)
 });
 if (!messageRekeyController) {
@@ -3685,6 +3686,7 @@ function attemptAssistantUpgrade(sessionId, payload, source) {
                 canonicalId: session.pendingAssistantUpgrade.assistantMsgId
             }
             : null,
+        allowCanonicalHandoff: source === 'chatDone',
         awaitingFinalBind: session.awaitingFinalMapBind === true,
         lastAssistantId: lastAssistantKey,
         hasMessage: (key) => hasOwnedAssistantIdentity(key),
@@ -3721,7 +3723,9 @@ function attemptAssistantUpgrade(sessionId, payload, source) {
         reason = 'set-current-only';
     } else if (currentKey !== newKey) {
         try {
-            replaceKeyEverywhere(currentKey, newKey, payloadSession);
+            replaceKeyEverywhere(currentKey, newKey, payloadSession, {
+                allowCanonicalHandoff: candidateDecision.source === 'final-canonical-handoff'
+            });
             replaced = true;
             reason = 'owned-identity-bind';
         } catch (error) {

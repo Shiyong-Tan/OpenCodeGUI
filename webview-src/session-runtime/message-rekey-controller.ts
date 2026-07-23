@@ -21,6 +21,7 @@ type RekeySession = {
   appendComposerDrafts?: Map<string, string>;
   clientKeyToServerId?: Map<string, string>;
   serverIdToClientKey?: Map<string, string>;
+  serverIdToKey?: Map<string, string>;
   recentAssistantDomTargetAliases?: any[];
 };
 
@@ -40,8 +41,13 @@ export type MessageRekeyResult =
 
 export type MessageRekeyControllerOptions = Readonly<{
   bindCanonical(message: MessageLike, canonicalId: string): unknown;
+  handoffCanonical?(message: MessageLike, canonicalId: string): unknown;
   rebindTurnCanonical?(session: RekeySession, oldId: string, newId: string): void;
   now?(): number;
+}>;
+
+export type MessageRekeyOptions = Readonly<{
+  allowCanonicalHandoff?: boolean;
 }>;
 
 function pickCompleteMessage(
@@ -80,6 +86,7 @@ export function createMessageRekeyController(options: MessageRekeyControllerOpti
     oldId: string,
     newId: string,
     sessionId: string,
+    rekeyOptions: MessageRekeyOptions = {},
   ): MessageRekeyResult {
     if (!oldId || !newId || oldId === newId) {
       return { accepted: false, reason: 'invalid-key' };
@@ -93,12 +100,24 @@ export function createMessageRekeyController(options: MessageRekeyControllerOpti
     const preAssistantMsgId = session.currentTurnAssistantMsgId;
     const message = session.messagesById.get(oldId) || null;
     const existing = session.messagesById.get(newId) || null;
+    const isCanonicalHandoff = rekeyOptions.allowCanonicalHandoff === true
+      && oldId.startsWith('msg_')
+      && newId.startsWith('msg_');
+    if (isCanonicalHandoff && !options.handoffCanonical) {
+      throw new Error('Canonical presentation handoff is unavailable');
+    }
 
     if (message) {
       session.messagesById.delete(oldId);
       const selected = pickCompleteMessage(message, existing);
       if (selected) {
-        if (newId.startsWith('msg_')) options.bindCanonical(selected, newId);
+        if (newId.startsWith('msg_')) {
+          if (isCanonicalHandoff) {
+            options.handoffCanonical!(selected, newId);
+          } else {
+            options.bindCanonical(selected, newId);
+          }
+        }
         selected.id = newId;
         session.messagesById.set(newId, selected);
       }
@@ -155,9 +174,19 @@ export function createMessageRekeyController(options: MessageRekeyControllerOpti
     if (session.serverIdToClientKey?.get(newId) === oldId) {
       session.serverIdToClientKey.set(newId, newId);
     }
+    if (isCanonicalHandoff) {
+      session.serverIdToClientKey?.set(oldId, newId);
+      session.serverIdToClientKey?.set(newId, newId);
+      session.serverIdToKey?.set(oldId, newId);
+      session.serverIdToKey?.set(newId, newId);
+    }
     options.rebindTurnCanonical?.(session, oldId, newId);
 
-    const replacedTemporaryAssistant = (oldId.startsWith('tmp:') || oldId.startsWith('local-'))
+    const replacedAssistantPresentation = (
+      oldId.startsWith('tmp:')
+      || oldId.startsWith('local-')
+      || isCanonicalHandoff
+    )
       && newId.startsWith('msg_')
       && (
         message?.role === 'assistant'
@@ -165,7 +194,7 @@ export function createMessageRekeyController(options: MessageRekeyControllerOpti
         || preAssistantKey === oldId
         || preThinkingId === oldId
       );
-    if (replacedTemporaryAssistant) {
+    if (replacedAssistantPresentation) {
       const aliases = Array.isArray(session.recentAssistantDomTargetAliases)
         ? session.recentAssistantDomTargetAliases
         : [];

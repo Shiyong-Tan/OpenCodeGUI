@@ -6,6 +6,7 @@ export type AssistantUpgradeCandidateInput = Readonly<{
     temporaryId?: string | null;
     canonicalId?: string | null;
   }> | null;
+  allowCanonicalHandoff?: boolean;
   awaitingFinalBind?: boolean;
   lastAssistantId?: string | null;
   hasMessage(id: string): boolean;
@@ -27,6 +28,7 @@ export type AssistantUpgradeCandidateDecision =
       | 'matching-pending'
       | 'current-temporary'
       | 'already-canonical'
+      | 'final-canonical-handoff'
       | 'awaiting-final-assistant'
       | 'canonical-only';
   }>;
@@ -103,6 +105,20 @@ export function selectAssistantUpgradeCandidate(
       canonicalId,
       sourceId: canonicalId,
       source: 'already-canonical',
+    };
+  }
+
+  if (
+    input.allowCanonicalHandoff === true
+    && isCanonicalId(input.currentTurnAssistantId)
+    && input.currentTurnAssistantId !== canonicalId
+    && isPresentAssistant(input.currentTurnAssistantId, input)
+  ) {
+    return {
+      accepted: true,
+      canonicalId,
+      sourceId: input.currentTurnAssistantId,
+      source: 'final-canonical-handoff',
     };
   }
 

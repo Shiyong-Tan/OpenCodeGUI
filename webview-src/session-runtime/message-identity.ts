@@ -2,6 +2,7 @@ export type MessageIdentity = Readonly<{
   entityId: string;
   temporaryId?: string;
   canonicalId?: string;
+  canonicalAliases?: readonly string[];
 }>;
 
 type IdentityMessage = {
@@ -28,6 +29,9 @@ export function createMessageIdentityStore(
       entityId: value.entityId,
       ...(typeof value.temporaryId === 'string' ? { temporaryId: value.temporaryId } : {}),
       ...(typeof value.canonicalId === 'string' ? { canonicalId: value.canonicalId } : {}),
+      ...(Array.isArray(value.canonicalAliases)
+        ? { canonicalAliases: value.canonicalAliases.filter((id): id is string => typeof id === 'string') }
+        : {}),
     };
   }
 
@@ -55,6 +59,26 @@ export function createMessageIdentityStore(
     const identity: MessageIdentity = {
       entityId: current.entityId,
       canonicalId,
+    };
+    message.meta = { ...(message.meta || {}), identity };
+    return identity;
+  }
+
+  function handoffCanonical(message: IdentityMessage, canonicalId: string): MessageIdentity {
+    if (!canonicalId.startsWith('msg_')) {
+      throw new Error('Canonical message identity must start with msg_');
+    }
+    const current = ensure(message);
+    const aliases = new Set(current.canonicalAliases || []);
+    if (current.canonicalId && current.canonicalId !== canonicalId) {
+      aliases.add(current.canonicalId);
+    }
+    aliases.delete(canonicalId);
+    const canonicalAliases = Array.from(aliases);
+    const identity: MessageIdentity = {
+      entityId: current.entityId,
+      canonicalId,
+      ...(canonicalAliases.length ? { canonicalAliases } : {}),
     };
     message.meta = { ...(message.meta || {}), identity };
     return identity;
@@ -89,6 +113,7 @@ export function createMessageIdentityStore(
     read,
     ensure,
     bindCanonical,
+    handoffCanonical,
     sameEntity,
     store,
   });

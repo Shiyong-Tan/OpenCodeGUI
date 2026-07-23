@@ -60,6 +60,18 @@ describe('assistant binding candidate selection', () => {
     });
   });
 
+  test('allows a different current canonical assistant only for final presentation handoff', () => {
+    expect(selectAssistantUpgradeCandidate(input({
+      currentTurnAssistantId: 'msg_previous',
+      allowCanonicalHandoff: true,
+    }))).toEqual({
+      accepted: true,
+      canonicalId: 'msg_new',
+      sourceId: 'msg_previous',
+      source: 'final-canonical-handoff',
+    });
+  });
+
   test('requires candidate presence and assistant role', () => {
     expect(selectAssistantUpgradeCandidate(input({
       explicitTemporaryId: 'tmp:missing',

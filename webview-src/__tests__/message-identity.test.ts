@@ -38,6 +38,17 @@ describe('stable message identity store', () => {
     );
   });
 
+  test('supports an explicit final presentation handoff while retaining the prior canonical alias', () => {
+    const store = createMessageIdentityStore({ nextEntityId: () => 'entity:one' });
+    const message: any = { id: 'msg_first' };
+    store.ensure(message);
+    expect(store.handoffCanonical(message, 'msg_final')).toEqual({
+      entityId: 'entity:one',
+      canonicalId: 'msg_final',
+      canonicalAliases: ['msg_first'],
+    });
+  });
+
   test('compares entity identity independently from current storage key', () => {
     const store = createMessageIdentityStore();
     const left: any = { id: 'tmp:left' };

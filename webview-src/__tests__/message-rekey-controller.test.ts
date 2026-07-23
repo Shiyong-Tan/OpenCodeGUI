@@ -1,5 +1,6 @@
 import { createMessageIdentityStore } from '../session-runtime/message-identity';
 import { createMessageRekeyController } from '../session-runtime/message-rekey-controller';
+import { createSegmentTopology } from '../features/segments/segment-topology';
 
 function session() {
   return {
@@ -17,6 +18,7 @@ describe('message rekey controller', () => {
   const rebindTurnCanonical = jest.fn();
   const controller = createMessageRekeyController({
     bindCanonical: (message, canonicalId) => identity.bindCanonical(message, canonicalId),
+    handoffCanonical: (message, canonicalId) => identity.handoffCanonical(message, canonicalId),
     rebindTurnCanonical,
     now: () => 100,
   });
@@ -64,5 +66,63 @@ describe('message rekey controller', () => {
       accepted: false,
       reason: 'user-to-assistant-id',
     });
+  });
+
+  test('moves a same-turn aggregate to the final canonical ID and keeps undo references resolvable', () => {
+    const state: any = session();
+    state.serverIdToKey = new Map<string, string>();
+    const message = { id: 'msg_first', role: 'assistant', text: 'final answer', meta: {} };
+    identity.ensure(message);
+    state.messagesById.set('msg_user', { id: 'msg_user', role: 'user', text: 'request', meta: {} });
+    state.messagesById.set('msg_first', message);
+    state.timeline = ['msg_user', 'msg_first'];
+    state.currentTurnAssistantKey = 'msg_first';
+    state.currentTurnAssistantMsgId = 'msg_final';
+    state.segmentsByNoticeKey.set('seg', {
+      memberMsgIds: ['msg_user', 'msg_first'],
+      anchorMsgId: 'msg_user',
+      endMsgId: 'msg_first',
+    });
+
+    expect(controller.rekey(state, 'msg_first', 'msg_final', 'A', {
+      allowCanonicalHandoff: true,
+    })).toMatchObject({
+      accepted: true,
+      timelineIndex: 1,
+      timelineReplaced: true,
+    });
+    expect(state.timeline).toEqual(['msg_user', 'msg_final']);
+    expect(state.messagesById.get('msg_final')).toMatchObject({
+      id: 'msg_final',
+      text: 'final answer',
+      meta: {
+        identity: {
+          canonicalId: 'msg_final',
+          canonicalAliases: ['msg_first'],
+        },
+      },
+    });
+    expect(state.segmentsByNoticeKey.get('seg')).toMatchObject({
+      memberMsgIds: ['msg_user', 'msg_final'],
+      anchorMsgId: 'msg_user',
+      endMsgId: 'msg_final',
+    });
+    expect(state.serverIdToClientKey.get('msg_first')).toBe('msg_final');
+    expect(state.serverIdToKey.get('msg_first')).toBe('msg_final');
+
+    const topology = createSegmentTopology({ debug: () => undefined, now: () => 100 });
+    const normalized = topology.normalizeMembers(
+      state,
+      'msg_user',
+      'msg_final',
+      ['msg_user', 'msg_final'],
+      'undo:msg_user',
+    );
+    expect(normalized).toEqual({
+      anchorMsgId: 'msg_user',
+      endMsgId: 'msg_final',
+      memberMsgIds: ['msg_user', 'msg_final'],
+    });
+    expect(normalized.memberMsgIds.filter((id) => state.messagesById.has(id))).toHaveLength(2);
   });
 });
