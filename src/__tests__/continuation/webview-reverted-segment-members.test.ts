@@ -159,15 +159,23 @@ function loadUndoSenderHarness() {
                 }),
                 selectAssistantUpgradeCandidate: jest.fn(),
                 createTurnLifecycleController: () => ({}),
-                createMessageIdentityStore: () => ({
-                    ensure: (message: any) => {
+                createMessageIdentityStore: () => {
+                  const ensure = (message: any) => {
                         message.meta = {
                             ...(message.meta || {}),
                             identity: message.meta?.identity || { entityId: `entity:${message.id || 'test'}` },
                         };
                         return message.meta.identity;
+                  };
+                  return {
+                    ensure,
+                    store: (messagesById: Map<string, any>, message: any) => {
+                      ensure(message);
+                      messagesById.set(message.id, message);
+                      return message;
                     },
-                }),
+                  };
+                },
                 createMessageRekeyController: () => ({
                     rekey: jest.fn(),
                 }),

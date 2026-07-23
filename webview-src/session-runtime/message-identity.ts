@@ -73,10 +73,23 @@ export function createMessageIdentityStore(
     );
   }
 
+  function store<T extends IdentityMessage>(
+    messagesById: Map<string, T>,
+    message: T & { id?: string },
+  ): T {
+    if (typeof message.id !== 'string' || !message.id) {
+      throw new Error('Stored message requires an id');
+    }
+    ensure(message);
+    messagesById.set(message.id, message);
+    return message;
+  }
+
   return Object.freeze({
     read,
     ensure,
     bindCanonical,
     sameEntity,
+    store,
   });
 }

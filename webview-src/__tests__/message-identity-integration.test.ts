@@ -8,7 +8,8 @@ describe('stable message identity production integration', () => {
     expect(source).toContain(
       'const messageIdentityStore = window.__ocContinuation?.createMessageIdentityStore?.();',
     );
-    expect(source.match(/messageIdentityStore\.ensure\(/g)).toHaveLength(2);
+    expect(source.match(/messageIdentityStore\.store\(/g)).toHaveLength(7);
+    expect(source).not.toContain('session.messagesById.set(');
   });
 
   test('delegates compatibility storage rekey to the session-owned controller', () => {

@@ -2678,7 +2678,6 @@ function createMessage(session, payload) {
         meta: { ...(payload.meta || {}) },
         order
     };
-    messageIdentityStore.ensure(message);
     return message;
 }
 
@@ -2703,12 +2702,11 @@ function upsertMessage(session, payload) {
             text: typeof payload.text === 'string' ? payload.text : existing.text,
             meta: { ...existing.meta, ...(payload.meta || {}) }
         };
-        messageIdentityStore.ensure(next);
-        session.messagesById.set(payload.id, next);
+        messageIdentityStore.store(session.messagesById, next);
         return next;
     }
     const message = createMessage(session, payload);
-    session.messagesById.set(message.id, message);
+    messageIdentityStore.store(session.messagesById, message);
     session.timeline.push(message.id);
     logTimelineSnapshot('append', session.timeline, `key=${message.id}`);
     return message;
@@ -2746,7 +2744,7 @@ function materializeInjectedChangeLists(session, rawSessionMessages, source = 's
         nextOrder: session.nextOrder,
         toStableMessageKey: (messageId) => toStableMessageKey(session, messageId)
     });
-    for (const message of plan.messages) session.messagesById.set(message.id, message);
+    for (const message of plan.messages) messageIdentityStore.store(session.messagesById, message);
     session.timeline = [...plan.timeline];
     session.nextOrder = plan.nextOrder;
     const stats = plan.stats;
@@ -2965,7 +2963,7 @@ function getUndoPlaceholderId(noticeKey) {
 function upsertUndoPlaceholder(session, noticeKey, anchorMsgId, endMsgId, applied) {
     const placeholderId = getUndoPlaceholderId(noticeKey);
     const createdAt = Date.now();
-    session.messagesById.set(placeholderId, {
+    messageIdentityStore.store(session.messagesById, {
         id: placeholderId,
         role: 'system',
         text: '',
@@ -13437,7 +13435,7 @@ function appendMessageImages(parentEl, message) {
                 skippedInvalid++;
                 continue;
             }
-            session.messagesById.set(id, normalized);
+            messageIdentityStore.store(session.messagesById, normalized);
             mergedIds.add(id);
         }
 
@@ -14314,7 +14312,7 @@ function appendMessageImages(parentEl, message) {
                                     const cleanedText = role === 'user'
                                         ? stripSystemInjections(rawText.replace(/^(\r?\n)+/, ''))
                                         : rawText;
-                                    session.messagesById.set(item.id, {
+                                    messageIdentityStore.store(session.messagesById, {
                                         id: item.id,
                                         role: role,
                                         text: cleanedText,
@@ -14458,7 +14456,7 @@ function appendMessageImages(parentEl, message) {
                         }
                         const placeholderId = getUndoPlaceholderId(noticeKey);
                         if (!session.messagesById.has(placeholderId)) {
-                            session.messagesById.set(placeholderId, {
+                            messageIdentityStore.store(session.messagesById, {
                                 id: placeholderId,
                                 role: 'system',
                                 text: '',

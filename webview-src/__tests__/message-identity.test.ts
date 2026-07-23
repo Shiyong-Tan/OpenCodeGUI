@@ -45,4 +45,15 @@ describe('stable message identity store', () => {
     const right: any = { id: 'msg_right', meta: { identity: left.meta.identity } };
     expect(store.sameEntity(left, right)).toBe(true);
   });
+
+  test('ensures backing-only records receive identity before storage', () => {
+    const store = createMessageIdentityStore({ nextEntityId: () => 'entity:backing' });
+    const messages = new Map<string, any>();
+    const message: any = { id: 'msg_backing', role: 'assistant' };
+    expect(store.store(messages, message)).toBe(message);
+    expect(messages.get('msg_backing').meta.identity).toEqual({
+      entityId: 'entity:backing',
+      canonicalId: 'msg_backing',
+    });
+  });
 });
