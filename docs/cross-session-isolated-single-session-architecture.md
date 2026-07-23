@@ -721,3 +721,60 @@ The cross-session implementation is complete only when:
 8. Entry files are composition surfaces rather than business-state owners.
 9. Each state domain has one authoritative writer and typed boundaries.
 10. Automated gates and the real UI matrix both pass.
+
+## 20. Implementation checkpoint (2026-07-23)
+
+The migration is implemented through the production-routing and identity
+boundaries, with the legacy presentation structures retained as compatibility
+projections until the real UI matrix is accepted.
+
+Implemented owners:
+
+- `src/session-runtime/protocol.ts`: owned event envelope, epoch, and sequence.
+- `src/session-runtime/SessionActor.ts` and `SessionRegistry.ts`: one serialized
+  execution queue per session with concurrency across sessions.
+- `src/session-runtime/ChatEventActorRouter.ts`: production `ChatEvent` routing;
+  parent-visible subagent effects use the parent actor.
+- `src/session-runtime/turn/turn-reducer.ts`: monotonic reference lifecycle.
+- `webview-src/session-runtime/assistant-binding.ts`: session-owned temporary to
+  canonical assistant selection.
+- `webview-src/session-runtime/turn-lifecycle.ts`: main-assistant terminal state
+  separated from cleanup-effect completion.
+- `webview-src/session-runtime/message-identity.ts`: stable entity identity
+  preserved across compatibility rekeys.
+- `webview-src/session-runtime/session-selection-controller.ts`: immediate
+  render-only selection with forced bottom scroll.
+- `webview-src/continuation/hydration-state-controller.ts`: authoritative
+  durable payload plus active-turn-only projection overlay.
+
+Production ownership rules now enforced:
+
+- asynchronous assistant, text, error, user-ack, diff, permission, and file
+  events do not fall back to the visible session;
+- background assistant permission is derived from the event-owned session,
+  never the selected session;
+- same-session events are serialized, while different sessions progress
+  concurrently;
+- `chatDone` seals the main assistant before `finalize_done` completes snapshot,
+  diff, and other effects;
+- selecting a cached session renders it immediately and scrolls to the bottom
+  before hydration returns;
+- hydration cannot restore unrelated cached durable records that are absent
+  from the authoritative payload.
+
+Automated acceptance at this checkpoint:
+
+- 134 Jest suites and 1061 tests pass;
+- Extension and Webview compilation pass;
+- all four Webview bundles remain within size limits;
+- deterministic rendering bundle check passes;
+- VSIX content policy passes.
+
+Still required before deleting compatibility projections and diagnostic shadow
+state:
+
+- run the real UI A/B/C matrix in section 16.6;
+- inspect `[EXT][TURN_SHADOW_DIVERGENCE]` and
+  `[EXT][SESSION_ACTOR_ERROR]` output;
+- only after zero unexplained divergence, remove the shadow path and remaining
+  compatibility writers in a separate reversible commit.
