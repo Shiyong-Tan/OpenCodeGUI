@@ -14647,6 +14647,10 @@ function appendMessageImages(parentEl, message) {
                     && followup.assistantMsgId === message.assistantMsgId) {
                     const target = session.messagesById.get(followup.assistantMsgId);
                     if (!target || target.role !== 'assistant') break;
+                    const hadPresentableContent = Boolean(
+                        (typeof target.text === 'string' && target.text.trim())
+                        || (typeof target.meta?.statusText === 'string' && target.meta.statusText.trim())
+                    );
                     const text = typeof message.lastText === 'string' ? message.lastText : '';
                     if (message.isStatusUpdate) target.meta = { ...(target.meta || {}), isThinking: true, statusText: text };
                     else if (text) target.text = `${target.text || ''}${text}`;
@@ -14654,6 +14658,29 @@ function appendMessageImages(parentEl, message) {
                     session.currentTurnAssistantKey = followup.assistantMsgId;
                     session.currentTurnAssistantMsgId = followup.assistantMsgId;
                     session.thinkingId = followup.assistantMsgId;
+                    const hasPresentableContent = Boolean(
+                        (typeof target.text === 'string' && target.text.trim())
+                        || (typeof target.meta?.statusText === 'string' && target.meta.statusText.trim())
+                    );
+                    if (!hadPresentableContent && hasPresentableContent) {
+                        const predecessorKeys = [
+                            followup.predecessorAssistantMsgId,
+                            ...getPresentationMessageKeyVariants(session, followup.predecessorAssistantMsgId),
+                        ];
+                        const predecessorPresentationKey =
+                            predecessorKeys.find((key) => keyedRootForKey(key))
+                            || followup.predecessorAssistantMsgId;
+                        const migrated = applyKeyedChatPresentationAliasMigration(
+                            predecessorPresentationKey,
+                            followup.assistantMsgId,
+                            sessionId,
+                        );
+                        vscode.postMessage({
+                            type: 'ui-debug',
+                            payload: ['[WV][APPEND_PRESENTATION_HANDOFF]', `sessionId=${sessionId}`,
+                                `from=${predecessorPresentationKey}`, `to=${followup.assistantMsgId}`, `migrated=${migrated}`]
+                        });
+                    }
                     renderIfActive(sessionId, 'append-followup-meta', { scroll: true });
                     break;
                 }

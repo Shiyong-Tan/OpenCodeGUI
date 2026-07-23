@@ -31,6 +31,13 @@ describe('append followup same-turn handoff', () => {
         expect(scope.assistantMeta).toBeGreaterThan(scope.turnInFlight);
         expect(scope.indexDelta).toBeGreaterThan(scope.turnInFlight);
         expect(scope.extractedHelper).toBe(-1);
+        const assistantMetaEnd = scope.source.indexOf("case 'chatChunk':", scope.assistantMeta);
+        const assistantMetaBlock = scope.source.slice(scope.assistantMeta, assistantMetaEnd);
+        expect(assistantMetaBlock).toContain(
+            'applyKeyedChatPresentationAliasMigration(',
+        );
+        expect(assistantMetaBlock.indexOf('applyKeyedChatPresentationAliasMigration('))
+            .toBeLessThan(assistantMetaBlock.indexOf("renderIfActive(sessionId, 'append-followup-meta'"));
     });
 
     it('rotates the existing turn from canonical A to B only after A tool-calls completion', () => {
