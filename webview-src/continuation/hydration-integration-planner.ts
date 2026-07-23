@@ -328,7 +328,10 @@ export function planHydrationIntegration(
             noticeKey: segment.noticeKey,
             anchorMsgId: plannedSegment.anchorMsgId,
             endMsgId: plannedSegment.endMsgId,
-            applied: segment.applied ?? null,
+            // Legacy hydration intentionally drops the persisted applied flag
+            // before rebuilding placeholders, so the hydrated placeholder
+            // always receives the neutral value.
+            applied: null,
             createdAt: typeof segment.createdAt === 'number' ? segment.createdAt : null,
           }),
         }));

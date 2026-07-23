@@ -131,6 +131,7 @@ describe('hydration integration planner', () => {
         anchorMsgId: 'msg_a',
         endMsgId: 'msg_b',
         memberMsgIds: ['msg_a', 'msg_b'],
+        applied: true,
       }],
     });
     expect(result.timeline).toEqual(['system:undo-seg:undo:one', 'msg_b', 'msg_c']);
@@ -141,7 +142,11 @@ describe('hydration integration planner', () => {
         memberMsgIds: ['msg_a', 'msg_b'],
       }),
     ]);
-    expect(result.messages.filter((item) => item.meta?.kind === 'undoSegmentPlaceholder')).toHaveLength(1);
+    const placeholders = result.messages.filter(
+      (item) => item.meta?.kind === 'undoSegmentPlaceholder',
+    );
+    expect(placeholders).toHaveLength(1);
+    expect(placeholders[0].meta.applied).toBeNull();
   });
 
   test('plans finalized append statuses through the stable append planner', () => {
