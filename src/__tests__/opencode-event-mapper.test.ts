@@ -45,11 +45,13 @@ describe('OpenCodeEventMapper', () => {
         type, source, lane: 'main', sessionId: props.sessionID,
       }),
       logUiDebug: (value: string) => calls.push(value.includes('session.idle.received')
-        ? 'idle-log' : (value.includes('session.status.detail') ? 'status-detail' : 'normalized-log')),
+        ? 'idle-log' : (value.includes('session.idle.final')
+          ? 'idle-final-log' : (value.includes('session.status.detail') ? 'status-detail' : 'normalized-log'))),
       sessionIdleReceivedBySession: { add: () => calls.push('idle-store') },
       canceledActiveTurnBySession: new Map(),
       turnStateBySession: new Map([['session-a', {}]]),
-      markTurnFinal: () => calls.push('mark-final'),
+      getTurnAssistantMsgId: () => 'msg-final',
+      markTurnFinal: (_sessionId: string, messageId: string) => calls.push(`mark-final:${messageId}`),
     };
     const events = mapServerEventToChatEvents(host, 'session.status', {
       sessionID: 'session-a', status: { type: 'idle', used: 12, size: 100, cost: { amount: 0.25 } },
@@ -57,6 +59,6 @@ describe('OpenCodeEventMapper', () => {
     expect(events).toEqual([{
       type: 'sessionUsage', sessionId: 'session-a', usage: { used: 12, size: 100, amount: 0.25 }, source: 'resync',
     }]);
-    expect(calls).toEqual(['normalized-log', 'status-detail', 'idle-store', 'idle-log', 'mark-final']);
+    expect(calls).toEqual(['normalized-log', 'status-detail', 'idle-store', 'idle-log', 'idle-final-log', 'mark-final:msg-final']);
   });
 });

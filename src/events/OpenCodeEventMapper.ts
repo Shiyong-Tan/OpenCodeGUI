@@ -503,6 +503,15 @@ export function mapServerEventToChatEvents(
                         return events;
                     }
                 }
+                // Some providers emit a successor assistant message only through
+                // message.part.updated (text + step-finish), without a matching
+                // message.updated completion event. Keep the active turn owner in
+                // sync with the assistant content that we actually accept so a
+                // later session.idle can finalize the correct message.
+                if (source === 'sse' && normalized.lane === 'main' && sessionId && msgId && host.turnStateBySession.has(sessionId)) {
+                    host.setCurrentTurnAssistantMsgId(sessionId, msgId, 'assistant-text-part');
+                    host.recordAssistantMsgId(sessionId, msgId);
+                }
                 if (source === 'sse' && sessionId && msgId) {
                     const finalMsgId = host.getFinalizingMsgId(sessionId);
                     if (finalMsgId && finalMsgId === msgId && typeof part?.text === 'string' && part.text.length >= knownLenBefore) {
@@ -847,7 +856,9 @@ export function mapServerEventToChatEvents(
                 return events;
             }
             if (host.turnStateBySession.has(sessionId)) {
-                host.markTurnFinal(sessionId, undefined, 'session-idle');
+                const assistantMsgId = host.getTurnAssistantMsgId(sessionId);
+                host.logUiDebug(`EXT: session.idle.final | sessionId=${sessionId} | msgId=${assistantMsgId || 'null'}`);
+                host.markTurnFinal(sessionId, assistantMsgId, 'session-idle');
             }
             return events;
         }

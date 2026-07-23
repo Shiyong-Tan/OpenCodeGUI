@@ -72,4 +72,32 @@ describe('append followup same-turn handoff', () => {
         expect(client.mapServerEventToChatEvents('message.updated', { info: { id: 'msg_a', sessionID: 'ses', role: 'assistant', parentID: 'msg_root', finish: 'stop' } }, 'sse')).toEqual([]);
         expect(client.mapServerEventToChatEvents('message.updated', { info: { id: 'msg_b', sessionID: 'ses', role: 'assistant', parentID: 'msg_u', finish: 'stop' } }, 'sse')).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'assistantMessageMeta', assistantMsgId: 'msg_b' })]));
     });
+
+    it('finalizes an inactive session latest text-only successor when idle is the terminal signal', () => {
+        const client = createSameTurnFixture();
+        client.mapServerEventToChatEvents('message.updated', {
+            info: { id: 'msg_a', sessionID: 'ses', role: 'assistant', parentID: 'msg_root', finish: 'tool-calls' },
+        }, 'sse');
+        client.setSessionId('other-visible-session');
+
+        const textEvents = client.mapServerEventToChatEvents('message.part.updated', {
+            part: { sessionID: 'ses', messageID: 'msg_b', type: 'text', text: 'OK' },
+        }, 'sse');
+        expect(textEvents).toEqual(expect.arrayContaining([
+            expect.objectContaining({ type: 'text', sessionId: 'ses', assistantMsgId: 'msg_b', text: 'OK' }),
+        ]));
+        expect(client.getTurnAssistantMsgId('ses')).toBe('msg_b');
+
+        client.mapServerEventToChatEvents('message.part.updated', {
+            part: { sessionID: 'ses', messageID: 'msg_b', type: 'step-finish' },
+        }, 'sse');
+        client.mapServerEventToChatEvents('session.status', {
+            sessionID: 'ses', status: { type: 'idle' },
+        }, 'sse');
+
+        expect(client.getFinalizingMsgId('ses')).toBe('msg_b');
+        expect((client as any).turnFinalMsgIdBySession.get('ses')).toBe('msg_b');
+        expect((client as any).turnFinalSourceBySession.get('ses')).toBe('session-idle');
+        expect(client.getSessionId()).toBe('other-visible-session');
+    });
 });
