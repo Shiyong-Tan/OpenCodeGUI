@@ -3174,7 +3174,9 @@ function replaceKeyEverywhere(oldId, newId, sessionId) {
         });
         return;
     }
-    if (typeof sessionSearch !== 'undefined') sessionSearch.rekey(oldId, newId);
+    if (sessionId === activeSessionId && typeof sessionSearch !== 'undefined') {
+        sessionSearch.rekey(oldId, newId);
+    }
     if (typeof subagentTextExpandedByKey !== 'undefined' && subagentTextExpandedByKey instanceof Map) {
         const expansionNeedle = `:${oldId}:`;
         for (const [key, expanded] of Array.from(subagentTextExpandedByKey.entries())) {
