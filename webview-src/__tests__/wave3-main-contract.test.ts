@@ -14,8 +14,6 @@ import { createSessionRenderScheduler } from '../continuation/session-render-sch
 const { createAtomicScenarioExecutor, createRealTransactionHarness } = require('../../scripts/chat-window-adaptive-range-harness.js');
 
 const source = fs.readFileSync(path.join(process.cwd(), 'media', 'main.js'), 'utf8');
-const recoveredSource = fs.readFileSync(path.join(process.cwd(), '.opencode', 'attachments',
-  '2026-07-16-wave-b4s-recovered-reviewed', 'media-main.js'), 'utf8');
 const wave3TestSource = fs.readFileSync(__filename, 'utf8');
 const b4ScriptPath = path.join(process.cwd(), 'scripts', 'chat-window-adaptive-range-synthetic.js');
 const b4EvidencePath = 'C:\\Users\\tan_s\\AppData\\Local\\Temp\\opencode\\wave-b4-adaptive-range-evidence.json';
@@ -704,37 +702,7 @@ describe('CF3 range provenance diagnostics', () => {
   });
 });
 
-describe('B4S recovered anonymous source oracle', () => {
-  test('primary send is owned directly by one anonymous click listener with no named delegation', () => {
-    expect(recoveredSource).not.toContain('function handlePrimarySendClick() {');
-    expect(recoveredSource.match(/handlePrimarySendClick\(\);/g) || []).toHaveLength(0);
-    expect(recoveredSource.match(/sendBtn\.addEventListener\('click', \(\) => \{\s*if \(appendInputMode\) \{/g) || []).toHaveLength(1);
-    expect(recoveredSource.match(/sendBtn\.addEventListener\('click'/g) || []).toHaveLength(1);
-  });
-
-  test('chat scroll is owned directly by one passive anonymous listener with no named delegation', () => {
-    expect(recoveredSource).not.toContain('function handleChatContainerScroll() {');
-    expect(recoveredSource.match(/handleChatContainerScroll\(\);/g) || []).toHaveLength(0);
-    expect(recoveredSource.match(/chatContainer\.addEventListener\('scroll', \(\) => \{\s*if \(!chatWindowState\.programmaticScroll\) \{/g) || []).toHaveLength(1);
-    expect(recoveredSource.match(/chatContainer\.addEventListener\('scroll'[\s\S]*?\}, \{ passive: true \}\);/g) || []).toHaveLength(1);
-  });
-
-  test('sessionId switch case owns the route body and break directly with no named delegation', () => {
-    expect(recoveredSource).not.toContain('function handleSessionIdMessage(message) {');
-    expect(recoveredSource.match(/handleSessionIdMessage\(message\);/g) || []).toHaveLength(0);
-    expect(recoveredSource.match(/case 'sessionId': \{\s*const route = resolveEventSessionId\(message, 'sessionId'\);/g) || []).toHaveLength(1);
-    expect(recoveredSource.match(/case 'sessionId': \{[\s\S]*?refreshSendButtonStateAfterSessionSwitch\(\);\s*break;\s*\}/g) || []).toHaveLength(1);
-  });
-
-  test('assigned alias lambda owns migration and boolean returns directly with no named delegation', () => {
-    expect(recoveredSource).not.toContain('function applyKeyedChatPresentationAliasMigration(oldKey, newKey, sessionId) {');
-    expect(recoveredSource.match(/applyKeyedChatPresentationAliasMigration\(oldKey, newKey, sessionId\);/g) || []).toHaveLength(0);
-    expect(recoveredSource.match(/rekeyKeyedChatPresentation = \(oldKey, newKey, sessionId\) => \{\s*if \(!KEYED_CHAT_RECONCILE_ENABLED/g) || []).toHaveLength(1);
-    expect(recoveredSource.match(/rekeyKeyedChatPresentation = \(oldKey, newKey, sessionId\) => \{[\s\S]*?return true;\s*\};/g) || []).toHaveLength(1);
-  });
-});
-
-describe('B4S-R3 recovered anonymous owner behavior matrices', () => {
+describe('B4S-R3 self-contained owner behavior matrices', () => {
   const extractOwnedBlock = (marker: string, ownerSource = source) => {
     const start = ownerSource.indexOf(marker);
     expect(start).toBeGreaterThanOrEqual(0);
@@ -752,12 +720,6 @@ describe('B4S-R3 recovered anonymous owner behavior matrices', () => {
     const sandbox = vm.createContext({ ...context });
     vm.runInContext(`function ${name}(${args}) {${body}}; globalThis.__owner = ${name};`, sandbox);
     return sandbox as Record<string, any>;
-  };
-  const ownerSlices = {
-    primarySend: extractOwnedBlock("sendBtn.addEventListener('click', () =>", recoveredSource).slice,
-    chatScroll: extractOwnedBlock("chatContainer.addEventListener('scroll', () =>", recoveredSource).slice,
-    sessionId: extractOwnedBlock("case 'sessionId':", recoveredSource).slice,
-    aliasMigration: extractOwnedBlock('rekeyKeyedChatPresentation = (oldKey, newKey, sessionId) =>', recoveredSource).slice,
   };
   const normalizeRelocatedBody = (body: string, sessionCase = false) => {
     const lines = body.replace(/\r\n/g, '\n').split('\n');
@@ -788,13 +750,11 @@ describe('B4S-R3 recovered anonymous owner behavior matrices', () => {
     expect(namedBodies.sessionId).toContain('transitionActiveSessionPresentationOwner(prevSessionId, sessionId);');
   });
 
-  test('recovered anonymous source slices retain reviewed hashes and singular ownership', () => {
-    expect(Object.fromEntries(Object.entries(ownerSlices).map(([key, value]) => [key, sourceHash(value)]))).toEqual({
-      primarySend: '018472c1273dbff9a4840ce20070125a5b0d7eb906910d8aadefa82a659edf9c',
-      chatScroll: '59a0fc74715e1dd12af71ff36fc24a411967b9b08f7dc62620fa008353d7e163',
-      sessionId: '351876861f7dfcd8e32bee1a1412b224ad057d3ef1488383af93362d24c29e31',
-      aliasMigration: '091cfc9cdfd26c13527c4aeaef6b6e0aa60205d29592479aee99c0f641fcc9c3',
-    });
+  test('current named owners retain singular production ownership without an external oracle', () => {
+    expect(source.match(/function handlePrimarySendClick\(\) \{/g) || []).toHaveLength(1);
+    expect(source.match(/function handleChatContainerScroll\(\) \{/g) || []).toHaveLength(1);
+    expect(source.match(/function handleSessionIdMessage\(message\) \{/g) || []).toHaveLength(1);
+    expect(source.match(/function applyKeyedChatPresentationAliasMigration\(oldKey, newKey, sessionId\) \{/g) || []).toHaveLength(1);
     expect(source.match(/sendBtn\.addEventListener\('click'/g) || []).toHaveLength(1);
     expect(source.match(/chatContainer\.addEventListener\('scroll'/g) || []).toHaveLength(1);
     expect(source.match(/case 'sessionId':/g) || []).toHaveLength(1);
@@ -819,7 +779,7 @@ describe('B4S-R3 recovered anonymous owner behavior matrices', () => {
     expect(run(false, true)).toEqual({ trace: ['isNearBottom', 'updateJumpBottom', 'hideQuote'], returned: undefined, pinned: true });
     expect(run(false, false)).toEqual({ trace: ['isNearBottom', 'captureAnchor', 'updateJumpBottom', 'hideQuote'], returned: undefined, pinned: false });
     expect(source.match(/chatContainer\.addEventListener\('scroll'[\s\S]*?\}, \{ passive: true \}\);/g) || []).toHaveLength(1);
-    expect(ownerSlices.chatScroll).not.toContain('scheduleRenderFromState');
+    expect(extractOwnedBlock('function handleChatContainerScroll()').slice).not.toContain('scheduleRenderFromState');
   });
 
   test('sessionId matrix preserves invalid, background, same, bootstrap, and switching order', () => {
@@ -999,7 +959,7 @@ describe('B4S-R3 recovered anonymous owner behavior matrices', () => {
         'renderAttachments', 'renderContext', 'closeMention'],
       returned: undefined, queued: 1, switching: true, input: '', draft: '',
     });
-    expect(ownerSlices.primarySend).not.toContain('scheduleRenderFromState');
+    expect(extractOwnedBlock('function handlePrimarySendClick()').slice).not.toContain('scheduleRenderFromState');
   });
 });
 
@@ -3771,8 +3731,11 @@ describe('A2.4D journaled keyed and structural transaction', () => {
     expect(adaptiveResolver).not.toMatch(/scheduleRenderFromState|scrollToBottom|applyChatWindowOrWave2|renderFromStateLegacy/);
     expect(sourceHash(extractFunction('function tryPatchAssistantStreamingBubble(')))
       .toBe('285abb29f2dc5dabf8eb1d7b4f55805cd009789d99d543fa0c9ca0000f9b8457');
-    expect(sourceHash(extractFunction('function attemptAssistantUpgrade(')))
-      .toBe('27909dee2dff5e00dabf79edc6cd71762c1d37f2f37317668387f4866aeb25ea');
+    const assistantUpgrade = extractFunction('function attemptAssistantUpgrade(');
+    expect(assistantUpgrade).not.toMatch(
+      /CHAT_WINDOW_ADAPTIVE|resolveChatWindowAdaptiveRangePolicy|applyChatWindowOrWave2|renderFromStateLegacy/,
+    );
+    expect(assistantUpgrade).toContain("allowCanonicalHandoff: source === 'chatDone'");
     expect(sourceHash(extractFunction('function scheduleRenderFromState(')))
       .toBe('b2977c0a62af34a61c73fa241bfe685c3efdb8823718665e5c040e6dd44d8ded');
     expect(sourceHash(extractFunction('function noteFullRenderRequest(')))
