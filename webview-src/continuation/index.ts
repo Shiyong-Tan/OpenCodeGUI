@@ -3,6 +3,8 @@ import { createSessionState, createSessionStore } from './session-store';
 import { createHydrationStateController } from './hydration-state-controller';
 import { createSessionEventRouter } from './session-event-router';
 import { createSessionRenderScheduler } from './session-render-scheduler';
+import { createSessionSelectionController } from '../session-runtime/session-selection-controller';
+import { createSessionViewStore } from '../session-runtime/session-view-store';
 
 export const CONTINUATION_FACADE_VERSION = 1 as const;
 
@@ -14,6 +16,8 @@ const facade = Object.freeze({
   createHydrationStateController,
   createSessionEventRouter,
   createSessionRenderScheduler,
+  createSessionSelectionController,
+  createSessionViewStore,
 });
 
 declare global {
