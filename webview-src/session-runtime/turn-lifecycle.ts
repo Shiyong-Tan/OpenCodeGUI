@@ -72,6 +72,24 @@ export function createTurnLifecycleController(options: { now?(): number } = {}) 
       return infer(session);
     },
 
+    hydrateAuthoritative(session: TurnLifecycleSession): WebviewTurnLifecycle {
+      const current = infer(session);
+      const next: WebviewTurnLifecycle = {
+        generation: current.generation,
+        phase: 'effects-finalized',
+        backendInFlight: false,
+        canonicalAssistantId: null,
+      };
+      project(session, next, now());
+      return next;
+    },
+
+    reconcileProjection(session: TurnLifecycleSession): WebviewTurnLifecycle {
+      const current = infer(session);
+      project(session, current, now());
+      return current;
+    },
+
     start(session: TurnLifecycleSession): WebviewTurnLifecycle {
       const current = infer(session);
       const next: WebviewTurnLifecycle = {

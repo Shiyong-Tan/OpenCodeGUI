@@ -20,8 +20,10 @@ describe('hydration volatile state controller', () => {
     const result = controller.restore(hydrated, preserved);
     expect(hydrated.timeline).toEqual(['local-user']);
     expect(hydrated.messagesById.has('system:changeList:one')).toBe(false);
-    expect(hydrated.backendTurnInFlight).toBe(true);
-    expect(hydrated.turnFullyFinalized).toBe(false);
+    expect(hydrated.turnLifecycle).toMatchObject({
+      phase: 'active',
+      backendInFlight: true,
+    });
     expect(result).toMatchObject({
       missingIds: ['local-user'],
       skippedArtifacts: { timeline: 1, backing: 1 },

@@ -15,6 +15,8 @@ describe('turn lifecycle production integration', () => {
     expect(source).toContain('turnLifecycleController.acceptMainFinal(session, resolvedFinal)');
     expect(source).toContain('turnLifecycleController.completeEffects(session);');
     expect(source).toContain('turnLifecycleController.cancel(session);');
+    expect(source).toContain('turnLifecycleController.hydrateAuthoritative(session);');
+    expect(source).toContain('turnLifecycleController.reconcileProjection(session);');
   });
 
   test('gates assistant metadata and chunks through the monotonic lifecycle', () => {

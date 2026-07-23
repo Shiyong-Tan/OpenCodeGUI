@@ -900,7 +900,9 @@ function captureVolatileHydrationState(session) {
 }
 
 function restoreVolatileHydrationState(session, preserved) {
-    return hydrationStateController.restore(session, preserved);
+    const result = hydrationStateController.restore(session, preserved);
+    turnLifecycleController.reconcileProjection(session);
+    return result;
 }
 
 function postLiveTurnResumeReconcileDiagnostic(marker, sessionId, reason, extra = []) {
@@ -14379,11 +14381,8 @@ function appendMessageImages(parentEl, message) {
                     session.pendingAssistantUpgrade = null;
                     session.lastAssistantUpgradeFallback = null;
                     session.awaitingFinalMapBind = false;
-                    session.turnLifecycle = undefined;
-                    session.backendTurnInFlight = false;
-                    session.turnFullyFinalized = true;
+                    turnLifecycleController.hydrateAuthoritative(session);
                     session.earlyFinalAssistantId = null;
-                    session.finalAssistantLock = null;
                     if (session.hiddenControlUserIds instanceof Set) {
                         session.hiddenControlUserIds.clear();
                     }

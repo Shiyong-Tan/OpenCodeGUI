@@ -68,7 +68,10 @@ export function createHydrationStateController(options: HydrationStateController
 
   function capture(session: any): any | null {
     if (!session) return null;
-    const activeTurn = session.backendTurnInFlight === true && session.turnFullyFinalized === false
+    const hasLifecycle = Boolean(session.turnLifecycle?.phase);
+    const activeTurn = (hasLifecycle
+      ? session.turnLifecycle.phase === 'active'
+      : session.backendTurnInFlight === true && session.turnFullyFinalized === false)
       && session.cancelledTurn !== true && session.canceledActiveTurn !== true;
     return {
       messagesById: cloneMap(session.messagesById),
@@ -94,7 +97,17 @@ export function createHydrationStateController(options: HydrationStateController
       streamMode: session.streamMode,
       earlyFinalAssistantId: session.earlyFinalAssistantId,
       turnFullyFinalized: session.turnFullyFinalized,
-      turnLifecycle: clonePlainValue(session.turnLifecycle),
+      turnLifecycle: clonePlainValue(
+        session.turnLifecycle
+        || (activeTurn
+          ? {
+            generation: 0,
+            phase: 'active',
+            backendInFlight: true,
+            canonicalAssistantId: null,
+          }
+          : undefined),
+      ),
       appendRootUserKey: session.appendRootUserKey,
       appendComposerFor: session.appendComposerFor,
       appendComposerDrafts: cloneMap(session.appendComposerDrafts),
@@ -126,7 +139,9 @@ export function createHydrationStateController(options: HydrationStateController
     const skippedCanonicalizedVolatile = { timeline: 0, backing: 0, fields: 0 };
     const skippedDurable = { timeline: 0, backing: 0 };
     let hasCanonicalizedVolatileDuplicate = false;
-    const preservedTurnIsActive = preserved.backendTurnInFlight === true && preserved.turnFullyFinalized === false;
+    const preservedTurnIsActive = preserved.turnLifecycle?.phase
+      ? preserved.turnLifecycle.phase === 'active'
+      : preserved.backendTurnInFlight === true && preserved.turnFullyFinalized === false;
     const activeMessageIds = new Set([
       preserved.thinkingId,
       preserved.currentTurnAssistantKey,
@@ -223,10 +238,10 @@ export function createHydrationStateController(options: HydrationStateController
     };
     const shouldSkipStaleInFlightField = (name: string) => {
       if (!hasCanonicalizedVolatileDuplicate) return false;
-      const fields = new Set(['pendingAssistantUpgrade', 'thinkingId', 'currentTurnAssistantKey', 'currentTurnAssistantMsgId', 'lastTurnUserId', 'lastTurnAssistantId', 'activeTurnOpId', 'backendTurnInFlight', 'awaitingFinalMapBind', 'streamMode', 'appendRootUserKey']);
+      const fields = new Set(['pendingAssistantUpgrade', 'thinkingId', 'currentTurnAssistantKey', 'currentTurnAssistantMsgId', 'lastTurnUserId', 'lastTurnAssistantId', 'activeTurnOpId', 'awaitingFinalMapBind', 'streamMode', 'appendRootUserKey', 'turnLifecycle']);
       if (!fields.has(name)) return false;
       if (fieldReferencesCanonicalHydratedVolatile(preserved[name])) return true;
-      return ['activeTurnOpId', 'backendTurnInFlight', 'awaitingFinalMapBind', 'streamMode'].includes(name)
+      return ['activeTurnOpId', 'awaitingFinalMapBind', 'streamMode', 'turnLifecycle'].includes(name)
         && session.turnFullyFinalized !== false && session.backendTurnInFlight !== true;
     };
     const preserveField = (name: string, shouldPreserve: boolean) => {
@@ -239,7 +254,6 @@ export function createHydrationStateController(options: HydrationStateController
       fieldNames.push(name);
     };
     preserveField('pendingAssistantUpgrade', Boolean(preserved.pendingAssistantUpgrade));
-    preserveField('finalAssistantLock', Boolean(preserved.finalAssistantLock));
     preserveField('thinkingId', Boolean(preserved.thinkingId));
     preserveField('currentTurnAssistantKey', Boolean(preserved.currentTurnAssistantKey));
     preserveField('currentTurnAssistantMsgId', Boolean(preserved.currentTurnAssistantMsgId));
@@ -248,11 +262,9 @@ export function createHydrationStateController(options: HydrationStateController
     preserveField('cancelledTurn', preserved.cancelledTurn === true);
     preserveField('canceledActiveTurn', preserved.canceledActiveTurn === true);
     preserveField('activeTurnOpId', Boolean(preserved.activeTurnOpId));
-    preserveField('backendTurnInFlight', preserved.backendTurnInFlight === true);
     preserveField('awaitingFinalMapBind', preserved.awaitingFinalMapBind === true);
     preserveField('streamMode', Boolean(preserved.streamMode));
     preserveField('earlyFinalAssistantId', Boolean(preserved.earlyFinalAssistantId));
-    preserveField('turnFullyFinalized', preserved.turnFullyFinalized === false);
     preserveField('turnLifecycle', preservedTurnIsActive && Boolean(preserved.turnLifecycle));
     preserveField('appendRootUserKey', Boolean(preserved.appendRootUserKey));
     preserveField('appendComposerFor', Boolean(preserved.appendComposerFor));

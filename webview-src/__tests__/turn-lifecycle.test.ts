@@ -84,4 +84,37 @@ describe('webview single-session turn lifecycle', () => {
     expect(controller.fail(failed).phase).toBe('failed');
     expect(controller.canAcceptAssistantActivity(failed)).toBe(false);
   });
+
+  test('hydrates an authoritative durable baseline through the single writer', () => {
+    const session: any = {};
+    controller.start(session);
+    controller.setBackendInFlight(session, true);
+    expect(controller.hydrateAuthoritative(session)).toEqual({
+      generation: 1,
+      phase: 'effects-finalized',
+      backendInFlight: false,
+      canonicalAssistantId: null,
+    });
+    expect(session).toMatchObject({
+      backendTurnInFlight: false,
+      turnFullyFinalized: true,
+      finalAssistantLock: null,
+    });
+  });
+
+  test('reconciles a restored active lifecycle into compatibility projections', () => {
+    const session: any = {
+      turnLifecycle: {
+        generation: 4,
+        phase: 'active',
+        backendInFlight: true,
+        canonicalAssistantId: null,
+      },
+      backendTurnInFlight: false,
+      turnFullyFinalized: true,
+    };
+    controller.reconcileProjection(session);
+    expect(session.backendTurnInFlight).toBe(true);
+    expect(session.turnFullyFinalized).toBe(false);
+  });
 });
