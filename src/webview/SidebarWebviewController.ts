@@ -612,8 +612,7 @@ ${attachmentLines.join('\n')}`
                     break;
                 }
                 case "compactSession": {
-                    const requestedSessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
-                    const sessionId = requestedSessionId || host.currentSessionId || '';
+                    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
                     if (!sessionId) {
                         host.postAddResponse(activeWebview, 'Compaction skipped: no active session.');
                         break;
@@ -764,7 +763,7 @@ ${attachmentLines.join('\n')}`
                     break;
                 }
                 case "undoSegmentUpsert": {
-                    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : host.currentSessionId;
+                    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
                     if (!sessionId) {
                         host.uiDebugChannel.appendLine(`[EXT][SEG_UPSERT_SKIP] reason=missing-sessionId noticeKey=${typeof data.segment?.noticeKey === 'string' ? data.segment.noticeKey : 'null'}`);
                         break;
@@ -860,7 +859,7 @@ ${attachmentLines.join('\n')}`
                     break;
                 }
                 case "undoSegmentRemove": {
-                    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : host.currentSessionId;
+                    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
                     const noticeKey = typeof data.noticeKey === 'string' ? data.noticeKey : '';
                     
                     if (!sessionId || !noticeKey) {
@@ -890,7 +889,7 @@ ${attachmentLines.join('\n')}`
                     break;
                 }
                 case "undoSegmentDelete": {
-                    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : host.currentSessionId;
+                    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
                     const noticeKey = typeof data.noticeKey === 'string' ? data.noticeKey : '';
                     if (!sessionId || !noticeKey) {
                         host.uiDebugChannel.appendLine(
@@ -1277,7 +1276,11 @@ ${attachmentLines.join('\n')}`
                     if (!data.dataUrl || !data.mime) return;
                     const attachmentSessionId = typeof data.sessionId === 'string' && data.sessionId
                         ? data.sessionId
-                        : host.currentSessionId;
+                        : '';
+                    if (!attachmentSessionId) {
+                        host.uiDebugChannel.appendLine('[EXT][ATTACHMENT_DROP] type=clipboardImage reason=missing-session-owner');
+                        break;
+                    }
                     try {
                         const saved = await host.attachmentStorage.saveClipboardImage(data.dataUrl, data.mime);
                         activeWebview.postMessage({
@@ -1302,7 +1305,11 @@ ${attachmentLines.join('\n')}`
                 case "selectAttachments": {
                     const attachmentSessionId = typeof data.sessionId === 'string' && data.sessionId
                         ? data.sessionId
-                        : host.currentSessionId;
+                        : '';
+                    if (!attachmentSessionId) {
+                        host.uiDebugChannel.appendLine('[EXT][ATTACHMENT_DROP] type=selectAttachments reason=missing-session-owner');
+                        break;
+                    }
                     try {
                         const picks = await vscode.window.showOpenDialog({
                             canSelectMany: true,
@@ -1871,7 +1878,7 @@ ${attachmentLines.join('\n')}`
                         break;
                     }
                     try {
-                        const sessionId = typeof data.sessionId === 'string' ? data.sessionId : host.currentSessionId;
+                        const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
                         if (!sessionId) {
                             host.postAddResponse(activeWebview, 'No session available to open diff.');
                             break;
@@ -1886,7 +1893,7 @@ ${attachmentLines.join('\n')}`
                     break;
                 }
                 case "toolResult": {
-                    const sessionId = data.sessionId || host.currentSessionId;
+                    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
                     const callId = typeof data.callId === 'string' ? data.callId : '';
                     if (!sessionId || !callId) {
                         host.uiDebugChannel.appendLine(
@@ -1925,7 +1932,7 @@ ${attachmentLines.join('\n')}`
                     break;
                 }
                 case "permissionResult": {
-                    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : host.currentSessionId;
+                    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
                     const permissionId = typeof data.permissionId === 'string' ? data.permissionId : '';
                     const requestId = typeof data.requestId === 'string' ? data.requestId : '';
                     const response = data.response === 'always' || data.response === 'reject' ? data.response : 'once';

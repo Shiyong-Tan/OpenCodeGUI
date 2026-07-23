@@ -212,4 +212,26 @@ describe('cross-session runtime repository audit', () => {
     expect(read('src', 'webview', 'SidebarWebviewController.ts')).not.toContain('pendingClientMessageId');
     expect(provider).toContain('private pendingLocalKeyBySession = new Map<string, string>();');
   });
+
+  test('owned Webview commands do not fall back to Extension selection', () => {
+    const controller = read('src', 'webview', 'SidebarWebviewController.ts');
+    for (const command of [
+      'compactSession',
+      'undoSegmentUpsert',
+      'undoSegmentRemove',
+      'undoSegmentDelete',
+      'openGitDiff',
+      'toolResult',
+      'permissionResult',
+      'clipboardImage',
+      'selectAttachments',
+    ]) {
+      const start = controller.indexOf(`case "${command}":`);
+      expect(start).toBeGreaterThanOrEqual(0);
+      const end = controller.indexOf('\n                case "', start + 10);
+      const block = controller.slice(start, end > start ? end : undefined);
+      expect(block).not.toContain(': host.currentSessionId');
+      expect(block).not.toContain('|| host.currentSessionId');
+    }
+  });
 });
