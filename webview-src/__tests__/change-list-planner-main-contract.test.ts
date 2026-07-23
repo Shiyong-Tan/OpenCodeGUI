@@ -32,7 +32,8 @@ describe('change-list materialization planner integration', () => {
     const materialize = extractFunction('function materializeInjectedChangeLists(');
     expect(mainSource).toContain('const planChangeListMaterialization = window.__ocFeatures?.planChangeListMaterialization;');
     expect(materialize).toContain('const plan = planChangeListMaterialization({');
-    expect(materialize).toContain('session.messagesById.set(message.id, message);');
+    expect(materialize).toContain('messageIdentityStore.store(session.messagesById, message);');
+    expect(materialize).not.toContain('session.messagesById.set(');
     expect(materialize).toContain('session.timeline = [...plan.timeline];');
     expect(materialize).not.toContain('findNearestPriorTimelineId');
   });
