@@ -24,8 +24,9 @@ describe('stable message identity production integration', () => {
       'const result = messageRekeyController.rekey(session, oldId, newId, sessionId);',
     );
     expect(replacement).toContain(
-      "if (sessionId === activeSessionId && typeof sessionSearch !== 'undefined')",
+      'getSessionSearchState(sessionId, false)?.rekey(oldId, newId);',
     );
+    expect(replacement).not.toContain('sessionId === activeSessionId');
     expect(replacement).not.toContain('session.messagesById.delete');
     expect(replacement).not.toContain('session.timeline = session.timeline.map');
   });

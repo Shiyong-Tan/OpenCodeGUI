@@ -197,6 +197,7 @@ function loadUserAckBindHarness() {
         },
         logTimelineSnapshot: jest.fn(),
         syncAppendSnapshotMetadata: jest.fn(),
+        getSessionSearchState: () => ({ rekey: jest.fn() }),
     };
     context.messageRekeyController = createMessageRekeyController({
         bindCanonical: context.messageIdentityStore.bindCanonical,

@@ -296,12 +296,12 @@ export async function initializeSidebarSession(
 
                         const persisted = await host.loadPersistedSegment(recentSessionId);
                         if (persisted?.segment?.historySegments) {
-                            host.revertedSegmentHistory = persisted.segment.historySegments;
+                            host.revertedSegmentHistoryStore.set(recentSessionId, persisted.segment.historySegments);
                         } else {
-                            host.revertedSegmentHistory = [];
+                            host.revertedSegmentHistoryStore.clearSession(recentSessionId);
                         }
                         if (persisted?.segment && persisted.segment.isActive === true && persisted.discarded !== true) {
-                            host.client.setRevertedSegment({
+                            host.client.setRevertedSegment(recentSessionId, {
                                 isActive: true,
                                 discarded: false,
                                 startMessageId: persisted.segment.startMessageId || recentSessionId,
@@ -315,7 +315,7 @@ export async function initializeSidebarSession(
                                 operationId: persisted.segment.operationId
                             });
                         } else {
-                            host.client.setRevertedSegment(undefined);
+                            host.client.setRevertedSegment(recentSessionId, undefined);
                         }
 
                         const segMap = host.undoSegmentsBySession.get(recentSessionId);

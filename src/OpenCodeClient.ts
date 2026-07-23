@@ -477,7 +477,7 @@ export class OpenCodeClient {
     private nextMessageIndex = 0;
     private internalMessageSeq = 0;
     private seqCounter = 0;
-    private revertedSegment?: RevertedSegment;
+    private readonly revertedSegmentBySession = new Map<string, RevertedSegment>();
     private uiDebugChannel?: vscode.OutputChannel;
     private turnStateBySession = new Map<string, TurnState>();
     private pendingTurnChangesBySession = new PendingTurnChangeStore();
@@ -661,7 +661,7 @@ export class OpenCodeClient {
         this.nextMessageIndex = 0;
         this.internalMessageSeq = 0;
         this.seqCounter = 0;
-        this.revertedSegment = undefined;
+        this.revertedSegmentBySession.clear();
         this.turnStateBySession.clear();
         this.pendingTurnChangesBySession.clear();
         this.turnWriteStateBySession.clear();
@@ -4044,7 +4044,7 @@ export class OpenCodeClient {
         if (typeof startIndex !== 'number') return undefined;
         const tailIndex = order.length ? order.length - 1 : startIndex;
         let effectiveEndIndex = tailIndex;
-        const prevSeg = this.revertedSegment;
+        const prevSeg = sessionId ? this.revertedSegmentBySession.get(sessionId) : undefined;
         const hasActivePrev = Boolean(prevSeg && prevSeg.isActive && !prevSeg.discarded);
         if (hasActivePrev && prevSeg) {
             const prevStartIndex = typeof prevSeg.startMessageIndex === 'number'
@@ -4158,12 +4158,17 @@ export class OpenCodeClient {
         });
     }
 
-    public getRevertedSegment(): RevertedSegment | undefined {
-        return this.revertedSegment;
+    public getRevertedSegment(sessionId: string): RevertedSegment | undefined {
+        return sessionId ? this.revertedSegmentBySession.get(sessionId) : undefined;
     }
 
-    public setRevertedSegment(segment: RevertedSegment | undefined): void {
-        this.revertedSegment = segment;
+    public setRevertedSegment(sessionId: string, segment: RevertedSegment | undefined): void {
+        if (!sessionId) return;
+        if (segment) {
+            this.revertedSegmentBySession.set(sessionId, segment);
+        } else {
+            this.revertedSegmentBySession.delete(sessionId);
+        }
     }
 
     private isValidActiveRevertedSegmentForUndo(prevSeg: RevertedSegment | undefined, startIndex: number, sessionId?: string): prevSeg is RevertedSegment {
@@ -4234,7 +4239,7 @@ export class OpenCodeClient {
         this.logUiDebug(`EXT: undo.anchor.ok | startMessageId | ${startMessageId} | startIndex | ${startIndex} | undo.order.source=${orderSource}`);
         const tailIndex = activeOrder.length ? activeOrder.length - 1 : startIndex;
         let effectiveEndIndex = tailIndex;
-        const prevSeg = this.revertedSegment;
+        const prevSeg = explicitSessionId ? this.revertedSegmentBySession.get(explicitSessionId) : undefined;
         const hasActivePrev = !useFallbackOrder && this.isValidActiveRevertedSegmentForUndo(prevSeg, startIndex, explicitSessionId);
         let prevStartIndex: number | undefined;
         let prevEndIndex: number | undefined;
@@ -4324,7 +4329,10 @@ export class OpenCodeClient {
             }
             const mergedEndIndex = activeIndexMap.get(mergedEndId) ?? effectiveEndIndex;
 
-            this.revertedSegment = {
+            if (!explicitSessionId) {
+                return { conflicts: [], touchedFiles, applied: false, reason: 'missing-session' };
+            }
+            this.revertedSegmentBySession.set(explicitSessionId, {
                 isActive: true,
                 discarded: false,
                 startMessageId,
@@ -4340,7 +4348,7 @@ export class OpenCodeClient {
                 restoreCommit: result.restoreCommit,
                 undoTargetCommit: result.undoTargetCommit,
                 fileSet: result.fileSet
-            };
+            });
             this.logUiDebug(`EXT: undo.segment.merged | startIndex | ${startIndex} | endIndex | ${mergedEndIndex} | startId | ${startMessageId} | endId | ${mergedEndId} | messageIds | ${mergedMessageIds.length}`);
             return { conflicts: [], touchedFiles: result.touchedFiles, applied: result.applied, reason: result.reason };
         }
@@ -4348,13 +4356,13 @@ export class OpenCodeClient {
     }
 
     public async restoreAll(options?: { force?: boolean; sessionId?: string }): Promise<{ conflicts: ConflictDetail[]; touchedFiles: string[]; applied: boolean }> {
-        const segment = this.revertedSegment;
-        if (!segment || segment.discarded) {
-            throw new Error('No active reverted segment to restore.');
-        }
         const sessionId = typeof options?.sessionId === 'string' && options.sessionId ? options.sessionId : this.currentSessionId;
         if (!sessionId) {
             return { conflicts: [], touchedFiles: [], applied: false };
+        }
+        const segment = this.revertedSegmentBySession.get(sessionId);
+        if (!segment || segment.discarded) {
+            throw new Error('No active reverted segment to restore.');
         }
         if (!this.gitUndoAvailable) {
             this.logUiDebug(`EXT: restore.disabled | reason=git-unavailable`);
@@ -4448,16 +4456,18 @@ export class OpenCodeClient {
         return { conflicts: [], touchedFiles: result.touchedFiles, applied: result.applied };
     }
 
-    public discardRevertedSegment(): void {
-        if (!this.revertedSegment?.isActive) return;
-        this.revertedSegment.discarded = true;
-        this.revertedSegment.isActive = false;
-        this.revertedSegment.collapsed = true;
+    public discardRevertedSegment(sessionId: string): void {
+        const segment = this.revertedSegmentBySession.get(sessionId);
+        if (!segment?.isActive) return;
+        segment.discarded = true;
+        segment.isActive = false;
+        segment.collapsed = true;
     }
 
-    public setRevertedSegmentCollapsed(collapsed: boolean): void {
-        if (!this.revertedSegment) return;
-        this.revertedSegment.collapsed = collapsed;
+    public setRevertedSegmentCollapsed(sessionId: string, collapsed: boolean): void {
+        const segment = this.revertedSegmentBySession.get(sessionId);
+        if (!segment) return;
+        segment.collapsed = collapsed;
     }
 
     public removeMessageId(messageId: string): void {

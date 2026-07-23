@@ -44,6 +44,7 @@ import {
 } from './session-runtime/turn/TurnRuntimeShadow';
 import { ChatEventActorRouter } from './session-runtime/ChatEventActorRouter';
 import { PendingConflictStore } from './session-runtime/PendingConflictStore';
+import { RevertedSegmentHistoryStore } from './session-runtime/RevertedSegmentHistoryStore';
 
 type CanceledTurnRecord = {
     opId?: string;
@@ -403,7 +404,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private syncClientRevertedSegmentFromUndoSegments(sessionId: string): void {
         const segMap = this.undoSegmentsBySession.get(sessionId);
         if (!segMap || segMap.size === 0) {
-            this.client.setRevertedSegment(undefined);
+            this.client.setRevertedSegment(sessionId, undefined);
             return;
         }
         const activeSegments = Array.from(segMap.values())
@@ -411,7 +412,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
         const seg = activeSegments[0];
         if (!seg) {
-            this.client.setRevertedSegment(undefined);
+            this.client.setRevertedSegment(sessionId, undefined);
             return;
         }
         const memberMsgIds = Array.isArray(seg.memberMsgIds)
@@ -421,7 +422,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const endMessageId = seg.endMsgId || memberMsgIds[memberMsgIds.length - 1] || startMessageId;
         const startMessageIndex = this.client.getMessageIndex(startMessageId, sessionId);
         const endMessageIndex = this.client.getMessageIndex(endMessageId, sessionId);
-        this.client.setRevertedSegment({
+        this.client.setRevertedSegment(sessionId, {
             isActive: true,
             discarded: false,
             startMessageId,
@@ -436,13 +437,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private clearClientRevertedSegmentIfNonRestorable(sessionId: string): void {
-        const startMessageId = this.client.getRevertedSegment()?.startMessageId;
+        const startMessageId = this.client.getRevertedSegment(sessionId)?.startMessageId;
         if (!startMessageId) return;
 
         const noticeKey = `system:undo:${startMessageId}`;
         const stored = this.undoSegmentsBySession.get(sessionId)?.get(noticeKey);
         if (stored?.restoreAllowed === false) {
-            this.client.setRevertedSegment(undefined);
+            this.client.setRevertedSegment(sessionId, undefined);
             this.uiDebugChannel.appendLine(`[EXT][UNDO_SEGMENT] cleared non-restorable revertedSegment sessionId=${sessionId} noticeKey=${noticeKey}`);
         }
     }
@@ -606,9 +607,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private diffHashes = new Map<string, { before: string; after: string }>();
     private shownDiffKeysBySession = new Map<string, Set<string>>();
     private postFinalWatchDiffFocusedBySession = new Set<string>();
-    private revertedSegment?: { conflicts: ConflictDetail[]; discarded?: boolean };
     private clientMessageIdMap = new Map<string, string>();
-    private revertedSegmentHistory: Array<{ isActive: boolean; discarded: boolean; startMessageId?: string; startMessageIndex?: number; endMessageId?: string; endMessageIndex?: number; collapsed: boolean; messageIds?: string[] }> = [];
+    private readonly revertedSegmentHistoryStore = new RevertedSegmentHistoryStore();
     private readonly pendingConflictStore = new PendingConflictStore();
     private uiDebugChannel!: vscode.OutputChannel;
     private undoSegmentsBySession: Map<string, Map<string, SegmentState>> = new Map();
@@ -4127,8 +4127,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             this.currentWorkspaceKey = this.getWorkspaceKeyForRoot(newRoot);
             this.client.resetSessionState();
             this.currentSessionId = undefined;
-            this.revertedSegmentHistory = [];
-            this.revertedSegment = undefined;
+            this.revertedSegmentHistoryStore.clear();
 
             await this.client.ensureServer();
             const newPid = this.client.getServerPid();
@@ -4233,11 +4232,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             sessionId,
             operationId
         });
-        this.client.discardRevertedSegment();
-        const discardedSegment = this.client.getRevertedSegment();
+        this.client.discardRevertedSegment(sessionId);
+        const discardedSegment = this.client.getRevertedSegment(sessionId);
         liveWebview.postMessage({
             type: 'revertedSegmentDiscarded',
-            segment: discardedSegment ? { ...discardedSegment, historySegments: this.revertedSegmentHistory, noticeKey } : discardedSegment,
+            segment: discardedSegment ? { ...discardedSegment, historySegments: this.revertedSegmentHistoryStore.get(sessionId), noticeKey } : discardedSegment,
             sessionId,
             operationId
         });
@@ -4648,7 +4647,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 collapsed: true,
                 messageIds: segment.messageIds,
                 operationId: segment.operationId,
-                historySegments: this.revertedSegmentHistory
+                historySegments: this.revertedSegmentHistoryStore.get(sessionId)
             },
             conflicts: conflicts || [],
             discarded,
@@ -5379,8 +5378,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
         this.client.resetSessionState({ preserveInFlightSessionIds: retainedSendInFlightBySession });
         this.clientMessageIdMap.clear();
-        this.revertedSegment = undefined;
-        this.revertedSegmentHistory = [];
+        this.revertedSegmentHistoryStore.clear();
         this.pendingConflictStore.clear();
         this.pendingClientMessageId = undefined;
         this.lastDraft = undefined;

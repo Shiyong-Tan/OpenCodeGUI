@@ -93,4 +93,28 @@ describe('OpenCodeClient undo session-scoped message order', () => {
         expect(client.uiDebugChannel.appendLine).toHaveBeenCalledWith(expect.stringContaining('undo.order.source=missing'));
         expect(client.uiDebugChannel.appendLine).toHaveBeenCalledWith(expect.stringContaining('missing-session-cache-and-ui-order'));
     });
+
+    it('retains independent reverted segments when A and B undo are interleaved', async () => {
+        const client = createClient();
+        client.registerMessage('msg_A_anchor', 'ses_A');
+        client.registerMessage('msg_A_tail', 'ses_A');
+        client.registerMessage('msg_B_anchor', 'ses_B');
+        client.registerMessage('msg_B_tail', 'ses_B');
+
+        await client.undoFromMessage('msg_A_anchor', { sessionId: 'ses_A' });
+        await client.undoFromMessage('msg_B_anchor', { sessionId: 'ses_B' });
+
+        expect(client.getRevertedSegment('ses_A')).toMatchObject({
+            startMessageId: 'msg_A_anchor',
+            messageIds: ['msg_A_anchor', 'msg_A_tail'],
+        });
+        expect(client.getRevertedSegment('ses_B')).toMatchObject({
+            startMessageId: 'msg_B_anchor',
+            messageIds: ['msg_B_anchor', 'msg_B_tail'],
+        });
+
+        client.discardRevertedSegment('ses_A');
+        expect(client.getRevertedSegment('ses_A')?.discarded).toBe(true);
+        expect(client.getRevertedSegment('ses_B')?.discarded).toBe(false);
+    });
 });

@@ -348,6 +348,10 @@ function createHarness(options: { appendable?: boolean; undoAllowed?: boolean; b
     let conflictShellPresentationGeneration = 0;
     let conflictCardEl = null;
     let lastConflictPayload = null;
+    function clearOwnedConflictPayload() {
+      lastConflictPayload = null;
+      return true;
+    }
     ${extractFunction('function forEachSafeShellUserCanonicalPart(')}
     ${extractFunction('function scanSafeShellTextPage(')}
     ${extractFunction('function scanSafeShellAssistantTextPage(')}

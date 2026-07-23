@@ -435,12 +435,12 @@ ${attachmentLines.join('\n')}`
                             host.pendingClientMessageId = undefined;
                         }
                         if (targetMode === 'build') {
-                            const segment = host.client.getRevertedSegment();
+                            const segment = host.client.getRevertedSegment(targetSessionId);
                             if (segment) {
                                 segment.discarded = true;
                                 segment.isActive = true;
                                 segment.collapsed = true;
-                                host.client.setRevertedSegment(segment);
+                                host.client.setRevertedSegment(targetSessionId, segment);
                                 await host.persistRevertedSegment(targetSessionId, segment, segment.conflicts || [], true);
                             }
                         }
@@ -1031,12 +1031,12 @@ ${attachmentLines.join('\n')}`
 
                         const persisted = await host.loadPersistedSegment(targetSessionId);
                         if (persisted?.segment?.historySegments) {
-                            host.revertedSegmentHistory = persisted.segment.historySegments;
+                            host.revertedSegmentHistoryStore.set(targetSessionId, persisted.segment.historySegments);
                         } else {
-                            host.revertedSegmentHistory = [];
+                            host.revertedSegmentHistoryStore.clearSession(targetSessionId);
                         }
                         if (persisted?.segment && persisted.segment.isActive === true && persisted.discarded !== true) {
-                            host.client.setRevertedSegment({
+                            host.client.setRevertedSegment(targetSessionId, {
                                 isActive: true,
                                 discarded: false,
                                 startMessageId: persisted.segment.startMessageId || targetSessionId,
@@ -1050,7 +1050,7 @@ ${attachmentLines.join('\n')}`
                                 operationId: persisted.segment.operationId
                             });
                         } else {
-                            host.client.setRevertedSegment(undefined);
+                            host.client.setRevertedSegment(targetSessionId, undefined);
                         }
 
                         const segMap = host.undoSegmentsBySession.get(targetSessionId);
@@ -1403,7 +1403,7 @@ ${attachmentLines.join('\n')}`
                         host.uiDebugChannel.appendLine(`[EXT][UNDO_CALL] sessionId=${ownerSessionId} opId=${operationId}`);
                         host.uiDebugChannel.appendLine(`[EXT][UNDO_RX] anchorMsgId=${payloadMessageId} resolvedMsgId=${resolvedMessageId} sessionId=${ownerSessionId} opId=${operationId}`);
                         host.clearClientRevertedSegmentIfNonRestorable(ownerSessionId);
-                        const previousSegment = host.client.getRevertedSegment();
+                        const previousSegment = host.client.getRevertedSegment(ownerSessionId);
                         const currentActiveNoticeKey = previousSegment?.startMessageId
                             ? `system:undo:${previousSegment.startMessageId}`
                             : undefined;
@@ -1427,7 +1427,7 @@ ${attachmentLines.join('\n')}`
                             visibleMessageIds,
                             forwardMessageIdsFromAnchor
                         });
-                        const currentSegment = host.client.getRevertedSegment();
+                        const currentSegment = host.client.getRevertedSegment(ownerSessionId);
                         host.uiDebugChannel.appendLine(`[EXT][UNDO_RESULT] applied=${result.applied} conflicts=${result.conflicts.length} touched=${result.touchedFiles.length} reason=${result.reason || 'null'} segmentStart=${currentSegment?.startMessageId || 'null'} segmentEnd=${currentSegment?.endMessageId || 'null'}`);
                         host.uiDebugChannel.appendLine(`[EXT][UNDO_DONE] applied=${result.applied} conflicts=${result.conflicts.length} sessionId=${ownerSessionId}`);
                             if (!result.applied && result.conflicts.length) {
@@ -1502,7 +1502,7 @@ ${attachmentLines.join('\n')}`
                         host.uiDebugChannel.appendLine(`[EXT][UNDO_TX] type=messageIndexMap sessionId=${ownerSessionId} opId=${operationId}`);
                         host.postMessageIndexMap(activeWebview, ownerSessionId);
                         if (result.applied && previousSegment) {
-                            const current = host.client.getRevertedSegment();
+                            const current = host.client.getRevertedSegment(ownerSessionId);
                             const currentSet = new Set(current?.messageIds ?? []);
                             const prevIds = previousSegment.messageIds ?? [];
                             const trimmedPrevIds = prevIds.filter((id: string) => !currentSet.has(id));
@@ -1518,23 +1518,22 @@ ${attachmentLines.join('\n')}`
                                 operationId: previousSegment.operationId
                             };
                             if (trimmedPrevIds.length) {
-                                host.revertedSegmentHistory = [...host.revertedSegmentHistory, historyEntry];
+                                host.revertedSegmentHistoryStore.update(ownerSessionId, (entries: any[]) => [...entries, historyEntry]);
                             }
-                            host.revertedSegmentHistory = host.revertedSegmentHistory
+                            host.revertedSegmentHistoryStore.update(ownerSessionId, (entries: any[]) => entries
                                 .map((e: any) => ({
                                     ...e,
                                     messageIds: (e.messageIds ?? []).filter((id: string) => !currentSet.has(id))
                                 }))
-                                .filter((e: any) => (e.messageIds ?? []).length > 0);
+                                .filter((e: any) => (e.messageIds ?? []).length > 0));
                         }
-                        const segment = host.client.getRevertedSegment();
+                        const segment = host.client.getRevertedSegment(ownerSessionId);
                         const liveWebview = host._view?.webview || activeWebview;
                         if (segment) {
                             if (operationId) {
                                 segment.operationId = operationId;
-                                host.client.setRevertedSegment(segment);
+                                host.client.setRevertedSegment(ownerSessionId, segment);
                             }
-                            host.revertedSegment = { conflicts: result.conflicts };
                             const finalSessionId = ownerSessionId;
                             const canonicalMessageIds = Array.isArray(segment.messageIds)
                                 ? segment.messageIds.filter((id: string) => typeof id === 'string' && id.startsWith('msg_'))
@@ -1569,7 +1568,7 @@ ${attachmentLines.join('\n')}`
                                     collapsed: uiSegment.collapsed,
                                     messageIds: uiSegment.messageIds,
                                     operationId,
-                                    historySegments: host.revertedSegmentHistory
+                                    historySegments: host.revertedSegmentHistoryStore.get(ownerSessionId)
                                 },
                                 sessionId: finalSessionId,
                                 operationId,
@@ -1588,7 +1587,6 @@ ${attachmentLines.join('\n')}`
                             }
                             await host.persistRevertedSegment(ownerSessionId, uiSegment, result.conflicts, false);
                         } else {
-                            host.revertedSegment = { conflicts: result.conflicts };
                             const finalSessionId = ownerSessionId;
                             host.uiDebugChannel.appendLine(`[EXT][UNDO_TX] type=revertedSegment sessionId=${finalSessionId || 'null'} anchorMsgId=null endMsgId=null applied=true opId=${operationId || 'null'} messageIds=0`);
                             liveWebview.postMessage({
@@ -1734,7 +1732,7 @@ ${attachmentLines.join('\n')}`
                             host.postAddResponse(activeWebview, 'Restore unavailable: Git not installed or version too old. Please install/upgrade Git and restart VS Code.', { operationId, sessionId: ownerSessionId });
                             break;
                         }
-                        const currentSegment = host.client.getRevertedSegment();
+                        const currentSegment = host.client.getRevertedSegment(ownerSessionId);
                         const fallbackCommits = Array.isArray(currentSegment?.startCommits) && currentSegment?.startCommits?.length
                             ? currentSegment.startCommits
                             : (currentSegment?.startCommit ? [currentSegment.startCommit] : []);
@@ -1760,7 +1758,6 @@ ${attachmentLines.join('\n')}`
                             // conflictCard provides the user-facing prompt; no extra system message needed.
                             break;
                         }
-                        host.revertedSegment = { conflicts: [] };
                         activeWebview.postMessage({
                             type: 'restoredSegment',
                             noticeKey: typeof data.noticeKey === 'string' ? data.noticeKey : '',
@@ -1770,12 +1767,12 @@ ${attachmentLines.join('\n')}`
                             operationId
                         });
                         host.uiDebugChannel.appendLine(`[EXT][RESTORE_TX] type=restoredSegment sessionId=${ownerSessionId} opId=${operationId} noticeKey=${noticeKey || 'null'} applied=${result.applied}`);
-                        host.client.discardRevertedSegment();
-                        const discardedSegment = host.client.getRevertedSegment();
+                        host.client.discardRevertedSegment(ownerSessionId);
+                        const discardedSegment = host.client.getRevertedSegment(ownerSessionId);
                         host.uiDebugChannel.appendLine(`[EXT][RESTORE_TX] type=revertedSegmentDiscarded sessionId=${ownerSessionId} opId=${operationId}`);
                         activeWebview.postMessage({
                             type: 'revertedSegmentDiscarded',
-                            segment: discardedSegment ? { ...discardedSegment, historySegments: host.revertedSegmentHistory } : discardedSegment,
+                            segment: discardedSegment ? { ...discardedSegment, historySegments: host.revertedSegmentHistoryStore.get(ownerSessionId) } : discardedSegment,
                             sessionId: ownerSessionId,
                             operationId
                         });
@@ -1815,7 +1812,7 @@ ${attachmentLines.join('\n')}`
                     const ownerSessionId = payloadSessionId;
                     host.uiDebugChannel.appendLine(`[EXT][RESTORE_ROUTE] phase=owner-captured type=restoreSegment ownerSessionId=${ownerSessionId} opId=${operationId} noticeKey=${noticeKey || 'null'} anchorMsgId=${anchorMsgId} endMsgId=${endMsgId || 'null'}`);
                     try {
-                        const currentSegment = host.client.getRevertedSegment();
+                        const currentSegment = host.client.getRevertedSegment(ownerSessionId);
                         const segMap = host.undoSegmentsBySession.get(ownerSessionId);
                         const persistedSegment = noticeKey ? segMap?.get(noticeKey) : undefined;
                         const messageIds = Array.isArray(persistedSegment?.memberMsgIds) && persistedSegment?.memberMsgIds?.length
@@ -2060,7 +2057,7 @@ ${attachmentLines.join('\n')}`
                     try {
                         if (conflictContext.kind === 'undo' && conflictContext.startMessageId) {
                             host.clearClientRevertedSegmentIfNonRestorable(ownerSessionId);
-                            const previousSegment = host.client.getRevertedSegment();
+                            const previousSegment = host.client.getRevertedSegment(ownerSessionId);
                             const currentActiveNoticeKey = previousSegment?.startMessageId
                                 ? `system:undo:${previousSegment.startMessageId}`
                                 : undefined;
@@ -2098,15 +2095,14 @@ ${attachmentLines.join('\n')}`
                                     messageIds: previousSegment.messageIds,
                                     operationId: previousSegment.operationId
                                 };
-                                host.revertedSegmentHistory = [...host.revertedSegmentHistory, historyEntry];
+                                host.revertedSegmentHistoryStore.update(ownerSessionId, (entries: any[]) => [...entries, historyEntry]);
                             }
-                            const segment = host.client.getRevertedSegment();
+                            const segment = host.client.getRevertedSegment(ownerSessionId);
                             if (segment) {
                                 if (conflictContext.operationId) {
                                     segment.operationId = conflictContext.operationId;
-                                    host.client.setRevertedSegment(segment);
+                                    host.client.setRevertedSegment(ownerSessionId, segment);
                                 }
-                                host.revertedSegment = { conflicts: result.conflicts };
                                 activeWebview.postMessage({
                                     type: 'revertedSegment',
                                     conflicts: result.conflicts || [],
@@ -2119,7 +2115,7 @@ ${attachmentLines.join('\n')}`
                                         collapsed: segment.collapsed,
                                         messageIds: segment.messageIds,
                                         operationId: conflictContext.operationId,
-                                        historySegments: host.revertedSegmentHistory
+                                        historySegments: host.revertedSegmentHistoryStore.get(ownerSessionId)
                                     },
                                     sessionId: ownerSessionId,
                                     operationId: conflictContext.operationId,
@@ -2133,13 +2129,13 @@ ${attachmentLines.join('\n')}`
                         }
                         if (conflictContext.kind === 'restore') {
                             const result = await host.client.restoreAll({ force: true, sessionId: ownerSessionId });
-                            host.revertedSegmentHistory = [];
+                            host.revertedSegmentHistoryStore.clearSession(ownerSessionId);
                             host.uiDebugChannel.appendLine(`[EXT][CONFLICT_TX] type=revertedSegment sessionId=${ownerSessionId} opId=${conflictContext.operationId} conflictId=${conflictContext.conflictId} kind=restore`);
                             activeWebview.postMessage({
                                 type: 'revertedSegment',
                                 conflicts: result.conflicts || [],
                                 segment: {
-                                    historySegments: host.revertedSegmentHistory,
+                                    historySegments: host.revertedSegmentHistoryStore.get(ownerSessionId),
                                     messageIds: [],
                                     isActive: false,
                                     discarded: false,
@@ -2153,12 +2149,12 @@ ${attachmentLines.join('\n')}`
                                 operationId: conflictContext.operationId,
                                 conflictId: conflictContext.conflictId
                             });
-                            host.client.discardRevertedSegment();
-                            const discardedSegment = host.client.getRevertedSegment();
+                            host.client.discardRevertedSegment(ownerSessionId);
+                            const discardedSegment = host.client.getRevertedSegment(ownerSessionId);
                             host.uiDebugChannel.appendLine(`[EXT][CONFLICT_TX] type=revertedSegmentDiscarded sessionId=${ownerSessionId} opId=${conflictContext.operationId} conflictId=${conflictContext.conflictId} kind=restore`);
                             activeWebview.postMessage({
                                 type: 'revertedSegmentDiscarded',
-                                segment: discardedSegment ? { ...discardedSegment, historySegments: host.revertedSegmentHistory } : discardedSegment,
+                                segment: discardedSegment ? { ...discardedSegment, historySegments: host.revertedSegmentHistoryStore.get(ownerSessionId) } : discardedSegment,
                                 sessionId: ownerSessionId,
                                 operationId: conflictContext.operationId,
                                 conflictId: conflictContext.conflictId
@@ -2169,7 +2165,7 @@ ${attachmentLines.join('\n')}`
                             host.refreshDiffIfTouched(result.touchedFiles);
                         }
                         if (conflictContext.kind === 'restoreSegment' && conflictContext.startMessageId) {
-                            const currentSegment = host.client.getRevertedSegment();
+                            const currentSegment = host.client.getRevertedSegment(ownerSessionId);
                             const segMap = host.undoSegmentsBySession.get(ownerSessionId);
                             const persistedSegment = conflictContext.noticeKey ? segMap?.get(conflictContext.noticeKey) : undefined;
                             const messageIds = Array.isArray(persistedSegment?.memberMsgIds) && persistedSegment?.memberMsgIds?.length
@@ -2187,7 +2183,7 @@ ${attachmentLines.join('\n')}`
                                 }
                             );
                             if (conflictContext.noticeKey) {
-                                const currentSegment = host.client.getRevertedSegment();
+                                const currentSegment = host.client.getRevertedSegment(ownerSessionId);
                                 const fallbackCommits = Array.isArray(currentSegment?.startCommits) && currentSegment?.startCommits?.length
                                     ? currentSegment.startCommits
                                     : (currentSegment?.startCommit ? [currentSegment.startCommit] : []);
@@ -2213,33 +2209,43 @@ ${attachmentLines.join('\n')}`
                     break;
                 }
                 case "discardSegment": {
-                    host.uiDebugChannel.appendLine(`[EXT][DISCARD_SEND] reason=explicit_user_action sessionId=${host.currentSessionId || 'null'}`);
-                    host.client.discardRevertedSegment();
-                    host.revertedSegment = { conflicts: [], discarded: true };
-                    const discardedSegment = host.client.getRevertedSegment();
+                    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
+                    if (!sessionId) {
+                        host.uiDebugChannel.appendLine('[EXT][DISCARD_DROP] reason=missing-session-owner');
+                        break;
+                    }
+                    host.uiDebugChannel.appendLine(`[EXT][DISCARD_SEND] reason=explicit_user_action sessionId=${sessionId}`);
+                    host.client.discardRevertedSegment(sessionId);
+                    const discardedSegment = host.client.getRevertedSegment(sessionId);
                     activeWebview.postMessage({
                         type: 'revertedSegmentDiscarded',
-                        segment: discardedSegment ? { ...discardedSegment, historySegments: host.revertedSegmentHistory } : discardedSegment,
-                        sessionId: host.currentSessionId
+                        segment: discardedSegment ? { ...discardedSegment, historySegments: host.revertedSegmentHistoryStore.get(sessionId) } : discardedSegment,
+                        sessionId
                     });
-                    host.postAddResponse(activeWebview, 'Reverted segment discarded.');
-                    if (host.currentSessionId) {
-                        const segment = host.client.getRevertedSegment();
+                    host.postAddResponse(activeWebview, 'Reverted segment discarded.', { sessionId });
+                    if (sessionId) {
+                        const segment = host.client.getRevertedSegment(sessionId);
                         if (segment) {
-                            await host.persistRevertedSegment(host.currentSessionId, segment, segment.conflicts || [], true);
+                            await host.persistRevertedSegment(sessionId, segment, segment.conflicts || [], true);
                         }
                     }
                     break;
                 }
                 case "setRevertedSegmentCollapsed": {
                     if (typeof data.collapsed !== 'boolean') return;
-                    host.client.setRevertedSegmentCollapsed(data.collapsed);
+                    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
+                    if (!sessionId) {
+                        host.uiDebugChannel.appendLine('[EXT][SEGMENT_COLLAPSE_DROP] reason=missing-session-owner');
+                        break;
+                    }
+                    host.client.setRevertedSegmentCollapsed(sessionId, data.collapsed);
+                    const segment = host.client.getRevertedSegment(sessionId);
                     activeWebview.postMessage({
                         type: 'revertedSegmentState',
-                        segment: host.client.getRevertedSegment()
-                            ? { ...host.client.getRevertedSegment(), historySegments: host.revertedSegmentHistory }
+                        segment: segment
+                            ? { ...segment, historySegments: host.revertedSegmentHistoryStore.get(sessionId) }
                             : null,
-                        sessionId: host.currentSessionId
+                        sessionId
                     });
                     break;
                 }

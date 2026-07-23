@@ -12,7 +12,9 @@ describe('composer attachment production ownership', () => {
 
   it('routes extension events, draft restoration, removal, and clearing through attachment state', () => {
     expect(source).toContain('attachmentStateController = factory();');
-    expect(source).toContain('getAttachmentStateController().add({');
+    expect(source).toContain('sessionComposerStore.addAttachment(sessionId, attachment);');
+    expect(source).toContain('getAttachmentStateController().add(attachment);');
+    expect(source).toContain('if (sessionId === activeSessionId)');
     expect(source).toContain('getAttachmentStateController().restoreFilePaths(draft.attachments);');
     expect(source).toContain('attachmentState.clear();');
     expect(source).toContain('getAttachmentStateController().clear();');

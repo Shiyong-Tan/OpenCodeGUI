@@ -191,4 +191,18 @@ describe('cross-session runtime repository audit', () => {
     );
     expect(outputSelection).toContain("this.sendPrefillInput(sessionId, 'vscode output'");
   });
+
+  test('undo file semantics and segment history are stored per session', () => {
+    const client = read('src', 'OpenCodeClient.ts');
+    const webviewController = read('src', 'webview', 'SidebarWebviewController.ts');
+
+    expect(client).toContain('private readonly revertedSegmentBySession = new Map<string, RevertedSegment>();');
+    expect(client).not.toContain('private revertedSegment?: RevertedSegment;');
+    expect(client).not.toMatch(/getRevertedSegment\(\)/);
+    expect(client).not.toMatch(/discardRevertedSegment\(\)/);
+    expect(provider).toContain('private readonly revertedSegmentHistoryStore = new RevertedSegmentHistoryStore();');
+    expect(provider).not.toContain('private revertedSegmentHistory:');
+    expect(webviewController).not.toMatch(/client\.getRevertedSegment\(\)/);
+    expect(webviewController).not.toMatch(/client\.discardRevertedSegment\(\)/);
+  });
 });
