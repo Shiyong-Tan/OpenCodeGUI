@@ -269,6 +269,9 @@ function loadAppendChatDoneHarness() {
         updateSendGate: jest.fn(),
         assertInvariants: jest.fn(),
         syncAppendSnapshotMetadata,
+        turnLifecycleController: {
+            acceptMainFinal: jest.fn(() => ({ accepted: true })),
+        },
     };
     context.appendSnapshotController = createAppendSnapshotController({
         resolveMessageKey: (_session: any, key: unknown) => typeof key === 'string' ? key : null,
@@ -941,7 +944,7 @@ describe('append runtime isolation', () => {
         )).toBe(true);
     });
 
-    it('does not revive a hidden predecessor while an append successor is still empty', () => {
+    it('keeps one predecessor presentation mounted until an append successor has content', () => {
         const { context } = loadAppendPresentationHarness();
         const session = {
             messagesById: new Map<string, any>([
@@ -993,7 +996,7 @@ describe('append runtime isolation', () => {
 
         expect(context.isAppendChainTopLevelAssistantHidden(
             session, session.messagesById.get('msg_predecessor'), 'msg_predecessor', appendIndex,
-        )).toBe(true);
+        )).toBe(false);
         expect(context.isAppendChainTopLevelAssistantHidden(
             session, session.messagesById.get('msg_successor'), 'msg_successor', appendIndex,
         )).toBe(true);
@@ -1006,6 +1009,43 @@ describe('append runtime isolation', () => {
         expect(context.isAppendChainTopLevelAssistantHidden(
             session, session.messagesById.get('msg_successor'), 'msg_successor', appendIndex,
         )).toBe(false);
+    });
+
+    it('does not reattach predecessor subagent state while finalizing an append successor', () => {
+        const { context, sessions } = loadAppendChatDoneHarness();
+        const successor = {
+            id: 'msg_successor',
+            role: 'assistant',
+            text: 'OK',
+            meta: {
+                isThinking: true,
+                statusText: '',
+                subagents: [{ sessionId: 'ses_agent', state: 'done', title: 'old status' }],
+            },
+        };
+        const session = {
+            messagesById: new Map<string, any>([['msg_successor', successor]]),
+            timeline: ['msg_successor'],
+            thinkingId: 'msg_successor',
+            currentTurnAssistantKey: 'msg_successor',
+            currentTurnAssistantMsgId: 'msg_successor',
+            activeSubagents: [{ sessionId: 'ses_agent', state: 'done', title: 'old status' }],
+            appendFollowupIdentity: {
+                kind: 'append-followup',
+                mode: 'same-turn-handoff',
+                assistantMsgId: 'msg_successor',
+            },
+            backendTurnInFlight: true,
+            turnFullyFinalized: false,
+        };
+        sessions.set('ses_A', session);
+
+        context.handleChatDone('ses_A', { lastAssistantMsgId: 'msg_successor' });
+
+        expect(successor.meta.subagents).toBeUndefined();
+        expect(session.activeSubagents).toEqual([]);
+        expect(session.appendFollowupIdentity).toBeNull();
+        expect(successor.meta.isThinking).toBe(false);
     });
 
     it('normalizes all append roots on chatDone and re-syncs append snapshot metadata', () => {

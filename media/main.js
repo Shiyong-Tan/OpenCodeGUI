@@ -2681,10 +2681,10 @@ function isAppendChainTopLevelAssistantHidden(session, msg, id, appendChildPrese
             }
             return false;
         };
-        // Suppress the empty successor without reviving a predecessor that the
-        // append chain already hid. Reviving it here makes completed temporary
-        // content flash immediately before the successor's first real payload.
+        // Keep one presentation owner mounted until the successor has content.
+        // The keyed handoff below then replaces that presentation atomically.
         if (matchesFollowupKey(followup.assistantMsgId)) return true;
+        if (matchesFollowupKey(followup.predecessorAssistantMsgId)) return false;
     }
     if (session.backendTurnInFlight === true && session.turnFullyFinalized !== true && session.canceledActiveTurn !== true) {
         const messageKeys = new Set();
@@ -12557,6 +12557,11 @@ function handleChatDone(sessionId, message) {
         const skipSnapshot = message?.skipSnapshot === true;
         const preDoneAssistantKey = session.currentTurnAssistantKey || session.thinkingId || null;
         const preDoneAssistant = preDoneAssistantKey ? session.messagesById.get(preDoneAssistantKey) : null;
+        const finalizingAppendSuccessor = Boolean(
+            followup?.kind === 'append-followup'
+            && followup.mode === 'same-turn-handoff'
+            && followup.assistantMsgId === preDoneAssistantKey
+        );
         const wasLiveTurnResumeAssistant = preDoneAssistant?.meta?.liveTurnResume === true;
         // agent timeout notice removed
     if (session.thinkingId && session.messagesById.has(session.thinkingId)) {
@@ -12577,7 +12582,7 @@ function handleChatDone(sessionId, message) {
         }
         // For subagents: snapshot into meta before clearing
         if (session.activeSubagents && session.activeSubagents.length > 0) {
-            if (msg.meta) {
+            if (msg.meta && !finalizingAppendSuccessor) {
                 // Snapshot final state, clearing streaming artifacts
                 msg.meta.subagents = session.activeSubagents.map(a => ({
                     ...a,
@@ -12586,6 +12591,12 @@ function handleChatDone(sessionId, message) {
                 }));
             }
             session.activeSubagents = [];
+        }
+        if (finalizingAppendSuccessor && msg.meta && Array.isArray(msg.meta.subagents)) {
+            // These agents belong to the predecessor presentation. Reattaching
+            // them here makes the historical temporary state flash after the
+            // successor text has already replaced it.
+            delete msg.meta.subagents;
         }
         session.thinkingId = null;
 
@@ -13743,7 +13754,17 @@ function appendMessageImages(parentEl, message) {
                   };
                 });
                 sess.activeSubagents = mergedAgents;
-                if (currentThinking && currentThinking.meta) {
+                const appendSuccessorHasContent = Boolean(
+                  currentThinking
+                  && sess.appendFollowupIdentity?.kind === 'append-followup'
+                  && sess.appendFollowupIdentity.mode === 'same-turn-handoff'
+                  && sess.appendFollowupIdentity.assistantMsgId === currentThinking.id
+                  && (
+                    (typeof currentThinking.text === 'string' && currentThinking.text.trim())
+                    || (typeof currentThinking.meta?.statusText === 'string' && currentThinking.meta.statusText.trim())
+                  )
+                );
+                if (currentThinking && currentThinking.meta && !appendSuccessorHasContent) {
                   currentThinking.meta.subagents = mergedAgents;
                 }
               }
@@ -14662,6 +14683,10 @@ function appendMessageImages(parentEl, message) {
                         || (typeof target.meta?.statusText === 'string' && target.meta.statusText.trim())
                     );
                     if (!hadPresentableContent && hasPresentableContent) {
+                        if (Array.isArray(target.meta?.subagents)) {
+                            target.meta = { ...(target.meta || {}) };
+                            delete target.meta.subagents;
+                        }
                         const predecessorKeys = [
                             followup.predecessorAssistantMsgId,
                             ...getPresentationMessageKeyVariants(session, followup.predecessorAssistantMsgId),
