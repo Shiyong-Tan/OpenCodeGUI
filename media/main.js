@@ -1966,6 +1966,20 @@ const sessionEventRouter = window.__ocContinuation.createSessionEventRouter({
     },
     singleInFlightFallbackEvents: SINGLE_IN_FLIGHT_FALLBACK_EVENTS
 });
+const sessionSelectionController = window.__ocContinuation.createSessionSelectionController({
+    renderSession: (sessionId, reason) => {
+        if (sessionId !== activeSessionId) return;
+        window.__oc?.renderFromState?.(reason);
+    },
+    scrollSessionToBottom: (sessionId, force) => {
+        if (sessionId !== activeSessionId) return;
+        if (typeof window.__oc?.scrollToBottom === 'function') {
+            window.__oc.scrollToBottom(force);
+        } else {
+            scrollToBottom(force);
+        }
+    }
+});
 
 function findSingleInFlightSessionId() {
     return sessionEventRouter.findSingleInFlightSessionId();
@@ -12322,6 +12336,19 @@ function shouldHideDcpUiMessage(message) {
             button.addEventListener('click', () => {
                 armedDeleteSessionId = '';
                 pendingExplicitSessionSelectionId = item.id;
+                const previousSessionId = activeSessionId;
+                transitionActiveSessionPresentationOwner(previousSessionId, item.id);
+                activeSessionId = item.id;
+                clearAppendInputForSessionChange(item.id);
+                clearQuestionOverlay('session-change');
+                clearPermissionOverlay('session-change');
+                closeStallCard();
+                setSystemNotice('');
+                closeSessionPanel();
+                renderHeaderUsage();
+                updateUndoStatusDisplay(item.id);
+                refreshSendButtonStateAfterSessionSwitch();
+                sessionSelectionController.select(item.id);
                 vscode.postMessage({
                     type: 'ui-debug',
                     payload: ['[WV][SESSION_SELECTION_TARGET]', `sessionId=${item.id || 'null'}`]
