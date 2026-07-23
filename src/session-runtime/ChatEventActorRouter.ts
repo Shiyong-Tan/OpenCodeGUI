@@ -1,15 +1,19 @@
 import type { ChatEvent } from '../OpenCodeClient';
 import { SessionRegistry } from './SessionRegistry';
 import type { SessionEnvelope } from './protocol';
+import { createTurnRuntimeState } from './turn/turn-reducer';
+import { reduceChatEventTurnRuntime } from './turn/chat-event-turn-reducer';
+import type { TurnRuntimeState } from './turn/types';
 
 type ChatEventEnvelope = SessionEnvelope<
     'chat-event',
     Readonly<{ event: ChatEvent }>
 >;
 
-type ChatEventActorState = Readonly<{
+export type ChatEventActorState = Readonly<{
     sessionId: string;
     handledCount: number;
+    turn: TurnRuntimeState;
 }>;
 
 export type ChatEventActorRouterOptions = Readonly<{
@@ -40,14 +44,29 @@ export class ChatEventActorRouter {
 
     constructor(private readonly options: ChatEventActorRouterOptions) {
         this.registry = new SessionRegistry({
-            createInitialState: (sessionId) => ({ sessionId, handledCount: 0 }),
-            reduce: (state, envelope) => ({
-                state: {
-                    sessionId: state.sessionId,
-                    handledCount: state.handledCount + 1,
-                },
-                effects: [envelope.payload.event],
+            createInitialState: (sessionId, sessionEpoch) => ({
+                sessionId,
+                handledCount: 0,
+                turn: createTurnRuntimeState(sessionId, sessionEpoch),
             }),
+            reduce: (state, envelope) => {
+                const turn = reduceChatEventTurnRuntime(
+                    state.turn,
+                    envelope.payload.event,
+                    {
+                        sessionEpoch: envelope.sessionEpoch,
+                        sequence: envelope.sequence,
+                    },
+                ).state;
+                return {
+                    state: {
+                        sessionId: state.sessionId,
+                        handledCount: state.handledCount + 1,
+                        turn,
+                    },
+                    effects: [envelope.payload.event],
+                };
+            },
             runEffect: async (event) => {
                 try {
                     await this.options.handle(event);
@@ -78,6 +97,10 @@ export class ChatEventActorRouter {
 
     public getHandledCount(sessionId: string): number {
         return this.registry.get(sessionId)?.getSnapshot().handledCount || 0;
+    }
+
+    public getSnapshot(sessionId: string): ChatEventActorState | undefined {
+        return this.registry.get(sessionId)?.getSnapshot();
     }
 
     public dispose(): void {

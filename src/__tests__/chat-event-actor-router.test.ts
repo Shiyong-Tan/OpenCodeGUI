@@ -70,4 +70,70 @@ describe('production chat event actor router', () => {
             'missing-session-owner',
         );
     });
+
+    test('production actor snapshots satisfy interleaving equivalence', async () => {
+        const interleaved = new ChatEventActorRouter({ handle: () => undefined });
+        const singleA = new ChatEventActorRouter({ handle: () => undefined });
+        const singleB = new ChatEventActorRouter({ handle: () => undefined });
+        const events = [
+            { type: 'turnInFlight', sessionId: 'A', inFlight: true, tmpKey: 'tmp:A' },
+            { type: 'text', sessionId: 'A', text: 'A partial. ' },
+            { type: 'turnInFlight', sessionId: 'B', inFlight: true, tmpKey: 'tmp:B' },
+            { type: 'assistantMessageMeta', sessionId: 'B', assistantMsgId: 'msg_B', tmpKey: 'tmp:B' },
+            { type: 'text', sessionId: 'B', text: 'B final.' },
+            { type: 'assistantMessageMeta', sessionId: 'A', assistantMsgId: 'msg_A', tmpKey: 'tmp:A' },
+            { type: 'turnResolved', sessionId: 'A', assistantMsgId: 'msg_A', lastText: 'A final.' },
+            { type: 'turnResolved', sessionId: 'B', assistantMsgId: 'msg_B', lastText: 'B final.' },
+        ] as const;
+
+        for (const owned of events) {
+            await interleaved.route(owned);
+            if (owned.sessionId === 'A') await singleA.route(owned);
+            if (owned.sessionId === 'B') await singleB.route(owned);
+        }
+
+        expect(interleaved.getSnapshot('A')?.turn).toEqual(singleA.getSnapshot('A')?.turn);
+        expect(interleaved.getSnapshot('B')?.turn).toEqual(singleB.getSnapshot('B')?.turn);
+        expect(interleaved.getSnapshot('A')?.turn).toMatchObject({
+            phase: 'finalized',
+            assistantText: 'A final.',
+            assistant: { canonicalId: 'msg_A' },
+        });
+        expect(interleaved.getSnapshot('B')?.turn).toMatchObject({
+            phase: 'finalized',
+            assistantText: 'B final.',
+            assistant: { canonicalId: 'msg_B' },
+        });
+    });
+
+    test('production actor snapshots satisfy non-interference and terminal monotonicity', async () => {
+        const router = new ChatEventActorRouter({ handle: () => undefined });
+        await router.route({ type: 'turnInFlight', sessionId: 'B', inFlight: true, tmpKey: 'tmp:B' });
+        await router.route({ type: 'text', sessionId: 'B', text: 'stable B' });
+        const beforeB = router.getSnapshot('B');
+
+        await router.route({ type: 'turnInFlight', sessionId: 'A', inFlight: true, tmpKey: 'tmp:A' });
+        await router.route({ type: 'assistantMessageMeta', sessionId: 'A', assistantMsgId: 'msg_A', tmpKey: 'tmp:A' });
+        await router.route({ type: 'turnResolved', sessionId: 'A', assistantMsgId: 'msg_A', lastText: 'final A' });
+        const terminalA = router.getSnapshot('A')?.turn;
+
+        expect(router.getSnapshot('B')).toBe(beforeB);
+        await router.route({ type: 'text', sessionId: 'A', text: 'late text' });
+        await router.route({ type: 'assistantMessageMeta', sessionId: 'A', assistantMsgId: 'msg_wrong' });
+        expect(router.getSnapshot('A')?.turn).toBe(terminalA);
+    });
+
+    test('parent-visible subagent traffic does not mutate the parent main turn', async () => {
+        const router = new ChatEventActorRouter({ handle: () => undefined });
+        await router.route({ type: 'turnInFlight', sessionId: 'A', inFlight: true, tmpKey: 'tmp:A' });
+        const before = router.getSnapshot('A')?.turn;
+        await router.route({
+            type: 'text',
+            sessionId: 'agent-A',
+            parentSessionId: 'A',
+            displayTarget: 'parent',
+            text: 'subagent output',
+        });
+        expect(router.getSnapshot('A')?.turn).toBe(before);
+    });
 });
