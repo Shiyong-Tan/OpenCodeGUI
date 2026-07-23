@@ -3768,7 +3768,7 @@ describe('A2.4D journaled keyed and structural transaction', () => {
     expect(sourceHash(extractFunction('function tryPatchAssistantStreamingBubble(')))
       .toBe('285abb29f2dc5dabf8eb1d7b4f55805cd009789d99d543fa0c9ca0000f9b8457');
     expect(sourceHash(extractFunction('function attemptAssistantUpgrade(')))
-      .toBe('99871bc6c811d5498c419005cae64443643351c39332b2a83923e04c0b886715');
+      .toBe('1ee56874b3c790bb2a0665f09ceab1781cd63e66d4acc3750eed79209bd66ee1');
     expect(sourceHash(extractFunction('function scheduleRenderFromState(')))
       .toBe('b2977c0a62af34a61c73fa241bfe685c3efdb8823718665e5c040e6dd44d8ded');
     expect(sourceHash(extractFunction('function noteFullRenderRequest(')))

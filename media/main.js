@@ -3663,6 +3663,11 @@ function setSendEnabled(enabled) {
     updateSendGate();
 }
 
+const selectAssistantUpgradeCandidate = window.__ocContinuation?.selectAssistantUpgradeCandidate;
+if (typeof selectAssistantUpgradeCandidate !== 'function') {
+    throw new Error('Assistant binding selector is unavailable');
+}
+
 function attemptAssistantUpgrade(sessionId, payload, source) {
     const currentSession = activeSessionId;
     const payloadSession = sessionId || payload?.sessionId || payload?.sessionID || null;
@@ -3725,21 +3730,50 @@ function attemptAssistantUpgrade(sessionId, payload, source) {
     const candidateTmpKey = typeof tmpKey === 'string'
         ? tmpKey
         : (session.pendingAssistantUpgrade?.assistantMsgId === assistantMsgId ? session.pendingAssistantUpgrade?.tmpKey : null);
-    const pickCandidateKey = (key) => {
-        if (typeof key !== 'string' || !key.length) return null;
-        if (key.startsWith('tmp:') || key.startsWith('local-')) return key;
-        if (session.messagesById.has(key)) return key;
-        return null;
-    };
-    const currentKey = pickCandidateKey(session.currentTurnAssistantKey)
-        || pickCandidateKey(candidateTmpKey)
-        || (session.awaitingFinalMapBind ? resolveLastAssistantKey() : null);
+    const lastAssistantKey = session.awaitingFinalMapBind ? resolveLastAssistantKey() : null;
+    const hasOwnedAssistantIdentity = (key) => Boolean(
+        typeof key === 'string'
+        && (
+            session.messagesById.has(key)
+            || session.timeline.includes(key)
+            || session.currentTurnAssistantKey === key
+            || session.thinkingId === key
+        )
+    );
+    const candidateDecision = selectAssistantUpgradeCandidate({
+        canonicalId: assistantMsgId,
+        explicitTemporaryId: typeof tmpKey === 'string' ? tmpKey : null,
+        currentTurnAssistantId: session.currentTurnAssistantKey,
+        pending: session.pendingAssistantUpgrade
+            ? {
+                temporaryId: session.pendingAssistantUpgrade.tmpKey,
+                canonicalId: session.pendingAssistantUpgrade.assistantMsgId
+            }
+            : null,
+        awaitingFinalBind: session.awaitingFinalMapBind === true,
+        lastAssistantId: lastAssistantKey,
+        hasMessage: (key) => hasOwnedAssistantIdentity(key),
+        isAssistantMessage: (key) => {
+            const message = session.messagesById.get(key);
+            if (message) return message.role === 'assistant';
+            return key === session.currentTurnAssistantKey || key === session.thinkingId;
+        }
+    });
+    if (!candidateDecision.accepted) {
+        emitTempFinalTrace('upgrade.drop', [
+            `reason=${candidateDecision.reason}`,
+            `assistantMsgId=${assistantMsgId}`
+        ]);
+        return;
+    }
+    const currentKey = candidateDecision.sourceId;
     const newKey = assistantMsgId;
 
     emitTempFinalTrace('upgrade.keySelect', [
         `currentTurnKey=${session.currentTurnAssistantKey || 'null'}`,
         `candidateTmpKey=${candidateTmpKey || 'null'}`,
         `resolvedCurrentKey=${currentKey || 'null'}`,
+        `candidateSource=${candidateDecision.source}`,
         `newKey=${newKey}`
     ]);
 
@@ -3818,7 +3852,6 @@ function attemptAssistantUpgrade(sessionId, payload, source) {
             return false;
         }
 
-        const isActiveSession = Boolean(payloadSession && payloadSession === activeSessionId);
         const currentTurnAnchored = Boolean(
             session.currentTurnAssistantKey === currentKey ||
             session.thinkingId === currentKey ||
@@ -3830,9 +3863,8 @@ function attemptAssistantUpgrade(sessionId, payload, source) {
             session.earlyFinalAssistantId === newKey ||
             session.finalAssistantLock?.assistantMsgId === newKey
         );
-        if (!isActiveSession || !currentTurnAnchored || !candidateAnchored || session.canceledActiveTurn) {
+        if (!currentTurnAnchored || !candidateAnchored || session.canceledActiveTurn) {
             logMapExistsFallbackSkip('stale-or-cross-turn', [
-                `isActiveSession=${isActiveSession}`,
                 `currentTurnAnchored=${currentTurnAnchored}`,
                 `candidateAnchored=${candidateAnchored}`,
                 `canceled=${Boolean(session.canceledActiveTurn)}`
