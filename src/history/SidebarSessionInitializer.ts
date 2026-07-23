@@ -18,8 +18,9 @@ export async function initializeSidebarSession(
 ): Promise<void> {
         const isStillCurrent = options.isStillCurrent || (() => true);
         if (!isStillCurrent()) throw new Error('stale-handshake-before-sendInit');
-        const isHardRescueSendInit = Boolean(options.hardRescue && options.isStillCurrent);
-        const rescueHydration = options.hardRescue || options.commandReload;
+    const isHardRescueSendInit = Boolean(options.hardRescue && options.isStillCurrent);
+    const rescueHydration = options.hardRescue || options.commandReload;
+    const initSessionId = rescueHydration?.sessionId || host.currentSessionId || '';
         const isCommandReloadSendInit = Boolean(options.commandReload && options.isStillCurrent);
         let isGuardedRescueSendInit = false;
         if (isHardRescueSendInit) {
@@ -53,7 +54,11 @@ export async function initializeSidebarSession(
                 host.lastKnownModels = models;
             }
         } catch (error) {
-            if (isStillCurrent()) host.postAddResponse(webview, `Failed to load models: ${error}`);
+            if (isStillCurrent() && initSessionId) {
+                host.postAddResponse(webview, `Failed to load models: ${error}`, { sessionId: initSessionId });
+            } else {
+                host.uiDebugChannel.appendLine(`[EXT][ADD_RESPONSE_DROP] reason=missing-session-owner source=initializeModels error=${String(error)}`);
+            }
         }
 
         try {
@@ -65,7 +70,11 @@ export async function initializeSidebarSession(
         try {
             sessions = await host.client.listSessions();
         } catch (error) {
-            if (isStillCurrent()) host.postAddResponse(webview, `Failed to load sessions: ${error}`);
+            if (isStillCurrent() && initSessionId) {
+                host.postAddResponse(webview, `Failed to load sessions: ${error}`, { sessionId: initSessionId });
+            } else {
+                host.uiDebugChannel.appendLine(`[EXT][ADD_RESPONSE_DROP] reason=missing-session-owner source=initializeSessions error=${String(error)}`);
+            }
         }
         const initWorkspaceRoot = host.client.getWorkspaceRoot() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         sessions = await host.filterSessionsForWorkspace(sessions, initWorkspaceRoot, 'init');

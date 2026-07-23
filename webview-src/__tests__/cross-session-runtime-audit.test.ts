@@ -225,6 +225,26 @@ describe('cross-session runtime repository audit', () => {
     expect(controller).not.toMatch(/handleAbortedMessage\([^,\n]+,\s*(?:liveWebview|activeWebview)\)/);
   });
 
+  test('synthetic assistant responses never borrow the selected session', () => {
+    const controller = read('src', 'webview', 'SidebarWebviewController.ts');
+    const initializer = read('src', 'history', 'SidebarSessionInitializer.ts');
+    const postResponseStart = provider.indexOf('private postAddResponse(');
+    const postResponse = provider.slice(
+      postResponseStart,
+      provider.indexOf('private postMessageIndexMap(', postResponseStart),
+    );
+
+    expect(postResponseStart).toBeGreaterThanOrEqual(0);
+    expect(postResponse).toContain('meta: { sessionId: string; operationId?: string }');
+    expect(postResponse).toContain('const targetSessionId = meta.sessionId.trim();');
+    expect(postResponse).not.toContain('this.currentSessionId');
+    for (const source of [controller, initializer]) {
+      for (const call of source.match(/host\.postAddResponse\([^\n]+/g) || []) {
+        expect(call).toContain('sessionId');
+      }
+    }
+  });
+
   test('owned Webview commands do not fall back to Extension selection', () => {
     const client = read('src', 'OpenCodeClient.ts');
     const controller = read('src', 'webview', 'SidebarWebviewController.ts');

@@ -215,7 +215,12 @@ export function resolveSidebarWebviewView(
 
                     if (data.value.toLowerCase() === 'ping') {
                         // OpenCodeClient.outputChannel.appendLine(`[BRIDGE] Manual PONG sent`);
-                        host.postAddResponse(activeWebview, 'PONG - Bridge is working!');
+                        const pingSessionId = payloadSessionId || host.currentSessionId || '';
+                        if (pingSessionId) {
+                            host.postAddResponse(activeWebview, 'PONG - Bridge is working!', { sessionId: pingSessionId });
+                        } else {
+                            host.uiDebugChannel.appendLine('[EXT][ADD_RESPONSE_DROP] reason=missing-session-owner source=ping');
+                        }
                         return;
                     }
 
@@ -614,17 +619,17 @@ ${attachmentLines.join('\n')}`
                 case "compactSession": {
                     const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
                     if (!sessionId) {
-                        host.postAddResponse(activeWebview, 'Compaction skipped: no active session.');
+                        host.uiDebugChannel.appendLine('[EXT][ADD_RESPONSE_DROP] reason=missing-session-owner source=compactSession');
                         break;
                     }
                     const model = host.client.pickFreeModel(host.lastKnownModels, host.selectedModel);
                     if (!model) {
-                        host.postAddResponse(activeWebview, 'Compaction skipped: no free model available.');
+                        host.postAddResponse(activeWebview, 'Compaction skipped: no free model available.', { sessionId });
                         break;
                     }
                     const modelRef = host.parseModelRef(model.fullId);
                     if (!modelRef) {
-                        host.postAddResponse(activeWebview, `Compaction skipped: invalid model id ${model.fullId}.`);
+                        host.postAddResponse(activeWebview, `Compaction skipped: invalid model id ${model.fullId}.`, { sessionId });
                         break;
                     }
                     activeWebview.postMessage({ type: 'compactionState', sessionId, running: true });
@@ -634,9 +639,9 @@ ${attachmentLines.join('\n')}`
                             modelID: modelRef.modelID,
                             auto: false
                         });
-                        host.postAddResponse(activeWebview, `Compaction started (${model.fullId}).`);
+                        host.postAddResponse(activeWebview, `Compaction started (${model.fullId}).`, { sessionId });
                     } catch (error) {
-                        host.postAddResponse(activeWebview, `Compaction failed: ${error}`);
+                        host.postAddResponse(activeWebview, `Compaction failed: ${error}`, { sessionId });
                     } finally {
                         const liveWebview = host._view?.webview || activeWebview;
                         liveWebview.postMessage({ type: 'compactionState', sessionId, running: false });
@@ -1267,7 +1272,7 @@ ${attachmentLines.join('\n')}`
                         }
                         } catch (error) {
                             vscode.window.showErrorMessage(`Failed to load session: ${error}`);
-                            host.postAddResponse(activeWebview, `Error: ${error}`);
+                            host.postAddResponse(activeWebview, `Error: ${error}`, { sessionId: targetSessionId });
                         }
                         break;
                 }
@@ -1873,22 +1878,22 @@ ${attachmentLines.join('\n')}`
                 }
                 case "openGitDiff": {
                     if (!data.filePath || typeof data.filePath !== 'string') break;
+                    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
+                    if (!sessionId) {
+                        host.uiDebugChannel.appendLine('[EXT][ADD_RESPONSE_DROP] reason=missing-session-owner source=openGitDiff');
+                        break;
+                    }
                     if (!host.gitUndoEnabled) {
-                        host.postAddResponse(activeWebview, 'Git diff unavailable: Git not installed or version too old.');
+                        host.postAddResponse(activeWebview, 'Git diff unavailable: Git not installed or version too old.', { sessionId });
                         break;
                     }
                     try {
-                        const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
-                        if (!sessionId) {
-                            host.postAddResponse(activeWebview, 'No session available to open diff.');
-                            break;
-                        }
                         const commitHead = typeof data.commitHead === 'string' ? data.commitHead : undefined;
                         const commitBase = typeof data.commitBase === 'string' ? data.commitBase : undefined;
                         await host.openGitDiffForFile(sessionId, data.filePath, activeWebview, commitHead, commitBase);
                     } catch (error) {
                         vscode.window.showErrorMessage(`Open diff failed: ${error}`);
-                        host.postAddResponse(activeWebview, `Open diff failed: ${error}`);
+                        host.postAddResponse(activeWebview, `Open diff failed: ${error}`, { sessionId });
                     }
                     break;
                 }

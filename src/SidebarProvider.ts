@@ -3838,7 +3838,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             filePath,
             commitHead,
             commitBase,
-            noBaseline: () => this.postAddResponse(webview, 'No baseline available to open diff.'),
+            noBaseline: () => this.postAddResponse(webview, 'No baseline available to open diff.', { sessionId }),
         });
     }
 
@@ -4434,16 +4434,21 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private async refreshModels(webview: vscode.Webview): Promise<ModelInfo[]> {
+        const sessionId = this.currentSessionId;
         try {
             const models = await this.client.listModels();
             if (models.length) {
                 this.lastKnownModels = models;
             }
-            webview.postMessage({ type: 'models', models, sessionId: this.currentSessionId });
+            webview.postMessage({ type: 'models', models, sessionId });
             await this.postModelQuota(webview, 'refresh-models');
             return models;
         } catch (error) {
-            this.postAddResponse(webview, `Failed to refresh models: ${error}`);
+            if (sessionId) {
+                this.postAddResponse(webview, `Failed to refresh models: ${error}`, { sessionId });
+            } else {
+                this.uiDebugChannel.appendLine(`[EXT][ADD_RESPONSE_DROP] reason=missing-session-owner source=refreshModels error=${String(error)}`);
+            }
         }
         return [];
     }
@@ -4491,6 +4496,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private async refreshSessions(webview: vscode.Webview, requestId: string): Promise<void> {
+        const sessionId = this.currentSessionId;
         try {
             const sessions = await this.client.listSessions();
             const workspaceRoot = this.client.getWorkspaceRoot() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -4498,7 +4504,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const topSession = filteredSessions?.[0];
             webview.postMessage({ type: 'sessionsList', requestId, sessions: filteredSessions });
         } catch (error) {
-            this.postAddResponse(webview, `Failed to refresh sessions: ${error}`);
+            if (sessionId) {
+                this.postAddResponse(webview, `Failed to refresh sessions: ${error}`, { sessionId });
+            } else {
+                this.uiDebugChannel.appendLine(`[EXT][ADD_RESPONSE_DROP] reason=missing-session-owner source=refreshSessions error=${String(error)}`);
+            }
         }
     }
 
@@ -5481,8 +5491,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         webview.postMessage({ type: 'removeMessage', messageId, sessionId });
     }
 
-    private postAddResponse(webview: vscode.Webview, value: string, meta?: { operationId?: string; sessionId?: string }): void {
-        const targetSessionId = meta?.sessionId || this.currentSessionId;
+    private postAddResponse(webview: vscode.Webview, value: string, meta: { sessionId: string; operationId?: string }): void {
+        const targetSessionId = meta.sessionId.trim();
+        if (!targetSessionId) {
+            this.uiDebugChannel.appendLine('[EXT][ADD_RESPONSE_DROP] reason=missing-session-owner');
+            return;
+        }
         const messageId = this.client.createInternalMessageId('assistant', targetSessionId);
         const messageIndex = this.client.registerMessage(messageId, targetSessionId);
         const liveWebview = this._view?.webview || webview;
