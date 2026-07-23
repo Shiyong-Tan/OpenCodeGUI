@@ -77,6 +77,7 @@ export type HydrationIntegrationPlan = Readonly<{
   }>;
   messages: readonly any[];
   timeline: readonly string[];
+  nextOrder: number;
   backingMessageIds: readonly string[];
   hiddenControlUserIds: readonly string[];
   segments: readonly any[];
@@ -149,6 +150,7 @@ export function planHydrationIntegration(
     }),
     messages: Object.freeze([]),
     timeline: Object.freeze([]),
+    nextOrder: 0,
     backingMessageIds: Object.freeze([]),
     hiddenControlUserIds: Object.freeze([]),
     segments: Object.freeze([]),
@@ -230,7 +232,7 @@ export function planHydrationIntegration(
     return Object.freeze(behavior.assignOrder
       ? {
         ...normalized,
-        order: typeof message.order === 'number' ? message.order : nextOrder++,
+        order: nextOrder++,
       }
       : normalized);
   };
@@ -374,6 +376,7 @@ export function planHydrationIntegration(
     }),
     messages: freezeArray([...messagesById.values()]),
     timeline: freezeArray(plannedTimeline),
+    nextOrder: changeListPlan.nextOrder,
     backingMessageIds: freezeArray(backingMessageIds),
     hiddenControlUserIds: freezeArray(hiddenControlUserIds),
     segments: freezeArray(segmentPlans),

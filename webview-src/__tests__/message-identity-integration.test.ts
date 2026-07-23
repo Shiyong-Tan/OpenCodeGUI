@@ -8,7 +8,10 @@ describe('stable message identity production integration', () => {
     expect(source).toContain(
       'const messageIdentityStore = window.__ocContinuation?.createMessageIdentityStore?.();',
     );
-    expect(source.match(/messageIdentityStore\.store\(/g)).toHaveLength(7);
+    expect(source.match(/messageIdentityStore\.store\(/g)).toHaveLength(6);
+    expect(source).toMatch(
+      /storeMessage:\s*\(messagesById,\s*item\)\s*=>\s*messageIdentityStore\.store\(messagesById,\s*item\)/,
+    );
     expect(source).not.toContain('session.messagesById.set(');
   });
 

@@ -14087,7 +14087,6 @@ function appendMessageImages(parentEl, message) {
                     }
                     
                     const session = getSessionState(sessionId, true);
-                    applyPayloadHydrationCoverage(sessionId, message);
                     const hasSegments = Array.isArray(message.segments);
                     const rawSessionMessages = Array.isArray(message.messages) ? message.messages : [];
                     const fallbackDisplayMessages = message?.meta?.source === 'snapshot'
@@ -14101,9 +14100,7 @@ function appendMessageImages(parentEl, message) {
                             )
                         );
                     const preservedHydrationState = captureVolatileHydrationState(session);
-                    let hydrationIntegrationShadow = null;
-                    try {
-                        hydrationIntegrationShadow = hydrationStateController.createIntegrationShadow({
+                    const hydrationIntegration = hydrationStateController.prepareIntegration({
                             sessionId,
                             activeSessionId: hydrationSelectionActiveSessionId,
                             pendingExplicitSessionSelectionId: isExplicitSelectionTarget
@@ -14141,290 +14138,32 @@ function appendMessageImages(parentEl, message) {
                             normalizeAppendItems: (_rootMessageId, items) =>
                                 appendSnapshotController.sanitizeItems(items, session)
                         }, preservedHydrationState);
-                    } catch (shadowError) {
-                        vscode.postMessage({
-                            type: 'ui-debug',
-                            payload: ['[WV][HYDRATION_SHADOW_ERROR]', `sessionId=${sessionId}`, `phase=plan`, `err=${String(shadowError)}`]
-                        });
-                    }
 
-                    // Clear everything
-                    session.messagesById.clear();
-                    session.timeline = [];
-                    if (hasSegments) {
-                        session.segmentsByNoticeKey.clear();
-                        session.hiddenSet.clear();
-                    }
-                    session.thinkingId = null;
-                    session.pendingAssistantUpgrade = null;
-                    session.awaitingFinalMapBind = false;
-                    turnLifecycleController.hydrateAuthoritative(session);
-                    session.earlyFinalAssistantId = null;
-                    if (session.hiddenControlUserIds instanceof Set) {
-                        session.hiddenControlUserIds.clear();
-                    }
-                    session.nextOrder = 0;
-                    
-                    // Load messages into timeline
-                    for (const item of rawSessionMessages) {
-                        if (!item || item.role !== 'user' || typeof item.id !== 'string') continue;
-                        if (isHiddenControlUserText(item.text || '')) {
-                            session.hiddenControlUserIds.add(item.id);
+                    const hydrationApplication = hydrationStateController.applyIntegration(
+                        session,
+                        hydrationIntegration,
+                        {
+                            storeMessage: (messagesById, item) =>
+                                messageIdentityStore.store(messagesById, item),
+                            rebuildHiddenSet: rebuildHiddenSetFromTimeline,
+                            createSnapshotNotice: () => ({
+                                id: `system:snapshot:${Date.now()}`,
+                                role: 'system',
+                                text: 'Session loaded from local snapshot because opencode export failed. This view may be stale.',
+                                meta: { kind: 'snapshotNotice' }
+                            })
                         }
-                    }
-                    const explicitTimelineIds = Array.isArray(message?.meta?.timelineMessageIds)
-                        ? message.meta.timelineMessageIds.filter((id) => typeof id === 'string' && id.length > 0)
-                        : [];
-                    if (explicitTimelineIds.length) {
-                        // DUAL-LOAD STRATEGY:
-                        // Load 1: Timeline messages only (via upsertMessage which pushes to timeline)
-                        const timelineIdSet = new Set(explicitTimelineIds);
-                        const timelineMessages = rawSessionMessages.filter((item) => {
-                            if (!item || !item.id) return false;
-                            if (!timelineIdSet.has(item.id)) return false;
-                            if (item.role === 'user' && isHiddenControlUserText(item.text || '')) return false;
-                            if (item.role === 'assistant' && isHiddenControlAssistantText(item.text || '')) return false;
-                            return true;
-                        });
-                        for (const item of timelineMessages) {
-                            if (!item || !item.id) continue;
-                            const key = item.id;
-                            if (typeof key !== 'string') continue;
-                            let role = item.role;
-                            if (!role) {
-                                if (key.startsWith('msg_')) {
-                                    role = 'assistant';
-                                } else if (key.startsWith('system:')) {
-                                    role = 'system';
-                                } else {
-                                    vscode.postMessage({
-                                        type: 'ui-debug',
-                                        payload: ['[WV][SESSIONDATA_WARN]', 'missing-role', `id=${key}`]
-                                    });
-                                    continue;
-                                }
-                            }
-                            const rawText = item.text || '';
-                            const cleanedText = role === 'user'
-                                ? stripSystemInjections(rawText.replace(/^(\r?\n)+/, ''))
-                                : rawText;
-                            upsertMessage(session, {
-                                id: key,
-                                role: role,
-                                text: cleanedText,
-                                meta: item.meta || {},
-                                order: session.nextOrder++
-                            });
-                        }
-                        vscode.postMessage({
-                            type: 'ui-debug',
-                            payload: ['[WV][DUAL_LOAD_TIMELINE]', `loaded=${timelineMessages.length}`, `timelineNow=${session.timeline.length}`]
-                        });
-
-                        // Load 2: Backing messages directly to messagesById ONLY (NOT timeline)
-                        const backingIds = new Set(
-                            Array.isArray(message?.meta?.segmentBackingMessageIds)
-                                ? message.meta.segmentBackingMessageIds.filter((id) => typeof id === 'string' && id.length > 0)
-                                : []
-                        );
-                        let backingLoaded = 0;
-                        if (backingIds.size > 0) {
-                            for (const item of rawSessionMessages) {
-                                if (!item?.id || !backingIds.has(item.id) || timelineIdSet.has(item.id)) continue;
-                                if (!session.messagesById.has(item.id)) {
-                                    let role = item.role;
-                                    if (!role) {
-                                        role = item.id.startsWith('msg_') ? 'assistant' : 'system';
-                                    }
-                                    const rawText = item.text || '';
-                                    const cleanedText = role === 'user'
-                                        ? stripSystemInjections(rawText.replace(/^(\r?\n)+/, ''))
-                                        : rawText;
-                                    messageIdentityStore.store(session.messagesById, {
-                                        id: item.id,
-                                        role: role,
-                                        text: cleanedText,
-                                        meta: item.meta || {}
-                                    });
-                                    backingLoaded++;
-                                }
-                            }
-                        }
-                        vscode.postMessage({
-                            type: 'ui-debug',
-                            payload: ['[WV][DUAL_LOAD_BACKING]', `backingIdsExpected=${backingIds.size}`, `backingLoaded=${backingLoaded}`, `messagesById=${session.messagesById.size}`]
-                        });
-
-                        // Reset timeline to explicit IDs. Keep undo segment slots even before placeholder hydration.
-                        session.timeline = explicitTimelineIds.filter((id) =>
-                            session.messagesById.has(id) || (typeof id === 'string' && id.startsWith('system:undo-seg:'))
-                        );
-                        const undoSlotCount = session.timeline.filter((id) => typeof id === 'string' && id.startsWith('system:undo-seg:')).length;
-                        vscode.postMessage({
-                            type: 'ui-debug',
-                            payload: ['[WV][DUAL_LOAD_TIMELINE_RESET]', `explicit=${explicitTimelineIds.length}`, `kept=${session.timeline.length}`, `undoSlots=${undoSlotCount}`]
-                        });
-                        logTimelineSnapshot('snapshot-restore', session.timeline, `count=${session.timeline.length}`);
-                    } else {
-                        // Fallback: no explicit timeline IDs — use old logic
-                        const sessionMessages = fallbackDisplayMessages;
-                        for (const item of sessionMessages) {
-                            if (!item || !item.id) continue;
-                            const key = item.id;
-                            if (typeof key !== 'string') continue;
-                            let role = item.role;
-                            if (!role) {
-                                if (key.startsWith('msg_')) {
-                                    role = 'assistant';
-                                } else if (key.startsWith('system:')) {
-                                    role = 'system';
-                                } else {
-                                    vscode.postMessage({
-                                        type: 'ui-debug',
-                                        payload: ['[WV][SESSIONDATA_WARN]', 'missing-role', `id=${key}`]
-                                    });
-                                    continue;
-                                }
-                            }
-                            const rawText = item.text || '';
-                            const cleanedText = role === 'user'
-                                ? stripSystemInjections(rawText.replace(/^(\r?\n)+/, ''))
-                                : rawText;
-                            upsertMessage(session, {
-                                id: key,
-                                role: role,
-                                text: cleanedText,
-                                meta: item.meta || {},
-                                order: session.nextOrder++
-                            });
-                        }
-                    }
-
-                    materializeInjectedChangeLists(session, rawSessionMessages, 'sessionData');
-                     
-                    // Snapshot notice if needed
-                    if (message.meta?.source === 'snapshot') {
-                        const noticeId = `system:snapshot:${Date.now()}`;
-                        upsertMessage(session, {
-                            id: noticeId,
-                            role: 'system',
-                            text: 'Session loaded from local snapshot because opencode export failed. This view may be stale.',
-                            meta: { kind: 'snapshotNotice' }
-                        });
-                        if (!session.timeline.includes(noticeId)) {
-                            session.timeline.unshift(noticeId);
-                        }
+                    );
+                    if (hydrationApplication.snapshotNoticeId) {
                         vscode.postMessage({
                             type: 'ui-debug',
                             payload: ['[WV][SNAPSHOT_MODE]', `sessionId=${sessionId}`]
                         });
                     }
                     
-                    // Apply hydrated segments (this calls rebuildHiddenSetFromTimeline)
-                    const segments = Array.isArray(message.segments) ? message.segments : [];
-                    if (hasSegments) {
-                        applyHydratedSegments(session, segments, true);
-                    } else {
-                        vscode.postMessage({
-                            type: 'ui-debug',
-                            payload: ['[WV][SEG_HYDRATE_SKIP]', 'reason=no-hasSegments', `before=${session.segmentsByNoticeKey.size}`]
-                        });
-                        rebuildHiddenSetFromTimeline(session);
-                    }
-
-                    // Rebuild placeholders for hydrated segments
-                    const msgOnlyTimeline = session.timeline.filter((id) => typeof id === 'string' && id.startsWith('msg_'));
-                    let inserted = 0;
-                    let skipped = 0;
-                    for (const seg of session.segmentsByNoticeKey.values()) {
-                        const noticeKey = seg.noticeKey;
-                        if (!noticeKey) {
-                            skipped++;
-                            continue;
-                        }
-                        const timelineSlotId = `system:undo-seg:${noticeKey}`;
-                        let anchorIdx = session.timeline.indexOf(timelineSlotId);
-                        if (anchorIdx === -1) {
-                            if (!seg.anchorMsgId || !msgOnlyTimeline.includes(seg.anchorMsgId)) {
-                                vscode.postMessage({
-                                    type: 'ui-debug',
-                                    payload: ['[WV][HYDRATE_SEG_SKIP]', 'reason=missing-slot-and-anchor', `noticeKey=${noticeKey}`]
-                                });
-                                skipped++;
-                                continue;
-                            }
-                            anchorIdx = session.timeline.indexOf(seg.anchorMsgId);
-                            if (anchorIdx === -1) {
-                                for (let i = 0; i < session.timeline.length; i++) {
-                                    const id = session.timeline[i];
-                                    if (id === seg.anchorMsgId) {
-                                        anchorIdx = i;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        if (anchorIdx === -1) {
-                            skipped++;
-                            continue;
-                        }
-                        const placeholderId = getUndoPlaceholderId(noticeKey);
-                        if (!session.messagesById.has(placeholderId)) {
-                            messageIdentityStore.store(session.messagesById, {
-                                id: placeholderId,
-                                role: 'system',
-                                text: '',
-                                meta: {
-                                    kind: 'undoSegmentPlaceholder',
-                                    noticeKey,
-                                    anchorMsgId: seg.anchorMsgId,
-                                    endMsgId: seg.endMsgId,
-                                    applied: seg.applied ?? null,
-                                    createdAt: seg.createdAt || Date.now()
-                                }
-                            });
-                        }
-                        session.timeline[anchorIdx] = placeholderId;
-                        inserted++;
-                        vscode.postMessage({
-                            type: 'ui-debug',
-                            payload: ['[WV][HYDRATE_PLACEHOLDER_INSERT]', `noticeKey=${noticeKey}`, `anchorIdx=${anchorIdx}`]
-                        });
-                    }
-
-                    vscode.postMessage({
-                        type: 'ui-debug',
-                        payload: ['[WV][HYDRATE_PLACEHOLDER_REBUILD]', `total=${session.segmentsByNoticeKey.size}`, `inserted=${inserted}`, `skipped=${skipped}`]
-                    });
-
-                    const preservedLive = restoreVolatileHydrationState(session, preservedHydrationState);
-                    const restoredAppendMeta = restoreAppendHydrationMetadata(sessionId, session);
-                    if (restoredAppendMeta.rootCount > 0) {
+                    const preservedLive = hydrationApplication.preservedResult;
+                    if (hydrationApplication.plan.diagnostics.appendRootCount > 0) {
                         syncAppendSnapshotMetadata(sessionId, 'sessionData-hydrate');
-                    }
-                    if (hydrationIntegrationShadow) {
-                        try {
-                            const shadowComparison = hydrationStateController.compareIntegrationShadow(
-                                session,
-                                hydrationIntegrationShadow
-                            );
-                            vscode.postMessage({
-                                type: 'ui-debug',
-                                payload: ['[WV][HYDRATION_SHADOW]',
-                                    `sessionId=${sessionId}`,
-                                    `matched=${shadowComparison.matched ? 'true' : 'false'}`,
-                                    `mismatches=${shadowComparison.mismatches.join(',') || 'none'}`,
-                                    `details=${shadowComparison.details.join(';') || 'none'}`,
-                                    `timeline=${shadowComparison.summary.timeline}`,
-                                    `messages=${shadowComparison.summary.messages}`,
-                                    `segments=${shadowComparison.summary.segments}`]
-                            });
-                        } catch (shadowError) {
-                            vscode.postMessage({
-                                type: 'ui-debug',
-                                payload: ['[WV][HYDRATION_SHADOW_ERROR]', `sessionId=${sessionId}`, `phase=compare`, `err=${String(shadowError)}`]
-                            });
-                        }
                     }
                     const skippedTimelineArtifacts = preservedLive.skippedArtifacts?.timeline || 0;
                     const skippedBackingArtifacts = preservedLive.skippedArtifacts?.backing || 0;

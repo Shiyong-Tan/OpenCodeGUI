@@ -22,7 +22,7 @@ const integrationOptions = {
 };
 
 describe('hydration volatile state controller', () => {
-  test('builds a side-effect-free integration shadow and reports normalized equivalence', () => {
+  test('prepares a side-effect-free hydration integration', () => {
     const preservedSession: any = createSessionState();
     preservedSession.backendTurnInFlight = true;
     preservedSession.turnFullyFinalized = false;
@@ -40,7 +40,7 @@ describe('hydration volatile state controller', () => {
     });
     preservedSession.timeline = ['msg_user', 'msg_assistant'];
     const preserved = controller.capture(preservedSession);
-    const shadow = controller.createIntegrationShadow({
+    const shadow = controller.prepareIntegration({
       sessionId: 'session-a',
       activeSessionId: 'session-a',
       hasSegments: false,
@@ -55,39 +55,73 @@ describe('hydration volatile state controller', () => {
       },
     }, integrationOptions, preserved);
 
-    const equivalent: any = {
-      ...shadow.state,
-      messagesById: new Map(shadow.state.messagesById),
-      timeline: [...shadow.state.timeline],
-    };
-    equivalent.messagesById.set('system:snapshot:dynamic', {
-      id: 'system:snapshot:dynamic',
-      role: 'system',
-      meta: { kind: 'snapshotNotice' },
-    });
-    equivalent.timeline.unshift('system:snapshot:dynamic');
-    expect(controller.compareIntegrationShadow(equivalent, shadow)).toMatchObject({
-      matched: true,
-      mismatches: [],
-      summary: { timeline: 2, messages: 2 },
+    expect(shadow.plan.accepted).toBe(true);
+    expect(shadow.state.timeline).toEqual(['msg_user', 'msg_assistant']);
+    expect(shadow.state.messagesById.get('msg_assistant').text).toBe('live answer');
+    expect(preservedSession.messagesById.get('msg_assistant').text).toBe('live answer');
+  });
+
+  test('applies the accepted hydration plan as the sole state writer', () => {
+    const target: any = createSessionState();
+    const messagesRef = target.messagesById;
+    const segmentsRef = target.segmentsByNoticeKey;
+    target.messagesById.set('stale', { id: 'stale', role: 'assistant' });
+    const prepared = controller.prepareIntegration({
+      sessionId: 'session-a',
+      activeSessionId: 'session-a',
+      hasSegments: true,
+      turnFullyFinalized: true,
+      messages: [
+        { id: 'msg_user', role: 'user', text: 'prompt' },
+        { id: 'msg_assistant', role: 'assistant', text: 'answer' },
+      ],
+      segments: [{
+        noticeKey: 'undo:one',
+        anchorMsgId: 'msg_user',
+        endMsgId: 'msg_assistant',
+        memberMsgIds: ['msg_user', 'msg_assistant'],
+        applied: true,
+      }],
+      meta: {
+        source: 'snapshot',
+        timelineMessageIds: ['msg_user', 'msg_assistant'],
+        segmentBackingMessageIds: ['msg_user', 'msg_assistant'],
+        hydrationCoverage: 'authoritativeHistoryComplete',
+      },
+    }, integrationOptions, controller.capture(target));
+
+    const result = controller.applyIntegration(target, prepared, {
+      storeMessage: (messagesById, item) => messagesById.set(item.id, {
+        ...item,
+        identity: `identity:${item.id}`,
+      }),
+      rebuildHiddenSet: () => {
+        throw new Error('segment reset must not use retained topology');
+      },
+      createSnapshotNotice: () => ({
+        id: 'system:snapshot:test',
+        role: 'system',
+        text: 'snapshot',
+        meta: { kind: 'snapshotNotice' },
+      }),
     });
 
-    equivalent.timeline.reverse();
-    expect(controller.compareIntegrationShadow(equivalent, shadow)).toMatchObject({
-      matched: false,
-      mismatches: ['timeline'],
-    });
-
-    equivalent.timeline.reverse();
-    equivalent.messagesById.set('msg_assistant', {
-      ...equivalent.messagesById.get('msg_assistant'),
-      text: 'different answer',
-    });
-    expect(controller.compareIntegrationShadow(equivalent, shadow)).toMatchObject({
-      matched: false,
-      mismatches: ['messages'],
-      details: ['messages:msg_assistant:text'],
-    });
+    expect(target.messagesById).toBe(messagesRef);
+    expect(target.segmentsByNoticeKey).toBe(segmentsRef);
+    expect(target.messagesById.has('stale')).toBe(false);
+    expect(target.timeline).toEqual([
+      'system:snapshot:test',
+      'system:undo-seg:undo:one',
+      'msg_assistant',
+    ]);
+    expect(target.messagesById.get('msg_user').identity).toBe('identity:msg_user');
+    expect(target.messagesById.get('system:undo-seg:undo:one').meta.applied).toBeNull();
+    expect(target.messagesById.get('system:snapshot:test').order).toBe(2);
+    expect(target.nextOrder).toBe(3);
+    expect(target.segmentsByNoticeKey.get('undo:one')).not.toHaveProperty('applied');
+    expect(target.hiddenSet).toEqual(new Set(['msg_user', 'msg_assistant']));
+    expect(target.hydrationCoverage).toBe('authoritativeHistoryComplete');
+    expect(result.snapshotNoticeId).toBe('system:snapshot:test');
   });
 
   test('restores missing live messages while excluding persistence artifacts', () => {

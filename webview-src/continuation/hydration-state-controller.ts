@@ -321,16 +321,17 @@ export function createHydrationStateController(options: HydrationStateController
     meta: message?.meta && typeof message.meta === 'object' ? { ...message.meta } : {},
   });
 
-  function createIntegrationShadow(
+  function prepareIntegration(
     input: HydrationIntegrationInput,
     plannerOptions: HydrationIntegrationPlannerOptions,
     preserved: any,
-  ): Readonly<{ plan: HydrationIntegrationPlan; state: any }> {
+  ): Readonly<{ plan: HydrationIntegrationPlan; state: any; preservedResult: any }> {
     const plan = planHydrationIntegration(input, plannerOptions);
     const state: any = {
       hydrationCoverage: plan.coverage,
       messagesById: new Map(),
       timeline: [...plan.timeline],
+      nextOrder: plan.nextOrder,
       messageIndexMap: new Map(),
       segmentsByNoticeKey: new Map(),
       hiddenSet: new Set(),
@@ -370,12 +371,25 @@ export function createHydrationStateController(options: HydrationStateController
       },
       finalAssistantLock: null,
     };
-    if (!plan.accepted) return Object.freeze({ plan, state });
+    if (!plan.accepted) return Object.freeze({ plan, state, preservedResult: restore(null, null) });
     for (const message of plan.messages) state.messagesById.set(message.id, cloneShadowMessage(message));
     for (const segment of plan.segments) {
       state.segmentsByNoticeKey.set(segment.noticeKey, {
-        ...segment,
+        noticeKey: segment.noticeKey,
+        anchorMsgId: segment.anchorMsgId,
+        endMsgId: segment.endMsgId,
         memberMsgIds: [...segment.memberMsgIds],
+        mergedInvalidSegments: Array.isArray(segment.mergedInvalidSegments)
+          ? segment.mergedInvalidSegments.map((child: any) => ({
+            ...child,
+            memberMsgIds: Array.isArray(child?.memberMsgIds) ? [...child.memberMsgIds] : [],
+          }))
+          : [],
+        restoreAllowed: segment.restoreAllowed === true,
+        collapsed: true,
+        createdAt: typeof segment.createdAt === 'number'
+          ? segment.createdAt
+          : (options.now?.() ?? Date.now()),
       });
       if (segment.collapsed === false) continue;
       for (const id of segment.memberMsgIds) {
@@ -393,7 +407,7 @@ export function createHydrationStateController(options: HydrationStateController
       if (!message) continue;
       message.meta = { ...(message.meta || {}), appendedPrompts: [...root.items] };
     }
-    restore(state, preserved);
+    const preservedResult = restore(state, preserved);
     if (state.turnLifecycle) {
       state.backendTurnInFlight = state.turnLifecycle.backendInFlight === true;
       state.turnFullyFinalized = ['effects-finalized', 'failed', 'cancelled']
@@ -412,7 +426,123 @@ export function createHydrationStateController(options: HydrationStateController
     if (!protectedAppendRoot && plan.appendRoots.length > 0) {
       state.appendRootUserKey = plan.appendRoots[0].rootMessageId;
     }
-    return Object.freeze({ plan, state });
+    return Object.freeze({ plan, state, preservedResult });
+  }
+
+  function applyIntegration(
+    session: any,
+    integration: Readonly<{ plan: HydrationIntegrationPlan; state: any; preservedResult: any }>,
+    applicationOptions: Readonly<{
+      storeMessage(messagesById: Map<any, any>, message: any): void;
+      rebuildHiddenSet(session: any): void;
+      createSnapshotNotice?(): any;
+    }>,
+  ) {
+    if (!session || !integration?.plan?.accepted || !integration.state) {
+      throw new Error('hydration-integration-unavailable');
+    }
+    const { plan, state } = integration;
+    const replaceMap = (name: string, source: any) => {
+      if (!(session[name] instanceof Map)) session[name] = new Map();
+      session[name].clear();
+      if (!(source instanceof Map)) return;
+      for (const [key, value] of source.entries()) session[name].set(key, clonePlainValue(value));
+    };
+    const replaceSet = (name: string, source: any) => {
+      if (!(session[name] instanceof Set)) session[name] = new Set();
+      session[name].clear();
+      if (!(source instanceof Set)) return;
+      for (const value of source.values()) session[name].add(value);
+    };
+
+    if (!(session.messagesById instanceof Map)) session.messagesById = new Map();
+    session.messagesById.clear();
+    for (const message of state.messagesById.values()) {
+      applicationOptions.storeMessage(session.messagesById, cloneMessage(message));
+    }
+    session.timeline = [...state.timeline];
+    session.nextOrder = state.nextOrder;
+    session.hydrationCoverage = state.hydrationCoverage;
+
+    if (plan.reset.segments) {
+      if (!(session.segmentsByNoticeKey instanceof Map)) session.segmentsByNoticeKey = new Map();
+      session.segmentsByNoticeKey.clear();
+      for (const [noticeKey, segment] of state.segmentsByNoticeKey.entries()) {
+        session.segmentsByNoticeKey.set(noticeKey, {
+          ...segment,
+          memberMsgIds: Array.isArray(segment?.memberMsgIds) ? [...segment.memberMsgIds] : [],
+          mergedInvalidSegments: Array.isArray(segment?.mergedInvalidSegments)
+            ? segment.mergedInvalidSegments.map((child: any) => ({
+              ...child,
+              memberMsgIds: Array.isArray(child?.memberMsgIds) ? [...child.memberMsgIds] : [],
+            }))
+            : [],
+        });
+      }
+      replaceSet('hiddenSet', state.hiddenSet);
+    } else {
+      applicationOptions.rebuildHiddenSet(session);
+    }
+
+    for (const name of [
+      'messageIndexMap',
+      'serverIdToKey',
+      'clientKeyToServerId',
+      'serverIdToClientKey',
+      'appendComposerDrafts',
+    ]) replaceMap(name, state[name]);
+    for (const name of [
+      'hiddenControlUserIds',
+      'assistantUpgradeSeen',
+    ]) replaceSet(name, state[name]);
+
+    for (const name of [
+      'pendingAssistantUpgrade',
+      'thinkingId',
+      'currentTurnAssistantKey',
+      'currentTurnAssistantMsgId',
+      'lastTurnUserId',
+      'lastTurnAssistantId',
+      'cancelledTurn',
+      'canceledActiveTurn',
+      'activeTurnOpId',
+      'backendTurnInFlight',
+      'awaitingFinalMapBind',
+      'streamMode',
+      'earlyFinalAssistantId',
+      'turnFullyFinalized',
+      'turnLifecycle',
+      'finalAssistantLock',
+      'appendRootUserKey',
+      'appendComposerFor',
+      'inputDraft',
+      'backgroundSubagentIndicatorVisible',
+      'backgroundSubagentIndicatorUntil',
+      'backgroundSubagentIndicatorAnchorId',
+    ]) session[name] = clonePlainValue(state[name]);
+    if (Object.prototype.hasOwnProperty.call(state, 'activeSubagents')) {
+      session.activeSubagents = cloneActiveSubagents(state.activeSubagents);
+    } else {
+      delete session.activeSubagents;
+    }
+
+    let snapshotNoticeId: string | null = null;
+    if (plan.snapshotNoticeRequired) {
+      const notice = applicationOptions.createSnapshotNotice?.();
+      if (notice && typeof notice.id === 'string' && notice.id) {
+        applicationOptions.storeMessage(session.messagesById, cloneMessage({
+          ...notice,
+          order: typeof notice.order === 'number' ? notice.order : session.nextOrder++,
+        }));
+        session.timeline.unshift(notice.id);
+        snapshotNoticeId = notice.id;
+      }
+    }
+    return Object.freeze({
+      plan,
+      preservedResult: integration.preservedResult,
+      snapshotNoticeId,
+    });
   }
 
   const stableValue = (value: any): any => {
@@ -479,47 +609,8 @@ export function createHydrationStateController(options: HydrationStateController
     }
     const expected = shadow.state;
     const mismatches: string[] = [];
-    const details: string[] = [];
-    const describeMessageDifference = (left: any, right: any) => {
-      if (details.length >= 4) return;
-      const leftById = new Map(
-        (Array.isArray(left) ? left : [])
-          .filter((entry: any) => Array.isArray(entry) && entry.length >= 2)
-          .map((entry: any) => [entry[0], entry[1]]),
-      );
-      const rightById = new Map(
-        (Array.isArray(right) ? right : [])
-          .filter((entry: any) => Array.isArray(entry) && entry.length >= 2)
-          .map((entry: any) => [entry[0], entry[1]]),
-      );
-      for (const id of new Set([...leftById.keys(), ...rightById.keys()])) {
-        if (!leftById.has(id)) {
-          details.push(`messages:missing-actual:${String(id)}`);
-          continue;
-        }
-        if (!rightById.has(id)) {
-          details.push(`messages:extra-actual:${String(id)}`);
-          continue;
-        }
-        const leftMessage: any = leftById.get(id);
-        const rightMessage: any = rightById.get(id);
-        if (stableJson(leftMessage) === stableJson(rightMessage)) continue;
-        const topKeys = new Set([
-          ...Object.keys(leftMessage || {}),
-          ...Object.keys(rightMessage || {}),
-        ]);
-        const changed = [...topKeys].filter((key) => (
-          stableJson(leftMessage?.[key]) !== stableJson(rightMessage?.[key])
-        ));
-        details.push(`messages:${String(id)}:${changed.join('+') || 'value'}`);
-        if (details.length >= 4) break;
-      }
-    };
     const compare = (name: string, left: any, right: any) => {
-      if (stableJson(left) === stableJson(right)) return;
-      mismatches.push(name);
-      if (name === 'messages') describeMessageDifference(left, right);
-      else if (details.length < 4) details.push(name);
+      if (stableJson(left) !== stableJson(right)) mismatches.push(name);
     };
     compare('timeline', visibleTimeline(actual), visibleTimeline(expected));
     compare('messages', visibleMessages(actual), visibleMessages(expected));
@@ -564,7 +655,7 @@ export function createHydrationStateController(options: HydrationStateController
     return Object.freeze({
       matched: mismatches.length === 0,
       mismatches: Object.freeze(mismatches),
-      details: Object.freeze(details),
+      details: Object.freeze([]),
       summary: Object.freeze({
         timeline: visibleTimeline(actual).length,
         messages: visibleMessages(actual).length,
@@ -584,7 +675,7 @@ export function createHydrationStateController(options: HydrationStateController
     resolveCanonicalId,
     capture,
     restore,
-    createIntegrationShadow,
-    compareIntegrationShadow,
+    prepareIntegration,
+    applyIntegration,
   });
 }
