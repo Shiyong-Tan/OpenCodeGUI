@@ -146,4 +146,47 @@ describe('SidebarChatEventHandler', () => {
       sessionId: 'session-A',
     });
   });
+
+  test('binds a user acknowledgement to its session-local pending identity', async () => {
+    const webview = { postMessage: jest.fn() };
+    const host = {
+      smartSearchSessions: { owns: () => false },
+      currentSessionId: 'session-B',
+      _view: { webview },
+      activeSubagentSessionIds: new Set(),
+      pendingClientMessageId: 'local-B',
+      pendingLocalKeyBySession: new Map([
+        ['session-A', 'local-A'],
+        ['session-B', 'local-B'],
+      ]),
+      clientMessageIdMap: new Map([
+        ['local-A', 'internal-A'],
+        ['local-B', 'internal-B'],
+      ]),
+      rawUserTextByLocalKey: new Map([['local-A', 'prompt A']]),
+      rawUserTextByMsgId: new Map(),
+      uiDebugChannel: { appendLine: jest.fn() },
+      client: {
+        getMessageIndex: jest.fn(() => 4),
+        registerMessage: jest.fn(),
+        aliasMessageId: jest.fn(),
+      },
+    };
+
+    await handleSidebarChatEvent(host as any, {
+      type: 'message',
+      sessionId: 'session-A',
+      text: 'msg_user_A',
+    } as any, webview as any);
+
+    expect(webview.postMessage).toHaveBeenCalledWith({
+      type: 'userAckBind',
+      sessionId: 'session-A',
+      localKey: 'local-A',
+      msgId: 'msg_user_A',
+    });
+    expect(host.pendingClientMessageId).toBe('local-B');
+    expect(host.rawUserTextByMsgId.get('msg_user_A')).toBe('prompt A');
+    expect(host.client.aliasMessageId).not.toHaveBeenCalledWith('local-B', 'msg_user_A');
+  });
 });

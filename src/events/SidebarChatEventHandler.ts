@@ -658,9 +658,7 @@ export async function handleSidebarChatEvent(
                 host.uiDebugChannel.appendLine('[EXT][SESSION_ROUTE_DROP] event=userAckBind reason=missing-event-session');
                 return;
             }
-            const localKey = host.pendingClientMessageId
-                || (sessionId ? host.pendingLocalKeyBySession.get(sessionId) : undefined)
-                || null;
+            const localKey = host.pendingLocalKeyBySession.get(sessionId) || null;
             if (localKey && sessionId) {
                 const mappedMessageIndex = host.client.getMessageIndex(localKey, sessionId)
                     ?? host.client.registerMessage(localKey, sessionId);
