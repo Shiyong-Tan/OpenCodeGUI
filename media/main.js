@@ -366,6 +366,7 @@ let headerUiController = null;
 let textMeasureCanvas = null;
 let subagentIntervals = new Map();
 let subagentCardsContainer = null;
+const appendPresentationDiagnostics = new Map();
 let autoScrollPinnedToBottom = true;
 const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 80;
 let debugWebviewLivenessAckDrop = false;
@@ -11534,6 +11535,56 @@ function shouldHideDcpUiMessage(message) {
         return true;
     }
 
+    function emitAppendPresentationDiagnostic(session, units, chatWindowRoute) {
+        if (typeof appendPresentationDiagnostics === 'undefined') return;
+        const trace = appendPresentationDiagnostics.get(activeSessionId);
+        if (!trace || !session || trace.sessionId !== activeSessionId) return;
+        trace.renderOrdinal += 1;
+        const visibleKeys = new Set(units.map((unit) => unit.key));
+        const directRoots = Array.from(chatContainer.querySelectorAll(':scope > [data-render-unit-key]'));
+        const summarize = (key, label) => {
+            const message = session.messagesById.get(key);
+            const keyedRootsForMessage = directRoots.filter((root) => root.dataset.renderUnitKey === key);
+            const descendantRootsForMessage = directRoots.filter((root) =>
+                root.querySelector?.(`[data-message-id="${escapeMessageIdForSelector(key)}"]`)
+            );
+            const roots = Array.from(new Set([...keyedRootsForMessage, ...descendantRootsForMessage]));
+            const root = roots[0] || null;
+            const text = String(root?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+            const subagentDomCount = root
+                ? root.querySelectorAll('[class*="subagent"], [data-safe-shell-family="message-subagent"]').length
+                : 0;
+            return [
+                `${label}=${key}`,
+                `visible=${visibleKeys.has(key)}`,
+                `keyedRoots=${keyedRootsForMessage.length}`,
+                `matchedRoots=${roots.length}`,
+                `isThinking=${message?.meta?.isThinking === true}`,
+                `metaSubagents=${Array.isArray(message?.meta?.subagents) ? message.meta.subagents.length : 0}`,
+                `domSubagents=${subagentDomCount}`,
+                `text=${JSON.stringify(text)}`
+            ].join(',');
+        };
+        const reconcile = window.__ocKeyedChatLastReconcile || {};
+        const rootKeyTail = directRoots.slice(-8).map((root) => root.dataset.renderUnitKey || '?').join(',');
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: [
+                '[WV][APPEND_PRESENTATION_TRACE]',
+                `sessionId=${activeSessionId}`,
+                `generation=${trace.generation}`,
+                `stage=${trace.stage}`,
+                `render=${trace.renderOrdinal}`,
+                `route=${chatWindowRoute}`,
+                `reconcile=create:${reconcile.create || 0},replace:${reconcile.replace || 0},remove:${reconcile.remove || 0},move:${reconcile.move || 0},reuse:${reconcile.reuse || 0}`,
+                summarize(trace.predecessorAssistantMsgId, 'predecessor'),
+                summarize(trace.successorAssistantMsgId, 'successor'),
+                `rootKeyTail=[${rootKeyTail}]`
+            ]
+        });
+        if (trace.stage === 'finalize_done') appendPresentationDiagnostics.delete(activeSessionId);
+    }
+
     function renderFromState() {
         const owner = Object.freeze({ sessionId: activeSessionId || '__no_session__', generation: chatWindowGeneration });
         if (!KEYED_CHAT_RECONCILE_ENABLED || !window.__ocRendering) {
@@ -11555,6 +11606,9 @@ function shouldHideDcpUiMessage(message) {
             if (!CHAT_WINDOW_RAW_AUDIT_ACCEPTED_ROUTES.has(chatWindowRoute)) {
                 recordChatWindowOuterRecovery(owner, chatWindowRoute || 'window-route-unavailable');
                 return;
+            }
+            if (typeof emitAppendPresentationDiagnostic === 'function') {
+                emitAppendPresentationDiagnostic(session, units, chatWindowRoute);
             }
             stage = 'raw-integrity';
             const rawIntegrity = captureChatWindowRawIntegrityAudit();
@@ -14481,6 +14535,14 @@ function appendMessageImages(parentEl, message) {
                         session.pendingAssistantUpgrade = null;
                         session.awaitingFinalMapBind = false;
                     }
+                    appendPresentationDiagnostics.set(sessionId, {
+                        sessionId,
+                        generation: followup.generation,
+                        predecessorAssistantMsgId: followup.predecessorAssistantMsgId,
+                        successorAssistantMsgId: followup.assistantMsgId,
+                        stage: 'start',
+                        renderOrdinal: 0
+                    });
                     const followupLifecycle = turnLifecycleController.setBackendInFlight(session, true);
                     if (followupLifecycle.phase !== 'active') {
                         vscode.postMessage({ type: 'ui-debug', payload: ['append-followup', 'drop-terminal-turn', followupLifecycle.phase] });
@@ -14683,6 +14745,8 @@ function appendMessageImages(parentEl, message) {
                         || (typeof target.meta?.statusText === 'string' && target.meta.statusText.trim())
                     );
                     if (!hadPresentableContent && hasPresentableContent) {
+                        const trace = appendPresentationDiagnostics.get(sessionId);
+                        if (trace?.generation === followup.generation) trace.stage = 'handoff';
                         if (Array.isArray(target.meta?.subagents)) {
                             target.meta = { ...(target.meta || {}) };
                             delete target.meta.subagents;
@@ -14849,6 +14913,8 @@ function appendMessageImages(parentEl, message) {
                 if (!session.meta) session.meta = {};
                 session.meta.turnFinalizePhase = message.phase || '';
                 if (message.phase === 'finalize_done') {
+                    const trace = appendPresentationDiagnostics.get(sessionId);
+                    if (trace) trace.stage = 'finalize_done';
                     turnLifecycleController.completeEffects(session);
                     session.snapshotFinalizeReady = true;
                     const pendingEpoch = typeof session.snapshotPendingEpoch === 'number' ? session.snapshotPendingEpoch : 0;
@@ -14872,6 +14938,8 @@ function appendMessageImages(parentEl, message) {
                 const sessionId = route.sessionId;
                 logIdCandidates('[DBG_CHATDONE]', message, sessionId, activeSessionId);
                 const session = getSessionState(sessionId);
+                const trace = appendPresentationDiagnostics.get(sessionId);
+                if (trace) trace.stage = 'chatDone';
                 retainAgentLaneParentAssociation(session, route);
                 if (session) {
                     const tail = formatTail(session.timeline);
