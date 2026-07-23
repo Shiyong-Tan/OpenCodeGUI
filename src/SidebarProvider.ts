@@ -5374,6 +5374,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
     }
 
+    private consumeAppendSuccessorTmpKey(sessionId: string, successor: { predecessorAssistantMsgId?: string; generation?: number }): void {
+        const tmpKey = this.pendingAssistantTmpKeyBySession.get(sessionId);
+        if (!tmpKey || !successor?.predecessorAssistantMsgId || !Number.isFinite(successor.generation)) {
+            this.uiDebugChannel.appendLine(`[EXT][APPEND_FOLLOWUP_TMP_RETAIN] sessionId=${sessionId} generation=${successor?.generation ?? 'null'}`);
+            return;
+        }
+        // The host only clears the session pointer after Client has proven canonical A→B ownership.
+        this.pendingAssistantTmpKeyBySession.delete(sessionId);
+        this.uiDebugChannel.appendLine(`[EXT][APPEND_FOLLOWUP_TMP_CLEAR] sessionId=${sessionId} predecessorAssistantMsgId=${successor.predecessorAssistantMsgId} generation=${successor.generation}`);
+    }
+
     private async handleAbortedMessage(messageId: string, webview: vscode.Webview): Promise<void> {
         this.client.removeMessageId(messageId);
         this.clientMessageIdMap.delete(messageId);

@@ -19,6 +19,50 @@ export function mapServerEventToChatEvents(
         const events: ChatEvent[] = [];
         const normalized = host.normalizeEvent(type, props, source);
         const sessionId = normalized.sessionId;
+        let appendFollowup: any;
+        let appendFollowupStart = false;
+        if (source === 'sse' && type === 'message.updated' && props?.info?.role === 'assistant' && sessionId) {
+            const info = props.info;
+            const active = host.getActiveAppendFollowup?.(sessionId);
+            if (active) {
+                if (info.id !== active.assistantMsgId || info.parentID !== active.appendUserMsgId) {
+                    // A's duplicate tool-calls update is harmless; all other late/foreign main messages fail closed.
+                    if (!(info.id === active.predecessorAssistantMsgId && info.finish === 'tool-calls')) return events;
+                } else {
+                    appendFollowup = active;
+                }
+            } else {
+                if (info.finish === 'tool-calls') {
+                    host.recordAppendFollowupToolCallsBoundary?.(sessionId, info.id, normalized.lane);
+                } else {
+                    const state = host.appendTurnStateBySession.get(sessionId);
+                    if (state?.appendUserMsgIds?.has(info.parentID)) {
+                        const result = host.tryBindAppendFollowup?.(sessionId, info.id, info.parentID, normalized.lane);
+                        if (result?.status === 'new') {
+                            appendFollowup = result.identity;
+                            appendFollowupStart = true;
+                        } else if (result?.status !== 'existing') {
+                            return events;
+                        } else {
+                            appendFollowup = result.identity;
+                        }
+                    }
+                }
+            }
+        }
+        if (source === 'sse' && type === 'message.part.updated' && sessionId) {
+            const part = props?.part;
+            const active = host.getActiveAppendFollowup?.(sessionId);
+            const messageId = typeof part?.messageID === 'string' ? part.messageID : undefined;
+            if (active && messageId && messageId !== active.assistantMsgId && part?.type !== 'tool') return events;
+            if (!active && part?.type === 'text' && messageId) {
+                host.clearAppendFollowupBoundaryForRenewedContent?.(sessionId, messageId);
+            }
+            if (active?.assistantMsgId === messageId) appendFollowup = active;
+        }
+        if (appendFollowupStart) {
+            events.push({ type: 'turnInFlight', sessionId, inFlight: true, ownerMsgId: appendFollowup.assistantMsgId, assistantMsgId: appendFollowup.assistantMsgId, appendFollowup, source });
+        }
         if (sessionId) {
             host.logUiDebug(`EXT: event.normalized | type=${normalized.type} | lane=${normalized.lane} | sessionId=${normalized.sessionId} | messageId=${normalized.messageId || 'null'} | parentId=${normalized.parentId || 'null'} | finish=${normalized.finish || 'null'} | partType=${normalized.partType || 'null'} | source=${normalized.source}`);
         }
@@ -64,7 +108,7 @@ export function mapServerEventToChatEvents(
             }
         }
         const isSessionStatus = type === 'session.status';
-        if (source === 'sse' && sessionId && host.turnFinishedBySession.has(sessionId) && !isSessionStatus) {
+        if (source === 'sse' && sessionId && host.turnFinishedBySession.has(sessionId) && !isSessionStatus && !appendFollowup) {
             return events;
         }
         if (source === 'resync' && sessionId && (type === 'files' || type === 'diff' || type === 'toolPatch')) {
@@ -224,7 +268,7 @@ export function mapServerEventToChatEvents(
                 }
             }
             if (role === 'assistant' && messageId) {
-                const isSubagentLane = typeof sessionId === 'string' && host.subagentToParentSessionMap.has(sessionId);
+                const isSubagentLane = typeof sessionId === 'string' && host.subagentToParentSessionMap.has(sessionId) && !appendFollowup;
                 const lane: EventLane = isSubagentLane ? 'subagent' : host.classifyEventLane(sessionId);
                 const tokens = info?.tokens;
                 if (sessionId && tokens && typeof tokens === 'object') {
@@ -340,6 +384,7 @@ export function mapServerEventToChatEvents(
                             messageId,
                             messageIndex,
                             tmpKey: host.getPendingAssistantTmpKey(sessionId),
+                            appendFollowup,
                             ...(isSubagentLane ? {
                                 parentSessionId: host.getParentSessionForSubagent(sessionId),
                                 agentSessionId: sessionId,
@@ -526,13 +571,14 @@ export function mapServerEventToChatEvents(
                     }
                     host.assistantStatusCleared.add(msgId);
                 }
-                const textParentSessionId = host.getParentSessionForSubagent(sessionId);
+                const textParentSessionId = appendFollowup ? undefined : host.getParentSessionForSubagent(sessionId);
                 events.push({
                     type: 'text',
                     text: chunk,
                     sessionId,
                     assistantMsgId: part?.messageID,
                     tmpKey: host.getPendingAssistantTmpKey(sessionId),
+                    appendFollowup,
                     ...(textParentSessionId ? {
                         parentSessionId: textParentSessionId,
                         agentSessionId: sessionId,

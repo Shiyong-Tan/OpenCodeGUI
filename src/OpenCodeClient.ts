@@ -274,6 +274,7 @@ export type ChatEvent = {
     lane?: EventLane;
     source?: EventSource;
     continuationMeta?: ContinuationMessageMetadata;
+    appendFollowup?: AppendFollowupIdentity;
 };
 type PendingQuestionControl = {
     callId: string;
@@ -369,6 +370,15 @@ type TurnState = {
     turnMessageIds?: Set<string>;
     continuationMeta?: ContinuationMessageMetadata;
     continuationState?: ContinuationLifecycleState;
+    appendFollowupHandoff?: AppendFollowupHandoff;
+};
+
+type AppendFollowupHandoff = {
+    phase: 'tool-calls-complete' | 'followup-active';
+    predecessorAssistantMsgId: string;
+    appendUserMsgId?: string;
+    followupAssistantMsgId?: string;
+    generation?: number;
 };
 
 type PostFinalWatchState = {
@@ -421,6 +431,18 @@ type AppendTurnState = {
     pending: AppendPendingPrompt[];
     appendUserMsgIds: Set<string>;
     emittedAppendUserMsgIds: Set<string>;
+    nextSuccessorGeneration?: number;
+    activeSuccessor?: AppendFollowupIdentity;
+};
+
+export type AppendFollowupIdentity = {
+    kind: 'append-followup';
+    mode: 'same-turn-handoff' | 'post-final';
+    sessionId: string;
+    appendUserMsgId: string;
+    predecessorAssistantMsgId: string;
+    assistantMsgId: string;
+    generation: number;
 };
 
 export type BeginAppendPromptResult = {
@@ -1780,6 +1802,8 @@ export class OpenCodeClient {
     public cancelTurn(sessionId: string, opId?: string): void {
         if (!sessionId) return;
         this.canceledActiveTurnBySession.set(sessionId, true);
+        const appendState = this.appendTurnStateBySession.get(sessionId);
+        if (appendState) appendState.activeSuccessor = undefined;
         if (opId && typeof opId === 'string') {
             this.activeTurnOpIdBySession.set(sessionId, opId);
         }
@@ -1878,6 +1902,8 @@ export class OpenCodeClient {
             void this.persistContinuationState(sessionId, postFinal.ownerMsgId, 'watching', postFinal.changes);
         }
         this.beginLateDiffGrace(sessionId);
+        const appendState = this.appendTurnStateBySession.get(sessionId);
+        if (appendState?.activeSuccessor?.mode === 'same-turn-handoff') appendState.activeSuccessor = undefined;
         this.turnStateBySession.delete(sessionId);
         this.pendingTurnChangesBySession.delete(sessionId);
         this.turnWriteStateBySession.delete(sessionId);
@@ -2553,6 +2579,48 @@ export class OpenCodeClient {
         if (existing && existing === assistantMsgId) return;
         this.currentTurnAssistantMsgIdBySession.set(sessionId, assistantMsgId);
         this.logUiDebug(`EXT: turn.anchor.assistant | sessionId=${sessionId} | assistantMsgId=${assistantMsgId} | reason=${reason}`);
+    }
+
+    public recordAppendFollowupToolCallsBoundary(sessionId: string | undefined, assistantMsgId: string | undefined, lane: EventLane): void {
+        if (!sessionId || !assistantMsgId || lane !== 'main') return;
+        const state = this.turnStateBySession.get(sessionId);
+        if (!state || state.assistantMsgId !== assistantMsgId || this.appendTurnStateBySession.get(sessionId)?.activeSuccessor) return;
+        if (state.appendFollowupHandoff?.phase === 'tool-calls-complete' && state.appendFollowupHandoff.predecessorAssistantMsgId === assistantMsgId) return;
+        state.appendFollowupHandoff = { phase: 'tool-calls-complete', predecessorAssistantMsgId: assistantMsgId };
+    }
+
+    public clearAppendFollowupBoundaryForRenewedContent(sessionId: string | undefined, assistantMsgId: string | undefined): void {
+        const state = sessionId ? this.turnStateBySession.get(sessionId) : undefined;
+        if (state?.appendFollowupHandoff?.phase === 'tool-calls-complete' && state.appendFollowupHandoff.predecessorAssistantMsgId === assistantMsgId) state.appendFollowupHandoff = undefined;
+    }
+
+    public tryBindAppendFollowup(sessionId: string | undefined, assistantMsgId: string | undefined, parentId: string | undefined, lane: EventLane): { status: 'new' | 'existing' | 'blocked' | 'conflict'; identity?: AppendFollowupIdentity } {
+        if (!sessionId || !assistantMsgId || !parentId || lane !== 'main') return { status: 'blocked' };
+        const append = this.appendTurnStateBySession.get(sessionId);
+        const state = this.turnStateBySession.get(sessionId);
+        const active = append?.activeSuccessor;
+        if (active) return active.assistantMsgId === assistantMsgId && active.appendUserMsgId === parentId ? { status: 'existing', identity: { ...active } } : { status: 'conflict' };
+        const marker = state?.appendFollowupHandoff;
+        if (!append?.appendUserMsgIds.has(parentId) || !state || marker?.phase !== 'tool-calls-complete' || marker.predecessorAssistantMsgId !== state.assistantMsgId || this.turnFinishedBySession.has(sessionId) || this.turnFinalMsgIdBySession.has(sessionId) || this.finalizingMsgIdBySession.has(sessionId)) return { status: 'blocked' };
+        const identity: AppendFollowupIdentity = { kind: 'append-followup', mode: 'same-turn-handoff', sessionId, appendUserMsgId: parentId, predecessorAssistantMsgId: marker.predecessorAssistantMsgId, assistantMsgId, generation: (append.nextSuccessorGeneration || 0) + 1 };
+        append.nextSuccessorGeneration = identity.generation;
+        append.activeSuccessor = identity;
+        state.assistantMsgId = assistantMsgId;
+        state.pendingAssistantTmpKey = undefined;
+        state.turnMessageIds = state.turnMessageIds || new Set<string>();
+        state.turnMessageIds.add(marker.predecessorAssistantMsgId);
+        state.turnMessageIds.add(assistantMsgId);
+        state.appendFollowupHandoff = { phase: 'followup-active', predecessorAssistantMsgId: marker.predecessorAssistantMsgId, appendUserMsgId: parentId, followupAssistantMsgId: assistantMsgId, generation: identity.generation };
+        this.currentTurnAssistantMsgIdBySession.set(sessionId, assistantMsgId);
+        this.pendingAssistantMsgIdBySession.set(sessionId, assistantMsgId);
+        this.currentTurnUserMsgIdBySession.set(sessionId, parentId);
+        this.pendingUserMsgIdBySession.set(sessionId, parentId);
+        return { status: 'new', identity: { ...identity } };
+    }
+
+    public getActiveAppendFollowup(sessionId: string | undefined): AppendFollowupIdentity | undefined {
+        const identity = sessionId ? this.appendTurnStateBySession.get(sessionId)?.activeSuccessor : undefined;
+        return identity ? { ...identity } : undefined;
     }
 
     private hasSeenFinalForAssistant(sessionId: string, assistantMsgId: string): boolean {

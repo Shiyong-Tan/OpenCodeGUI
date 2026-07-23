@@ -132,4 +132,16 @@ describe('hydration volatile state controller', () => {
     expect(hydrated.messagesById.get('msg_assistant').text).toBe('authoritative history');
     expect(result.mergedIds).toEqual([]);
   });
+
+  test('retains active subagent progress across active-turn hydration only', () => {
+    const before: any = createSessionState();
+    before.backendTurnInFlight = true;
+    before.turnFullyFinalized = false;
+    before.activeSubagents = [{ sessionId: 'agent-a', state: 'running', latestText: 'working' }];
+    const preserved = controller.capture(before);
+    const hydrated: any = createSessionState();
+    controller.restore(hydrated, preserved);
+    expect(hydrated.activeSubagents).toEqual(before.activeSubagents);
+    expect(hydrated.activeSubagents).not.toBe(before.activeSubagents);
+  });
 });

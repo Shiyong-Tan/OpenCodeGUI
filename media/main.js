@@ -12717,6 +12717,7 @@ function handleChatChunk(sessionId, message) {
 function handleChatDone(sessionId, message) {
         const session = getSessionState(sessionId);
         if (!session) return;
+        const followup = session.appendFollowupIdentity;
         const skipSnapshot = message?.skipSnapshot === true;
         const preDoneAssistantKey = session.currentTurnAssistantKey || session.thinkingId || null;
         const preDoneAssistant = preDoneAssistantKey ? session.messagesById.get(preDoneAssistantKey) : null;
@@ -12761,7 +12762,7 @@ function handleChatDone(sessionId, message) {
         null;
 
     let replaced = false;
-    if (resolvedFinal && typeof resolvedFinal === 'string') {
+    if (resolvedFinal && typeof resolvedFinal === 'string' && !(followup && followup.assistantMsgId === resolvedFinal)) {
         const beforeKey = session.currentTurnAssistantKey;
         attemptAssistantUpgrade(sessionId, { assistantMsgId: resolvedFinal, tmpKey: preDoneAssistantKey }, 'chatDone');
         replaced = beforeKey !== session.currentTurnAssistantKey && session.currentTurnAssistantKey === resolvedFinal;
@@ -12836,6 +12837,9 @@ function handleChatDone(sessionId, message) {
         }
     }
     const appendItemsChanged = normalizeSessionAppendItemsForFinalize(session);
+    if (followup && followup.assistantMsgId === resolvedFinal) {
+        session.appendFollowupIdentity = null;
+    }
     if (appendItemsChanged) {
         syncAppendSnapshotMetadata(sessionId, 'chatDone-finalize');
     }
@@ -14759,6 +14763,35 @@ function appendMessageImages(parentEl, message) {
                 const sessionId = getEventSessionId(message, 'turnInFlight');
                 if (!sessionId) break;
                 const session = getSessionState(sessionId, true);
+                const followup = message?.appendFollowup;
+                if (message?.inFlight && followup?.kind === 'append-followup' && followup.mode === 'same-turn-handoff'
+                    && followup.sessionId === sessionId && typeof followup.generation === 'number'
+                    && followup.assistantMsgId === message.ownerMsgId) {
+                    const appendUser = session.messagesById.get(followup.appendUserMsgId);
+                    if (!appendUser || appendUser.role !== 'user') {
+                        vscode.postMessage({ type: 'ui-debug', payload: ['append-followup', 'drop-invalid-user', followup.appendUserMsgId] });
+                        break;
+                    }
+                    const current = session.appendFollowupIdentity;
+                    if (current && (current.generation !== followup.generation || current.assistantMsgId !== followup.assistantMsgId)) break;
+                    const successor = upsertMessage(session, { id: followup.assistantMsgId, role: 'assistant', text: '', meta: { isThinking: true, statusText: '' } });
+                    const userIndex = session.timeline.indexOf(followup.appendUserMsgId);
+                    const successorIndex = session.timeline.indexOf(successor.id);
+                    if (userIndex >= 0 && successorIndex !== userIndex + 1) {
+                        if (successorIndex >= 0) session.timeline.splice(successorIndex, 1);
+                        session.timeline.splice(userIndex + 1, 0, successor.id);
+                    }
+                    session.appendFollowupIdentity = { ...followup };
+                    session.backendTurnInFlight = true;
+                    session.turnFullyFinalized = false;
+                    session.snapshotFinalizeReady = false;
+                    session.currentTurnAssistantKey = successor.id;
+                    session.currentTurnAssistantMsgId = successor.id;
+                    session.thinkingId = successor.id;
+                    updateSendGate();
+                    renderIfActive(sessionId, 'append-followup-start', { scroll: true });
+                    break;
+                }
                 session.backendTurnInFlight = Boolean(message?.inFlight);
                 if (message?.inFlight) {
                     session.turnFullyFinalized = false;
@@ -14817,6 +14850,16 @@ function appendMessageImages(parentEl, message) {
                 const messageIndex = typeof message?.messageIndex === 'number' ? message.messageIndex : null;
                 if (messageId && Number.isFinite(messageIndex)) {
                     session.messageIndexMap.set(messageId, messageIndex);
+                    const followup = message?.appendFollowup;
+                    if (followup?.kind === 'append-followup' && session.appendFollowupIdentity?.generation === followup.generation
+                        && followup.assistantMsgId === messageId) {
+                        const a = session.timeline.indexOf(followup.predecessorAssistantMsgId);
+                        const u = session.timeline.indexOf(followup.appendUserMsgId);
+                        const b = session.timeline.indexOf(messageId);
+                        if (!(a >= 0 && u > a && b > u)) vscode.postMessage({ type: 'ui-debug', payload: ['append-followup', 'index-order-contradiction'] });
+                        updateSendGate();
+                        break;
+                    }
                     const tmpKey = session.pendingAssistantUpgrade?.tmpKey || session.thinkingId || null;
                     const assistantUpgradeFallbackSnapshot = session.lastAssistantUpgradeFallback ? {
                         ...session.lastAssistantUpgradeFallback,
@@ -14932,6 +14975,22 @@ function appendMessageImages(parentEl, message) {
                 if (!route) break;
                 const sessionId = route.sessionId;
                 const session = getSessionState(sessionId, false);
+                const followup = message?.appendFollowup;
+                if (followup?.kind === 'append-followup' && followup.mode === 'same-turn-handoff'
+                    && followup.sessionId === sessionId && session?.appendFollowupIdentity?.generation === followup.generation
+                    && followup.assistantMsgId === message.assistantMsgId) {
+                    const target = session.messagesById.get(followup.assistantMsgId);
+                    if (!target || target.role !== 'assistant') break;
+                    const text = typeof message.lastText === 'string' ? message.lastText : '';
+                    if (message.isStatusUpdate) target.meta = { ...(target.meta || {}), isThinking: true, statusText: text };
+                    else if (text) target.text = `${target.text || ''}${text}`;
+                    target.meta = { ...(target.meta || {}), isThinking: true };
+                    session.currentTurnAssistantKey = followup.assistantMsgId;
+                    session.currentTurnAssistantMsgId = followup.assistantMsgId;
+                    session.thinkingId = followup.assistantMsgId;
+                    renderIfActive(sessionId, 'append-followup-meta', { scroll: true });
+                    break;
+                }
                 retainAgentLaneParentAssociation(session, route);
                 if (session?.canceledActiveTurn) {
                     vscode.postMessage({

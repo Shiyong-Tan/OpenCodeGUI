@@ -470,7 +470,9 @@ export async function handleSidebarChatEvent(
                 type: 'turnInFlight',
                 sessionId: event.sessionId,
                 inFlight: event.inFlight === true,
-                ownerMsgId: event.ownerMsgId
+                ownerMsgId: event.ownerMsgId,
+                assistantMsgId: event.assistantMsgId,
+                appendFollowup: event.appendFollowup,
             });
             if (event.inFlight !== true) {
                 host.syncTurnInFlightAfterFinalize(event.sessionId, liveWebview, 'event:turnInFlight:false');
@@ -498,7 +500,9 @@ export async function handleSidebarChatEvent(
             const sessionId = event.sessionId || host.currentSessionId;
             const eventTmpKey = typeof (event as any).tmpKey === 'string' ? (event as any).tmpKey : undefined;
             const sessionTmpKey = sessionId ? host.pendingAssistantTmpKeyBySession.get(sessionId) : undefined;
-            const tmpKey = eventTmpKey || sessionTmpKey;
+            const isAppendFollowup = Boolean(event.appendFollowup);
+            const tmpKey = isAppendFollowup ? undefined : (eventTmpKey || sessionTmpKey);
+            if (isAppendFollowup && sessionId) host.consumeAppendSuccessorTmpKey?.(sessionId, event.appendFollowup);
             if (sessionId && tmpKey && tmpKey.startsWith('tmp:')) {
                 host.pendingAssistantTmpKeyBySession.set(sessionId, tmpKey);
                 const pendingLocalKey = host.pendingLocalKeyBySession.get(sessionId);
@@ -523,7 +527,8 @@ export async function handleSidebarChatEvent(
                 agentSessionId: event.agentSessionId,
                 displayTarget: event.displayTarget,
                 assistantMsgId: event.assistantMsgId,
-                tmpKey,
+                ...(isAppendFollowup ? {} : { tmpKey }),
+                appendFollowup: event.appendFollowup,
                 isStatusUpdate: event.isStatusUpdate,
                 allowedSessionIds: event.displayTarget === 'agent-lane' && event.agentSessionId
                     ? [event.agentSessionId, ...(event.parentSessionId ? [event.parentSessionId] : [])]
@@ -536,7 +541,8 @@ export async function handleSidebarChatEvent(
                     sessionId,
                     messageId: event.assistantMsgId,
                     messageIndex: event.messageIndex,
-                    phase: 'final-early'
+                    phase: 'final-early',
+                    appendFollowup: event.appendFollowup,
                 });
             }
             return;
@@ -556,7 +562,9 @@ export async function handleSidebarChatEvent(
                     parentSessionId: event.parentSessionId,
                     agentSessionId: event.agentSessionId,
                     displayTarget: event.displayTarget,
-                    tmpKey: host.pendingAssistantTmpKeyBySession?.get(sessionId),
+                    assistantMsgId: event.assistantMsgId,
+                    ...(event.appendFollowup ? {} : { tmpKey: host.pendingAssistantTmpKeyBySession?.get(sessionId) }),
+                    appendFollowup: event.appendFollowup,
                     lastText: event.text,
                     isStatusUpdate: false,
                     allowedSessionIds: event.displayTarget === 'agent-lane' && event.agentSessionId
