@@ -615,7 +615,7 @@ export async function handleSidebarChatEvent(
             const pendingLocalKey = sessionId ? host.pendingLocalKeyBySession.get(sessionId) : undefined;
             if (sessionId && pendingLocalKey) {
                 host.clearDraft(pendingLocalKey);
-                await host.handleAbortedMessage(pendingLocalKey, liveWebview);
+                await host.handleAbortedMessage(sessionId, pendingLocalKey, liveWebview);
             }
             if (sessionId) {
                 if (pendingLocalKey) {

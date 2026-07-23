@@ -430,7 +430,7 @@ ${attachmentLines.join('\n')}`
                         await host.postModelQuota(liveWebview, 'chat-done');
                         if (host.pendingLocalKeyBySession.get(targetSessionId) === clientMessageId) {
                             host.clearDraft(clientMessageId);
-                            await host.handleAbortedMessage(clientMessageId, liveWebview);
+                            await host.handleAbortedMessage(targetSessionId, clientMessageId, liveWebview);
                             host.pendingLocalKeyBySession.delete(targetSessionId);
                         }
                         if (targetMode === 'build') {
@@ -473,7 +473,7 @@ ${attachmentLines.join('\n')}`
                         const pendingLocalKey = sessionId ? host.pendingLocalKeyBySession.get(sessionId) : undefined;
                         if (sessionId && pendingLocalKey) {
                             host.clearDraft(pendingLocalKey);
-                            await host.handleAbortedMessage(pendingLocalKey, activeWebview);
+                            await host.handleAbortedMessage(sessionId, pendingLocalKey, activeWebview);
                             host.pendingLocalKeyBySession.delete(sessionId);
                         }
                         if (sessionId) {
@@ -1657,23 +1657,23 @@ ${attachmentLines.join('\n')}`
                         host.pendingAssistantTmpKeyBySession.delete(cancelSessionId);
                         activeWebview.postMessage({ type: 'turnInFlight', sessionId: cancelSessionId, inFlight: false });
                     }
-                    if (pendingLocalKey) {
-                        await host.handleAbortedMessage(pendingLocalKey, activeWebview);
+                    if (cancelSessionId && pendingLocalKey) {
+                        await host.handleAbortedMessage(cancelSessionId, pendingLocalKey, activeWebview);
                         const mappedUser = host.clientMessageIdMap.get(pendingLocalKey);
                         if (mappedUser && mappedUser !== pendingLocalKey) {
-                            await host.handleAbortedMessage(mappedUser, activeWebview);
+                            await host.handleAbortedMessage(cancelSessionId, mappedUser, activeWebview);
                         }
                     }
                     if (cancelSessionId) {
                         const mappedAssistant = pendingTmpKey ? host.clientMessageIdMap.get(pendingTmpKey) : undefined;
                         if (pendingTmpKey) {
-                            await host.handleAbortedMessage(pendingTmpKey, activeWebview);
+                            await host.handleAbortedMessage(cancelSessionId, pendingTmpKey, activeWebview);
                         }
                         if (pendingAssistant) {
-                            await host.handleAbortedMessage(pendingAssistant, activeWebview);
+                            await host.handleAbortedMessage(cancelSessionId, pendingAssistant, activeWebview);
                         }
                         if (mappedAssistant && mappedAssistant !== pendingTmpKey) {
-                            await host.handleAbortedMessage(mappedAssistant, activeWebview);
+                            await host.handleAbortedMessage(cancelSessionId, mappedAssistant, activeWebview);
                         }
                         host.pendingAssistantTmpKeyBySession.delete(cancelSessionId);
                         host.pendingAssistantMessageIdBySession.delete(cancelSessionId);

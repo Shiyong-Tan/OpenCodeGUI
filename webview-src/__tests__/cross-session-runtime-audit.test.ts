@@ -213,6 +213,18 @@ describe('cross-session runtime repository audit', () => {
     expect(provider).toContain('private pendingLocalKeyBySession = new Map<string, string>();');
   });
 
+  test('aborted-message cleanup retains its captured session owner', () => {
+    const controller = read('src', 'webview', 'SidebarWebviewController.ts');
+    const cleanup = extractFunction(provider, 'private async handleAbortedMessage(');
+
+    expect(cleanup).toContain('handleAbortedMessage(sessionId: string, messageId: string');
+    expect(cleanup).toContain('this.pendingAssistantTmpKeyBySession.get(sessionId)');
+    expect(cleanup).toContain("webview.postMessage({ type: 'removeMessage', messageId, sessionId })");
+    expect(cleanup).not.toContain('this.currentSessionId');
+    expect(handler).toContain('host.handleAbortedMessage(sessionId, pendingLocalKey, liveWebview)');
+    expect(controller).not.toMatch(/handleAbortedMessage\([^,\n]+,\s*(?:liveWebview|activeWebview)\)/);
+  });
+
   test('owned Webview commands do not fall back to Extension selection', () => {
     const controller = read('src', 'webview', 'SidebarWebviewController.ts');
     for (const command of [

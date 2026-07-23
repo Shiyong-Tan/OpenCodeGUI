@@ -5459,24 +5459,26 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.uiDebugChannel.appendLine(`[EXT][APPEND_FOLLOWUP_TMP_CLEAR] sessionId=${sessionId} predecessorAssistantMsgId=${successor.predecessorAssistantMsgId} generation=${successor.generation}`);
     }
 
-    private async handleAbortedMessage(messageId: string, webview: vscode.Webview): Promise<void> {
+    private async handleAbortedMessage(sessionId: string, messageId: string, webview: vscode.Webview): Promise<void> {
+        if (!sessionId) {
+            this.uiDebugChannel.appendLine(`[EXT][ABORTED_MESSAGE_DROP] reason=missing-session-owner messageId=${messageId || 'null'}`);
+            return;
+        }
         this.client.removeMessageId(messageId);
         this.clientMessageIdMap.delete(messageId);
         this.pendingAssistantTmpKeyByLocalKey.delete(messageId);
         this.rawUserTextByLocalKey.delete(messageId);
         this.rawUserTextByMsgId.delete(messageId);
-        if (this.currentSessionId) {
-            const tmpKey = this.pendingAssistantTmpKeyBySession.get(this.currentSessionId);
-            if (tmpKey === messageId) {
-                this.pendingAssistantTmpKeyBySession.delete(this.currentSessionId);
-            }
+        const tmpKey = this.pendingAssistantTmpKeyBySession.get(sessionId);
+        if (tmpKey === messageId) {
+            this.pendingAssistantTmpKeyBySession.delete(sessionId);
         }
         for (const [key, value] of this.clientMessageIdMap.entries()) {
             if (value === messageId) {
                 this.clientMessageIdMap.delete(key);
             }
         }
-        webview.postMessage({ type: 'removeMessage', messageId, sessionId: this.currentSessionId });
+        webview.postMessage({ type: 'removeMessage', messageId, sessionId });
     }
 
     private postAddResponse(webview: vscode.Webview, value: string, meta?: { operationId?: string; sessionId?: string }): void {
