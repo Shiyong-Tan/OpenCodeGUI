@@ -114,4 +114,36 @@ describe('SidebarChatEventHandler', () => {
       expect.stringContaining('reason=missing-event-session'),
     );
   });
+
+  test('anchors plan files to the event owner while another session is visible', async () => {
+    const webview = { postMessage: jest.fn() };
+    const host = {
+      smartSearchSessions: { owns: () => false },
+      currentSessionId: 'session-B',
+      _view: { webview },
+      activeSubagentSessionIds: new Set(),
+      uiDebugChannel: { appendLine: jest.fn() },
+      pickActiveFile: () => ({ file: { filePath: 'docs/plan.md' }, index: 0 }),
+      tryOpenDiffForEventFile: jest.fn(),
+      client: {
+        isInLateDiffGrace: () => false,
+        wasTurnFinishedRecently: () => false,
+        getTurnAssistantMsgId: jest.fn((sessionId: string) => sessionId === 'session-A' ? 'msg_A' : 'msg_B'),
+      },
+    };
+
+    await handleSidebarChatEvent(host as any, {
+      type: 'files',
+      sessionId: 'session-A',
+      files: ['docs/plan.md'],
+    } as any, webview as any);
+
+    expect(host.client.getTurnAssistantMsgId).toHaveBeenCalledWith('session-A');
+    expect(webview.postMessage).toHaveBeenCalledWith({
+      type: 'planFileCard',
+      files: ['docs/plan.md'],
+      anchorMessageId: 'msg_A',
+      sessionId: 'session-A',
+    });
+  });
 });

@@ -761,14 +761,14 @@ export async function handleSidebarChatEvent(
             const mdFiles = event.files
                 .map(f => (typeof f === 'string' ? f : (f as any).path))
                 .filter((path): path is string => typeof path === 'string' && path.endsWith('.md'));
-            if (mdFiles.length && host.currentSessionId) {
-                const anchorMessageId = host.client.getTurnAssistantMsgId(host.currentSessionId);
+            if (mdFiles.length) {
+                const anchorMessageId = host.client.getTurnAssistantMsgId(sessionId);
                 if (anchorMessageId) {
                     liveWebview.postMessage({
                         type: 'planFileCard',
                         files: mdFiles,
                         anchorMessageId,
-                        sessionId: host.currentSessionId
+                        sessionId
                     });
                 }
             }
