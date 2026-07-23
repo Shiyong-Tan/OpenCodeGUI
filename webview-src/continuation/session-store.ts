@@ -16,7 +16,6 @@ export function createSessionState() {
     activeTurnOpId: null,
     backendTurnInFlight: false,
     pendingAssistantUpgrade: null,
-    lastAssistantUpgradeFallback: null,
     awaitingFinalMapBind: false,
     streamMode: null,
     seenDiffKeys: new Set(),

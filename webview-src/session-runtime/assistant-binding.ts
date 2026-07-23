@@ -109,6 +109,10 @@ export function selectAssistantUpgradeCandidate(
   if (
     input.awaitingFinalBind === true
     && isPresentAssistant(input.lastAssistantId, input)
+    && (
+      isTemporaryId(input.lastAssistantId)
+      || input.lastAssistantId === canonicalId
+    )
   ) {
     return {
       accepted: true,

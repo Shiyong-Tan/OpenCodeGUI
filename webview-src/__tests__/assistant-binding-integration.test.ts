@@ -31,10 +31,13 @@ describe('assistant binding production integration', () => {
     expect(upgrade).toContain('const currentKey = candidateDecision.sourceId;');
   });
 
-  test('does not use the visible session to authorize a background binding', () => {
+  test('binds a background assistant only through its session-owned identity', () => {
     expect(upgrade).not.toContain('payloadSession === activeSessionId');
     expect(upgrade).not.toContain('!isActiveSession');
-    expect(upgrade).toContain('currentTurnAnchored');
-    expect(upgrade).toContain('candidateAnchored');
+    expect(upgrade).not.toContain('messageIndexMap');
+    expect(upgrade).not.toContain('tryMapExistsMissingNewKeyFallback');
+    expect(upgrade).not.toContain('lastAssistantUpgradeFallback');
+    expect(upgrade).toContain('replaceKeyEverywhere(currentKey, newKey, payloadSession);');
+    expect(upgrade).toContain("reason = 'owned-identity-bind';");
   });
 });

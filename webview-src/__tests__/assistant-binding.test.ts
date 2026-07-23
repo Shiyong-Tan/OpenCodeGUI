@@ -77,8 +77,12 @@ describe('assistant binding candidate selection', () => {
     }))).toMatchObject({ accepted: true, source: 'already-canonical' });
     expect(selectAssistantUpgradeCandidate(input({
       awaitingFinalBind: true,
+      lastAssistantId: 'tmp:new',
+    }))).toMatchObject({ accepted: true, source: 'awaiting-final-assistant', sourceId: 'tmp:new' });
+    expect(selectAssistantUpgradeCandidate(input({
+      awaitingFinalBind: true,
       lastAssistantId: 'msg_last',
-    }))).toMatchObject({ accepted: true, source: 'awaiting-final-assistant', sourceId: 'msg_last' });
+    }))).toMatchObject({ accepted: false, reason: 'no-owned-source' });
     expect(selectAssistantUpgradeCandidate(input())).toMatchObject({
       accepted: true,
       source: 'canonical-only',

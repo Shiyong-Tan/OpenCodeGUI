@@ -961,7 +961,6 @@ const renderStormCounters = {
     suppressedFallbackRenderRequestsByReason: Object.create(null),
     backgroundIndicatorApplyResults: Object.create(null),
     localPatchFailedByReason: Object.create(null),
-    assistantUpgradeFallbackResults: Object.create(null),
     userAppendFastPathResults: Object.create(null),
     userAppendFastPathBailReasons: Object.create(null),
     assistantStreamingPatchResults: Object.create(null),
@@ -1545,14 +1544,6 @@ function countLocalPatchFailed(reason, fields = []) {
     logRenderStormMetric('local-patch-failed', [`reason=${reason || 'unknown'}`, `count=${total}`, ...fields]);
 }
 
-function countAssistantUpgradeFallbackResult(reason, fields = []) {
-    const total = incrementRenderStormCounter('assistantUpgradeFallbackResults', reason);
-    vscode.postMessage({
-        type: 'ui-debug',
-        payload: ['[WV][ASSIST_UPGRADE_FALLBACK]', `reason=${reason || 'unknown'}`, `count=${total}`, ...fields]
-    });
-}
-
 function countUserMessageAppendFastPathResult(result, fields = []) {
     const key = result || 'unknown';
     const total = incrementRenderStormCounter('userAppendFastPathResults', key);
@@ -1938,7 +1929,6 @@ function clearBackgroundSubagentIndicator(session) {
     session.cancelledTurn = true;
     session.canceledActiveTurn = true;
     session.pendingAssistantUpgrade = null;
-    session.lastAssistantUpgradeFallback = null;
     session.awaitingFinalMapBind = false;
     turnLifecycleController.cancel(session);
     session.currentTurnAssistantKey = null;
@@ -3657,185 +3647,34 @@ function attemptAssistantUpgrade(sessionId, payload, source) {
         `newKey=${newKey}`
     ]);
 
-    vscode.postMessage({
-        type: 'ui-debug',
-        payload: ['ASSIST_UPGRADE_MAP', `mapExists=${Boolean(session.messageIndexMap)}`, `hasType=${typeof session.messageIndexMap?.has}`, `hasNewKey=${session.messageIndexMap?.has?.(newKey)}`]
-    });
-
-    const getKeyIndex = (key) => {
-        if (typeof key !== 'string' || !key.length) return null;
-        if (session.messageIndexMap?.has(key)) return session.messageIndexMap.get(key);
-        if (key.startsWith('tmp:') || key.startsWith('local-')) return -1;
-        return null;
-    };
-
-    const curIndex = getKeyIndex(currentKey);
-    const newIndex = getKeyIndex(newKey);
     let replaced = false;
-    let reason = 'no-change';
-
-    const logMapExistsFallbackSkip = (skipReason, extra = []) => {
-        countAssistantUpgradeFallbackResult(`skipped-${skipReason}`, [
-            `sessionId=${payloadSession || 'null'}`,
-            `activeSessionId=${currentSession || 'null'}`,
-            `curKey=${currentKey || 'null'}`,
-            `newKey=${newKey || 'null'}`,
-            `source=${source || 'unknown'}`,
-            ...extra
-        ]);
-    };
-
-    const tryMapExistsMissingNewKeyFallback = () => {
-        const pending = session.pendingAssistantUpgrade || null;
-        const mapExists = session.messageIndexMap instanceof Map;
-        if (!mapExists) return false;
-        if (typeof newKey !== 'string' || !newKey.startsWith('msg_')) {
-            logMapExistsFallbackSkip('bad-new-key');
-            return false;
-        }
-        if (session.messageIndexMap.has(newKey)) return false;
-        if (typeof currentKey !== 'string' || !(currentKey.startsWith('tmp:') || currentKey.startsWith('local-'))) {
-            logMapExistsFallbackSkip('current-not-tmp-local');
-            return false;
-        }
-        if (!pending) {
-            logMapExistsFallbackSkip('missing-pending-metadata');
-            return false;
-        }
-        if (pending.tmpKey !== currentKey || pending.assistantMsgId !== newKey) {
-            logMapExistsFallbackSkip('pending-mismatch', [
-                `pendingTmpKey=${pending.tmpKey || 'null'}`,
-                `pendingAssistantMsgId=${pending.assistantMsgId || 'null'}`
-            ]);
-            return false;
-        }
-
-        const currentMsg = session.messagesById?.get?.(currentKey) || null;
-        const currentInTimeline = Array.isArray(session.timeline) && session.timeline.includes(currentKey);
-        const currentInTurnState = session.currentTurnAssistantKey === currentKey || session.thinkingId === currentKey;
-        if (!currentMsg && !currentInTimeline && !currentInTurnState) {
-            logMapExistsFallbackSkip('current-key-not-present', [
-                `hasMessage=${Boolean(currentMsg)}`,
-                `inTimeline=${currentInTimeline}`,
-                `inTurnState=${currentInTurnState}`
-            ]);
-            return false;
-        }
-        if (currentMsg && currentMsg.role !== 'assistant') {
-            logMapExistsFallbackSkip('current-not-assistant', [`role=${currentMsg.role || 'null'}`]);
-            return false;
-        }
-        if (currentKey.startsWith('local-') && session.currentTurnAssistantMsgId === newKey) {
-            logMapExistsFallbackSkip('replace-rejected-local-current-assistant', [
-                `currentTurnAssistantMsgId=${session.currentTurnAssistantMsgId || 'null'}`
-            ]);
-            return false;
-        }
-
-        const currentTurnAnchored = Boolean(
-            session.currentTurnAssistantKey === currentKey ||
-            session.thinkingId === currentKey ||
-            (session.awaitingFinalMapBind && pending.tmpKey === currentKey)
-        );
-        const candidateAnchored = Boolean(
-            session.currentTurnAssistantMsgId === newKey ||
-            pending.assistantMsgId === newKey ||
-            session.earlyFinalAssistantId === newKey ||
-            session.finalAssistantLock?.assistantMsgId === newKey
-        );
-        if (!currentTurnAnchored || !candidateAnchored || session.canceledActiveTurn) {
-            logMapExistsFallbackSkip('stale-or-cross-turn', [
-                `currentTurnAnchored=${currentTurnAnchored}`,
-                `candidateAnchored=${candidateAnchored}`,
-                `canceled=${Boolean(session.canceledActiveTurn)}`
-            ]);
-            return false;
-        }
-
-        const fallbackMetadata = {
-            fallbackAssistantKey: newKey,
-            fallbackSourceTmpKey: currentKey,
-            fallbackSessionId: payloadSession,
-            fallbackSource: source || 'unknown',
-            fallbackTurnAnchor: session.currentTurnAssistantKey || session.thinkingId || currentKey,
-            fallbackPendingSource: pending.source || 'unknown',
-            fallbackAppliedAt: Date.now(),
-            fallbackMapSize: session.messageIndexMap.size,
-            fallbackMapHadNewKey: false,
-            fallbackReason: 'map-exists-new-key-missing'
-        };
-        session.pendingAssistantUpgrade = {
-            ...pending,
-            ...fallbackMetadata
-        };
-        session.lastAssistantUpgradeFallback = fallbackMetadata;
-        replaceKeyEverywhere(currentKey, newKey, payloadSession);
-        countAssistantUpgradeFallbackResult('applied-map-exists-new-key-missing', [
-            `sessionId=${payloadSession}`,
-            `curKey=${currentKey}`,
-            `newKey=${newKey}`,
-            `source=${source || 'unknown'}`,
-            `mapSize=${session.messageIndexMap.size}`,
-            `turnAnchor=${fallbackMetadata.fallbackTurnAnchor || 'null'}`
-        ]);
-        return true;
-    };
+    let reason = 'already-current';
 
     if (!currentKey) {
         session.currentTurnAssistantKey = newKey;
         session.currentTurnAssistantMsgId = newKey;
         reason = 'set-current-only';
-    } else if (currentKey === newKey) {
-        reason = 'already-current';
-    } else if (source === 'chatDone'
-        && newKey.startsWith('msg_')
-        && session.messagesById.get(currentKey)?.meta?.liveTurnResume === true
-        && (
-            session.backendTurnInFlight === true
-            || session.turnFullyFinalized === false
-            || session.thinkingId === currentKey
-            || session.currentTurnAssistantKey === currentKey
-            || session.pendingAssistantUpgrade?.tmpKey === currentKey
-            || session.pendingAssistantUpgrade?.fallbackSourceTmpKey === currentKey
-        )) {
-        replaceKeyEverywhere(currentKey, newKey, payloadSession);
-        replaced = true;
-        reason = 'live-resume-final-id-bridge';
-    } else if (typeof newIndex === 'number' && typeof curIndex !== 'number') {
-        replaceKeyEverywhere(currentKey, newKey, payloadSession);
-        replaced = true;
-        reason = 'new-index-known';
-    } else if (typeof newIndex === 'number' && typeof curIndex === 'number' && newIndex > curIndex) {
-        replaceKeyEverywhere(currentKey, newKey, payloadSession);
-        replaced = true;
-        reason = 'higher-index';
-    } else if ((currentKey.startsWith('tmp:') || currentKey.startsWith('local-')) && typeof newIndex === 'number') {
-        replaceKeyEverywhere(currentKey, newKey, payloadSession);
-        replaced = true;
-        reason = 'tmp-local-upgrade';
-    } else if (typeof newIndex === 'number' && curIndex === -1) {
-        replaceKeyEverywhere(currentKey, newKey, payloadSession);
-        replaced = true;
-        reason = 'tmp-local-index';
-    } else if ((currentKey.startsWith('tmp:') || currentKey.startsWith('local-')) && newIndex === null && session.messageIndexMap instanceof Map && newKey.startsWith('msg_')) {
-        if (tryMapExistsMissingNewKeyFallback()) {
+    } else if (currentKey !== newKey) {
+        try {
+            replaceKeyEverywhere(currentKey, newKey, payloadSession);
             replaced = true;
-            reason = 'map-exists-new-key-missing-fallback';
-        } else {
-            reason = 'map-exists-new-key-missing-fallback-skipped';
+            reason = 'owned-identity-bind';
+        } catch (error) {
+            emitTempFinalTrace('upgrade.drop', [
+                'reason=identity-bind-rejected',
+                `currentKey=${currentKey}`,
+                `assistantMsgId=${newKey}`,
+                `error=${String(error)}`
+            ]);
+            return;
         }
-    } else if ((currentKey.startsWith('tmp:') || currentKey.startsWith('local-')) && !session.messageIndexMap && newKey.startsWith('msg_')) {
-        replaceKeyEverywhere(currentKey, newKey, payloadSession);
-        replaced = true;
-        reason = 'index-map-missing-fallback';
-        console.log('[ASSIST_UPGRADE] fallback path triggered, reason=index-map-missing');
     }
 
     const tail = formatTail(session.timeline, 2);
     vscode.postMessage({
         type: 'ui-debug',
-        payload: ['ASSIST_UPGRADE', `curKey=${currentKey || 'null'}`, `newKey=${newKey}`, `curIndex=${curIndex === null ? 'null' : curIndex}`,
-            `newIndex=${newIndex === null ? 'null' : newIndex}`, `replaced=${replaced}`, `reason=${reason}`, `tail=${tail}`]
+        payload: ['ASSIST_UPGRADE', `curKey=${currentKey || 'null'}`, `newKey=${newKey}`,
+            `replaced=${replaced}`, `reason=${reason}`, `tail=${tail}`]
     });
 
     if (session.assistantUpgradeSeen instanceof Set) {
@@ -3846,92 +3685,9 @@ function attemptAssistantUpgrade(sessionId, payload, source) {
     if (bound) {
         if (session.pendingAssistantUpgrade && session.pendingAssistantUpgrade.assistantMsgId === newKey) {
             session.pendingAssistantUpgrade = null;
-            session.lastAssistantUpgradeFallback = null;
         }
         session.awaitingFinalMapBind = false;
         updateSendGate();
-    }
-}
-
-function reconcileAssistantUpgradeFallbackWithAuthoritativeMap(sessionId, session, source, observedMessageId = null, fallbackSnapshot = null) {
-    if (!session || !(session.messageIndexMap instanceof Map)) return;
-    const fallback = fallbackSnapshot || session.lastAssistantUpgradeFallback || null;
-    if (!fallback) return;
-
-    const fallbackAssistantKey = fallback.fallbackAssistantKey;
-    const fallbackSourceTmpKey = fallback.fallbackSourceTmpKey;
-    if (typeof fallbackAssistantKey !== 'string' || !fallbackAssistantKey.startsWith('msg_') || typeof fallbackSourceTmpKey !== 'string') {
-        countAssistantUpgradeFallbackResult('missing-fallback-metadata', [
-            `sessionId=${sessionId || 'null'}`,
-            `source=${source || 'unknown'}`,
-            `fallbackAssistantKey=${fallbackAssistantKey || 'null'}`,
-            `fallbackSourceTmpKey=${fallbackSourceTmpKey || 'null'}`
-        ]);
-        session.lastAssistantUpgradeFallback = null;
-        return;
-    }
-
-    if (observedMessageId && observedMessageId !== fallbackAssistantKey) return;
-
-    const mapHasFallbackAssistant = session.messageIndexMap.has(fallbackAssistantKey);
-    const tmpStillPresent = Boolean(
-        session.messagesById?.has?.(fallbackSourceTmpKey) ||
-        session.timeline?.includes?.(fallbackSourceTmpKey) ||
-        session.currentTurnAssistantKey === fallbackSourceTmpKey ||
-        session.thinkingId === fallbackSourceTmpKey
-    );
-    const preAttemptCurrentTurnAssistantKey = fallback.authoritativePreAttemptCurrentTurnAssistantKey || null;
-    const preAttemptTmpStillPresent = typeof fallback.authoritativePreAttemptTmpStillPresent === 'boolean'
-        ? fallback.authoritativePreAttemptTmpStillPresent
-        : null;
-    const authoritativeFields = [
-        `sessionId=${sessionId || 'null'}`,
-        `source=${source || 'unknown'}`,
-        `authoritativeMessageId=${observedMessageId || fallbackAssistantKey}`,
-        `fallbackAssistantKey=${fallbackAssistantKey}`,
-        `fallbackSourceTmpKey=${fallbackSourceTmpKey}`,
-        `mapHasFallbackAssistant=${mapHasFallbackAssistant}`,
-        `currentTurnAssistantKey=${session.currentTurnAssistantKey || 'null'}`,
-        `tmpStillPresent=${tmpStillPresent}`,
-        `preAttemptCurrentTurnAssistantKey=${preAttemptCurrentTurnAssistantKey || 'null'}`,
-        `preAttemptTmpStillPresent=${preAttemptTmpStillPresent === null ? 'null' : preAttemptTmpStillPresent}`
-    ];
-
-    if (!mapHasFallbackAssistant) {
-        countAssistantUpgradeFallbackResult('contradiction-detected-authoritative-missing', authoritativeFields);
-        session.awaitingFinalMapBind = true;
-        if (!session.pendingAssistantUpgrade || session.pendingAssistantUpgrade.assistantMsgId !== fallbackAssistantKey) {
-            session.pendingAssistantUpgrade = {
-                tmpKey: fallbackSourceTmpKey,
-                assistantMsgId: fallbackAssistantKey,
-                source: 'authoritative-map-missing-fallback-retry',
-                ts: Date.now(),
-                fallbackAssistantKey,
-                fallbackSourceTmpKey,
-                fallbackSessionId: sessionId,
-                fallbackSource: fallback.fallbackSource || 'unknown',
-                fallbackTurnAnchor: fallback.fallbackTurnAnchor || fallbackSourceTmpKey,
-                fallbackReason: fallback.fallbackReason || 'map-exists-new-key-missing'
-            };
-        }
-        return;
-    }
-
-    const conflictingCurrentKey = Boolean(session.currentTurnAssistantKey && session.currentTurnAssistantKey !== fallbackAssistantKey);
-    const preAttemptConflictingCurrentKey = Boolean(preAttemptCurrentTurnAssistantKey && preAttemptCurrentTurnAssistantKey !== fallbackAssistantKey);
-    if (conflictingCurrentKey || tmpStillPresent || preAttemptConflictingCurrentKey || preAttemptTmpStillPresent === true) {
-        countAssistantUpgradeFallbackResult('contradiction-detected-authoritative-present', authoritativeFields);
-        attemptAssistantUpgrade(sessionId, {
-            sessionId,
-            tmpKey: fallbackSourceTmpKey,
-            assistantMsgId: fallbackAssistantKey
-        }, `${source || 'authoritative'}:fallback-correction`);
-    }
-
-    if (session.currentTurnAssistantKey === fallbackAssistantKey || (!tmpStillPresent && !conflictingCurrentKey)) {
-        session.awaitingFinalMapBind = false;
-        session.lastAssistantUpgradeFallback = null;
-        countAssistantUpgradeFallbackResult('authoritative-correction-applied', authoritativeFields);
     }
 }
 
@@ -6657,7 +6413,6 @@ function renderMessageElement(message, renderedSet) {
         if (!postAppendAuditPassed) {
             return bailUserMessageAppendFastPath('post-append-audit-failed', [...fields, `duplicateCount=${duplicateCount}`, `afterTailKey=${afterTailKey || 'null'}`, `domChildrenBefore=${beforeChildren}`, `domChildrenAfter=${afterChildren}`, `domChildDelta=${domChildDelta}`, 'postAppendAuditMode=identity-tail', ...(tailSafety.fields || [])]);
         }
-        session.lastAssistantUpgradeFallback = null;
         if (typeof finishChatRenderPhase === 'function') finishChatRenderPhase('appendFastPath', appendFastPathStartedAt);
         countUserMessageAppendFastPathResult('success', [...fields, `reason=${tailSafety.reason || 'hidden-tail-safe'}`, `domChildren=${afterChildren}`, `domChildDelta=${domChildDelta}`, 'postAppendAuditMode=identity-tail', `postAppendAuditPassed=${postAppendAuditPassed ? 'true' : 'false'}`, ...(tailSafety.fields || [])]);
         if (isChatWindowAvailable()) scheduleRenderFromState('window-append-fast-path');
@@ -6724,27 +6479,10 @@ function renderMessageElement(message, renderedSet) {
 
         const pending = session.pendingAssistantUpgrade || null;
         addCandidate(pending?.tmpKey, pending?.source || 'pendingAssistantUpgrade', {
-            sessionId: pending?.fallbackSessionId,
-            newKey: pending?.assistantMsgId || pending?.fallbackAssistantKey,
-            assistantMsgId: pending?.assistantMsgId || pending?.fallbackAssistantKey,
-            ts: pending?.ts || pending?.fallbackAppliedAt,
-            turnAnchor: pending?.fallbackTurnAnchor || pending?.tmpKey
-        });
-        addCandidate(pending?.fallbackSourceTmpKey, pending?.fallbackSource || pending?.source || 'pendingAssistantUpgrade', {
-            sessionId: pending?.fallbackSessionId,
-            newKey: pending?.fallbackAssistantKey || pending?.assistantMsgId,
-            assistantMsgId: pending?.assistantMsgId || pending?.fallbackAssistantKey,
-            ts: pending?.ts || pending?.fallbackAppliedAt,
-            turnAnchor: pending?.fallbackTurnAnchor || pending?.fallbackSourceTmpKey
-        });
-
-        const fallback = session.lastAssistantUpgradeFallback || null;
-        addCandidate(fallback?.fallbackSourceTmpKey, fallback?.fallbackSource || 'lastAssistantUpgradeFallback', {
-            sessionId: fallback?.fallbackSessionId,
-            newKey: fallback?.fallbackAssistantKey,
-            assistantMsgId: fallback?.fallbackAssistantKey,
-            ts: fallback?.fallbackAppliedAt,
-            turnAnchor: fallback?.fallbackTurnAnchor || fallback?.fallbackSourceTmpKey
+            newKey: pending?.assistantMsgId,
+            assistantMsgId: pending?.assistantMsgId,
+            ts: pending?.ts,
+            turnAnchor: pending?.tmpKey
         });
 
         const recentAliases = Array.isArray(session.recentAssistantDomTargetAliases) ? session.recentAssistantDomTargetAliases : [];
@@ -12342,7 +12080,6 @@ function applyPromptToSession(sessionId, payload) {
     session.currentTurnAssistantKey = null;
     session.earlyFinalAssistantId = null;
     session.pendingAssistantUpgrade = null;
-    session.lastAssistantUpgradeFallback = null;
     session.awaitingFinalMapBind = false;
     session.streamMode = null;
     turnLifecycleController.start(session);
@@ -12452,12 +12189,7 @@ function handleAssistantMeta(sessionId, message, options = {}) {
                 tmpKey: message.tmpKey,
                 assistantMsgId: msgId,
                 source: 'assistantMessageMeta',
-                ts: Date.now(),
-                fallbackAssistantKey: msgId,
-                fallbackSourceTmpKey: message.tmpKey,
-                fallbackSessionId: sessionId,
-                fallbackSource: 'assistantMessageMeta',
-                fallbackTurnAnchor: session.currentTurnAssistantKey || session.thinkingId || message.tmpKey
+                ts: Date.now()
             };
             updateSendGate();
             vscode.postMessage({
@@ -12592,12 +12324,7 @@ function handleChatChunk(sessionId, message) {
                 tmpKey: message.tmpKey,
                 assistantMsgId: msgId,
                 source: 'chatChunk',
-                ts: Date.now(),
-                fallbackAssistantKey: msgId,
-                fallbackSourceTmpKey: message.tmpKey,
-                fallbackSessionId: sessionId,
-                fallbackSource: 'chatChunk',
-                fallbackTurnAnchor: session.currentTurnAssistantKey || session.thinkingId || message.tmpKey
+                ts: Date.now()
             };
             updateSendGate();
             vscode.postMessage({
@@ -12737,18 +12464,12 @@ function handleChatDone(sessionId, message) {
                     tmpKey: preDoneAssistantKey || session.currentTurnAssistantKey || session.thinkingId || null,
                     assistantMsgId: resolvedFinal,
                     source: 'chatDone',
-                    ts: Date.now(),
-                    fallbackAssistantKey: resolvedFinal,
-                    fallbackSourceTmpKey: preDoneAssistantKey || session.currentTurnAssistantKey || session.thinkingId || null,
-                    fallbackSessionId: sessionId,
-                    fallbackSource: 'chatDone',
-                    fallbackTurnAnchor: preDoneAssistantKey || session.currentTurnAssistantKey || session.thinkingId || null
+                    ts: Date.now()
                 };
             }
         } else {
             session.awaitingFinalMapBind = false;
             session.pendingAssistantUpgrade = null;
-            session.lastAssistantUpgradeFallback = null;
             session.currentTurnAssistantMsgId = null;
             session.currentTurnAssistantKey = null;
         }
@@ -13228,10 +12949,7 @@ function appendMessageImages(parentEl, message) {
             session.appendRootUserKey === aliasKey ||
             session.appendComposerFor === aliasKey ||
             pending?.tmpKey === aliasKey ||
-            pending?.assistantMsgId === aliasKey ||
-            pending?.fallbackAssistantKey === aliasKey ||
-            pending?.fallbackSourceTmpKey === aliasKey ||
-            pending?.fallbackTurnAnchor === aliasKey
+            pending?.assistantMsgId === aliasKey
         );
         const aliasIsLivePlaceholder = Boolean(
             aliasMessage?.meta?.liveTurnResume === true ||
@@ -13263,9 +12981,6 @@ function appendMessageImages(parentEl, message) {
         if (session.appendComposerFor === aliasKey) session.appendComposerFor = canonicalKey;
         if (pending?.tmpKey === aliasKey) pending.tmpKey = canonicalKey;
         if (pending?.assistantMsgId === aliasKey) pending.assistantMsgId = canonicalKey;
-        if (pending?.fallbackAssistantKey === aliasKey) pending.fallbackAssistantKey = canonicalKey;
-        if (pending?.fallbackSourceTmpKey === aliasKey) pending.fallbackSourceTmpKey = canonicalKey;
-        if (pending?.fallbackTurnAnchor === aliasKey) pending.fallbackTurnAnchor = canonicalKey;
         if (session.appendComposerDrafts?.has?.(aliasKey)) {
             const draft = session.appendComposerDrafts.get(aliasKey);
             session.appendComposerDrafts.delete(aliasKey);
@@ -13302,7 +13017,7 @@ function appendMessageImages(parentEl, message) {
         }
         const pending = session.pendingAssistantUpgrade || null;
         if (tmpAssistantKey && pending?.tmpKey === tmpAssistantKey) {
-            const pendingAssistantId = pending.assistantMsgId || pending.fallbackAssistantKey || '';
+            const pendingAssistantId = pending.assistantMsgId || '';
             if (pendingAssistantId && session.messagesById?.get?.(pendingAssistantId)?.role === 'assistant') {
                 return { key: pendingAssistantId, reason: 'mapped-canonical-assistant-reuse' };
             }
@@ -13586,12 +13301,7 @@ function appendMessageImages(parentEl, message) {
                 tmpKey: tmpAssistantKey,
                 assistantMsgId: assistantMessageId,
                 source: 'liveTurnResume',
-                ts: Date.now(),
-                fallbackAssistantKey: assistantKey,
-                fallbackSourceTmpKey: tmpAssistantKey,
-                fallbackSessionId: sessionId,
-                fallbackSource: 'liveTurnResume',
-                fallbackTurnAnchor: userKey
+                ts: Date.now()
             };
         } else {
             session.pendingAssistantUpgrade = null;
@@ -14227,7 +13937,6 @@ function appendMessageImages(parentEl, message) {
                     }
                     session.thinkingId = null;
                     session.pendingAssistantUpgrade = null;
-                    session.lastAssistantUpgradeFallback = null;
                     session.awaitingFinalMapBind = false;
                     turnLifecycleController.hydrateAuthoritative(session);
                     session.earlyFinalAssistantId = null;
@@ -14819,25 +14528,11 @@ function appendMessageImages(parentEl, message) {
                         break;
                     }
                     const tmpKey = session.pendingAssistantUpgrade?.tmpKey || session.thinkingId || null;
-                    const assistantUpgradeFallbackSnapshot = session.lastAssistantUpgradeFallback ? {
-                        ...session.lastAssistantUpgradeFallback,
-                        authoritativePreAttemptCurrentTurnAssistantKey: session.currentTurnAssistantKey || null,
-                        authoritativePreAttemptTmpStillPresent: Boolean(
-                            tmpKey && (
-                                session.messagesById?.has?.(tmpKey) ||
-                                session.timeline?.includes?.(tmpKey) ||
-                                session.currentTurnAssistantKey === tmpKey ||
-                                session.thinkingId === tmpKey
-                            )
-                        )
-                    } : null;
                     attemptAssistantUpgrade(sessionId, { sessionId, tmpKey, assistantMsgId: messageId }, 'messageIndexMapDelta');
-                    reconcileAssistantUpgradeFallbackWithAuthoritativeMap(sessionId, session, 'messageIndexMapDelta', messageId, assistantUpgradeFallbackSnapshot);
                     if (session.currentTurnAssistantKey === messageId) {
                         session.awaitingFinalMapBind = false;
                         if (session.pendingAssistantUpgrade?.assistantMsgId === messageId) {
                             session.pendingAssistantUpgrade = null;
-                            session.lastAssistantUpgradeFallback = null;
                         }
                     }
                 }
@@ -14865,9 +14560,7 @@ function appendMessageImages(parentEl, message) {
                 const pending = session?.pendingAssistantUpgrade || null;
                 const willTry = Boolean(
                     session &&
-                    pending &&
-                    session.messageIndexMap instanceof Map &&
-                    session.messageIndexMap.size > 0
+                    pending
                 );
                 const mapHasKey = Boolean(pending?.assistantMsgId && session?.messageIndexMap?.has?.(pending.assistantMsgId));
                 vscode.postMessage({
@@ -14883,13 +14576,9 @@ function appendMessageImages(parentEl, message) {
                     const didReplace = session.currentTurnAssistantKey === pending.assistantMsgId;
                     if (didReplace) {
                         session.pendingAssistantUpgrade = null;
-                        session.lastAssistantUpgradeFallback = null;
                         session.awaitingFinalMapBind = false;
                         vscode.postMessage({ type: 'ui-debug', payload: ['[DBG_PENDING_UPGRADE_CLEAR]', 'sessionId', sessionId] });
                     }
-                }
-                if (session) {
-                    reconcileAssistantUpgradeFallbackWithAuthoritativeMap(sessionId, session, 'messageIndexMap');
                 }
                 const sample = map.slice(0, 5).map((entry) => `${entry.messageId}:${entry.messageIndex}`);
                 let hasUser = false;
@@ -15255,11 +14944,6 @@ function appendMessageImages(parentEl, message) {
 
                 if (assistantMsgId && session.pendingAssistantUpgrade?.tmpKey) {
                     session.pendingAssistantUpgrade.assistantMsgId = assistantMsgId;
-                    session.pendingAssistantUpgrade.fallbackAssistantKey = assistantMsgId;
-                    session.pendingAssistantUpgrade.fallbackSourceTmpKey = session.pendingAssistantUpgrade.tmpKey;
-                    session.pendingAssistantUpgrade.fallbackSessionId = sessionId;
-                    session.pendingAssistantUpgrade.fallbackSource = 'userMessageUpgrade';
-                    session.pendingAssistantUpgrade.fallbackTurnAnchor = session.currentTurnAssistantKey || session.thinkingId || session.pendingAssistantUpgrade.tmpKey;
                 }
                 
                 // Also upgrade the assistant message if provided
