@@ -286,6 +286,17 @@ describe('cross-session runtime repository audit', () => {
     expect(send).not.toContain('host.client.setSessionId(payloadSessionId)');
   });
 
+  test('transport session events never promote themselves to UI selection', () => {
+    const sessionEventStart = handler.indexOf("if (event.type === 'session' && event.sessionId) {");
+    const sessionEventEnd = handler.indexOf("if (event.type === 'message'", sessionEventStart);
+    const sessionEvent = handler.slice(sessionEventStart, sessionEventEnd);
+
+    expect(sessionEventStart).toBeGreaterThanOrEqual(0);
+    expect(sessionEvent).not.toContain('host.currentSessionId =');
+    expect(sessionEvent).not.toContain('host.client.setSessionId(');
+    expect(sessionEvent).not.toContain("type: 'sessionId'");
+  });
+
   test('owned liveness and overlay responses do not borrow visible session', () => {
     expect(main).not.toContain('message.sessionId || activeSessionId');
     const livenessStart = main.indexOf("case 'webviewLivenessPing':");

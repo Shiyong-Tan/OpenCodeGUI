@@ -71,15 +71,6 @@ export async function handleSidebarChatEvent(
             return;
         }
         if (event.type === 'session' && event.sessionId) {
-            if (!host.isUserOwnedSession(event.sessionId) && !host.currentSessionId) {
-                host.currentSessionId = event.sessionId;
-                host.trackUserOwnedSession(host.currentSessionId);
-                host.client.setSessionId(host.currentSessionId);
-                const liveWebview = host._view?.webview || webview;
-                liveWebview.postMessage({ type: 'sessionId', value: event.sessionId, sessionId: event.sessionId });
-                host.uiDebugChannel.appendLine(`[SidebarProvider] Promoted first session to currentSessionId: ${event.sessionId}`);
-                return;
-            }
             const explicitParentSessionId = event.parentSessionId;
             if (!host.isUserOwnedSession(event.sessionId) && explicitParentSessionId) {
                 host.activeSubagentSessionIds.add(event.sessionId);
