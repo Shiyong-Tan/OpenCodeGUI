@@ -5086,33 +5086,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return normalized;
     }
 
-    private formatMessagesByIds(exportData: any, messageIds: Set<string>): SessionMessage[] {
-        if (!(messageIds instanceof Set) || messageIds.size === 0) return [];
-        const rawMessages = Array.isArray(exportData?.messages) ? exportData.messages : [];
-        const sessionId = exportData?.session?.id || exportData?.info?.id || exportData?.info?.sessionId || this.currentSessionId;
-        const formatted: SessionMessage[] = [];
-        const seenIds = new Set<string>();
-        for (const message of rawMessages) {
-            const resolvedId = typeof message?.info?.id === 'string' ? message.info.id : '';
-            if (!resolvedId || !messageIds.has(resolvedId) || seenIds.has(resolvedId)) continue;
-            const role = message?.info?.role === 'user' ? 'user' : message?.info?.role === 'assistant' ? 'assistant' : null;
-            if (!role) continue;
-            const parts = Array.isArray(message?.parts)
-                ? message.parts.filter((part: any) => part.type === 'text' && typeof part.text === 'string')
-                : [];
-            const text = parts.map((part: any) => part.text).join('');
-            if (!text) continue;
-            const displayText = role === 'user' ? this.stripModeInjectionBlock(text) : text;
-            if (!displayText.trim()) continue;
-            if (role === 'user' && this.isHiddenControlUserText(displayText)) continue;
-            if (role === 'assistant' && this.isHiddenControlAssistantText(displayText)) continue;
-            const messageIndex = this.client.registerMessage(resolvedId, sessionId);
-            formatted.push({ role, text: displayText, id: resolvedId, messageIndex });
-            seenIds.add(resolvedId);
-        }
-        return formatted;
-    }
-
     private formatSession(exportData: any): { title: string; messages: SessionMessage[] } {
         const title = exportData?.session?.title || exportData?.info?.title || 'Session';
         const messages: SessionMessage[] = [];
