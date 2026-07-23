@@ -200,6 +200,9 @@ describe('cross-session runtime repository audit', () => {
     expect(client).not.toContain('private revertedSegment?: RevertedSegment;');
     expect(client).not.toMatch(/getRevertedSegment\(\)/);
     expect(client).not.toMatch(/discardRevertedSegment\(\)/);
+    expect(client).toContain('options: { sessionId: string; force?: boolean;');
+    expect(client).toContain("throw new Error('Missing session ID for undo.')");
+    expect(client).not.toContain('const sessionId = explicitSessionId || this.currentSessionId;');
     expect(provider).toContain('private readonly revertedSegmentHistoryStore = new RevertedSegmentHistoryStore();');
     expect(provider).not.toContain('private revertedSegmentHistory:');
     expect(webviewController).not.toMatch(/client\.getRevertedSegment\(\)/);

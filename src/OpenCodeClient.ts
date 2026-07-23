@@ -4198,17 +4198,20 @@ export class OpenCodeClient {
         return [];
     }
 
-    public async undoFromMessage(startMessageId: string, options?: { force?: boolean; excludedMessageIds?: string[]; sessionId?: string; visibleMessageIds?: string[]; forwardMessageIdsFromAnchor?: string[] }): Promise<{ conflicts: ConflictDetail[]; touchedFiles: string[]; applied: boolean; reason?: string }> {
+    public async undoFromMessage(startMessageId: string, options: { sessionId: string; force?: boolean; excludedMessageIds?: string[]; visibleMessageIds?: string[]; forwardMessageIdsFromAnchor?: string[] }): Promise<{ conflicts: ConflictDetail[]; touchedFiles: string[]; applied: boolean; reason?: string }> {
         const force = options?.force === true;
         const excludedMessageIds = new Set(
             Array.isArray(options?.excludedMessageIds)
                 ? options!.excludedMessageIds.filter((id) => typeof id === 'string' && id.startsWith('msg_'))
                 : []
         );
-        const explicitSessionId = typeof options?.sessionId === 'string' && options.sessionId.trim()
+        const explicitSessionId = typeof options.sessionId === 'string' && options.sessionId.trim()
             ? options.sessionId.trim()
             : undefined;
-        const sessionId = explicitSessionId || this.currentSessionId;
+        if (!explicitSessionId) {
+            throw new Error('Missing session ID for undo.');
+        }
+        const sessionId = explicitSessionId;
         const sessionOrder = this.getReadonlyMessageOrder(explicitSessionId);
         const sessionIndexMap = this.getReadonlyMessageIndexMap(explicitSessionId);
         const fallbackOrder = this.resolveOperationOrderFallback(startMessageId, options);
@@ -4222,7 +4225,7 @@ export class OpenCodeClient {
             : explicitSessionId ? sessionIndexMap : this.messageIndexById;
         const startIndex = activeIndexMap.get(startMessageId);
         this.logUiDebug(`EXT: undo.enter | startMessageId | ${startMessageId || 'null'} | force | ${String(force)} | hasSession | ${String(Boolean(sessionId))} | explicitSession | ${explicitSessionId || 'null'} | currentSession | ${this.currentSessionId || 'null'} | messageOrderLen | ${activeOrder.length} | undo.order.source=${orderSource}`);
-        this.logUiDebug(`EXT: undo.order.source=${orderSource} | sessionId=${explicitSessionId || this.currentSessionId || 'null'} | cacheOrderLen=${sessionOrder.length} | cacheMapSize=${sessionIndexMap.size} | fallbackOrderLen=${fallbackOrder.length}`);
+        this.logUiDebug(`EXT: undo.order.source=${orderSource} | sessionId=${explicitSessionId} | cacheOrderLen=${sessionOrder.length} | cacheMapSize=${sessionIndexMap.size} | fallbackOrderLen=${fallbackOrder.length}`);
         if (startIndex === undefined) {
             const reason = !startMessageId?.startsWith('msg_')
                 ? 'invalid-anchor-id'
