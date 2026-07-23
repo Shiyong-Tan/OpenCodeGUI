@@ -9,6 +9,10 @@ const utilityControllerSource = fs.readFileSync(
     path.join(process.cwd(), 'src', 'webview', 'controllers', 'UtilityCommandController.ts'),
     'utf8',
 );
+const providerSource = fs.readFileSync(
+    path.join(process.cwd(), 'src', 'SidebarProvider.ts'),
+    'utf8',
+);
 
 function extractRange(startMarker: string, endMarker: string): string {
     const start = controllerSource.indexOf(startMarker);
@@ -25,6 +29,21 @@ function expectOrder(source: string, markers: string[]): void {
         expect(index).toBeGreaterThan(previous);
         previous = index;
     }
+}
+
+function extractProviderMethod(marker: string): string {
+    const start = providerSource.indexOf(marker);
+    expect(start).toBeGreaterThanOrEqual(0);
+    const bodyStart = providerSource.indexOf('{', start);
+    expect(bodyStart).toBeGreaterThan(start);
+    let depth = 0;
+    for (let index = bodyStart; index < providerSource.length; index += 1) {
+        if (providerSource[index] === '{') depth += 1;
+        if (providerSource[index] === '}' && --depth === 0) {
+            return providerSource.slice(start, index + 1);
+        }
+    }
+    throw new Error(`Unclosed provider method: ${marker}`);
 }
 
 describe('session command family characterization', () => {
@@ -52,26 +71,38 @@ describe('session command family characterization', () => {
         const block = extractRange('case "selectSession"', 'case "newSession"');
         expectOrder(block, [
             'const targetSessionId = data.sessionId',
-            "host.resetWebviewLiveness('session-switch')",
-            'const selectionEpoch = ++host.sessionSelectionEpoch',
-            'host.resetUiState(targetSessionId)',
-            'host.currentSessionId = targetSessionId',
-            'host.client.setSessionId(host.currentSessionId)',
+            'const selectionEpoch = host.startSessionSelection(targetSessionId)',
+            'host.adoptSessionSelection(targetSessionId)',
             'const isCurrentSelection = () =>',
+            'host.isSessionSelectionCurrent(targetSessionId, selectionEpoch)',
             'const postSessionData =',
         ]);
-        expect(block).toContain('host.currentSessionId === targetSessionId');
-        expect(block).toContain('host.sessionSelectionEpoch === selectionEpoch');
         expect(block).toContain('[EXT][SESSION_LOAD_STALE]');
         expect(block).toContain('if (!isCurrentSelection())');
         expect(block).toContain("phase: 'snapshot' | 'recent' | 'full'");
+
+        const start = extractProviderMethod('private startSessionSelection(');
+        expectOrder(start, [
+            "this.resetWebviewLiveness('session-switch')",
+            'return ++this.sessionSelectionEpoch',
+        ]);
+        const adopt = extractProviderMethod('private adoptSessionSelection(');
+        expectOrder(adopt, [
+            'this.resetUiState(targetSessionId)',
+            'this.currentSessionId = targetSessionId',
+            'this.trackUserOwnedSession(targetSessionId)',
+            'this.client.setSessionId(targetSessionId)',
+        ]);
+        const guard = extractProviderMethod('private isSessionSelectionCurrent(');
+        expect(guard).toContain('this.currentSessionId === targetSessionId');
+        expect(guard).toContain('this.sessionSelectionEpoch === selectionEpoch');
     });
 
     test('preserves snapshot-first hydration and recent/full fallback order', () => {
         const block = extractRange('case "selectSession"', 'case "newSession"');
         expectOrder(block, [
-            'await host.ensureSessionUndoReady(targetSessionId, activeWebview)',
-            'await host.loadPersistedSegment(targetSessionId)',
+            'await host.persistRecentSessionSelection(targetSessionId)',
+            'await host.hydrateSessionUndoPresentation(',
             'await host.readSnapshot(targetSessionId)',
             "postSessionData(payload, 'snapshot')",
             'await host.client.exportSessionRecent(targetSessionId, host.recentSessionLoadLimit)',
@@ -87,6 +118,16 @@ describe('session command family characterization', () => {
         expect(block).toContain('host.buildFullExportSnapshotDelta(');
         expect(block).toContain('await host.persistStructurallyRepairedSnapshot(');
         expect(block).not.toContain('mergeSessionMessagesById(');
+
+        const undoHydration = extractProviderMethod('private async hydrateSessionUndoPresentation(');
+        expectOrder(undoHydration, [
+            'await this.ensureSessionUndoReady(sessionId, webview)',
+            'await this.loadPersistedSegment(sessionId)',
+            'this.revertedSegmentHistoryStore.',
+            'this.client.setRevertedSegment(sessionId,',
+            'const segmentMap = this.undoSegmentsBySession.get(sessionId)',
+            'this.syncClientRevertedSegmentFromUndoSegments(sessionId)',
+        ]);
     });
 
     test('reapplies cached append metadata to every hydration message set', () => {
@@ -110,30 +151,60 @@ describe('session command family characterization', () => {
             'await host.client.deleteSession(sessionId)',
             'await host.cleanupDeletedSessionArtifacts(sessionId)',
             'await host.clearRecentSessionIfMatches(sessionId)',
-            'if (host.currentSessionId === sessionId)',
-            'host.resetUiState()',
-            'host.currentSessionId = undefined',
-            'host.client.setSessionId(undefined)',
+            'host.clearSelectedSessionAfterDelete(sessionId)',
             'await host.refreshSessions(liveWebview',
             "liveWebview.postMessage({ type: 'sessionDeleted', sessionId, opId })",
         ]);
         expect(block).toContain("type: 'sessionDeleteFailed'");
         expect(block).toContain('reason: String(error)');
+
+        const clear = extractProviderMethod('private clearSelectedSessionAfterDelete(');
+        expectOrder(clear, [
+            'if (this.currentSessionId !== sessionId) return',
+            'this.resetUiState()',
+            'this.currentSessionId = undefined',
+            'this.client.setSessionId(undefined)',
+        ]);
     });
 
     test('new session clears the selected owner before publishing an empty session', () => {
         const block = extractRange('case "newSession"', 'case "undoToMessage"');
         expectOrder(block, [
-            'await host.clearPersistedSegment(host.currentSessionId)',
-            'host.resetSessionState()',
-            'host.currentSessionId = undefined',
-            'host.client.setSessionId(host.currentSessionId)',
-            'await host._context.globalState.update(`recentSession.${workspaceKey}`, undefined)',
-            "activeWebview.postMessage({ type: 'newSession', sessionId: host.currentSessionId })",
+            'const sessionId = await host.prepareNewSession()',
+            "activeWebview.postMessage({ type: 'newSession', sessionId })",
+            'await host.initializeNewSessionBaseline(activeWebview)',
         ]);
-        expect(block).toContain('if (host.gitUndoEnabled)');
-        expect(block).toContain('await host.client.ensureBaselineForTurn(host.pendingBaselineTurnKey)');
-        expect(block).toContain("type: 'baselineStatus'");
+
+        const prepare = extractProviderMethod('private async prepareNewSession(');
+        expectOrder(prepare, [
+            'await this.clearPersistedSegment(this.currentSessionId)',
+            'this.resetSessionState()',
+            'this.currentSessionId = undefined',
+            'this.client.setSessionId(undefined)',
+            'await this.persistRecentSessionSelection(undefined)',
+        ]);
+        const baseline = extractProviderMethod('private async initializeNewSessionBaseline(');
+        expectOrder(baseline, [
+            'if (!this.gitUndoEnabled) return',
+            'this.pendingBaselineTurnKey = `baseline-${Date.now()}`',
+            'this.pendingBaselineFailed = false',
+            "type: 'baselineStatus'",
+            'await this.client.ensureBaselineForTurn(this.pendingBaselineTurnKey)',
+            'this.baselineReady = baselineResult.ok',
+        ]);
+    });
+
+    test('routes session-owned mutable state only through provider domain methods', () => {
+        const sessionBlocks = [
+            extractRange('case "deleteSession"', 'case "selectSession"'),
+            extractRange('case "selectSession"', 'case "newSession"'),
+            extractRange('case "newSession"', 'case "undoToMessage"'),
+        ].join('\n');
+        expect(sessionBlocks).not.toMatch(/host\.(currentSessionId|sessionSelectionEpoch)\s*(?:=|\+\+)/);
+        expect(sessionBlocks).not.toContain('host.revertedSegmentHistoryStore.');
+        expect(sessionBlocks).not.toContain('host.undoSegmentsBySession.');
+        expect(sessionBlocks).not.toMatch(/host\.(pendingBaselineTurnKey|pendingBaselineFailed|baselineReady)\s*=/);
+        expect(sessionBlocks).not.toContain('host._context.globalState.update(');
     });
 
     test('forwards snapshot timeline receipts without changing selection state', () => {

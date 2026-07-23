@@ -3614,6 +3614,106 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return { resolved: true, sessionId: pending.sessionId };
     }
 
+    private startSessionSelection(targetSessionId: string): number {
+        this.resetWebviewLiveness('session-switch');
+        return ++this.sessionSelectionEpoch;
+    }
+
+    private adoptSessionSelection(targetSessionId: string): void {
+        this.resetUiState(targetSessionId);
+        this.currentSessionId = targetSessionId;
+        this.trackUserOwnedSession(targetSessionId);
+        this.client.setSessionId(targetSessionId);
+    }
+
+    private isSessionSelectionCurrent(targetSessionId: string, selectionEpoch: number): boolean {
+        return this.currentSessionId === targetSessionId
+            && this.sessionSelectionEpoch === selectionEpoch;
+    }
+
+    private async persistRecentSessionSelection(sessionId: string | undefined): Promise<void> {
+        const workspaceFolder = this.client.getWorkspaceRoot()
+            || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!workspaceFolder) return;
+        const workspaceKey = this.getWorkspaceKeyForRoot(workspaceFolder);
+        await this._context.globalState.update(`recentSession.${workspaceKey}`, sessionId);
+    }
+
+    private async hydrateSessionUndoPresentation(
+        sessionId: string,
+        webview: vscode.Webview
+    ): Promise<SegmentState[]> {
+        await this.ensureSessionUndoReady(sessionId, webview);
+        const persisted = await this.loadPersistedSegment(sessionId);
+        if (persisted?.segment?.historySegments) {
+            this.revertedSegmentHistoryStore.set(sessionId, persisted.segment.historySegments);
+        } else {
+            this.revertedSegmentHistoryStore.clearSession(sessionId);
+        }
+        if (persisted?.segment && persisted.segment.isActive === true && persisted.discarded !== true) {
+            this.client.setRevertedSegment(sessionId, {
+                isActive: true,
+                discarded: false,
+                startMessageId: persisted.segment.startMessageId || sessionId,
+                startMessageIndex: persisted.segment.startMessageIndex ?? 0,
+                endMessageId: persisted.segment.endMessageId || sessionId,
+                endMessageIndex: persisted.segment.endMessageIndex
+                    ?? (persisted.segment.startMessageIndex ?? 0),
+                opIds: persisted.segment.opIds || [],
+                collapsed: true,
+                conflicts: persisted.conflicts || [],
+                messageIds: persisted.segment.messageIds,
+                operationId: persisted.segment.operationId
+            });
+        } else {
+            this.client.setRevertedSegment(sessionId, undefined);
+        }
+        const segmentMap = this.undoSegmentsBySession.get(sessionId);
+        this.syncClientRevertedSegmentFromUndoSegments(sessionId);
+        return segmentMap ? Array.from(segmentMap.values()) : [];
+    }
+
+    private clearSelectedSessionAfterDelete(sessionId: string): void {
+        if (this.currentSessionId !== sessionId) return;
+        this.resetUiState();
+        this.currentSessionId = undefined;
+        this.client.setSessionId(undefined);
+    }
+
+    private async prepareNewSession(): Promise<undefined> {
+        if (this.currentSessionId) {
+            await this.clearPersistedSegment(this.currentSessionId);
+        }
+        this.resetSessionState();
+        this.currentSessionId = undefined;
+        this.client.setSessionId(undefined);
+        await this.persistRecentSessionSelection(undefined);
+        return undefined;
+    }
+
+    private async initializeNewSessionBaseline(webview: vscode.Webview): Promise<void> {
+        if (!this.gitUndoEnabled) return;
+        this.pendingBaselineTurnKey = `baseline-${Date.now()}`;
+        this.pendingBaselineFailed = false;
+        webview.postMessage({
+            type: 'baselineStatus',
+            ready: false,
+            message: 'Initializing Git baseline...'
+        });
+        const baselineResult = await this.client.ensureBaselineForTurn(this.pendingBaselineTurnKey);
+        this.baselineReady = baselineResult.ok;
+        if (!baselineResult.ok) {
+            this.pendingBaselineFailed = true;
+            webview.postMessage({
+                type: 'baselineStatus',
+                ready: false,
+                message: 'Git baseline failed. Undo unavailable.'
+            });
+            return;
+        }
+        webview.postMessage({ type: 'baselineStatus', ready: true });
+    }
+
     private async listWorkspaceFiles(query: string, limit = 50): Promise<WorkspaceFileResult[]> {
         const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         if (!workspaceRoot) return [];

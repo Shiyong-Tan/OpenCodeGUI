@@ -829,11 +829,7 @@ ${attachmentLines.join('\n')}`
                         await host.cleanupDeletedSessionArtifacts(sessionId);
                         await host.clearRecentSessionIfMatches(sessionId);
 
-                        if (host.currentSessionId === sessionId) {
-                            host.resetUiState();
-                            host.currentSessionId = undefined;
-                            host.client.setSessionId(undefined);
-                        }
+                        host.clearSelectedSessionAfterDelete(sessionId);
 
                         await host.refreshSessions(liveWebview, `delete-${Date.now()}`);
                         liveWebview.postMessage({ type: 'sessionDeleted', sessionId, opId });
@@ -854,18 +850,12 @@ ${attachmentLines.join('\n')}`
                 case "selectSession": {
                     if (!data.sessionId) return;
                     const targetSessionId = data.sessionId;
-                    host.resetWebviewLiveness('session-switch');
-                    const selectionEpoch = ++host.sessionSelectionEpoch;
+                    const selectionEpoch = host.startSessionSelection(targetSessionId);
                     try {
-                        host.resetUiState(targetSessionId);
+                        host.adoptSessionSelection(targetSessionId);
                         let sessionDataSent = false;
-                        host.currentSessionId = targetSessionId;
-                        host.trackUserOwnedSession(host.currentSessionId);
-                        host.client.setSessionId(host.currentSessionId);
-                        const isCurrentSelection = () => (
-                            host.currentSessionId === targetSessionId &&
-                            host.sessionSelectionEpoch === selectionEpoch
-                        );
+                        const isCurrentSelection = () =>
+                            host.isSessionSelectionCurrent(targetSessionId, selectionEpoch);
                         const postSessionData = (payload: any, phase: 'snapshot' | 'recent' | 'full') => {
                             if (!isCurrentSelection()) {
                                 host.uiDebugChannel.appendLine(
@@ -894,40 +884,11 @@ ${attachmentLines.join('\n')}`
                                 typeof message.id === 'string' ? (messagesById.get(message.id) || message) : message
                             ));
                         };
-                            const workspaceFolder = host.client.getWorkspaceRoot() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-                            if (workspaceFolder) {
-                                const workspaceKey = host.getWorkspaceKeyForRoot(workspaceFolder);
-                                await host._context.globalState.update(`recentSession.${workspaceKey}`, targetSessionId);
-                            }
-                        await host.ensureSessionUndoReady(targetSessionId, activeWebview);
-
-                        const persisted = await host.loadPersistedSegment(targetSessionId);
-                        if (persisted?.segment?.historySegments) {
-                            host.revertedSegmentHistoryStore.set(targetSessionId, persisted.segment.historySegments);
-                        } else {
-                            host.revertedSegmentHistoryStore.clearSession(targetSessionId);
-                        }
-                        if (persisted?.segment && persisted.segment.isActive === true && persisted.discarded !== true) {
-                            host.client.setRevertedSegment(targetSessionId, {
-                                isActive: true,
-                                discarded: false,
-                                startMessageId: persisted.segment.startMessageId || targetSessionId,
-                                startMessageIndex: persisted.segment.startMessageIndex ?? 0,
-                                endMessageId: persisted.segment.endMessageId || targetSessionId,
-                                endMessageIndex: persisted.segment.endMessageIndex ?? (persisted.segment.startMessageIndex ?? 0),
-                                opIds: persisted.segment.opIds || [],
-                                collapsed: true,
-                                conflicts: persisted.conflicts || [],
-                                messageIds: persisted.segment.messageIds,
-                                operationId: persisted.segment.operationId
-                            });
-                        } else {
-                            host.client.setRevertedSegment(targetSessionId, undefined);
-                        }
-
-                        const segMap = host.undoSegmentsBySession.get(targetSessionId);
-                        host.syncClientRevertedSegmentFromUndoSegments(targetSessionId);
-                        const segments = segMap ? Array.from(segMap.values()) : [];
+                        await host.persistRecentSessionSelection(targetSessionId);
+                        const segments = await host.hydrateSessionUndoPresentation(
+                            targetSessionId,
+                            activeWebview
+                        );
 
                         let baseTitle = 'Session';
                         let baseMessages: SessionMessage[] = [];
@@ -1147,31 +1108,9 @@ ${attachmentLines.join('\n')}`
                 }
 
                 case "newSession": {
-                    if (host.currentSessionId) {
-                        await host.clearPersistedSegment(host.currentSessionId);
-                    }
-                    host.resetSessionState();
-                    host.currentSessionId = undefined;
-                    host.client.setSessionId(host.currentSessionId);
-                        const workspaceFolder = host.client.getWorkspaceRoot() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-                        if (workspaceFolder) {
-                            const workspaceKey = host.getWorkspaceKeyForRoot(workspaceFolder);
-                            await host._context.globalState.update(`recentSession.${workspaceKey}`, undefined);
-                        }
-                    activeWebview.postMessage({ type: 'newSession', sessionId: host.currentSessionId });
-                    if (host.gitUndoEnabled) {
-                        host.pendingBaselineTurnKey = `baseline-${Date.now()}`;
-                        host.pendingBaselineFailed = false;
-                        activeWebview.postMessage({ type: 'baselineStatus', ready: false, message: 'Initializing Git baseline...' });
-                        const baselineResult = await host.client.ensureBaselineForTurn(host.pendingBaselineTurnKey);
-                        host.baselineReady = baselineResult.ok;
-                        if (!baselineResult.ok) {
-                            host.pendingBaselineFailed = true;
-                            activeWebview.postMessage({ type: 'baselineStatus', ready: false, message: 'Git baseline failed. Undo unavailable.' });
-                        } else {
-                            activeWebview.postMessage({ type: 'baselineStatus', ready: true });
-                        }
-                    }
+                    const sessionId = await host.prepareNewSession();
+                    activeWebview.postMessage({ type: 'newSession', sessionId });
+                    await host.initializeNewSessionBaseline(activeWebview);
                     break;
                 }
                 case "undoToMessage": {
