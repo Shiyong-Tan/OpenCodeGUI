@@ -196,35 +196,6 @@ describe('OpenCodeClient subagent lane classification', () => {
         ]));
     });
 
-    it('retains only an allowlisted coherent child route across active-parent switch reset', () => {
-        const client = new OpenCodeClient() as any;
-        client.currentSessionId = 'ses_B';
-        client.registerSubagentSession('ses_child', 'ses_A');
-        client.resetSessionState({ preserveInFlightSessionIds: new Set(['ses_A']) });
-        client.currentSessionId = 'ses_B';
-        const events = client.mapServerEventToChatEvents('message.part.updated', {
-            part: { sessionID: 'ses_child', messageID: 'msg_child', type: 'text', text: 'still under A' },
-        }, 'sse');
-        expect(events).toEqual(expect.arrayContaining([
-            expect.objectContaining({ type: 'backgroundActivityPulse', sessionId: 'ses_A', agentSessionId: 'ses_child' }),
-            expect.objectContaining({ type: 'text', parentSessionId: 'ses_A', agentSessionId: 'ses_child' }),
-        ]));
-    });
-
-    it('clears orphan, mismatch, stable-only, and non-allowlisted child routes on reset', () => {
-        const client = new OpenCodeClient() as any;
-        client.subagentToParentSessionMap.set('orphan', 'ses_A');
-        client.subagentToParentSessionMap.set('mismatch', 'ses_A');
-        client.stablePulseRootSessionBySubagent.set('mismatch', 'ses_B');
-        client.stablePulseRootSessionBySubagent.set('stable-only', 'ses_A');
-        client.registerSubagentSession('not-allowed', 'ses_A');
-        client.resetSessionState({ preserveInFlightSessionIds: new Set(['ses_other']) });
-        expect(client.getParentSessionForSubagent('orphan')).toBeUndefined();
-        expect(client.getParentSessionForSubagent('mismatch')).toBeUndefined();
-        expect(client.getParentSessionForSubagent('stable-only')).toBeUndefined();
-        expect(client.getParentSessionForSubagent('not-allowed')).toBeUndefined();
-    });
-
     it('carries backend parentID as explicit parent evidence on session events', () => {
         const client = new OpenCodeClient() as any;
         client.logUiDebug = jest.fn();

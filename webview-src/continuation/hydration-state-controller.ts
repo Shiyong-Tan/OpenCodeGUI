@@ -14,9 +14,6 @@ export function createHydrationStateController(options: HydrationStateController
     if (!message || typeof message !== 'object') return message;
     return { ...message, meta: message.meta && typeof message.meta === 'object' ? { ...message.meta } : message.meta };
   };
-  const cloneActiveSubagents = (value: any) => Array.isArray(value)
-    ? value.filter((agent) => agent && typeof agent === 'object').map((agent) => ({ ...agent }))
-    : [];
   const isPersistenceArtifact = (id: unknown, message: any) => {
     if (typeof id === 'string' && (id.startsWith('system:snapshot:') || id.startsWith('system:changeList:'))) return true;
     const kind = message?.meta?.kind;
@@ -68,10 +65,6 @@ export function createHydrationStateController(options: HydrationStateController
 
   function capture(session: any): any | null {
     if (!session) return null;
-    const activeTurn = session.backendTurnInFlight === true
-      && session.turnFullyFinalized === false
-      && session.cancelledTurn !== true
-      && session.canceledActiveTurn !== true;
     return {
       messagesById: cloneMap(session.messagesById),
       timeline: Array.isArray(session.timeline) ? session.timeline.slice() : [],
@@ -103,9 +96,6 @@ export function createHydrationStateController(options: HydrationStateController
       backgroundSubagentIndicatorVisible: session.backgroundSubagentIndicatorVisible,
       backgroundSubagentIndicatorUntil: session.backgroundSubagentIndicatorUntil,
       backgroundSubagentIndicatorAnchorId: session.backgroundSubagentIndicatorAnchorId,
-      ...(activeTurn && Array.isArray(session.activeSubagents) && session.activeSubagents.length
-        ? { activeSubagents: cloneActiveSubagents(session.activeSubagents) }
-        : {}),
     };
   }
 
@@ -244,11 +234,6 @@ export function createHydrationStateController(options: HydrationStateController
     preserveField('backgroundSubagentIndicatorVisible', preserved.backgroundSubagentIndicatorVisible === true);
     preserveField('backgroundSubagentIndicatorUntil', typeof preserved.backgroundSubagentIndicatorUntil === 'number' && preserved.backgroundSubagentIndicatorUntil > (options.now?.() ?? Date.now()));
     preserveField('backgroundSubagentIndicatorAnchorId', Boolean(preserved.backgroundSubagentIndicatorAnchorId));
-    if (preservedTurnIsActive && Array.isArray(preserved.activeSubagents) && preserved.activeSubagents.length
-      && !Array.isArray(session.activeSubagents)) {
-      session.activeSubagents = cloneActiveSubagents(preserved.activeSubagents);
-      fieldNames.push('activeSubagents');
-    }
     if (preserved.messageIndexMap.size) {
       if (!(session.messageIndexMap instanceof Map)) session.messageIndexMap = new Map();
       for (const [key, value] of preserved.messageIndexMap.entries()) if (!session.messageIndexMap.has(key)) session.messageIndexMap.set(key, value);
@@ -279,7 +264,6 @@ export function createHydrationStateController(options: HydrationStateController
     cloneSet,
     clonePlainValue,
     cloneMessage,
-    cloneActiveSubagents,
     isPersistenceArtifact,
     findMappedMessageId,
     resolveCanonicalId,
