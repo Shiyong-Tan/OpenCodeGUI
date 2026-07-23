@@ -62,9 +62,9 @@ describe('hydration integration planner', () => {
         hydrationCoverage: 'deltaContinuityUnknown',
       },
       messages: [
-        message('msg_nested', 'assistant', 'nested'),
-        message('msg_assistant', 'assistant', 'answer'),
-        message('msg_user', 'user', 'system: prompt'),
+        { ...message('msg_nested', 'assistant', 'nested'), messageIndex: 3 } as any,
+        { ...message('msg_assistant', 'assistant', 'answer'), messageIndex: 2 } as any,
+        { ...message('msg_user', 'user', 'system: prompt'), messageIndex: 1 } as any,
       ],
     });
     expect(result.timeline).toEqual(['msg_user', 'msg_assistant']);
@@ -72,6 +72,7 @@ describe('hydration integration planner', () => {
     expect(result.messages.slice(0, 2).map((item) => item.id))
       .toEqual(['msg_assistant', 'msg_user']);
     expect(result.messages.find((item) => item.id === 'msg_user')?.text).toBe('prompt');
+    expect(result.messages.some((item) => 'messageIndex' in item)).toBe(false);
     expect(result.snapshotNoticeRequired).toBe(true);
     expect(result.coverage).toBe('deltaContinuityUnknown');
   });

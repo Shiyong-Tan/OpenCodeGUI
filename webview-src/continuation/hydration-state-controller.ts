@@ -463,18 +463,59 @@ export function createHydrationStateController(options: HydrationStateController
   function compareIntegrationShadow(
     actual: any,
     shadow: Readonly<{ plan: HydrationIntegrationPlan; state: any }> | null | undefined,
-  ): Readonly<{ matched: boolean; mismatches: readonly string[]; summary: Readonly<Record<string, number>> }> {
+  ): Readonly<{
+    matched: boolean;
+    mismatches: readonly string[];
+    details: readonly string[];
+    summary: Readonly<Record<string, number>>;
+  }> {
     if (!actual || !shadow?.plan?.accepted) {
       return Object.freeze({
         matched: false,
         mismatches: Object.freeze(['unavailable-shadow']),
+        details: Object.freeze(['unavailable-shadow']),
         summary: Object.freeze({ timeline: 0, messages: 0, segments: 0 }),
       });
     }
     const expected = shadow.state;
     const mismatches: string[] = [];
+    const details: string[] = [];
+    const describeMessageDifference = (left: any, right: any) => {
+      if (details.length >= 4) return;
+      const leftById = new Map(
+        (Array.isArray(left) ? left : []).map((entry: any) => [entry?.id, entry]),
+      );
+      const rightById = new Map(
+        (Array.isArray(right) ? right : []).map((entry: any) => [entry?.id, entry]),
+      );
+      for (const id of new Set([...leftById.keys(), ...rightById.keys()])) {
+        if (!leftById.has(id)) {
+          details.push(`messages:missing-actual:${String(id)}`);
+          continue;
+        }
+        if (!rightById.has(id)) {
+          details.push(`messages:extra-actual:${String(id)}`);
+          continue;
+        }
+        const leftMessage: any = leftById.get(id);
+        const rightMessage: any = rightById.get(id);
+        if (stableJson(leftMessage) === stableJson(rightMessage)) continue;
+        const topKeys = new Set([
+          ...Object.keys(leftMessage || {}),
+          ...Object.keys(rightMessage || {}),
+        ]);
+        const changed = [...topKeys].filter((key) => (
+          stableJson(leftMessage?.[key]) !== stableJson(rightMessage?.[key])
+        ));
+        details.push(`messages:${String(id)}:${changed.join('+') || 'value'}`);
+        if (details.length >= 4) break;
+      }
+    };
     const compare = (name: string, left: any, right: any) => {
-      if (stableJson(left) !== stableJson(right)) mismatches.push(name);
+      if (stableJson(left) === stableJson(right)) return;
+      mismatches.push(name);
+      if (name === 'messages') describeMessageDifference(left, right);
+      else if (details.length < 4) details.push(name);
     };
     compare('timeline', visibleTimeline(actual), visibleTimeline(expected));
     compare('messages', visibleMessages(actual), visibleMessages(expected));
@@ -519,6 +560,7 @@ export function createHydrationStateController(options: HydrationStateController
     return Object.freeze({
       matched: mismatches.length === 0,
       mismatches: Object.freeze(mismatches),
+      details: Object.freeze(details),
       summary: Object.freeze({
         timeline: visibleTimeline(actual).length,
         messages: visibleMessages(actual).length,

@@ -14414,6 +14414,7 @@ function appendMessageImages(parentEl, message) {
                                     `sessionId=${sessionId}`,
                                     `matched=${shadowComparison.matched ? 'true' : 'false'}`,
                                     `mismatches=${shadowComparison.mismatches.join(',') || 'none'}`,
+                                    `details=${shadowComparison.details.join(';') || 'none'}`,
                                     `timeline=${shadowComparison.summary.timeline}`,
                                     `messages=${shadowComparison.summary.messages}`,
                                     `segments=${shadowComparison.summary.segments}`]

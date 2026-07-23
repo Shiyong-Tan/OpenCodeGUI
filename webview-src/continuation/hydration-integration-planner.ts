@@ -220,7 +220,6 @@ export function planHydrationIntegration(
       return null;
     }
     const normalized = {
-      ...message,
       id: message.id,
       role,
       text: role === 'user' ? options.cleanUserText(rawText) : rawText,
