@@ -109,4 +109,17 @@ describe('cross-session runtime repository audit', () => {
     expect(sessionIdHandler).not.toContain("clearQuestionOverlay('session-change')");
     expect(sessionIdHandler).not.toContain("clearPermissionOverlay('session-change')");
   });
+
+  test('conflict cards are stored and cleared by explicit session identity', () => {
+    const conflictCaseStart = main.indexOf("case 'conflictCard':");
+    const conflictCaseEnd = main.indexOf("case 'newSession':", conflictCaseStart);
+    const conflictCase = main.slice(conflictCaseStart, conflictCaseEnd);
+    const clearConflict = extractFunction(main, 'function clearOwnedConflictPayload(');
+
+    expect(main).not.toContain('lastConflictPayload');
+    expect(conflictCase).toContain("const sessionId = typeof message.sessionId === 'string' ? message.sessionId : '';");
+    expect(conflictCase).toContain('sessionConflictStore.set(sessionId, message);');
+    expect(conflictCase).toContain('if (sessionId === activeSessionId)');
+    expect(clearConflict).toContain('sessionConflictStore.clear(sessionId, identity || undefined)');
+  });
 });

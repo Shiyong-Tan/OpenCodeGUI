@@ -10,6 +10,7 @@ import { createTurnLifecycleController } from '../session-runtime/turn-lifecycle
 import { createMessageIdentityStore } from '../session-runtime/message-identity';
 import { createMessageRekeyController } from '../session-runtime/message-rekey-controller';
 import { createSessionOverlayStore } from '../session-runtime/session-overlay-store';
+import { createSessionConflictStore } from '../session-runtime/session-conflict-store';
 
 export const CONTINUATION_FACADE_VERSION = 1 as const;
 
@@ -28,6 +29,7 @@ const facade = Object.freeze({
   createMessageIdentityStore,
   createMessageRekeyController,
   createSessionOverlayStore,
+  createSessionConflictStore,
 });
 
 declare global {

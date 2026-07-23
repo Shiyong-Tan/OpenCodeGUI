@@ -202,7 +202,6 @@ let rekeyKeyedChatPresentation = null;
 let conflictCardEl = null;
 let conflictShellPresentationGeneration = 0;
 let stallCardEl = null;
-let lastConflictPayload = null;
 let questionOverlayEl = null;
 let questionOverlayTimer = null;
 let quoteSelectionButton = null;
@@ -306,6 +305,13 @@ if (typeof createSessionOverlayStore !== 'function') {
 const sessionOverlayStore = createSessionOverlayStore({
     questionIdentity: (question) => question?.callId || '',
     permissionIdentity: (permission) => permission?.permissionId || permission?.requestId || ''
+});
+const createSessionConflictStore = window.__ocContinuation?.createSessionConflictStore;
+if (typeof createSessionConflictStore !== 'function') {
+    throw new Error('Session conflict store is unavailable');
+}
+const sessionConflictStore = createSessionConflictStore({
+    identity: (conflict) => conflict?.conflictId || conflict?.operationId || ''
 });
 let gitUndoEnabled = false;
 let gitUndoReason = null;
@@ -7784,9 +7790,10 @@ function shouldHideDcpUiMessage(message) {
                 hasVisibleUser = true;
             }
         }
-        if (lastConflictPayload && lastConflictPayload.sessionId === activeSessionId) {
-            const identity = lastConflictPayload.conflictId || lastConflictPayload.operationId || 'active';
-            candidates.push({ key: `conflict:${activeSessionId || 'none'}:${identity}`, kind: 'conflict', value: lastConflictPayload });
+        const activeConflictPayload = sessionConflictStore.get(activeSessionId);
+        if (activeConflictPayload) {
+            const identity = activeConflictPayload.conflictId || activeConflictPayload.operationId || 'active';
+            candidates.push({ key: `conflict:${activeSessionId || 'none'}:${identity}`, kind: 'conflict', value: activeConflictPayload });
         }
         return candidates;
     }
@@ -11624,8 +11631,9 @@ function shouldHideDcpUiMessage(message) {
             ]
         });
 
-        if (lastConflictPayload && lastConflictPayload.sessionId === activeSessionId) {
-            renderConflictCard(lastConflictPayload);
+        const activeConflictPayload = sessionConflictStore.get(activeSessionId);
+        if (activeConflictPayload) {
+            renderConflictCard(activeConflictPayload);
         }
 
 
@@ -13722,6 +13730,7 @@ function appendMessageImages(parentEl, message) {
                     armedDeleteSessionId = '';
                 }
                 sessionOverlayStore.deleteSession(sessionId);
+                sessionConflictStore.deleteSession(sessionId);
                 sessions = sessions.filter((item) => item?.id !== sessionId);
                 renderSessionList();
                 break;
@@ -15962,10 +15971,20 @@ function appendMessageImages(parentEl, message) {
                 break;
             }
             case 'conflictCard': {
-                lastConflictPayload = message;
+                const sessionId = typeof message.sessionId === 'string' ? message.sessionId : '';
+                if (!sessionId) {
+                    vscode.postMessage({
+                        type: 'ui-debug',
+                        payload: ['[WV][CONFLICT_DROP]', 'reason=missing-session-owner']
+                    });
+                    break;
+                }
+                sessionConflictStore.set(sessionId, message);
                 suspendUndoTimeoutForConflictCard(message);
-                window.__oc?.renderFromState?.();
-                scrollToBottom();
+                if (sessionId === activeSessionId) {
+                    window.__oc?.renderFromState?.();
+                    scrollToBottom();
+                }
                 break;
             }
             case 'newSession': {
@@ -16170,7 +16189,7 @@ function renderSafeShellConflictCard(payload, options, conflictOwner) {
     const decide = (decision) => {
         root.remove();
         if (conflictCardEl === root) conflictCardEl = null;
-        lastConflictPayload = null;
+        clearOwnedConflictPayload(conflictOwner);
         ownership.disposed = true;
         for (const frame of ownership.frames) cancelAnimationFrame(frame);
         for (const timer of ownership.timers) clearTimeout(timer);
@@ -16342,6 +16361,13 @@ function renderSafeShellConflictCard(payload, options, conflictOwner) {
     return root;
 }
 
+function clearOwnedConflictPayload(conflictOwner) {
+    const sessionId = typeof conflictOwner?.sessionId === 'string' ? conflictOwner.sessionId : '';
+    const identity = conflictOwner?.conflictId || conflictOwner?.operationId || '';
+    if (!sessionId) return false;
+    return sessionConflictStore.clear(sessionId, identity || undefined);
+}
+
 function renderConflictCard(payload, options = {}) {
     const chatContainer = document.getElementById('chat');
     if (!payload || !Array.isArray(payload.conflicts) || !chatContainer) return;
@@ -16438,7 +16464,7 @@ function renderConflictCard(payload, options = {}) {
             conflictCardEl.parentElement.removeChild(conflictCardEl);
         }
         conflictCardEl = null;
-        lastConflictPayload = null;
+        clearOwnedConflictPayload(conflictOwner);
         vscode.postMessage({
             type: 'conflictDecision',
             decision: 'skip',
@@ -16462,7 +16488,7 @@ function renderConflictCard(payload, options = {}) {
             conflictCardEl.parentElement.removeChild(conflictCardEl);
         }
         conflictCardEl = null;
-        lastConflictPayload = null;
+        clearOwnedConflictPayload(conflictOwner);
         vscode.postMessage({
             type: 'conflictDecision',
             decision: 'override',
