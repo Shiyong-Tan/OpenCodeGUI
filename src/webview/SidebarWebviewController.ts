@@ -1423,7 +1423,7 @@ ${attachmentLines.join('\n')}`
                         host.uiDebugChannel.appendLine(`[EXT][UNDO_DONE] applied=${result.applied} conflicts=${result.conflicts.length} sessionId=${ownerSessionId}`);
                             if (!result.applied && result.conflicts.length) {
                                 const conflictId = host.createConflictId('undo', operationId);
-                                host.pendingConflict = {
+                                host.pendingConflictStore.set({
                                     kind: 'undo',
                                     sessionId: ownerSessionId,
                                     operationId,
@@ -1433,7 +1433,7 @@ ${attachmentLines.join('\n')}`
                                     forwardMessageIdsFromAnchor,
                                     anchorIndex,
                                     noticeKey
-                                };
+                                });
                                 const liveWebview = host._view?.webview || activeWebview;
                                 host.uiDebugChannel.appendLine(`[EXT][UNDO_TX] type=conflictCard sessionId=${ownerSessionId} opId=${operationId} conflictId=${conflictId} kind=undo`);
                                 host.uiDebugChannel.appendLine(`EXT: undo.postToWebview | type=conflictCard | sessionId | ${ownerSessionId} | opId | ${operationId} | conflictId | ${conflictId}`);
@@ -1734,7 +1734,7 @@ ${attachmentLines.join('\n')}`
                         const result = await host.client.restoreAll({ sessionId: ownerSessionId });
                         if (!result.applied && result.conflicts.length) {
                             const conflictId = host.createConflictId('restore', operationId);
-                            host.pendingConflict = { kind: 'restore', sessionId: ownerSessionId, operationId, conflictId, noticeKey };
+                            host.pendingConflictStore.set({ kind: 'restore', sessionId: ownerSessionId, operationId, conflictId, noticeKey });
                             const liveWebview = host._view?.webview || activeWebview;
                             host.uiDebugChannel.appendLine(`[EXT][RESTORE_TX] type=conflictCard sessionId=${ownerSessionId} opId=${operationId} conflictId=${conflictId} kind=restore noticeKey=${noticeKey || 'null'}`);
                             liveWebview.postMessage({
@@ -1838,7 +1838,7 @@ ${attachmentLines.join('\n')}`
                             );
                         } else if (result.conflicts.length) {
                             const conflictId = host.createConflictId('restoreSegment', operationId);
-                            host.pendingConflict = { kind: 'restoreSegment', sessionId: ownerSessionId, operationId, conflictId, startMessageId: anchorMsgId, endMessageId: endMsgId, noticeKey };
+                            host.pendingConflictStore.set({ kind: 'restoreSegment', sessionId: ownerSessionId, operationId, conflictId, startMessageId: anchorMsgId, endMessageId: endMsgId, noticeKey });
                             host.uiDebugChannel.appendLine(`[EXT][RESTORE_TX] type=conflictCard sessionId=${ownerSessionId} opId=${operationId} conflictId=${conflictId} kind=restoreSegment noticeKey=${noticeKey || 'null'} anchorMsgId=${anchorMsgId} endMsgId=${endMsgId || 'null'}`);
                             liveWebview.postMessage({
                                 type: 'conflictCard',
@@ -2022,24 +2022,24 @@ ${attachmentLines.join('\n')}`
                     host.uiDebugChannel.appendLine(`[EXT][CONFLICT_ROUTE] phase=rx decision=${decision || 'null'} payloadSessionId=${payloadSessionId || 'null'} currentSessionId=${host.currentSessionId || 'null'} opId=${operationId || 'null'} conflictId=${conflictId || 'null'} kind=${kind || 'null'}`);
                     if (!decision || !payloadSessionId || !operationId || !conflictId || !kind) {
                         const missing = [!decision ? 'decision' : undefined, !payloadSessionId ? 'sessionId' : undefined, !operationId ? 'operationId' : undefined, !conflictId ? 'conflictId' : undefined, !kind ? 'kind' : undefined].filter(Boolean).join(',');
-                        host.uiDebugChannel.appendLine(`[EXT][CONFLICT_DROP] reason=missing-${missing} payloadSessionId=${payloadSessionId || 'null'} opId=${operationId || 'null'} conflictId=${conflictId || 'null'} kind=${kind || 'null'} pending=${host.pendingConflict ? 'yes' : 'no'}`);
+                        host.uiDebugChannel.appendLine(`[EXT][CONFLICT_DROP] reason=missing-${missing} payloadSessionId=${payloadSessionId || 'null'} opId=${operationId || 'null'} conflictId=${conflictId || 'null'} kind=${kind || 'null'} pendingCount=${host.pendingConflictStore.size}`);
                         break;
                     }
-                    if (!host.pendingConflict) {
+                    const pendingConflict = host.pendingConflictStore.get(payloadSessionId);
+                    if (!pendingConflict) {
                         host.uiDebugChannel.appendLine(`[EXT][CONFLICT_DROP] reason=no-pending sessionId=${payloadSessionId} opId=${operationId} conflictId=${conflictId} kind=${kind} decision=${decision}`);
                         break;
                     }
                     if (
-                        host.pendingConflict.sessionId !== payloadSessionId ||
-                        host.pendingConflict.operationId !== operationId ||
-                        host.pendingConflict.conflictId !== conflictId ||
-                        host.pendingConflict.kind !== kind
+                        pendingConflict.operationId !== operationId ||
+                        pendingConflict.conflictId !== conflictId ||
+                        pendingConflict.kind !== kind
                     ) {
-                        host.uiDebugChannel.appendLine(`[EXT][CONFLICT_DROP] reason=owner-mismatch payloadSessionId=${payloadSessionId} payloadOpId=${operationId} payloadConflictId=${conflictId} payloadKind=${kind} pendingSessionId=${host.pendingConflict.sessionId} pendingOpId=${host.pendingConflict.operationId} pendingConflictId=${host.pendingConflict.conflictId} pendingKind=${host.pendingConflict.kind} decision=${decision}`);
+                        host.uiDebugChannel.appendLine(`[EXT][CONFLICT_DROP] reason=owner-mismatch payloadSessionId=${payloadSessionId} payloadOpId=${operationId} payloadConflictId=${conflictId} payloadKind=${kind} pendingSessionId=${pendingConflict.sessionId} pendingOpId=${pendingConflict.operationId} pendingConflictId=${pendingConflict.conflictId} pendingKind=${pendingConflict.kind} decision=${decision}`);
                         break;
                     }
-                    const conflictContext = host.pendingConflict;
-                    host.pendingConflict = undefined;
+                    const conflictContext = host.pendingConflictStore.take(payloadSessionId);
+                    if (!conflictContext) break;
                     const ownerSessionId = conflictContext.sessionId;
                     host.uiDebugChannel.appendLine(`[EXT][CONFLICT_ROUTE] phase=owner-validated sessionId=${ownerSessionId} opId=${conflictContext.operationId} conflictId=${conflictContext.conflictId} kind=${conflictContext.kind} decision=${decision}`);
                     if (decision === 'cancel' || decision === 'skip') {

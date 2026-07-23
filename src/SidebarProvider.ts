@@ -43,6 +43,7 @@ import {
     type TurnShadowObservation,
 } from './session-runtime/turn/TurnRuntimeShadow';
 import { ChatEventActorRouter } from './session-runtime/ChatEventActorRouter';
+import { PendingConflictStore } from './session-runtime/PendingConflictStore';
 
 type CanceledTurnRecord = {
     opId?: string;
@@ -608,18 +609,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private revertedSegment?: { conflicts: ConflictDetail[]; discarded?: boolean };
     private clientMessageIdMap = new Map<string, string>();
     private revertedSegmentHistory: Array<{ isActive: boolean; discarded: boolean; startMessageId?: string; startMessageIndex?: number; endMessageId?: string; endMessageIndex?: number; collapsed: boolean; messageIds?: string[] }> = [];
-    private pendingConflict?: {
-        kind: 'undo' | 'restore' | 'restoreSegment';
-        sessionId: string;
-        operationId: string;
-        conflictId: string;
-        startMessageId?: string;
-        endMessageId?: string;
-        visibleMessageIds?: string[];
-        forwardMessageIdsFromAnchor?: string[];
-        anchorIndex?: number;
-        noticeKey?: string;
-    };
+    private readonly pendingConflictStore = new PendingConflictStore();
     private uiDebugChannel!: vscode.OutputChannel;
     private undoSegmentsBySession: Map<string, Map<string, SegmentState>> = new Map();
     private readonly UNDO_SEGMENTS_KEY = 'opencode.undoSegmentsBySession.v1';
@@ -5388,7 +5378,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.clientMessageIdMap.clear();
         this.revertedSegment = undefined;
         this.revertedSegmentHistory = [];
-        this.pendingConflict = undefined;
+        this.pendingConflictStore.clear();
         this.pendingClientMessageId = undefined;
         this.lastDraft = undefined;
         this.draftByLocalKey.clear();

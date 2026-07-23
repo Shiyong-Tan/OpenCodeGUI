@@ -199,42 +199,73 @@ describe('SidebarProvider conflictDecision owner validation', () => {
     it('drops missing and mismatched decisions without clearing pending conflict', async () => {
         const provider = createProvider();
         const { receive } = attachWebview(provider);
-        provider.pendingConflict = {
+        provider.pendingConflictStore.set({
             kind: 'restore',
             sessionId: 'ses_A_payload',
             operationId: 'op_conflict',
             conflictId: 'conflict_1',
-        };
+        });
 
         await receive({ type: 'conflictDecision', decision: 'override', sessionId: 'ses_A_payload', operationId: 'op_conflict', kind: 'restore' });
-        expect(provider.pendingConflict).toEqual(expect.objectContaining({ conflictId: 'conflict_1' }));
+        expect(provider.pendingConflictStore.get('ses_A_payload')).toEqual(expect.objectContaining({ conflictId: 'conflict_1' }));
 
         await receive({ type: 'conflictDecision', decision: 'override', sessionId: 'ses_B_wrong', operationId: 'op_conflict', conflictId: 'conflict_1', kind: 'restore' });
-        expect(provider.pendingConflict).toEqual(expect.objectContaining({ conflictId: 'conflict_1' }));
+        expect(provider.pendingConflictStore.get('ses_A_payload')).toEqual(expect.objectContaining({ conflictId: 'conflict_1' }));
         expect(provider.client.restoreAll).not.toHaveBeenCalled();
         expect(provider.uiDebugChannel.appendLine).toHaveBeenCalledWith(expect.stringContaining('[EXT][CONFLICT_DROP] reason=missing-conflictId'));
-        expect(provider.uiDebugChannel.appendLine).toHaveBeenCalledWith(expect.stringContaining('[EXT][CONFLICT_DROP] reason=owner-mismatch'));
+        expect(provider.uiDebugChannel.appendLine).toHaveBeenCalledWith(expect.stringContaining('[EXT][CONFLICT_DROP] reason=no-pending'));
     });
 
     it('applies matching restore conflict decision to captured owner session', async () => {
         const provider = createProvider();
         const { postMessage, receive } = attachWebview(provider);
-        provider.pendingConflict = {
+        provider.pendingConflictStore.set({
             kind: 'restore',
             sessionId: 'ses_A_payload',
             operationId: 'op_conflict',
             conflictId: 'conflict_1',
-        };
+        });
 
         await receive({ type: 'conflictDecision', decision: 'override', sessionId: 'ses_A_payload', operationId: 'op_conflict', conflictId: 'conflict_1', kind: 'restore' });
 
-        expect(provider.pendingConflict).toBeUndefined();
+        expect(provider.pendingConflictStore.get('ses_A_payload')).toBeUndefined();
         expect(provider.client.restoreAll).toHaveBeenCalledWith(expect.objectContaining({ force: true, sessionId: 'ses_A_payload' }));
         expect(provider.clearPersistedSegment).toHaveBeenCalledWith('ses_A_payload');
         expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
             type: 'addResponse',
             sessionId: 'ses_A_payload',
             meta: expect.objectContaining({ operationId: 'op_conflict', sessionId: 'ses_A_payload' }),
+        }));
+    });
+
+    it('consumes one session decision without clearing another session conflict', async () => {
+        const provider = createProvider();
+        const { receive } = attachWebview(provider);
+        provider.pendingConflictStore.set({
+            kind: 'restore',
+            sessionId: 'ses_A_payload',
+            operationId: 'op_A',
+            conflictId: 'conflict_A',
+        });
+        provider.pendingConflictStore.set({
+            kind: 'restore',
+            sessionId: 'ses_B_payload',
+            operationId: 'op_B',
+            conflictId: 'conflict_B',
+        });
+
+        await receive({
+            type: 'conflictDecision',
+            decision: 'cancel',
+            sessionId: 'ses_A_payload',
+            operationId: 'op_A',
+            conflictId: 'conflict_A',
+            kind: 'restore',
+        });
+
+        expect(provider.pendingConflictStore.get('ses_A_payload')).toBeUndefined();
+        expect(provider.pendingConflictStore.get('ses_B_payload')).toEqual(expect.objectContaining({
+            conflictId: 'conflict_B',
         }));
     });
 });

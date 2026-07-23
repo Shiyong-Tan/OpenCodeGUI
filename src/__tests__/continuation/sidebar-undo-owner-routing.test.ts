@@ -266,14 +266,15 @@ describe('SidebarProvider undoToMessage owner routing', () => {
             anchorIndex: 1,
             forwardMessageIdsFromAnchor: ['msg_anchor', 'msg_ui_tail'],
         });
-        const pendingConflict = provider.pendingConflict;
+        const pendingConflict = provider.pendingConflictStore.get('ses_A_payload');
+        expect(pendingConflict).toBeDefined();
 
         await receive({
             type: 'conflictDecision',
             decision: 'override',
             sessionId: 'ses_A_payload',
             operationId: 'op_conflict_ui_range',
-            conflictId: pendingConflict.conflictId,
+            conflictId: pendingConflict!.conflictId,
             kind: 'undo',
         });
 
@@ -300,14 +301,15 @@ describe('SidebarProvider undoToMessage owner routing', () => {
             messageId: 'msg_anchor',
             operationId: 'op_conflict_missing_ui_range',
         });
-        const pendingConflict = provider.pendingConflict;
+        const pendingConflict = provider.pendingConflictStore.get('ses_A_payload');
+        expect(pendingConflict).toBeDefined();
 
         await receive({
             type: 'conflictDecision',
             decision: 'override',
             sessionId: 'ses_A_payload',
             operationId: 'op_conflict_missing_ui_range',
-            conflictId: pendingConflict.conflictId,
+            conflictId: pendingConflict!.conflictId,
             kind: 'undo',
         });
 
