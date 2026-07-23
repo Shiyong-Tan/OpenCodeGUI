@@ -36,8 +36,11 @@ describe('append followup same-turn handoff', () => {
         expect(assistantMetaBlock).toContain(
             'applyKeyedChatPresentationAliasMigration(',
         );
-        expect(assistantMetaBlock.indexOf('applyKeyedChatPresentationAliasMigration('))
-            .toBeLessThan(assistantMetaBlock.indexOf("renderIfActive(sessionId, 'append-followup-meta'"));
+        const migrationIndex = assistantMetaBlock.indexOf('applyKeyedChatPresentationAliasMigration(');
+        const synchronousReconcileIndex = assistantMetaBlock.indexOf('renderFromState();', migrationIndex);
+        const scheduledReconcileIndex = assistantMetaBlock.indexOf("renderIfActive(sessionId, 'append-followup-meta'");
+        expect(migrationIndex).toBeLessThan(synchronousReconcileIndex);
+        expect(synchronousReconcileIndex).toBeLessThan(scheduledReconcileIndex);
     });
 
     it('rotates the existing turn from canonical A to B only after A tool-calls completion', () => {

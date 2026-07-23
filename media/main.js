@@ -14680,6 +14680,13 @@ function appendMessageImages(parentEl, message) {
                             payload: ['[WV][APPEND_PRESENTATION_HANDOFF]', `sessionId=${sessionId}`,
                                 `from=${predecessorPresentationKey}`, `to=${followup.assistantMsgId}`, `migrated=${migrated}`]
                         });
+                        if (migrated && route.shouldRender) {
+                            // The key migration is synchronous. Reconcile the
+                            // successor content in the same event task so the
+                            // browser cannot paint the predecessor payload
+                            // under the newly migrated key for one frame.
+                            renderFromState();
+                        }
                     }
                     renderIfActive(sessionId, 'append-followup-meta', { scroll: true });
                     break;
