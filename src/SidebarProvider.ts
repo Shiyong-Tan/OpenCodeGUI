@@ -600,8 +600,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private selectedVariant?: string;
     private selectedMode?: string;
     private availableModes: string[] = ['plan', 'build'];
-    private pendingClientMessageId?: string;
-    private lastDraft?: { text: string; attachments: string[]; model?: string; variant?: string; mode?: string };
     private draftByLocalKey = new Map<string, { text: string; attachments: string[]; model?: string; variant?: string; mode?: string }>();
     private currentDiffFilePath: string | null = null;
     private diffHashes = new Map<string, { before: string; after: string }>();
@@ -5305,7 +5303,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private rememberDraft(localKey: string | undefined, draft: { text: string; attachments: string[]; model?: string; variant?: string; mode?: string }): void {
-        this.lastDraft = { ...draft };
         if (localKey) {
             this.draftByLocalKey.set(localKey, { ...draft });
         }
@@ -5380,8 +5377,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.clientMessageIdMap.clear();
         this.revertedSegmentHistoryStore.clear();
         this.pendingConflictStore.clear();
-        this.pendingClientMessageId = undefined;
-        this.lastDraft = undefined;
         this.draftByLocalKey.clear();
         this.appendSubmitInFlightBySession.clear();
         this.pendingBaselineTurnKey = undefined;

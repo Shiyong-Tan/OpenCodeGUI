@@ -613,10 +613,9 @@ export async function handleSidebarChatEvent(
             host.emitTurnFinalizePhase(liveWebview, sessionId, 'commit_done');
             host.emitTurnFinalizePhase(liveWebview, sessionId, 'upgrade_done');
             const pendingLocalKey = sessionId ? host.pendingLocalKeyBySession.get(sessionId) : undefined;
-            if (sessionId && sessionId === host.currentSessionId && pendingLocalKey && host.pendingClientMessageId === pendingLocalKey) {
-                host.clearDraft(host.pendingClientMessageId);
-                await host.handleAbortedMessage(host.pendingClientMessageId, liveWebview);
-                host.pendingClientMessageId = undefined;
+            if (sessionId && pendingLocalKey) {
+                host.clearDraft(pendingLocalKey);
+                await host.handleAbortedMessage(pendingLocalKey, liveWebview);
             }
             if (sessionId) {
                 if (pendingLocalKey) {
@@ -673,8 +672,8 @@ export async function handleSidebarChatEvent(
                     host.rawUserTextByMsgId.set(event.text, rawUserText);
                     host.rawUserTextByLocalKey.delete(localKey);
                 }
-                if (host.pendingClientMessageId === localKey) {
-                    host.pendingClientMessageId = undefined;
+                if (host.pendingLocalKeyBySession.get(sessionId) === localKey) {
+                    host.pendingLocalKeyBySession.delete(sessionId);
                 }
                 host.uiDebugChannel.appendLine(`EXT: user.ack.bind | sessionId=${sessionId} | localKey=${localKey} | msgId=${event.text}`);
                 const liveWebview = host._view?.webview || webview;

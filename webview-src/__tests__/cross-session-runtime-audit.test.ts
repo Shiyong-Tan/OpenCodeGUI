@@ -205,4 +205,11 @@ describe('cross-session runtime repository audit', () => {
     expect(webviewController).not.toMatch(/client\.getRevertedSegment\(\)/);
     expect(webviewController).not.toMatch(/client\.discardRevertedSegment\(\)/);
   });
+
+  test('optimistic user identity has no cross-session singleton fallback', () => {
+    expect(provider).not.toContain('pendingClientMessageId');
+    expect(handler).not.toContain('pendingClientMessageId');
+    expect(read('src', 'webview', 'SidebarWebviewController.ts')).not.toContain('pendingClientMessageId');
+    expect(provider).toContain('private pendingLocalKeyBySession = new Map<string, string>();');
+  });
 });

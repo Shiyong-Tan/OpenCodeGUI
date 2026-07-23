@@ -268,7 +268,6 @@ export function resolveSidebarWebviewView(
                         turnClientMessageId = clientMessageId;
                         turnTmpAssistantKey = tmpAssistantKey;
                         host.uiDebugChannel.appendLine(`[EXT][TURN_BIND] phase=capture reqId=${reqId} payloadSessionId=${payloadSessionId || 'none'} currentSessionId=${currentSessionIdAtSend || 'none'} targetSessionId=${targetSessionId} routeSource=${routeSource} clientMessageId=${clientMessageId} tmpAssistantKey=${tmpAssistantKey || 'none'}`);
-                        host.pendingClientMessageId = clientMessageId;
                         host.rememberDraft(clientMessageId, initialDraft);
                         host.rawUserTextByLocalKey.set(clientMessageId, userText);
                         const opId = typeof data.opId === 'string' ? data.opId : undefined;
@@ -429,10 +428,10 @@ ${attachmentLines.join('\n')}`
                         host.uiDebugChannel.appendLine(`[EXT][TURN_BIND] phase=finalize_done reqId=${reqId} payloadSessionId=${payloadSessionId || 'none'} currentSessionId=${currentSessionIdAtSend || 'none'} targetSessionId=${targetSessionId} routeSource=${routeSource} clientMessageId=${clientMessageId} assistantMsgId=${doneAssistantMsgId || 'none'} tmpAssistantKey=${tmpAssistantKey || 'none'}`);
                         host.emitTurnFinalizePhase(liveWebview, targetSessionId, 'finalize_done');
                         await host.postModelQuota(liveWebview, 'chat-done');
-                        if (host.pendingClientMessageId === clientMessageId) {
+                        if (host.pendingLocalKeyBySession.get(targetSessionId) === clientMessageId) {
                             host.clearDraft(clientMessageId);
                             await host.handleAbortedMessage(clientMessageId, liveWebview);
-                            host.pendingClientMessageId = undefined;
+                            host.pendingLocalKeyBySession.delete(targetSessionId);
                         }
                         if (targetMode === 'build') {
                             const segment = host.client.getRevertedSegment(targetSessionId);
@@ -472,10 +471,10 @@ ${attachmentLines.join('\n')}`
                         await host.resolvePendingUserUpgrade(sessionId, activeWebview);
                         host.emitTurnFinalizePhase(activeWebview, sessionId, 'upgrade_done');
                         const pendingLocalKey = sessionId ? host.pendingLocalKeyBySession.get(sessionId) : undefined;
-                        if (sessionId && pendingLocalKey && host.pendingClientMessageId === pendingLocalKey) {
+                        if (sessionId && pendingLocalKey) {
                             host.clearDraft(pendingLocalKey);
                             await host.handleAbortedMessage(pendingLocalKey, activeWebview);
-                            host.pendingClientMessageId = undefined;
+                            host.pendingLocalKeyBySession.delete(sessionId);
                         }
                         if (sessionId) {
                             if (pendingLocalKey) {
@@ -1656,9 +1655,6 @@ ${attachmentLines.join('\n')}`
                         const mappedUser = host.clientMessageIdMap.get(pendingLocalKey);
                         if (mappedUser && mappedUser !== pendingLocalKey) {
                             await host.handleAbortedMessage(mappedUser, activeWebview);
-                        }
-                        if (host.pendingClientMessageId === pendingLocalKey) {
-                            host.pendingClientMessageId = undefined;
                         }
                     }
                     if (cancelSessionId) {

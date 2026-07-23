@@ -154,7 +154,6 @@ describe('SidebarChatEventHandler', () => {
       currentSessionId: 'session-B',
       _view: { webview },
       activeSubagentSessionIds: new Set(),
-      pendingClientMessageId: 'local-B',
       pendingLocalKeyBySession: new Map([
         ['session-A', 'local-A'],
         ['session-B', 'local-B'],
@@ -185,7 +184,8 @@ describe('SidebarChatEventHandler', () => {
       localKey: 'local-A',
       msgId: 'msg_user_A',
     });
-    expect(host.pendingClientMessageId).toBe('local-B');
+    expect(host.pendingLocalKeyBySession.get('session-A')).toBeUndefined();
+    expect(host.pendingLocalKeyBySession.get('session-B')).toBe('local-B');
     expect(host.rawUserTextByMsgId.get('msg_user_A')).toBe('prompt A');
     expect(host.client.aliasMessageId).not.toHaveBeenCalledWith('local-B', 'msg_user_A');
   });
