@@ -189,4 +189,32 @@ describe('SidebarChatEventHandler', () => {
     expect(host.rawUserTextByMsgId.get('msg_user_A')).toBe('prompt A');
     expect(host.client.aliasMessageId).not.toHaveBeenCalledWith('local-B', 'msg_user_A');
   });
+
+  test('does not treat a background transport session event as user selection', async () => {
+    const webview = { postMessage: jest.fn() };
+    const host = {
+      smartSearchSessions: { owns: () => false },
+      currentSessionId: 'session-B',
+      _view: { webview },
+      isUserOwnedSession: (sessionId: string) => sessionId === 'session-A' || sessionId === 'session-B',
+      activeSubagentSessionIds: new Set(),
+      pendingBaselineTurnKey: undefined,
+      uiDebugChannel: { appendLine: jest.fn() },
+      client: { setSessionId: jest.fn() },
+    };
+
+    await handleSidebarChatEvent(host as any, {
+      type: 'session',
+      sessionId: 'session-A',
+    } as any, webview as any);
+
+    expect(host.currentSessionId).toBe('session-B');
+    expect(host.client.setSessionId).not.toHaveBeenCalled();
+    expect(webview.postMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'sessionId' }),
+    );
+    expect(host.uiDebugChannel.appendLine).toHaveBeenCalledWith(
+      expect.stringContaining('selectionMutation=false'),
+    );
+  });
 });

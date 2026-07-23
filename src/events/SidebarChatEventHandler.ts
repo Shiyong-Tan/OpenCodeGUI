@@ -195,19 +195,10 @@ export async function handleSidebarChatEvent(
                 return;
             }
 
-            const prevSessionId = host.currentSessionId;
-            const nextSessionId = event.sessionId;
-            host.currentSessionId = nextSessionId;
-            host.client.setSessionId(host.currentSessionId);
-            const liveWebview = host._view?.webview || webview;
-            if (prevSessionId && prevSessionId !== event.sessionId) {
-                liveWebview.postMessage({ type: 'questionOverlayClose', reason: 'session-switch', sessionId: event.sessionId });
-                liveWebview.postMessage({ type: 'permissionOverlayClose', reason: 'session-switch', sessionId: event.sessionId });
-            }
-            liveWebview.postMessage({ type: 'sessionId', value: event.sessionId, sessionId: event.sessionId });
-            if (host.pendingBaselineTurnKey) {
+            if (event.sessionId === host.currentSessionId && host.pendingBaselineTurnKey) {
                 const turnKey = host.pendingBaselineTurnKey;
                 host.pendingBaselineTurnKey = undefined;
+                const liveWebview = host._view?.webview || webview;
                 if (host.pendingBaselineFailed) {
                     host.pendingBaselineFailed = false;
                     host.baselineReady = false;
@@ -226,6 +217,10 @@ export async function handleSidebarChatEvent(
                     });
                 }
             }
+            host.uiDebugChannel.appendLine(
+                `[EXT][SESSION_ROUTE] event=session ownerSessionId=${event.sessionId} ` +
+                `visibleSessionId=${host.currentSessionId || 'none'} selectionMutation=false`,
+            );
             return;
         }
 
