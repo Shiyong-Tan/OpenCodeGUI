@@ -3175,147 +3175,16 @@ function upsertUndoNotice(session, operationId, startServerId, text, anchorKey, 
     return k;
 }
 
-function replaceKeyEverywhere(oldId, newId, sessionId = activeSessionId) {
+function replaceKeyEverywhere(oldId, newId, sessionId) {
     const session = getSessionState(sessionId);
     if (!session) return;
-
-    const preReplaceCurrentTurnAssistantKey = session.currentTurnAssistantKey;
-    const preReplaceThinkingId = session.thinkingId;
-    const preReplaceCurrentTurnAssistantMsgId = session.currentTurnAssistantMsgId;
-
-    if (typeof oldId === 'string' && typeof newId === 'string' && oldId.startsWith('local-') && newId === session.currentTurnAssistantMsgId) {
+    const result = messageRekeyController.rekey(session, oldId, newId, sessionId);
+    if (!result.accepted) {
         vscode.postMessage({
             type: 'ui-debug',
-            payload: ['reject.user->assistant-id', 'oldKey', oldId, 'newKey', newId, 'sessionId', sessionId]
+            payload: ['reject.message-rekey', 'oldKey', oldId, 'newKey', newId, 'sessionId', sessionId, 'reason', result.reason]
         });
         return;
-    }
-
-    const message = session.messagesById.get(oldId) || null;
-    const existing = session.messagesById.get(newId) || null;
-
-    let timelineIndex = -1;
-    let timelineReplaced = false;
-    let deduped = false;
-
-    const pickCompleteMessage = (primary, secondary) => {
-        if (!primary) return secondary || null;
-        if (!secondary) return primary || null;
-        const primaryText = typeof primary.text === 'string' ? primary.text : '';
-        const secondaryText = typeof secondary.text === 'string' ? secondary.text : '';
-        if (primaryText.length !== secondaryText.length) {
-            return primaryText.length > secondaryText.length ? primary : secondary;
-        }
-        const primarySegments = Array.isArray(primary.meta?.textSegments) ? primary.meta.textSegments.length : 0;
-        const secondarySegments = Array.isArray(secondary.meta?.textSegments) ? secondary.meta.textSegments.length : 0;
-        if (primarySegments !== secondarySegments) {
-            return primarySegments > secondarySegments ? primary : secondary;
-        }
-        const primaryThinking = primary.meta?.isThinking === true;
-        const secondaryThinking = secondary.meta?.isThinking === true;
-        if (primaryThinking !== secondaryThinking) {
-            return primaryThinking ? secondary : primary;
-        }
-        const primaryOrder = typeof primary.order === 'number' ? primary.order : -1;
-        const secondaryOrder = typeof secondary.order === 'number' ? secondary.order : -1;
-        return primaryOrder >= secondaryOrder ? primary : secondary;
-    };
-
-    if (message) {
-        session.messagesById.delete(oldId);
-        if (!existing) {
-            if (typeof newId === 'string' && newId.startsWith('msg_')) {
-                messageIdentityStore.bindCanonical(message, newId);
-            }
-            message.id = newId;
-            session.messagesById.set(newId, message);
-        } else {
-            const selected = pickCompleteMessage(message, existing);
-            if (selected) {
-                if (typeof newId === 'string' && newId.startsWith('msg_')) {
-                    messageIdentityStore.bindCanonical(selected, newId);
-                }
-                selected.id = newId;
-                session.messagesById.set(newId, selected);
-            }
-        }
-    }
-
-    session.timeline = session.timeline.map((id, idx) => {
-        if (id === oldId) {
-            if (timelineIndex === -1) timelineIndex = idx;
-            timelineReplaced = true;
-            return newId;
-        }
-        return id;
-    });
-
-    const seen = new Set();
-    session.timeline = session.timeline.filter(id => {
-        if (seen.has(id)) {
-            deduped = true;
-            return false;
-        }
-        seen.add(id);
-        return true;
-    });
-
-    // Update segments to use new message ID
-    for (const segment of session.segmentsByNoticeKey.values()) {
-        if (segment.memberMsgIds.includes(oldId)) {
-            segment.memberMsgIds = segment.memberMsgIds.map(id => id === oldId ? newId : id);
-        }
-        if (segment.anchorMsgId === oldId) {
-            segment.anchorMsgId = newId;
-        }
-        if (segment.endMsgId === oldId) {
-            segment.endMsgId = newId;
-        }
-    }
-
-    if (session.thinkingId === oldId) {
-        session.thinkingId = newId;
-    }
-
-    if (session.lastTurnUserId === oldId) {
-        session.lastTurnUserId = newId;
-    }
-    if (session.lastTurnAssistantId === oldId) {
-        session.lastTurnAssistantId = newId;
-    }
-    if (session.currentTurnAssistantMsgId === oldId) {
-        session.currentTurnAssistantMsgId = newId;
-    }
-    if (session.finalAssistantLock?.assistantMsgId === oldId) {
-        session.finalAssistantLock.assistantMsgId = newId;
-    }
-    if (session.pendingUndo?.anchorKey === oldId) {
-        session.pendingUndo.anchorKey = newId;
-    }
-    if (session.appendRootUserKey === oldId) {
-        session.appendRootUserKey = newId;
-    }
-    if (session.appendComposerFor === oldId) {
-        session.appendComposerFor = newId;
-    }
-    if (session.appendComposerDrafts?.has?.(oldId)) {
-        const draft = session.appendComposerDrafts.get(oldId);
-        session.appendComposerDrafts.delete(oldId);
-        session.appendComposerDrafts.set(newId, draft);
-    }
-
-    if (session.currentTurnAssistantKey === oldId) {
-        session.currentTurnAssistantKey = newId;
-    }
-    if (typeof newId === 'string' && newId.startsWith('msg_')) {
-        session.currentTurnAssistantMsgId = newId;
-    }
-
-    if (session.clientKeyToServerId?.get(oldId) === newId) {
-        session.clientKeyToServerId.delete(oldId);
-    }
-    if (session.serverIdToClientKey?.get(newId) === oldId) {
-        session.serverIdToClientKey.set(newId, newId);
     }
     if (typeof sessionSearch !== 'undefined') sessionSearch.rekey(oldId, newId);
     if (typeof subagentTextExpandedByKey !== 'undefined' && subagentTextExpandedByKey instanceof Map) {
@@ -3327,42 +3196,16 @@ function replaceKeyEverywhere(oldId, newId, sessionId = activeSessionId) {
         }
     }
 
-    const replacedTmpLocalAssistant = typeof oldId === 'string'
-        && typeof newId === 'string'
-        && (oldId.startsWith('tmp:') || oldId.startsWith('local-'))
-        && newId.startsWith('msg_')
-        && (
-            message?.role === 'assistant'
-            || existing?.role === 'assistant'
-            || preReplaceCurrentTurnAssistantKey === oldId
-            || preReplaceThinkingId === oldId
-        );
-    if (replacedTmpLocalAssistant) {
-        const recentAliases = Array.isArray(session.recentAssistantDomTargetAliases)
-            ? session.recentAssistantDomTargetAliases
-            : [];
-        recentAliases.push({
-            oldKey: oldId,
-            newKey: newId,
-            sessionId,
-            source: 'replaceKeyEverywhere',
-            ts: Date.now(),
-            turnAnchor: preReplaceCurrentTurnAssistantKey || preReplaceThinkingId || oldId,
-            assistantMsgId: preReplaceCurrentTurnAssistantMsgId || newId
-        });
-        session.recentAssistantDomTargetAliases = recentAliases.slice(-6);
-    }
-
     const timelineSample = session.timeline.slice(0, 5);
     vscode.postMessage({
         type: 'ui-debug',
         payload: ['replaceKeyEverywhere', 'oldKey', oldId, 'newKey', newId,
-            'timelineIndex', timelineIndex,
-            'timelineReplaced', timelineReplaced,
-            'deduped', deduped,
+            'timelineIndex', result.timelineIndex,
+            'timelineReplaced', result.timelineReplaced,
+            'deduped', result.deduped,
             'sessionId', sessionId,
-            'hadOldMsg', Boolean(message),
-            'hadNewMsg', Boolean(existing),
+            'hadOldMsg', result.hadOldMessage,
+            'hadNewMsg', result.hadNewMessage,
             'timelineSample', timelineSample]
     });
     if (typeof rekeyKeyedChatPresentation === 'function' && !rekeyKeyedChatPresentation(oldId, newId, sessionId)) {
@@ -3698,6 +3541,13 @@ if (!turnLifecycleController) {
 const messageIdentityStore = window.__ocContinuation?.createMessageIdentityStore?.();
 if (!messageIdentityStore) {
     throw new Error('Message identity store is unavailable');
+}
+const messageRekeyController = window.__ocContinuation?.createMessageRekeyController?.({
+    bindCanonical: (message, canonicalId) => messageIdentityStore.bindCanonical(message, canonicalId),
+    rebindTurnCanonical: (session, oldId, newId) => turnLifecycleController.rebindCanonical(session, oldId, newId)
+});
+if (!messageRekeyController) {
+    throw new Error('Message rekey controller is unavailable');
 }
 
 function attemptAssistantUpgrade(sessionId, payload, source) {

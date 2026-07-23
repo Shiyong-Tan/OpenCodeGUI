@@ -39,6 +39,7 @@ import { OpenCodeClient } from '../../OpenCodeClient';
 import { SidebarProvider } from '../../SidebarProvider';
 import { OpenCodeDiffProvider } from '../../OpenCodeDiffProvider';
 const createAppendSnapshotController = require('../../../webview-src/continuation/append-snapshot-controller').createAppendSnapshotController;
+const createMessageRekeyController = require('../../../webview-src/session-runtime/message-rekey-controller').createMessageRekeyController;
 
 const createdClients: OpenCodeClient[] = [];
 const createdProviders: Array<{ dispose: () => Promise<void> }> = [];
@@ -197,6 +198,9 @@ function loadUserAckBindHarness() {
         logTimelineSnapshot: jest.fn(),
         syncAppendSnapshotMetadata: jest.fn(),
     };
+    context.messageRekeyController = createMessageRekeyController({
+        bindCanonical: context.messageIdentityStore.bindCanonical,
+    });
     vm.createContext(context);
     vm.runInContext(`${source.slice(mappingStart, mappingEnd)}\n${source.slice(replaceStart, replaceEnd)}\nthis.handleUserAckBindMessage = handleUserAckBindMessage;`, context);
     return { context, posts, sessions };

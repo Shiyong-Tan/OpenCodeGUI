@@ -11,15 +11,18 @@ describe('stable message identity production integration', () => {
     expect(source.match(/messageIdentityStore\.ensure\(/g)).toHaveLength(2);
   });
 
-  test('binds canonical identity before the compatibility storage rekey', () => {
+  test('delegates compatibility storage rekey to the session-owned controller', () => {
     const replacement = source.slice(
       source.indexOf('function replaceKeyEverywhere('),
       source.indexOf('// Removed obsolete freezeSegments function'),
     );
-    expect(replacement.match(/messageIdentityStore\.bindCanonical\(/g)).toHaveLength(2);
-    expect(replacement.indexOf('messageIdentityStore.bindCanonical(message, newId);'))
-      .toBeLessThan(replacement.indexOf('message.id = newId;'));
-    expect(replacement.indexOf('messageIdentityStore.bindCanonical(selected, newId);'))
-      .toBeLessThan(replacement.indexOf('selected.id = newId;'));
+    expect(source).toContain(
+      'const messageRekeyController = window.__ocContinuation?.createMessageRekeyController?.({',
+    );
+    expect(replacement).toContain(
+      'const result = messageRekeyController.rekey(session, oldId, newId, sessionId);',
+    );
+    expect(replacement).not.toContain('session.messagesById.delete');
+    expect(replacement).not.toContain('session.timeline = session.timeline.map');
   });
 });

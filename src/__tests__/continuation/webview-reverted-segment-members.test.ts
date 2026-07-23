@@ -168,6 +168,9 @@ function loadUndoSenderHarness() {
                         return message.meta.identity;
                     },
                 }),
+                createMessageRekeyController: () => ({
+                    rekey: jest.fn(),
+                }),
             },
         },
     };
