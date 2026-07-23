@@ -586,7 +586,11 @@ export async function handleSidebarChatEvent(
 
         if (event.type === 'error' && event.text) {
             const liveWebview = host._view?.webview || webview;
-            const sessionId = event.sessionId || host.currentSessionId;
+            const sessionId = event.sessionId;
+            if (!sessionId) {
+                host.uiDebugChannel.appendLine('[EXT][SESSION_ROUTE_DROP] event=error reason=missing-event-session');
+                return;
+            }
             liveWebview.postMessage({ type: 'addResponse', value: `Error: ${event.text}`, sessionId, skipSnapshot: true });
             // Cleanup before chatDone
             if (sessionId) {
@@ -649,7 +653,11 @@ export async function handleSidebarChatEvent(
         }
 
         if (event.type === 'message' && event.text) {
-            const sessionId = event.sessionId || host.currentSessionId;
+            const sessionId = event.sessionId;
+            if (!sessionId) {
+                host.uiDebugChannel.appendLine('[EXT][SESSION_ROUTE_DROP] event=userAckBind reason=missing-event-session');
+                return;
+            }
             const localKey = host.pendingClientMessageId
                 || (sessionId ? host.pendingLocalKeyBySession.get(sessionId) : undefined)
                 || null;
@@ -699,17 +707,21 @@ export async function handleSidebarChatEvent(
         }
 
         if (event.type === 'files' && event.files && event.files.length) {
+            const sessionId = event.sessionId;
+            if (!sessionId) {
+                host.uiDebugChannel.appendLine('[EXT][SESSION_ROUTE_DROP] event=files reason=missing-event-session');
+                return;
+            }
             const picked = host.pickActiveFile(event.files);
             if (!picked) return;
             const { file: active, index } = picked;
             const liveWebview = host._view?.webview || webview;
             liveWebview.postMessage({
                 type: 'segmentRestoreLock',
-                sessionId: event.sessionId || host.currentSessionId,
+                sessionId,
                 reason: 'file-change-detected'
             });
-            host.tryOpenDiffForEventFile(active, liveWebview, index, event.sessionId || host.currentSessionId || '', 'main');
-            const sessionId = event.sessionId || host.currentSessionId;
+            host.tryOpenDiffForEventFile(active, liveWebview, index, sessionId, 'main');
             const inGrace = Boolean(sessionId && host.client.isInLateDiffGrace(sessionId));
             const inRecentFinishWindow = Boolean(sessionId && host.client.wasTurnFinishedRecently(sessionId, 5000));
             if (sessionId && (inGrace || inRecentFinishWindow)) {

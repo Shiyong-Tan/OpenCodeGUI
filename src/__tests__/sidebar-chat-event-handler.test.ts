@@ -94,4 +94,23 @@ describe('SidebarChatEventHandler', () => {
       expect.stringContaining('reason=missing-event-session'),
     );
   });
+
+  test.each([
+    { type: 'error', text: 'failed' },
+    { type: 'message', text: 'msg_user' },
+    { type: 'files', files: [{ path: 'a.ts' }] },
+  ])('drops ownerless $type events before any state mutation', async (event) => {
+    const webview = { postMessage: jest.fn() };
+    const host = {
+      smartSearchSessions: { owns: () => false },
+      currentSessionId: 'visible-session',
+      _view: { webview },
+      uiDebugChannel: { appendLine: jest.fn() },
+    };
+    await handleSidebarChatEvent(host as any, event as any, webview as any);
+    expect(webview.postMessage).not.toHaveBeenCalled();
+    expect(host.uiDebugChannel.appendLine).toHaveBeenCalledWith(
+      expect.stringContaining('reason=missing-event-session'),
+    );
+  });
 });
