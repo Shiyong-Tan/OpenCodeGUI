@@ -92,4 +92,21 @@ describe('cross-session runtime repository audit', () => {
     expect(main).not.toContain("Undo unavailable: ${isBusy ? 'busy'");
     expect(main).not.toContain("segment.state === 'restorable' && !isBusy");
   });
+
+  test('question and permission interactions remain owned by their background session', () => {
+    const showQuestion = extractFunction(main, 'function showQuestionOverlay(');
+    const showPermission = extractFunction(main, 'function showPermissionOverlay(');
+    const activateOverlays = extractFunction(main, 'function activateSessionOverlays(');
+    const sessionIdHandler = extractFunction(main, 'function handleSessionIdMessage(');
+
+    expect(showQuestion).toContain('sessionOverlayStore.enqueueQuestion(sessionId, state)');
+    expect(showQuestion).not.toContain('reason=session-mismatch');
+    expect(showPermission).toContain('sessionOverlayStore.setPermission(sessionId, {');
+    expect(showPermission).not.toContain('payload.sessionId !== activeSessionId');
+    expect(activateOverlays).toContain('renderQuestionOverlayModal();');
+    expect(activateOverlays).toContain('renderPermissionOverlayModal();');
+    expect(sessionIdHandler).toContain('activateSessionOverlays(sessionId);');
+    expect(sessionIdHandler).not.toContain("clearQuestionOverlay('session-change')");
+    expect(sessionIdHandler).not.toContain("clearPermissionOverlay('session-change')");
+  });
 });

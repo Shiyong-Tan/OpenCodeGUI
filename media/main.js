@@ -205,7 +205,6 @@ let stallCardEl = null;
 let lastConflictPayload = null;
 let questionOverlayEl = null;
 let questionOverlayTimer = null;
-let questionOverlayState = null;
 let quoteSelectionButton = null;
 let quoteSelectionText = '';
 const createSessionSearchState = window.__ocFeatures?.createSessionSearchState;
@@ -289,9 +288,7 @@ const segmentTopology = createSegmentTopology({
 });
 const shownQuestionCallIds = new Set();
 const sentQuestionCallIds = new Set();
-const questionOverlayQueue = [];
 let permissionOverlayEl = null;
-let permissionOverlayState = null;
 let isSwitchingSession = false;
 let pendingExplicitSessionSelectionId = '';
 let pendingRefreshRequestId = null;
@@ -302,6 +299,14 @@ let armedDeleteSessionId = '';
 let shouldEmitSnapshotOnNextRender = false;
 
 const sessionStore = window.__ocContinuation.createSessionStore();
+const createSessionOverlayStore = window.__ocContinuation?.createSessionOverlayStore;
+if (typeof createSessionOverlayStore !== 'function') {
+    throw new Error('Session overlay store is unavailable');
+}
+const sessionOverlayStore = createSessionOverlayStore({
+    questionIdentity: (question) => question?.callId || '',
+    permissionIdentity: (permission) => permission?.permissionId || permission?.requestId || ''
+});
 let gitUndoEnabled = false;
 let gitUndoReason = null;
 let baselineReady = true;
@@ -11949,8 +11954,7 @@ function shouldHideDcpUiMessage(message) {
                 transitionActiveSessionPresentationOwner(previousSessionId, item.id);
                 activeSessionId = item.id;
                 clearAppendInputForSessionChange(item.id);
-                clearQuestionOverlay('session-change');
-                clearPermissionOverlay('session-change');
+                activateSessionOverlays(item.id);
                 closeStallCard();
                 setSystemNotice('');
                 closeSessionPanel();
@@ -13362,10 +13366,11 @@ function appendMessageImages(parentEl, message) {
         clearAppendInputForSessionChange(sessionId);
         renderHeaderUsage();
         if (prevSessionId && prevSessionId !== sessionId) {
-            clearQuestionOverlay('session-change');
-            clearPermissionOverlay('session-change');
+            activateSessionOverlays(sessionId);
             closeStallCard();
             setSystemNotice('');
+        } else {
+            activateSessionOverlays(sessionId);
         }
         if (isSwitchingSession) {
             isSwitchingSession = false;
@@ -13716,6 +13721,7 @@ function appendMessageImages(parentEl, message) {
                 if (armedDeleteSessionId === sessionId) {
                     armedDeleteSessionId = '';
                 }
+                sessionOverlayStore.deleteSession(sessionId);
                 sessions = sessions.filter((item) => item?.id !== sessionId);
                 renderSessionList();
                 break;
@@ -15927,7 +15933,7 @@ function appendMessageImages(parentEl, message) {
                 break;
             }
             case 'questionOverlayClose': {
-                clearQuestionOverlay('external-close');
+                clearQuestionOverlay('external-close', false, message.sessionId || activeSessionId);
                 scheduleRenderFromState('question-overlay-close');
                 break;
             }
@@ -15936,17 +15942,21 @@ function appendMessageImages(parentEl, message) {
                 break;
             }
             case 'permissionOverlayClose': {
-                clearPermissionOverlay('external-close');
+                clearPermissionOverlay('external-close', message.sessionId || activeSessionId);
                 break;
             }
             case 'permissionResultAck': {
-                clearPermissionOverlay('result-ack');
+                clearPermissionOverlay('result-ack', message.sessionId || activeSessionId);
                 break;
             }
             case 'permissionResultFailed': {
-                if (permissionOverlayState) {
-                    permissionOverlayState.pending = false;
-                    permissionOverlayState.error = typeof message.reason === 'string' ? message.reason : 'Permission response failed.';
+                const sessionId = message.sessionId || activeSessionId;
+                const permissionOverlayState = sessionOverlayStore.updatePermission(sessionId, (state) => ({
+                    ...state,
+                    pending: false,
+                    error: typeof message.reason === 'string' ? message.reason : 'Permission response failed.'
+                }));
+                if (permissionOverlayState && sessionId === activeSessionId) {
                     renderPermissionOverlayModal();
                 }
                 break;
@@ -15964,8 +15974,7 @@ function appendMessageImages(parentEl, message) {
                 activeSessionId = nextSessionId;
                 pendingExplicitSessionSelectionId = '';
                 clearAppendInputForSessionChange(activeSessionId);
-                clearQuestionOverlay('new-session');
-                clearPermissionOverlay('new-session');
+                activateSessionOverlays(activeSessionId);
                 getHeaderStateController().setBaseTitle('OpenCode: Chat');
                 renderHeaderTitle();
                 renderHeaderUsage();
@@ -16483,23 +16492,28 @@ function renderConflictCard(payload, options = {}) {
 }
 
 function commitCurrentQuestionAnswers(answersForCurrent) {
+    const questionOverlayState = sessionOverlayStore.getQuestion(activeSessionId);
     if (!questionOverlayState) return;
     const stepIndex = questionOverlayState.stepIndex || 0;
     const questions = Array.isArray(questionOverlayState.questions) ? questionOverlayState.questions : [];
     const nextAnswers = Array.isArray(questionOverlayState.answers) ? questionOverlayState.answers.slice() : [];
     nextAnswers[stepIndex] = Array.isArray(answersForCurrent) ? answersForCurrent.slice() : [];
     if (stepIndex + 1 < questions.length) {
-        questionOverlayState.stepIndex = stepIndex + 1;
-        questionOverlayState.answers = nextAnswers;
-        questionOverlayState.selected = [];
+        sessionOverlayStore.updateQuestion(questionOverlayState.sessionId, (state) => ({
+            ...state,
+            stepIndex: stepIndex + 1,
+            answers: nextAnswers,
+            selected: []
+        }));
         renderQuestionOverlayModal();
         return;
     }
     const callId = questionOverlayState.callId;
     const requestId = questionOverlayState.requestId;
     const sessionId = questionOverlayState.sessionId;
-    if (!callId || sentQuestionCallIds.has(callId)) return;
-    sentQuestionCallIds.add(callId);
+    const sentKey = `${sessionId}|${callId}`;
+    if (!callId || sentQuestionCallIds.has(sentKey)) return;
+    sentQuestionCallIds.add(sentKey);
     const allAnswers = nextAnswers.map((entry) => Array.isArray(entry) ? entry : []);
     const result = {
         selectedId: allAnswers[0]?.[0] || undefined,
@@ -16523,7 +16537,7 @@ function commitCurrentQuestionAnswers(answersForCurrent) {
             result
         });
     }
-    clearQuestionOverlay('selected', true);
+    clearQuestionOverlay('selected', true, sessionId);
 }
 
 function renderQuestionCardInTimeline() {
@@ -16604,6 +16618,7 @@ function applyQuestionOptionWidth(actionsEl, options) {
 }
 
 function renderQuestionOverlayModal() {
+    const questionOverlayState = sessionOverlayStore.getQuestion(activeSessionId);
     if (!questionOverlayState) return;
     const state = questionOverlayState;
     if (state.sessionId && activeSessionId && state.sessionId !== activeSessionId) return;
@@ -16657,15 +16672,17 @@ function renderQuestionOverlayModal() {
         button.textContent = optionLabel;
         button.addEventListener('click', () => {
             if (current.multiple) {
-                const currentSelected = new Set(Array.isArray(questionOverlayState?.selected) ? questionOverlayState.selected : []);
+                const latestState = sessionOverlayStore.getQuestion(state.sessionId);
+                const currentSelected = new Set(Array.isArray(latestState?.selected) ? latestState.selected : []);
                 if (currentSelected.has(optionLabel)) {
                     currentSelected.delete(optionLabel);
                 } else {
                     currentSelected.add(optionLabel);
                 }
-                if (questionOverlayState) {
-                    questionOverlayState.selected = Array.from(currentSelected);
-                }
+                sessionOverlayStore.updateQuestion(state.sessionId, (currentState) => ({
+                    ...currentState,
+                    selected: Array.from(currentSelected)
+                }));
                 renderQuestionOverlayModal();
                 return;
             }
@@ -16685,7 +16702,8 @@ function renderQuestionOverlayModal() {
             submit.disabled = true;
         }
         submit.addEventListener('click', () => {
-            const currentSelected = Array.isArray(questionOverlayState?.selected) ? questionOverlayState.selected : [];
+            const latestState = sessionOverlayStore.getQuestion(state.sessionId);
+            const currentSelected = Array.isArray(latestState?.selected) ? latestState.selected : [];
             if (!currentSelected.length) return;
             const buttons = card.querySelectorAll('button.question-card-btn,button.question-card-submit');
             for (const btn of buttons) btn.disabled = true;
@@ -16739,6 +16757,7 @@ function renderQuestionOverlayModal() {
 }
 
 function renderPermissionOverlayModal() {
+    const permissionOverlayState = sessionOverlayStore.getPermission(activeSessionId);
     if (!permissionOverlayState) return;
     const state = permissionOverlayState;
     if (state.sessionId && activeSessionId && state.sessionId !== activeSessionId) return;
@@ -16803,9 +16822,13 @@ function renderPermissionOverlayModal() {
             button.disabled = true;
         }
         button.addEventListener('click', () => {
-            if (!permissionOverlayState || permissionOverlayState.pending) return;
-            permissionOverlayState.pending = true;
-            permissionOverlayState.error = '';
+            const latestState = sessionOverlayStore.getPermission(state.sessionId);
+            if (!latestState || latestState.pending) return;
+            sessionOverlayStore.updatePermission(state.sessionId, (currentState) => ({
+                ...currentState,
+                pending: true,
+                error: ''
+            }));
             renderPermissionOverlayModal();
             vscode.postMessage({
                 type: 'permissionResult',
@@ -16824,43 +16847,48 @@ function renderPermissionOverlayModal() {
     permissionOverlayEl = wrapper;
 }
 
-function clearQuestionOverlay(reason, advanceQueue = false) {
+function clearQuestionOverlay(reason, advanceQueue = false, sessionId = activeSessionId) {
     if (questionOverlayTimer) {
         clearTimeout(questionOverlayTimer);
         questionOverlayTimer = null;
     }
+    if (sessionId === activeSessionId && questionOverlayEl && questionOverlayEl.parentElement) {
+        questionOverlayEl.parentElement.removeChild(questionOverlayEl);
+    }
+    if (sessionId === activeSessionId) {
+        questionOverlayEl = null;
+    }
+    sessionOverlayStore.clearQuestion(sessionId, {
+        advanceQueue,
+        clearQueue: reason === 'session-deleted'
+    });
+    if (sessionId === activeSessionId && sessionOverlayStore.getQuestion(sessionId)) {
+        renderQuestionOverlayModal();
+    }
+}
+
+function clearPermissionOverlay(reason, sessionId = activeSessionId) {
+    if (sessionId === activeSessionId && permissionOverlayEl && permissionOverlayEl.parentElement) {
+        permissionOverlayEl.parentElement.removeChild(permissionOverlayEl);
+    }
+    if (sessionId === activeSessionId) {
+        permissionOverlayEl = null;
+    }
+    sessionOverlayStore.clearPermission(sessionId);
+}
+
+function activateSessionOverlays(sessionId) {
     if (questionOverlayEl && questionOverlayEl.parentElement) {
         questionOverlayEl.parentElement.removeChild(questionOverlayEl);
     }
     questionOverlayEl = null;
-    questionOverlayState = null;
-    if (reason === 'session-change' || reason === 'new-session' || reason === 'external-close') {
-        questionOverlayQueue.length = 0;
-    }
-    if (advanceQueue && questionOverlayQueue.length) {
-        const nextPayload = questionOverlayQueue.shift();
-        if (nextPayload) {
-            questionOverlayState = {
-                sessionId: nextPayload.sessionId,
-                callId: nextPayload.callId,
-                requestId: nextPayload.requestId || undefined,
-                localOnly: nextPayload.localOnly === true,
-                questions: nextPayload.questions,
-                stepIndex: 0,
-                answers: [],
-                selected: []
-            };
-            renderQuestionOverlayModal();
-        }
-    }
-}
-
-function clearPermissionOverlay(reason) {
     if (permissionOverlayEl && permissionOverlayEl.parentElement) {
         permissionOverlayEl.parentElement.removeChild(permissionOverlayEl);
     }
     permissionOverlayEl = null;
-    permissionOverlayState = null;
+    if (!sessionId) return;
+    renderQuestionOverlayModal();
+    renderPermissionOverlayModal();
 }
 
 function logQuestionDebug(...parts) {
@@ -16897,10 +16925,6 @@ function showQuestionOverlay(payload) {
         return;
     }
     const sessionId = payload.sessionId || activeSessionId || '';
-    if (payload.sessionId && activeSessionId && payload.sessionId !== activeSessionId) {
-        logQuestionDebug('show.skip', `reason=session-mismatch payload=${payload.sessionId} active=${activeSessionId}`);
-        return;
-    }
     const callId = typeof payload.callId === 'string' ? payload.callId : '';
     const requestId = typeof payload.requestId === 'string' ? payload.requestId : '';
     const questionItems = normalizeQuestionItems(payload);
@@ -16928,19 +16952,7 @@ function showQuestionOverlay(payload) {
         questions: questionItems
     };
 
-    if (questionOverlayState) {
-        if (questionOverlayQueue.some((item) => item && item.callId === callId && item.sessionId === sessionId) || (questionOverlayState.callId === callId && questionOverlayState.sessionId === sessionId)) {
-            logQuestionDebug('show.skip', `reason=already-present callId=${callId}`);
-            return;
-        }
-        questionOverlayQueue.push(normalizedPayload);
-        logQuestionDebug('show.queued', `callId=${callId}`, `queueSize=${questionOverlayQueue.length}`);
-        return;
-    }
-
-    clearQuestionOverlay('replace');
-    shownQuestionCallIds.add(dedupeKey);
-    questionOverlayState = {
+    const state = {
         sessionId,
         callId,
         requestId: requestId || undefined,
@@ -16950,8 +16962,20 @@ function showQuestionOverlay(payload) {
         answers: [],
         selected: []
     };
-    logQuestionDebug('show.active', `callId=${callId}`, `questions=${questionItems.length}`);
-    renderQuestionOverlayModal();
+    const result = sessionOverlayStore.enqueueQuestion(sessionId, state);
+    if (result === 'duplicate') {
+        logQuestionDebug('show.skip', `reason=already-present callId=${callId}`);
+        return;
+    }
+    shownQuestionCallIds.add(dedupeKey);
+    if (result === 'queued') {
+        logQuestionDebug('show.queued', `callId=${callId}`, `queueSize=${sessionOverlayStore.getQuestionQueueLength(sessionId)}`);
+        return;
+    }
+    logQuestionDebug('show.active', `callId=${callId}`, `questions=${questionItems.length}`, `visible=${sessionId === activeSessionId}`);
+    if (sessionId === activeSessionId) {
+        renderQuestionOverlayModal();
+    }
 }
 
 function showPermissionOverlay(payload) {
@@ -16959,9 +16983,6 @@ function showPermissionOverlay(payload) {
         return;
     }
     const sessionId = payload.sessionId || activeSessionId || '';
-    if (payload.sessionId && activeSessionId && payload.sessionId !== activeSessionId) {
-        return;
-    }
     const permissionId = typeof payload.permissionId === 'string' ? payload.permissionId : '';
     const requestId = typeof payload.requestId === 'string' ? payload.requestId : '';
     const permission = typeof payload.permission === 'string' ? payload.permission : '';
@@ -16972,16 +16993,7 @@ function showPermissionOverlay(payload) {
         return;
     }
 
-    if (
-        permissionOverlayState
-        && permissionOverlayState.sessionId === sessionId
-        && permissionOverlayState.permissionId === (permissionId || requestId)
-    ) {
-        return;
-    }
-
-    clearPermissionOverlay('replace');
-    permissionOverlayState = {
+    const result = sessionOverlayStore.setPermission(sessionId, {
         sessionId,
         permissionId: permissionId || requestId,
         requestId: requestId || permissionId || '',
@@ -16989,7 +17001,10 @@ function showPermissionOverlay(payload) {
         patterns,
         pending: false,
         error: ''
-    };
-    renderPermissionOverlayModal();
+    });
+    if (result === 'duplicate') return;
+    if (sessionId === activeSessionId) {
+        renderPermissionOverlayModal();
+    }
 }
 

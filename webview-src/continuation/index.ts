@@ -9,6 +9,7 @@ import { selectAssistantUpgradeCandidate } from '../session-runtime/assistant-bi
 import { createTurnLifecycleController } from '../session-runtime/turn-lifecycle';
 import { createMessageIdentityStore } from '../session-runtime/message-identity';
 import { createMessageRekeyController } from '../session-runtime/message-rekey-controller';
+import { createSessionOverlayStore } from '../session-runtime/session-overlay-store';
 
 export const CONTINUATION_FACADE_VERSION = 1 as const;
 
@@ -26,6 +27,7 @@ const facade = Object.freeze({
   createTurnLifecycleController,
   createMessageIdentityStore,
   createMessageRekeyController,
+  createSessionOverlayStore,
 });
 
 declare global {
