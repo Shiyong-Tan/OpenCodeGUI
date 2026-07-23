@@ -30,7 +30,10 @@ describe('OpenCodeEventMapper', () => {
     const start = source.indexOf('private handleCliOutputLine(');
     const end = source.indexOf('private resolveBin(', start);
     const handler = source.slice(start, end);
-    expect(handler).toContain("const resolvedSessionId = sessionId || this.currentSessionId;");
+    expect(source).toContain('private executeStreaming(args: string[], sessionId: string');
+    expect(source).toContain("throw new Error('Missing session ID for streaming process.')");
+    expect(handler).toContain("const resolvedSessionId = sessionId || ownerSessionId;");
+    expect(handler).not.toContain('this.currentSessionId');
     expect(handler).not.toContain('this.currentSessionId = sessionId;');
     expect(source).toContain('public setSessionId(sessionId: string | undefined): void');
   });

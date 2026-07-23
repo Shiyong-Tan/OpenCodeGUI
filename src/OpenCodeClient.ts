@@ -3473,15 +3473,18 @@ export class OpenCodeClient {
         return this.processRunner.execute(args);
     }
 
-    private executeStreaming(args: string[], onEvent?: (event: ChatEvent) => void, stdinText?: string): Promise<void> {
+    private executeStreaming(args: string[], sessionId: string, onEvent?: (event: ChatEvent) => void, stdinText?: string): Promise<void> {
+        if (!sessionId) {
+            throw new Error('Missing session ID for streaming process.');
+        }
         return this.processRunner.executeStreaming(
             args,
-            (line) => this.handleCliOutputLine(line, onEvent),
+            (line) => this.handleCliOutputLine(line, sessionId, onEvent),
             stdinText,
         );
     }
 
-    private handleCliOutputLine(trimmed: string, onEvent?: (event: ChatEvent) => void): void {
+    private handleCliOutputLine(trimmed: string, ownerSessionId: string, onEvent?: (event: ChatEvent) => void): void {
         if (!trimmed) return;
                 try {
                     const parsed = JSON.parse(trimmed);
@@ -3496,19 +3499,18 @@ export class OpenCodeClient {
                     // if (assistantMsgId || messageId) {
                     //     this.logUiDebug(`[DBG_STDOUT_ID] type=${parsed.type || 'unknown'} session=${sessionId || 'null'} tmpKey=null messageID=${assistantMsgId || messageId || 'null'}`);
                     // }
-                    const resolvedSessionId = sessionId || this.currentSessionId;
+                    const resolvedSessionId = sessionId || ownerSessionId;
                     if (assistantMsgId && resolvedSessionId) {
                         this.recordAssistantMsgId(resolvedSessionId, assistantMsgId);
                     }
                     if (messageId && onEvent) {
-                        onEvent({ type: 'message', text: messageId, sessionId });
+                        onEvent({ type: 'message', text: messageId, sessionId: resolvedSessionId });
                         this.registerMessageId(messageId, resolvedSessionId);
                         if (resolvedSessionId && typeof messageId === 'string') {
                             this.trackTurnMessageId(resolvedSessionId, messageId);
                         }
                     }
                     if (assistantMsgId && onEvent) {
-                        const resolvedSessionId = sessionId || this.currentSessionId;
                         onEvent({
                             type: 'assistantMessageMeta',
                             sessionId: resolvedSessionId,
@@ -3519,7 +3521,7 @@ export class OpenCodeClient {
                     if (parsed.type === 'error') {
                         const errMsg = parsed.error?.data?.message || parsed.error?.message || 'Unknown CLI error';
                         if (onEvent) {
-                            onEvent({ type: 'error', text: errMsg, sessionId });
+                            onEvent({ type: 'error', text: errMsg, sessionId: resolvedSessionId });
                         }
                         return;
                     }
@@ -3542,7 +3544,7 @@ export class OpenCodeClient {
                             `patchLen=${typeof patchText === 'string' ? patchText.length : 0}`
                         );
                         if (patchText && onEvent) {
-                            onEvent({ type: 'toolPatch', text: patchText, sessionId });
+                            onEvent({ type: 'toolPatch', text: patchText, sessionId: resolvedSessionId });
                         }
                     }
                     if (parsed.type === 'tool_use' && parsed.part && parsed.part.tool) {
@@ -3550,11 +3552,11 @@ export class OpenCodeClient {
                         const toolStatus = parsed.part?.state?.status;
                         if (toolStatus === 'completed') {
                             if (['apply_patch', 'edit', 'write'].includes(toolName)) {
-                                this.markTurnHasWrites(resolvedSessionId || sessionId || '', `tool_use:${toolName}`);
+                                this.markTurnHasWrites(resolvedSessionId, `tool_use:${toolName}`);
                             } else if (toolName === 'bash') {
                                 const command = parsed.part?.state?.input?.command;
                                 if (!this.isBashCommandReadOnly(command)) {
-                                    this.markTurnHasWrites(resolvedSessionId || sessionId || '', 'tool_use:bash');
+                                    this.markTurnHasWrites(resolvedSessionId, 'tool_use:bash');
                                 }
                             }
                         }
@@ -3569,11 +3571,11 @@ export class OpenCodeClient {
                             const changeSpecs = this.buildChangeSpecs(files);
                             this.queueTurnChanges(resolvedSessionId, turnKey, tmpKey, assistantId, changeSpecs);
                         }
-                        onEvent({ type: 'files', files, sessionId });
+                        onEvent({ type: 'files', files, sessionId: resolvedSessionId });
                     }
                     if (parsed.type === 'text' && parsed.part && typeof parsed.part.text === 'string') {
                         if (onEvent) {
-                            onEvent({ type: 'text', text: parsed.part.text, sessionId, assistantMsgId });
+                            onEvent({ type: 'text', text: parsed.part.text, sessionId: resolvedSessionId, assistantMsgId });
                         }
                     }
 
@@ -3584,7 +3586,7 @@ export class OpenCodeClient {
 
                     if (parsed.part && parsed.part.type && ['diff', 'patch', 'file-diff'].includes(parsed.part.type)) {
                         if (diffText && onEvent) {
-                            onEvent({ type: 'diff', text: diffText, sessionId });
+                            onEvent({ type: 'diff', text: diffText, sessionId: resolvedSessionId });
                         }
                     }
                 } catch (error) {
