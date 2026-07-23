@@ -32,7 +32,14 @@ export interface VirtualAdapterRangePolicy {
 
 export interface MeasurementBatch {
   readonly changedKeys: readonly string[];
+  readonly measurements: readonly VirtualAdapterMeasurement[];
   readonly totalSize: number;
+}
+
+export interface VirtualAdapterMeasurement {
+  readonly key: string;
+  readonly revision: string;
+  readonly size: number;
 }
 
 interface ResizeObserverLike {
@@ -55,6 +62,7 @@ export interface VirtualAdapterOptions {
   readonly maxMounted?: number;
   readonly gap?: number;
   readonly keepMountedKeys?: readonly string[];
+  readonly initialMeasurements?: readonly VirtualAdapterMeasurement[];
   readonly onRangeChange?: (snapshot: VirtualRangeSnapshot) => void;
   readonly onMeasurements?: (batch: MeasurementBatch) => void;
   readonly requestAnimationFrame?: (callback: FrameRequestCallback) => number;
@@ -498,7 +506,14 @@ function createSingleAdapter(
   const elementByKey = new Map<string, Element>(control.seed?.elements);
   const keyByElement = new Map<Element, string>();
   for (const [key, element] of elementByKey) keyByElement.set(element, key);
-  const measured = new Map<string, { revision: string; size: number }>(control.seed?.measured);
+  const initialMeasurements = control.seed?.measured
+    || new Map(
+      (current.initialMeasurements || [])
+        .filter((entry) => entry && typeof entry.key === 'string' && entry.key.length > 0
+          && typeof entry.revision === 'string' && Number.isFinite(entry.size) && entry.size > 0)
+        .map((entry) => [entry.key, { revision: entry.revision, size: entry.size }] as const),
+    );
+  const measured = new Map<string, { revision: string; size: number }>(initialMeasurements);
   const pendingMeasurementKeys = new Set<string>(control.seed?.pendingMeasurementKeys);
   const requestFrame = current.requestAnimationFrame || ((callback) => window.requestAnimationFrame(callback));
   const cancelFrame = current.cancelAnimationFrame || ((handle) => window.cancelAnimationFrame(handle));
@@ -660,7 +675,14 @@ function createSingleAdapter(
       virtualizer.resizeItem?.(index, size);
     }
     if (!changedKeys.length) return;
-    const batch = { changedKeys, totalSize: virtualizer.getTotalSize() };
+    const batch = {
+      changedKeys,
+      measurements: changedKeys.map((key) => {
+        const entry = measured.get(key)!;
+        return { key, revision: entry.revision, size: entry.size };
+      }),
+      totalSize: virtualizer.getTotalSize(),
+    };
     if (!callbacksSuppressed) current.onMeasurements?.(batch);
     else suppressedMeasurementBatch = batch;
     publishRange(expectedGeneration);

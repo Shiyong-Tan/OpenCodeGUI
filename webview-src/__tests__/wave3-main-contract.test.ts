@@ -143,6 +143,31 @@ function extractFunction(marker: string): string {
 }
 
 describe('undo segment placeholder presentation revisions', () => {
+  test('session busy state is not part of every message presentation fingerprint', () => {
+    const placeholderPresentation = extractFunction('function getUndoSegmentPlaceholderPresentation(');
+    const keyedPresentation = extractFunction('function getKeyedUnitPresentation(');
+    const message = { id: 'msg-user', role: 'user', text: 'hello', meta: {} };
+    const context = vm.createContext({
+      activeSessionId: 'session-a',
+      getAppendItems: () => [],
+      canAppendToMessage: () => false,
+      gitUndoEnabled: true,
+      appendHoverActiveKey: '',
+      buildAppendHoverKey: () => '',
+      shouldShowBackgroundSubagentIndicator: () => false,
+      getSubagentExpansionPresentation: () => [],
+    });
+    vm.runInContext(`${placeholderPresentation}; ${keyedPresentation}; globalThis.present = getKeyedUnitPresentation;`, context);
+    const session = { turnFullyFinalized: false, backendTurnInFlight: true };
+    const unit = { key: message.id, kind: 'message', value: { message } };
+    const active = JSON.stringify(context.present(session, unit));
+    session.turnFullyFinalized = true;
+    session.backendTurnInFlight = false;
+    const finalized = JSON.stringify(context.present(session, unit));
+
+    expect(active).toBe(finalized);
+  });
+
   test('expand and collapse change the keyed presentation fingerprint', () => {
     const placeholderPresentation = extractFunction('function getUndoSegmentPlaceholderPresentation(');
     const keyedPresentation = extractFunction('function getKeyedUnitPresentation(');

@@ -43,7 +43,11 @@ class FakeResizeObserver {
   emit(...targets: Element[]) { this.callback(targets.map((target) => ({ target }))); }
 }
 
-function createHarness(count = 1001, initialOwnerMode: 'active' | 'deferred-transaction' = 'active') {
+function createHarness(
+  count = 1001,
+  initialOwnerMode: 'active' | 'deferred-transaction' = 'active',
+  initialMeasurements: readonly { key: string; revision: string; size: number }[] = [],
+) {
   FakeResizeObserver.instance = undefined;
   FakeResizeObserver.instances = [];
   FakeResizeObserver.nextFailObserveAt = 0;
@@ -113,6 +117,7 @@ function createHarness(count = 1001, initialOwnerMode: 'active' | 'deferred-tran
     keys,
     kinds: keys.map((_, index) => index % 2 ? 'assistant' : 'user'),
     presentationRevisions: keys.map(() => 'r1'),
+    initialMeasurements,
     scrollElement,
     overscan: 20,
     initialTailCount: 80,
@@ -1347,6 +1352,17 @@ describe('Wave 3 TanStack adapter contract', () => {
     expect(adapter.getRange().items).toHaveLength(32); // visible 12 + 20 overscan; initial force is one-shot
   });
 
+  test('seeds estimates from matching cached measurements only', () => {
+    const { adapter } = createHarness(4, 'active', [
+      { key: 'key-0', revision: 'r1', size: 321 },
+      { key: 'key-1', revision: 'stale', size: 654 },
+      { key: 'missing', revision: 'r1', size: 999 },
+    ]);
+    const range = adapter.getRange();
+    expect(range.items.find((item) => item.key === 'key-0')?.size).toBe(321);
+    expect(range.items.find((item) => item.key === 'key-1')?.size).toBe(160);
+  });
+
   test('updates count/keys without recreation, keeps extraction contiguous, and scrolls by key', () => {
     const { adapter, keys, constructions } = createHarness();
     adapter.getRange();
@@ -1378,7 +1394,13 @@ describe('Wave 3 TanStack adapter contract', () => {
     expect(raf).toHaveLength(1);
     raf.shift()?.(1);
     expect(measurements).toHaveLength(1);
-    expect(measurements[0]).toMatchObject({ changedKeys: ['key-999', 'key-1000'] });
+    expect(measurements[0]).toMatchObject({
+      changedKeys: ['key-999', 'key-1000'],
+      measurements: [
+        { key: 'key-999', revision: 'r1', size: 333 },
+        { key: 'key-1000', revision: 'r1', size: 444 },
+      ],
+    });
     expect(constructions[0].sizes).toEqual(new Map([[999, 333], [1000, 444]]));
     expect(constructions).toHaveLength(1);
   });

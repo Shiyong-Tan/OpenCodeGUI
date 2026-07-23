@@ -7276,6 +7276,12 @@ function shouldHideDcpUiMessage(message) {
         localOlderObserver: null, localOlderObserverArmed: true, pendingScrollKey: '',
         pendingScrollAttempts: 0, localHistoryPresentation: null, acknowledgedRawSnapshot: null
     };
+    const chatWindowMeasurementCache = window.__ocFeatures?.createVirtualMeasurementCache?.({
+        read: () => sessionStorage.getItem('opencode.chatWindow.measurements.v1'),
+        write: (value) => sessionStorage.setItem('opencode.chatWindow.measurements.v1', value),
+        getWidth: () => Number(chatContainer?.clientWidth || 0),
+        schedule: (callback, delay) => setTimeout(callback, delay)
+    }) || null;
     let chatWindowPressureLifecycle = { current: null, closures: [] };
     let chatWindowAdaptiveShadow = null;
     let chatWindowOuterRecovery = Object.freeze({
@@ -7827,12 +7833,26 @@ function shouldHideDcpUiMessage(message) {
             undoSegment: getUndoSegmentPlaceholderPresentation(session, message),
             actions: {
                 canAppend: canAppendToMessage(session, message), canUndo: message?.role === 'user' && gitUndoEnabled,
-                busy: Boolean(session && (session.turnFullyFinalized === false || session.backendTurnInFlight === true)),
                 appendHoverActive: appendHoverActiveKey === buildAppendHoverKey(activeSessionId, message?.id)
             },
             backgroundSubagent: shouldShowBackgroundSubagentIndicator(session, message),
             subagentExpansion: getSubagentExpansionPresentation(message)
         };
+    }
+
+    function refreshMountedSafeShellActionAvailability(session) {
+        const sessionBusy = Boolean(session && (session.turnFullyFinalized === false || session.backendTurnInFlight === true));
+        for (const root of keyedRoots()) {
+            if (root?.dataset?.safeShellFamily !== 'message-user') continue;
+            const undoButton = root.querySelector?.('[data-safe-shell-role="undo"]');
+            if (!undoButton) continue;
+            const messageId = root.dataset.messageId || '';
+            const verdict = messageId && session ? canUndo(session, messageId) : { allowed: false, reason: 'message-unavailable' };
+            undoButton.disabled = sessionBusy || verdict.allowed !== true;
+            undoButton.title = undoButton.disabled
+                ? `Undo unavailable: ${sessionBusy ? 'busy' : verdict.reason || 'unavailable'}`
+                : 'Undo';
+        }
     }
 
     function getKeyedStreamStablePresentation(presentation) {
@@ -10083,6 +10103,13 @@ function shouldHideDcpUiMessage(message) {
                 kinds: adapterUpdate.kinds,
                 presentationRevisions: adapterUpdate.presentationRevisions,
                 keepMountedKeys: adapterUpdate.keepMountedKeys,
+                initialMeasurements: typeof chatWindowMeasurementCache !== 'undefined'
+                    ? chatWindowMeasurementCache?.getInitial?.(
+                        capturedActiveSessionId,
+                        adapterUpdate.keys,
+                        adapterUpdate.presentationRevisions
+                    ) || []
+                    : [],
                 scrollElement: chatContainer,
                 overscan: CHAT_WINDOW_OVERSCAN,
                 initialTailCount: CHAT_WINDOW_INITIAL_TAIL,
@@ -10177,6 +10204,9 @@ function shouldHideDcpUiMessage(message) {
                         recordChatWindowStaleCallback(candidateGeneration, 'measurement');
                         if (typeof resetChatWindowAdaptiveShadow === 'function') resetChatWindowAdaptiveShadow('stale-generation', candidateGeneration);
                         return;
+                    }
+                    if (typeof chatWindowMeasurementCache !== 'undefined') {
+                        chatWindowMeasurementCache?.remember?.(capturedActiveSessionId, batch.measurements);
                     }
                     const priorObservations = typeof chatWindowAdaptiveShadow !== 'undefined'
                         ? chatWindowAdaptiveShadow?.observations : null;
@@ -11619,6 +11649,10 @@ function shouldHideDcpUiMessage(message) {
             stage = 'background-indicator';
             if (session) {
                 countBackgroundIndicatorApplyResult(applyBackgroundSubagentIndicator(session), [`sessionId=${activeSessionId || 'null'}`, 'source=renderFromState-keyed']);
+            }
+            stage = 'action-availability';
+            if (typeof refreshMountedSafeShellActionAvailability === 'function') {
+                refreshMountedSafeShellActionAvailability(session);
             }
             renderQuestionCardInTimeline();
             stage = 'search-highlight';
