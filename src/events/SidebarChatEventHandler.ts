@@ -497,7 +497,11 @@ export async function handleSidebarChatEvent(
 
         if (event.type === 'assistantMessageMeta' && (event.messageId || event.assistantMsgId)) {
             const liveWebview = host._view?.webview || webview;
-            const sessionId = event.sessionId || host.currentSessionId;
+            const sessionId = event.sessionId;
+            if (!sessionId) {
+                host.uiDebugChannel.appendLine('[EXT][SESSION_ROUTE_DROP] event=assistantMessageMeta reason=missing-event-session');
+                return;
+            }
             const eventTmpKey = typeof (event as any).tmpKey === 'string' ? (event as any).tmpKey : undefined;
             const sessionTmpKey = sessionId ? host.pendingAssistantTmpKeyBySession.get(sessionId) : undefined;
             const isAppendFollowup = Boolean(event.appendFollowup);
@@ -532,7 +536,7 @@ export async function handleSidebarChatEvent(
                 isStatusUpdate: event.isStatusUpdate,
                 allowedSessionIds: event.displayTarget === 'agent-lane' && event.agentSessionId
                     ? [event.agentSessionId, ...(event.parentSessionId ? [event.parentSessionId] : [])]
-                    : host.getAssistantMetaAllowedSessionIds(),
+                    : host.getAssistantMetaAllowedSessionIds(sessionId),
                 ...(isSyntheticTurn ? { isSyntheticTurn: true } : {})
             });
             if (sessionId && typeof event.assistantMsgId === 'string' && typeof event.messageIndex === 'number') {
@@ -549,7 +553,11 @@ export async function handleSidebarChatEvent(
         }
 
         if (event.type === 'text' && event.text) {
-            const sessionId = event.sessionId || host.currentSessionId;
+            const sessionId = event.sessionId;
+            if (!sessionId) {
+                host.uiDebugChannel.appendLine('[EXT][SESSION_ROUTE_DROP] event=text reason=missing-event-session');
+                return;
+            }
             if (sessionId) {
                 host.markWebviewActiveTurnUpdated(sessionId, 'event:text');
                 host.appendAssistantBuffer(sessionId, event.text);
@@ -569,7 +577,7 @@ export async function handleSidebarChatEvent(
                     isStatusUpdate: false,
                     allowedSessionIds: event.displayTarget === 'agent-lane' && event.agentSessionId
                         ? [event.agentSessionId, ...(event.parentSessionId ? [event.parentSessionId] : [])]
-                        : host.getAssistantMetaAllowedSessionIds(),
+                        : host.getAssistantMetaAllowedSessionIds(sessionId),
                     ...(isSyntheticTurn ? { isSyntheticTurn: true } : {})
                 });
             }

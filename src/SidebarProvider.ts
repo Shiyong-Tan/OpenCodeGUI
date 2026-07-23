@@ -4383,16 +4383,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.assistantTextBufferBySession.set(sessionId, next);
     }
 
-    private getAssistantMetaAllowedSessionIds(): string[] {
-        const currentSessionId = this.currentSessionId || '';
-        if (!currentSessionId) {
+    private getAssistantMetaAllowedSessionIds(targetSessionId: string): string[] {
+        if (!targetSessionId) {
             return [];
         }
         try {
-            const relatedIds = this.client.getRelatedSessionIds(currentSessionId);
-            return Array.from(new Set([currentSessionId, ...relatedIds].filter(Boolean)));
+            const relatedIds = this.client.getRelatedSessionIds(targetSessionId);
+            return Array.from(new Set([targetSessionId, ...relatedIds].filter(Boolean)));
         } catch {
-            return currentSessionId ? [currentSessionId] : [];
+            return [targetSessionId];
         }
     }
 
@@ -4422,7 +4421,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             lastText: text,
             sessionId,
             tmpKey,
-            allowedSessionIds: this.getAssistantMetaAllowedSessionIds(),
+            allowedSessionIds: this.getAssistantMetaAllowedSessionIds(sessionId),
             ...(isSyntheticTurn ? { isSyntheticTurn: true } : {})
         });
     }

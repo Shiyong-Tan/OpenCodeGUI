@@ -36,4 +36,62 @@ describe('SidebarChatEventHandler', () => {
       sessionId: 'session-a', parentSessionId: 'parent-a', agentSessionId: 'agent-a', displayTarget: 'parent',
     });
   });
+
+  test('routes background assistant metadata by event owner, not visible session', async () => {
+    const webview = { postMessage: jest.fn() };
+    const host = {
+      smartSearchSessions: { owns: () => false },
+      currentSessionId: 'session-B',
+      _view: { webview },
+      pendingAssistantTmpKeyBySession: new Map([['session-A', 'tmp:A']]),
+      pendingLocalKeyBySession: new Map(),
+      pendingAssistantTmpKeyByLocalKey: new Map(),
+      activeSubagentSessionIds: new Set(),
+      subagentProgressBySession: new Map(),
+      uiDebugChannel: { appendLine: jest.fn() },
+      markWebviewActiveTurnUpdated: jest.fn(),
+      isCurrentTurnSynthetic: () => false,
+      getAssistantMetaAllowedSessionIds: jest.fn((sessionId: string) => [sessionId]),
+    };
+
+    await handleSidebarChatEvent(host as any, {
+      type: 'assistantMessageMeta',
+      sessionId: 'session-A',
+      assistantMsgId: 'msg_A',
+      messageIndex: 12,
+      lastText: 'A is still running',
+    }, webview as any);
+
+    expect(host.getAssistantMetaAllowedSessionIds).toHaveBeenCalledWith('session-A');
+    expect(webview.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'assistantMessageMeta',
+      sessionId: 'session-A',
+      assistantMsgId: 'msg_A',
+      allowedSessionIds: ['session-A'],
+    }));
+  });
+
+  test('drops ownerless asynchronous assistant events instead of using visible session', async () => {
+    const webview = { postMessage: jest.fn() };
+    const host = {
+      smartSearchSessions: { owns: () => false },
+      currentSessionId: 'session-B',
+      _view: { webview },
+      uiDebugChannel: { appendLine: jest.fn() },
+    };
+
+    await handleSidebarChatEvent(host as any, {
+      type: 'assistantMessageMeta',
+      assistantMsgId: 'msg_unknown',
+    }, webview as any);
+    await handleSidebarChatEvent(host as any, {
+      type: 'text',
+      text: 'ownerless',
+    }, webview as any);
+
+    expect(webview.postMessage).not.toHaveBeenCalled();
+    expect(host.uiDebugChannel.appendLine).toHaveBeenCalledWith(
+      expect.stringContaining('reason=missing-event-session'),
+    );
+  });
 });
