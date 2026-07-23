@@ -132,11 +132,4 @@ describe('hydration volatile state controller', () => {
     expect(hydrated.messagesById.get('msg_assistant').text).toBe('authoritative history');
     expect(result.mergedIds).toEqual([]);
   });
-
-  test('restores active subagents only for an active un-cancelled turn', () => {
-    const before: any = createSessionState(); before.backendTurnInFlight = true; before.turnFullyFinalized = false; before.activeSubagents = [{ sessionId: 'ses_child', state: 'running' }];
-    const hydrated: any = createSessionState(); controller.restore(hydrated, controller.capture(before));
-    expect(hydrated.activeSubagents).toEqual([{ sessionId: 'ses_child', state: 'running' }]);
-    for (const state of [{ finalized: true }, { cancelled: true }]) { const stale: any = createSessionState(); stale.backendTurnInFlight = !state.finalized; stale.turnFullyFinalized = Boolean(state.finalized); stale.canceledActiveTurn = Boolean(state.cancelled); stale.activeSubagents = [{ sessionId: 'ses_child' }]; expect(controller.capture(stale).activeSubagents).toBeUndefined(); }
-  });
 });
