@@ -42,6 +42,7 @@ import {
     TurnRuntimeShadow,
     type TurnShadowObservation,
 } from './session-runtime/turn/TurnRuntimeShadow';
+import { ChatEventActorRouter } from './session-runtime/ChatEventActorRouter';
 
 type CanceledTurnRecord = {
     opId?: string;
@@ -692,6 +693,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private webviewHandshakeLifecycle = 0;
     private readonly activeTurnTracker: ActiveTurnTracker;
     private readonly turnRuntimeShadow: TurnRuntimeShadow;
+    private readonly chatEventActorRouter: ChatEventActorRouter;
     private readonly lastTurnShadowDivergenceBySession = new Map<string, string>();
     private sendInitGuardCompensationByKey = new Map<string, SendInitGuardCompensationEntry>();
     private sendInitGuardSpentCompensationByKey = new Map<string, SendInitGuardCompensationEntry>();
@@ -3899,6 +3901,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             freshnessWindowMs: this.webviewActiveTurnFreshnessWindowMs,
         });
         this.turnRuntimeShadow = new TurnRuntimeShadow();
+        this.chatEventActorRouter = new ChatEventActorRouter({
+            handle: async (event) => {
+                const liveWebview = this._view?.webview;
+                if (!liveWebview) return;
+                await this.handleChatEvent(event, liveWebview);
+            },
+            onError: (event, error) => {
+                this.uiDebugChannel.appendLine(
+                    `[EXT][SESSION_ACTOR_ERROR] sessionId=${event.sessionId || 'none'} type=${event.type} error=${String(error)}`,
+                );
+            },
+        });
         this.turnFinalizationCoordinator = new TurnFinalizationCoordinator({
             getAssistantMessageId: (sessionId) => this.client.getTurnAssistantMsgId(sessionId),
             emitPhase: (target, sessionId, phase) => this.emitTurnFinalizePhase(target as vscode.Webview, sessionId, phase),
@@ -3941,9 +3955,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             this.sendServerStatus(status, reason);
         });
         this.client.addChatEventListener((event) => {
-            const liveWebview = this._view?.webview;
-            if (!liveWebview) return;
-            void this.handleChatEvent(event, liveWebview);
+            void this.chatEventActorRouter.route(event);
         });
         if (!process.env.JEST_WORKER_ID) {
             void this.client.warmServer();
@@ -4680,6 +4692,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     public async dispose(): Promise<void> {
         this.attachmentStorage.dispose();
+        this.chatEventActorRouter.dispose();
         this.turnRuntimeShadow.dispose();
         if (this.subagentRetentionTimer) {
             clearTimeout(this.subagentRetentionTimer);

@@ -12,6 +12,7 @@ describe('SidebarChatEventHandler', () => {
     expect(method).toContain('await handleSidebarChatEvent(this, event, webview);');
     expect(method).toContain('this.reportTurnRuntimeShadow(event, await shadowObservation);');
     expect(method.match(/handleSidebarChatEvent\(this, event, webview\)/g)).toHaveLength(1);
+    expect(source).toContain('void this.chatEventActorRouter.route(event);');
   });
 
   test('temporary Smart Search sessions never reach the Webview pipeline', async () => {
