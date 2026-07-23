@@ -483,10 +483,14 @@ export function createHydrationStateController(options: HydrationStateController
     const describeMessageDifference = (left: any, right: any) => {
       if (details.length >= 4) return;
       const leftById = new Map(
-        (Array.isArray(left) ? left : []).map((entry: any) => [entry?.id, entry]),
+        (Array.isArray(left) ? left : [])
+          .filter((entry: any) => Array.isArray(entry) && entry.length >= 2)
+          .map((entry: any) => [entry[0], entry[1]]),
       );
       const rightById = new Map(
-        (Array.isArray(right) ? right : []).map((entry: any) => [entry?.id, entry]),
+        (Array.isArray(right) ? right : [])
+          .filter((entry: any) => Array.isArray(entry) && entry.length >= 2)
+          .map((entry: any) => [entry[0], entry[1]]),
       );
       for (const id of new Set([...leftById.keys(), ...rightById.keys()])) {
         if (!leftById.has(id)) {

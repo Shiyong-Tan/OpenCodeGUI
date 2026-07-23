@@ -77,6 +77,17 @@ describe('hydration volatile state controller', () => {
       matched: false,
       mismatches: ['timeline'],
     });
+
+    equivalent.timeline.reverse();
+    equivalent.messagesById.set('msg_assistant', {
+      ...equivalent.messagesById.get('msg_assistant'),
+      text: 'different answer',
+    });
+    expect(controller.compareIntegrationShadow(equivalent, shadow)).toMatchObject({
+      matched: false,
+      mismatches: ['messages'],
+      details: ['messages:msg_assistant:text'],
+    });
   });
 
   test('restores missing live messages while excluding persistence artifacts', () => {
