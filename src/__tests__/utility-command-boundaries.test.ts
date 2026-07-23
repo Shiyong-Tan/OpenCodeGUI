@@ -1,0 +1,278 @@
+jest.mock('vscode', () => {
+    const executeCommand = jest.fn();
+    const showOpenDialog = jest.fn();
+    const showErrorMessage = jest.fn();
+    const openTextDocument = jest.fn();
+    const showTextDocument = jest.fn();
+    return {
+        commands: { executeCommand },
+        window: {
+            createOutputChannel: () => ({ appendLine: () => undefined, append: () => undefined, dispose: () => undefined }),
+            showOpenDialog,
+            showErrorMessage,
+            showInformationMessage: jest.fn(),
+            showTextDocument,
+        },
+        workspace: { workspaceFolders: [], openTextDocument },
+        Uri: {
+            joinPath: (...parts: any[]) => parts.join('/'),
+            file: (fsPath: string) => ({ fsPath }),
+        },
+        Position: class Position {
+            constructor(public readonly line: number, public readonly character: number) {}
+        },
+        Selection: class Selection {
+            constructor(public readonly anchor: unknown, public readonly active: unknown) {}
+        },
+        Range: class Range {
+            constructor(public readonly start: unknown, public readonly end: unknown) {}
+        },
+        TextEditorRevealType: { InCenter: 0 },
+    };
+}, { virtual: true });
+
+import * as fs from 'fs';
+import * as path from 'path';
+import * as vscode from 'vscode';
+import { resolveSidebarWebviewView } from '../webview/SidebarWebviewController';
+
+const controllerSource = fs.readFileSync(
+    path.join(process.cwd(), 'src', 'webview', 'SidebarWebviewController.ts'),
+    'utf8',
+);
+
+function createHarness(overrides: Record<string, unknown> = {}) {
+    let messageRegistrations = 0;
+    let messageHandler: ((data: any) => Promise<void>) | undefined;
+    const posts: any[] = [];
+    const webview: any = {
+        options: {},
+        html: '',
+        postMessage: jest.fn(async (message: any) => {
+            posts.push(message);
+            return true;
+        }),
+        onDidReceiveMessage: (handler: (data: any) => Promise<void>) => {
+            messageRegistrations += 1;
+            messageHandler = handler;
+        },
+    };
+    const view: any = {
+        webview,
+        visible: true,
+        onDidChangeVisibility: jest.fn(),
+        onDidDispose: jest.fn(),
+    };
+    const host: any = {
+        _view: undefined,
+        _extensionUri: {},
+        _webviewInstanceId: '',
+        webviewLivenessPanelSeq: 0,
+        initPosted: false,
+        resetWebviewLiveness: jest.fn(),
+        uiDebugChannel: { appendLine: jest.fn() },
+        _getHtmlForWebview: jest.fn(() => '<html></html>'),
+        startWebviewLivenessProbes: jest.fn(),
+        stopWebviewLivenessProbes: jest.fn(),
+        triggerWebviewLivenessProbe: jest.fn(),
+        selectedModel: undefined,
+        selectedMode: 'plan',
+        selectedVariant: undefined,
+        availableModes: ['plan', 'build'],
+        _context: { globalState: { update: jest.fn(async () => undefined) } },
+        postModelQuota: jest.fn(async () => undefined),
+        refreshModels: jest.fn(async () => undefined),
+        listWorkspaceFiles: jest.fn(async () => []),
+        smartSearch: { run: jest.fn() },
+        attachmentStorage: {
+            saveClipboardImage: jest.fn(),
+            getImageMimeFromName: jest.fn(() => 'image/png'),
+            isImageFileName: jest.fn(() => true),
+        },
+        client: {
+            sendToolResult: jest.fn(async () => undefined),
+            respondPermission: jest.fn(async () => undefined),
+        },
+        pendingLocalQuestionRequests: new Map(),
+        gitUndoEnabled: true,
+        openGitDiffForFile: jest.fn(async () => undefined),
+        postAddResponse: jest.fn(),
+        getWorkspaceRootPath: jest.fn(() => path.resolve('workspace')),
+        ...overrides,
+    };
+    resolveSidebarWebviewView(host, view, {} as any, {} as any);
+    return {
+        host,
+        view,
+        posts,
+        get messageRegistrations() { return messageRegistrations; },
+        send: async (data: any) => {
+            if (!messageHandler) throw new Error('message handler unavailable');
+            await messageHandler(data);
+        },
+    };
+}
+
+describe('utility command family characterization', () => {
+    test('keeps every utility command in the single top-level dispatcher', () => {
+        const commands = [
+            'setModel', 'compactSession', 'setMode', 'setVariant', 'refreshModels',
+            'smartSessionSearch', 'listWorkspaceFiles', 'ping', 'reloadWindow',
+            'clipboardImage', 'selectAttachments', 'openGitDiff', 'toolResult',
+            'localQuestionResult', 'permissionResult', 'openFileAtLocation',
+        ];
+        for (const command of commands) expect(controllerSource).toContain(`case "${command}"`);
+        expect(createHarness().messageRegistrations).toBe(1);
+    });
+
+    test('persists model, normalized mode, and variant with their existing keys and order', async () => {
+        const harness = createHarness();
+        await harness.send({ type: 'setModel', value: 'provider/model' });
+        await harness.send({ type: 'setMode', value: 'invalid-mode' });
+        await harness.send({ type: 'setVariant', value: 'fast' });
+
+        expect(harness.host.selectedModel).toBe('provider/model');
+        expect(harness.host.selectedMode).toBe('plan');
+        expect(harness.host.selectedVariant).toBe('fast');
+        expect(harness.host._context.globalState.update.mock.calls).toEqual([
+            ['opencode.model', 'provider/model'],
+            ['opencode.mode', 'plan'],
+            ['opencode.variant', 'fast'],
+        ]);
+        expect(harness.host.postModelQuota).toHaveBeenCalledWith(harness.view.webview, 'model-change');
+    });
+
+    test('normalizes Smart Search input and preserves request/session ownership on success and failure', async () => {
+        const run = jest.fn()
+            .mockResolvedValueOnce({ messageIds: ['m2'], modelId: 'free/model' })
+            .mockRejectedValueOnce(new Error('cancelled'));
+        const harness = createHarness({ smartSearch: { run } });
+        const input = {
+            type: 'smartSessionSearch',
+            requestId: 'request-1',
+            sessionId: 'session-a',
+            query: 'reload history',
+            messages: [
+                { id: 'm1', role: 'user', text: 'one' },
+                { id: 'm2', text: 'two' },
+                { id: 3, role: 'assistant', text: 'invalid' },
+            ],
+        };
+        await harness.send(input);
+        await harness.send({ ...input, requestId: 'request-2' });
+
+        expect(run).toHaveBeenNthCalledWith(1, 'session-a', 'reload history', [
+            { id: 'm1', role: 'user', text: 'one' },
+            { id: 'm2', role: 'unknown', text: 'two' },
+        ]);
+        expect(harness.posts).toContainEqual({
+            type: 'smartSessionSearchResult',
+            requestId: 'request-1',
+            sessionId: 'session-a',
+            messageIds: ['m2'],
+            modelId: 'free/model',
+        });
+        expect(harness.posts).toContainEqual({
+            type: 'smartSessionSearchError',
+            requestId: 'request-2',
+            sessionId: 'session-a',
+            error: 'Error: cancelled',
+        });
+    });
+
+    test('routes file listing, ping, and reload without changing session ownership', async () => {
+        const listWorkspaceFiles = jest.fn(async () => ['a.ts', 'b.ts']);
+        const harness = createHarness({ listWorkspaceFiles });
+        await harness.send({ type: 'listWorkspaceFiles', requestId: 'files-1', query: 'src' });
+        await harness.send({ type: 'ping', ts: 123 });
+        await harness.send({ type: 'reloadWindow' });
+
+        expect(listWorkspaceFiles).toHaveBeenCalledWith('src');
+        expect(harness.posts).toContainEqual({
+            type: 'workspaceFileResults',
+            requestId: 'files-1',
+            query: 'src',
+            files: ['a.ts', 'b.ts'],
+        });
+        expect(harness.posts).toContainEqual({ type: 'pong', ts: 123 });
+        expect(vscode.commands.executeCommand).toHaveBeenCalledWith('workbench.action.reloadWindow');
+    });
+
+    test('keeps clipboard attachment responses bound to the payload session', async () => {
+        const saveClipboardImage = jest.fn()
+            .mockResolvedValueOnce({ id: 'attachment-1', name: 'image.png', filePath: 'saved/image.png' })
+            .mockRejectedValueOnce(new Error('save failed'));
+        const harness = createHarness({
+            attachmentStorage: {
+                saveClipboardImage,
+                getImageMimeFromName: jest.fn(),
+                isImageFileName: jest.fn(),
+            },
+        });
+        const input = {
+            type: 'clipboardImage',
+            dataUrl: 'data:image/png;base64,AA==',
+            mime: 'image/png',
+            sessionId: 'session-a',
+        };
+        await harness.send(input);
+        await harness.send(input);
+
+        expect(harness.posts).toContainEqual({
+            type: 'attachmentAdded',
+            id: 'attachment-1',
+            name: 'image.png',
+            filePath: 'saved/image.png',
+            dataUrl: input.dataUrl,
+            mime: 'image/png',
+            sessionId: 'session-a',
+        });
+        expect(harness.posts).toContainEqual({
+            type: 'attachmentError',
+            value: 'Failed to save image: Error: save failed',
+            sessionId: 'session-a',
+        });
+    });
+
+    test('acknowledges permission results on the latest Webview and preserves failure payloads', async () => {
+        const respondPermission = jest.fn()
+            .mockResolvedValueOnce(undefined)
+            .mockRejectedValueOnce(new Error('backend unavailable'));
+        const harness = createHarness({ client: { sendToolResult: jest.fn(), respondPermission } });
+        const input = {
+            type: 'permissionResult',
+            sessionId: 'session-a',
+            permissionId: 'permission-1',
+            requestId: 'request-1',
+            response: 'always',
+        };
+        await harness.send(input);
+        await harness.send({ ...input, response: 'invalid' });
+
+        expect(respondPermission).toHaveBeenNthCalledWith(1, {
+            sessionId: 'session-a',
+            permissionId: 'permission-1',
+            requestId: 'request-1',
+            response: 'always',
+        });
+        expect(respondPermission).toHaveBeenNthCalledWith(2, {
+            sessionId: 'session-a',
+            permissionId: 'permission-1',
+            requestId: 'request-1',
+            response: 'once',
+        });
+        expect(harness.posts).toContainEqual({
+            type: 'permissionResultAck',
+            sessionId: 'session-a',
+            permissionId: 'permission-1',
+            response: 'always',
+        });
+        expect(harness.posts).toContainEqual({
+            type: 'permissionResultFailed',
+            sessionId: 'session-a',
+            permissionId: 'permission-1',
+            response: 'once',
+            reason: 'Error: backend unavailable',
+        });
+    });
+});
