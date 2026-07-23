@@ -1,4 +1,5 @@
 import {
+    classifyTurnShadowDivergences,
     compareTurnShadowToLegacy,
     TurnRuntimeShadow,
 } from '../session-runtime/turn/TurnRuntimeShadow';
@@ -109,5 +110,24 @@ describe('turn runtime shadow adapter', () => {
             legacy: 'msg_other',
         }]);
         expect(shadow.getSnapshot('A')).toBe(state);
+    });
+
+    test('classifies the known legacy finalization gap separately', async () => {
+        const shadow = new TurnRuntimeShadow();
+        await shadow.observe({ type: 'turnInFlight', sessionId: 'A', inFlight: true });
+        const observation = await shadow.observe({
+            type: 'turnInFlight',
+            sessionId: 'A',
+            inFlight: false,
+        });
+        if (!observation.observed) throw new Error('expected observed turn event');
+
+        expect(classifyTurnShadowDivergences(observation, {
+            inFlight: false,
+        })).toEqual([expect.objectContaining({
+            field: 'inFlight',
+            severity: 'explained',
+            reason: 'legacy-clears-in-flight-before-authoritative-final',
+        })]);
     });
 });

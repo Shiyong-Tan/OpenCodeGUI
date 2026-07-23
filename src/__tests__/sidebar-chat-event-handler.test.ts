@@ -3,9 +3,15 @@ import * as path from 'path';
 import { handleSidebarChatEvent } from '../events/SidebarChatEventHandler';
 
 describe('SidebarChatEventHandler', () => {
-  test('SidebarProvider keeps a single compatibility delegation', () => {
+  test('SidebarProvider shadows around a single compatibility delegation', () => {
     const source = fs.readFileSync(path.join(process.cwd(), 'src', 'SidebarProvider.ts'), 'utf8');
-    expect(source).toMatch(/private async handleChatEvent\([\s\S]*?return handleSidebarChatEvent\(this, event, webview\);\s*}/);
+    const start = source.indexOf('private async handleChatEvent(');
+    const end = source.indexOf('private async observeTurnRuntimeShadow(', start);
+    const method = source.slice(start, end);
+    expect(method).toContain('const shadowObservation = this.observeTurnRuntimeShadow(event);');
+    expect(method).toContain('await handleSidebarChatEvent(this, event, webview);');
+    expect(method).toContain('this.reportTurnRuntimeShadow(event, await shadowObservation);');
+    expect(method.match(/handleSidebarChatEvent\(this, event, webview\)/g)).toHaveLength(1);
   });
 
   test('temporary Smart Search sessions never reach the Webview pipeline', async () => {

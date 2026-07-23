@@ -236,6 +236,11 @@ export type TurnShadowDivergence = Readonly<{
     legacy: string | boolean | undefined;
 }>;
 
+export type ClassifiedTurnShadowDivergence = TurnShadowDivergence & Readonly<{
+    severity: 'explained' | 'unexplained';
+    reason: string;
+}>;
+
 export function compareTurnShadowToLegacy(
     state: TurnRuntimeState,
     legacy: TurnShadowLegacyProbe,
@@ -258,4 +263,50 @@ export function compareTurnShadowToLegacy(
     return checks
         .filter(([, shadow, current]) => shadow !== current)
         .map(([field, shadow, current]) => ({ field, shadow, legacy: current }));
+}
+
+export function classifyTurnShadowDivergences(
+    observation: Extract<TurnShadowObservation, { observed: true }>,
+    legacy: TurnShadowLegacyProbe,
+): readonly ClassifiedTurnShadowDivergence[] {
+    return compareTurnShadowToLegacy(observation.state, legacy).map((divergence) => {
+        if (
+            divergence.field === 'inFlight'
+            && observation.sourceType === 'turnInFlight'
+            && observation.state.phase === 'finalizing'
+        ) {
+            return {
+                ...divergence,
+                severity: 'explained',
+                reason: 'legacy-clears-in-flight-before-authoritative-final',
+            };
+        }
+        if (
+            (observation.state.phase === 'finalized'
+                || observation.state.phase === 'failed'
+                || observation.state.phase === 'cancelled')
+            && divergence.legacy === undefined
+        ) {
+            return {
+                ...divergence,
+                severity: 'explained',
+                reason: 'legacy-cleans-volatile-turn-state-after-terminal',
+            };
+        }
+        if (
+            divergence.field === 'bufferedText'
+            && observation.sourceType === 'assistantMessageMeta'
+        ) {
+            return {
+                ...divergence,
+                severity: 'explained',
+                reason: 'legacy-forwards-assistant-meta-text-without-buffering',
+            };
+        }
+        return {
+            ...divergence,
+            severity: 'unexplained',
+            reason: 'state-mismatch',
+        };
+    });
 }

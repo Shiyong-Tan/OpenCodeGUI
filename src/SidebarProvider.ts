@@ -37,6 +37,11 @@ import {
 } from './continuation/TurnIdentityResolver';
 import { TurnFinalizationCoordinator } from './continuation/TurnFinalizationCoordinator';
 import { ActiveTurnTracker, type ActiveTurnSnapshot as WebviewLivenessActiveTurnSnapshot } from './continuation/ActiveTurnTracker';
+import {
+    classifyTurnShadowDivergences,
+    TurnRuntimeShadow,
+    type TurnShadowObservation,
+} from './session-runtime/turn/TurnRuntimeShadow';
 
 type CanceledTurnRecord = {
     opId?: string;
@@ -686,6 +691,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private webviewCommandReloadGeneration = 0;
     private webviewHandshakeLifecycle = 0;
     private readonly activeTurnTracker: ActiveTurnTracker;
+    private readonly turnRuntimeShadow: TurnRuntimeShadow;
+    private readonly lastTurnShadowDivergenceBySession = new Map<string, string>();
     private sendInitGuardCompensationByKey = new Map<string, SendInitGuardCompensationEntry>();
     private sendInitGuardSpentCompensationByKey = new Map<string, SendInitGuardCompensationEntry>();
     private liveTurnResumePostedByKey = new Set<string>();
@@ -3891,6 +3898,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             getPendingLocalKey: (sessionId) => this.pendingLocalKeyBySession.get(sessionId),
             freshnessWindowMs: this.webviewActiveTurnFreshnessWindowMs,
         });
+        this.turnRuntimeShadow = new TurnRuntimeShadow();
         this.turnFinalizationCoordinator = new TurnFinalizationCoordinator({
             getAssistantMessageId: (sessionId) => this.client.getTurnAssistantMsgId(sessionId),
             emitPhase: (target, sessionId, phase) => this.emitTurnFinalizePhase(target as vscode.Webview, sessionId, phase),
@@ -4304,7 +4312,69 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private async handleChatEvent(event: ChatEvent, webview: vscode.Webview): Promise<void> {
-        return handleSidebarChatEvent(this, event, webview);
+        const shadowObservation = this.observeTurnRuntimeShadow(event);
+        await handleSidebarChatEvent(this, event, webview);
+        this.reportTurnRuntimeShadow(event, await shadowObservation);
+    }
+
+    private async observeTurnRuntimeShadow(event: ChatEvent): Promise<TurnShadowObservation | undefined> {
+        if (
+            !event.sessionId
+            || event.displayTarget === 'agent-lane'
+            || !this.isUserOwnedSession(event.sessionId)
+        ) {
+            return undefined;
+        }
+        try {
+            return await this.turnRuntimeShadow.observe(event);
+        } catch (error) {
+            this.uiDebugChannel.appendLine(
+                `[EXT][TURN_SHADOW_ERROR] sessionId=${event.sessionId} source=${event.type} error=${String(error)}`,
+            );
+            return undefined;
+        }
+    }
+
+    private reportTurnRuntimeShadow(
+        event: ChatEvent,
+        observation: TurnShadowObservation | undefined,
+    ): void {
+        if (!observation?.observed) return;
+        const sessionId = observation.sessionId;
+        const divergences = classifyTurnShadowDivergences(observation, {
+            inFlight: this.sendInFlightBySession.has(sessionId),
+            assistantId: this.client.getTurnAssistantMsgId(sessionId),
+            temporaryAssistantId: this.pendingAssistantTmpKeyBySession.get(sessionId),
+            bufferedText: this.assistantTextBufferBySession.get(sessionId),
+        });
+        const unexplained = divergences.filter((item) => item.severity === 'unexplained');
+        if (observation.warnings.length > 0 || unexplained.length > 0) {
+            const fields = unexplained.map((item) => item.field).join(',') || 'none';
+            const signature = `${observation.state.generation}:${observation.state.phase}:${fields}:${observation.warnings.join(',')}`;
+            if (this.lastTurnShadowDivergenceBySession.get(sessionId) !== signature) {
+                this.lastTurnShadowDivergenceBySession.set(sessionId, signature);
+                this.uiDebugChannel.appendLine(
+                    `[EXT][TURN_SHADOW_DIVERGENCE] sessionId=${sessionId} source=${event.type} ` +
+                    `phase=${observation.state.phase} generation=${observation.state.generation} ` +
+                    `fields=${fields} warnings=${observation.warnings.join(',') || 'none'}`,
+                );
+            }
+        } else {
+            this.lastTurnShadowDivergenceBySession.delete(sessionId);
+        }
+        if (
+            event.type === 'turnInFlight'
+            || event.type === 'turnResolved'
+            || event.type === 'error'
+            || event.type === 'autoResumeHardStop'
+        ) {
+            this.uiDebugChannel.appendLine(
+                `[EXT][TURN_SHADOW] sessionId=${sessionId} source=${event.type} ` +
+                `phase=${observation.state.phase} generation=${observation.state.generation} ` +
+                `canonical=${observation.state.assistant?.canonicalId || 'none'} ` +
+                `unexplained=${unexplained.length}`,
+            );
+        }
     }
 
     private appendAssistantBuffer(sessionId: string, chunk: string): void {
@@ -4611,6 +4681,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     public async dispose(): Promise<void> {
         this.attachmentStorage.dispose();
+        this.turnRuntimeShadow.dispose();
         if (this.subagentRetentionTimer) {
             clearTimeout(this.subagentRetentionTimer);
             this.subagentRetentionTimer = undefined;
