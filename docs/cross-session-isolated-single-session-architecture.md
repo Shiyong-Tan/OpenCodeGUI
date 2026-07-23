@@ -771,14 +771,28 @@ Production ownership rules now enforced:
   index;
 - a repository audit now enforces actor ingress, explicit event ownership,
   identity/lifecycle writer boundaries, and render-only session selection.
+- production session actors now retain the real monotonic turn snapshot, and
+  production actor tests prove interleaving equivalence, non-interference, and
+  terminal monotonicity rather than proving those properties only on the
+  reference model;
+- transport `sessionID` metadata is selection-neutral in both
+  `OpenCodeClient` and `SidebarChatEventHandler`; only an explicit Webview
+  selection command changes the selected session;
+- user acknowledgement, cancel, clipboard attachment, and file attachment
+  commands capture and retain their session owner across asynchronous work;
+- Webview busy checks for controls, assistant routing, safe-shell, and segment
+  actions are derived from the target session rather than a global busy flag.
 
 Automated acceptance at this checkpoint:
 
-- 136 Jest suites and 1073 tests pass;
+- 137 Jest suites and 1084 tests pass;
 - Extension and Webview compilation pass;
 - all four Webview bundles remain within size limits;
 - deterministic rendering bundle check passes;
-- VSIX content policy passes.
+- VSIX content policy passed before the latest source-only ownership slices;
+  the final rerun was unavailable because the external Codex execution quota
+  rejected the npm-cache/registry permission request. No package manifest or
+  packaging policy changed in those slices.
 
 Still required before deleting compatibility projections and diagnostic shadow
 state:
