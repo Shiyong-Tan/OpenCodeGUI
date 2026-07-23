@@ -3992,6 +3992,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     public async sendEditorSelectionToChat(): Promise<void> {
+        const sessionId = this.currentSessionId;
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
             vscode.window.showInformationMessage('No active editor selection to send.');
@@ -4012,7 +4013,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const filePath = editor.document.uri.fsPath;
         const displayPath = vscode.workspace.asRelativePath(filePath, false);
         const displayText = `${displayPath}:${startLine}-${endLine}`;
-        this.sendPrefillInput(displayText, {
+        this.sendPrefillInput(sessionId, displayText, {
             source: 'editor',
             text,
             filePath,
@@ -4021,6 +4022,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     public async sendOutputSelectionToChat(): Promise<void> {
+        const sessionId = this.currentSessionId;
         try {
             await vscode.commands.executeCommand('editor.action.clipboardCopyAction');
         } catch {
@@ -4031,13 +4033,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             vscode.window.showInformationMessage('No output selection found. Copy selection and try again.');
             return;
         }
-        this.sendPrefillInput('vscode output', {
+        this.sendPrefillInput(sessionId, 'vscode output', {
             source: 'output',
             text
         });
     }
 
-    private sendPrefillInput(displayText: string, payload: { source: string; text: string; filePath?: string; range?: { startLine?: number; endLine?: number } }): void {
+    private sendPrefillInput(sessionId: string | undefined, displayText: string, payload: { source: string; text: string; filePath?: string; range?: { startLine?: number; endLine?: number } }): void {
         const liveWebview = this._view?.webview;
         if (!liveWebview) {
             vscode.window.showInformationMessage('Open the OpenCode UI to receive the selection.');
@@ -4045,6 +4047,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
         liveWebview.postMessage({
             type: 'prefillInput',
+            sessionId,
             displayText,
             payload
         });

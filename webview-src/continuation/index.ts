@@ -13,6 +13,7 @@ import { createSessionOverlayStore } from '../session-runtime/session-overlay-st
 import { createSessionConflictStore } from '../session-runtime/session-conflict-store';
 import { createSessionTransientStatusStore } from '../session-runtime/session-transient-status-store';
 import { createSessionSearchRegistry } from '../session-runtime/session-search-registry';
+import { createSessionComposerStore } from '../session-runtime/session-composer-store';
 
 export const CONTINUATION_FACADE_VERSION = 1 as const;
 
@@ -34,6 +35,7 @@ const facade = Object.freeze({
   createSessionConflictStore,
   createSessionTransientStatusStore,
   createSessionSearchRegistry,
+  createSessionComposerStore,
 });
 
 declare global {

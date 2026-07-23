@@ -333,6 +333,11 @@ if (typeof createSessionTransientStatusStore !== 'function') {
     throw new Error('Session transient status store is unavailable');
 }
 const sessionTransientStatusStore = createSessionTransientStatusStore();
+const createSessionComposerStore = window.__ocContinuation?.createSessionComposerStore;
+if (typeof createSessionComposerStore !== 'function') {
+    throw new Error('Session composer store is unavailable');
+}
+const sessionComposerStore = createSessionComposerStore();
 let gitUndoEnabled = false;
 let gitUndoReason = null;
 let baselineReady = true;
@@ -5318,6 +5323,7 @@ document.addEventListener('DOMContentLoaded', () => {
         onRegularDraft: (value) => {
             const session = getSessionState(activeSessionId);
             if (session) session.inputDraft = value;
+            sessionComposerStore.setDraft(activeSessionId, value);
         },
         onExitAppend: () => exitAppendInputMode({ restoreDraft: true }),
         onCycleMode: () => {
@@ -5579,13 +5585,42 @@ document.addEventListener('DOMContentLoaded', () => {
         if (appendHoverActiveKey && !appendHoverActiveKey.startsWith(`${nextSessionId || ''}::`)) {
             clearAppendHover('session-change');
         }
-        if (!appendInputMode || appendInputMode.sessionId === nextSessionId) return;
-        appendInputMode = null;
-        if (input) {
-            const nextSession = getSessionState(nextSessionId);
-            input.value = nextSession?.inputDraft || '';
+        if (appendInputMode && appendInputMode.sessionId !== nextSessionId) {
+            appendInputMode = null;
         }
+        const nextSession = getSessionState(nextSessionId);
+        const composer = sessionComposerStore.get(nextSessionId);
+        if (input && (!appendInputMode || appendInputMode.sessionId !== nextSessionId)) {
+            input.value = composer.draft || nextSession?.inputDraft || '';
+        }
+        getAttachmentStateController().replace(composer.attachments);
+        renderAttachments();
+        const contextState = getComposerContextStateController();
+        contextState.clear();
+        for (const item of composer.contextItems) {
+            contextState.addContext(item?.displayText || '', item);
+        }
+        for (const file of composer.fileRefs) {
+            contextState.addFileRef(file);
+        }
+        renderContextTokens();
         updateAppendInputUi();
+    }
+
+    function captureSessionComposerState(sessionId) {
+        if (!sessionId) return;
+        const session = getSessionState(sessionId);
+        if (!session) return;
+        if (input && (!appendInputMode || appendInputMode.sessionId !== sessionId)) {
+            session.inputDraft = input.value;
+        }
+        const contextState = getComposerContextStateController();
+        sessionComposerStore.capture(sessionId, {
+            draft: session.inputDraft || '',
+            attachments: Array.from(getAttachmentStateController().getItems(), (item) => ({ ...item })),
+            contextItems: Array.from(contextState.getContextItems(), (item) => ({ ...item })),
+            fileRefs: Array.from(contextState.getFileRefs(), (file) => ({ ...file }))
+        });
     }
 
     function ensureQuoteSelectionButton() {
@@ -9636,6 +9671,9 @@ function shouldHideDcpUiMessage(message) {
     function transitionActiveSessionPresentationOwner(previousSessionId, targetSessionId) {
         const previousOwner = previousSessionId || '__no_session__';
         const targetOwner = targetSessionId || '__no_session__';
+        if (previousSessionId && previousOwner !== targetOwner) {
+            captureSessionComposerState(previousSessionId);
+        }
         const presentationOwner = chatWindowState.sessionId || previousOwner;
         const hasOwnedPresentation = Boolean(chatWindowState.adapter || chatWindowState.sessionId);
         if (!hasOwnedPresentation || (previousOwner === targetOwner && presentationOwner === targetOwner)) return false;
@@ -12799,6 +12837,14 @@ function appendMessageImages(parentEl, message) {
         input.value = '';
         const sentSession = getSessionState(activeSessionId);
         if (sentSession) sentSession.inputDraft = '';
+        if (sendingSessionId) {
+            sessionComposerStore.capture(sendingSessionId, {
+                draft: '',
+                attachments: [],
+                contextItems: [],
+                fileRefs: []
+            });
+        }
         closeFileMentionList();
     }
 
@@ -13807,6 +13853,7 @@ function appendMessageImages(parentEl, message) {
                 sessionConflictStore.deleteSession(sessionId);
                 sessionTransientStatusStore.deleteSession(sessionId);
                 sessionSearchRegistry.deleteSession(sessionId);
+                sessionComposerStore.deleteSession(sessionId);
                 sessions = sessions.filter((item) => item?.id !== sessionId);
                 renderSessionList();
                 break;
@@ -14448,9 +14495,22 @@ function appendMessageImages(parentEl, message) {
                 break;
             }
             case 'prefillInput': {
+                const sessionId = typeof message.sessionId === 'string' ? message.sessionId : '';
+                if (!sessionId) {
+                    vscode.postMessage({
+                        type: 'ui-debug',
+                        payload: ['[WV][PREFILL_DROP]', 'reason=missing-session-owner']
+                    });
+                    break;
+                }
                 const displayText = typeof message.displayText === 'string' ? message.displayText : '';
                 const payload = message.payload && typeof message.payload === 'object' ? message.payload : null;
-                addContextItem(displayText, payload);
+                if (!payload) break;
+                const contextItem = { displayText, ...payload };
+                sessionComposerStore.addContext(sessionId, contextItem);
+                if (sessionId === activeSessionId) {
+                    addContextItem(displayText, payload);
+                }
                 break;
             }
             case 'workspaceFileResults': {
@@ -14916,7 +14976,25 @@ function appendMessageImages(parentEl, message) {
                 break;
             }
             case 'restoreDraft': {
+                const sessionId = typeof message.sessionId === 'string' ? message.sessionId : '';
+                if (!sessionId) {
+                    vscode.postMessage({
+                        type: 'ui-debug',
+                        payload: ['[WV][RESTORE_DRAFT_DROP]', 'reason=missing-session-owner']
+                    });
+                    break;
+                }
+                const session = getSessionState(sessionId, true);
                 const draft = message?.payload || {};
+                const restoredText = typeof draft.text === 'string' ? draft.text : '';
+                const restoredAttachments = Array.isArray(draft.attachments)
+                    ? draft.attachments.map((filePath) => ({ filePath }))
+                    : [];
+                session.inputDraft = restoredText;
+                sessionComposerStore.restoreDraft(sessionId, restoredText, restoredAttachments);
+                if (sessionId !== activeSessionId) {
+                    break;
+                }
                 if (typeof draft.text === 'string' && inputEl) {
                     inputEl.value = draft.text;
                 }
@@ -14940,7 +15018,7 @@ function appendMessageImages(parentEl, message) {
                     applyModeStyles(selectedMode);
                     renderModeSelect();
                 }
-                setBusy(false);
+                clearBusyForSession(sessionId, 'restoreDraft');
                 if (inputEl) {
                     inputEl.focus();
                 }
@@ -15105,14 +15183,26 @@ function appendMessageImages(parentEl, message) {
                 break;
             }
             case 'attachmentAdded': {
-                getAttachmentStateController().add({
+                const sessionId = typeof message.sessionId === 'string' ? message.sessionId : '';
+                if (!sessionId) {
+                    vscode.postMessage({
+                        type: 'ui-debug',
+                        payload: ['[WV][ATTACHMENT_DROP]', 'reason=missing-session-owner']
+                    });
+                    break;
+                }
+                const attachment = {
                     id: message.id,
                     name: message.name,
                     filePath: message.filePath,
                     dataUrl: message.dataUrl,
                     mime: message.mime
-                });
-                renderAttachments();
+                };
+                sessionComposerStore.addAttachment(sessionId, attachment);
+                if (sessionId === activeSessionId) {
+                    getAttachmentStateController().add(attachment);
+                    renderAttachments();
+                }
                 break;
             }
             case 'attachmentError': {

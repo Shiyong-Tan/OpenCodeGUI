@@ -152,4 +152,43 @@ describe('cross-session runtime repository audit', () => {
     expect(smartResult).toContain('if (sessionId === activeSessionId)');
     expect(smartResult).not.toContain('sessionSearch.acceptSmartSearchResponse');
   });
+
+  test('composer drafts are captured on selection and restored only to their owner', () => {
+    const transition = extractFunction(main, 'function transitionActiveSessionPresentationOwner(');
+    const captureComposer = extractFunction(main, 'function captureSessionComposerState(');
+    const restoreDraftStart = main.indexOf("case 'restoreDraft':");
+    const restoreDraftEnd = main.indexOf("case 'userMessageUpgrade':", restoreDraftStart);
+    const restoreDraft = main.slice(restoreDraftStart, restoreDraftEnd);
+
+    expect(transition).toContain('captureSessionComposerState(previousSessionId);');
+    expect(captureComposer).toContain('sessionComposerStore.capture(sessionId, {');
+    expect(restoreDraft).toContain("const sessionId = typeof message.sessionId === 'string' ? message.sessionId : '';");
+    expect(restoreDraft).toContain('sessionComposerStore.restoreDraft(sessionId, restoredText, restoredAttachments);');
+    expect(restoreDraft).toContain('if (sessionId !== activeSessionId)');
+    expect(restoreDraft).toContain("clearBusyForSession(sessionId, 'restoreDraft')");
+    expect(restoreDraft).not.toContain('setBusy(false)');
+  });
+
+  test('asynchronous attachments and prefill context update only their composer owner', () => {
+    const attachmentStart = main.indexOf("case 'attachmentAdded':");
+    const attachmentEnd = main.indexOf("case 'attachmentError':", attachmentStart);
+    const attachmentCase = main.slice(attachmentStart, attachmentEnd);
+    const prefillStart = main.indexOf("case 'prefillInput':");
+    const prefillEnd = main.indexOf("case 'workspaceFileResults':", prefillStart);
+    const prefillCase = main.slice(prefillStart, prefillEnd);
+
+    expect(attachmentCase).toContain("const sessionId = typeof message.sessionId === 'string' ? message.sessionId : '';");
+    expect(attachmentCase).toContain('sessionComposerStore.addAttachment(sessionId, attachment)');
+    expect(attachmentCase).toContain('if (sessionId === activeSessionId)');
+    expect(prefillCase).toContain('sessionComposerStore.addContext(sessionId, contextItem)');
+    expect(prefillCase).toContain('if (sessionId === activeSessionId)');
+
+    const outputSelectionStart = provider.indexOf('public async sendOutputSelectionToChat()');
+    const outputSelectionEnd = provider.indexOf('private sendPrefillInput(', outputSelectionStart);
+    const outputSelection = provider.slice(outputSelectionStart, outputSelectionEnd);
+    expect(outputSelection.indexOf('const sessionId = this.currentSessionId;')).toBeLessThan(
+      outputSelection.indexOf('await vscode.commands.executeCommand'),
+    );
+    expect(outputSelection).toContain("this.sendPrefillInput(sessionId, 'vscode output'");
+  });
 });

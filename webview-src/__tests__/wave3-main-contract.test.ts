@@ -100,6 +100,7 @@ describe('SH1 snapshot history presentation ownership', () => {
       const destroys: string[] = [];
       const context = vm.createContext({
         chatWindowState: { sessionId: presentationSessionId, adapter },
+        captureSessionComposerState: () => undefined,
         destroyChatWindowAdapter: (reason: string) => destroys.push(reason),
       });
       vm.runInContext(`${transition}; globalThis.transition = transitionActiveSessionPresentationOwner;`, context);
@@ -941,6 +942,7 @@ describe('B4S-R3 recovered anonymous owner behavior matrices', () => {
         window: { __oc: { renderFromState: () => trace.push('render') } }, scrollToBottom: () => trace.push('scroll'),
         logSessionState: () => trace.push('logSession'), renderAttachments: () => trace.push('renderAttachments'),
         renderContextTokens: () => trace.push('renderContext'), closeFileMentionList: () => trace.push('closeMention'),
+        sessionComposerStore: { capture: () => trace.push('captureComposer') },
         ...overrides,
       });
       return { trace, returned: sandbox.__owner(), input: sandbox.input.value, attachments: sandbox.attachments,
@@ -981,6 +983,7 @@ describe('B4S-R3 recovered anonymous owner behavior matrices', () => {
         window: { __oc: { renderFromState: () => trace.push('render') } }, scrollToBottom: () => trace.push('scroll'),
         logSessionState: () => trace.push('logSession'), renderAttachments: () => trace.push('renderAttachments'),
         renderContextTokens: () => trace.push('renderContext'), closeFileMentionList: () => trace.push('closeMention'),
+        sessionComposerStore: { capture: () => trace.push('captureComposer') },
       });
       const returned = sandbox.__owner();
       return { trace, returned, queued: sandbox.pendingUiPrompts.length, switching: sandbox.isSwitchingSession,
@@ -988,7 +991,7 @@ describe('B4S-R3 recovered anonymous owner behavior matrices', () => {
     };
     expect(run('s')).toEqual({
       trace: ['logSegment', 'post:ui-debug', 'post:ui-debug', 'busy', 'prompt', 'post:registerTmpKey', 'render', 'scroll',
-        'logSession', 'post:ui-debug', 'post:ui-debug', 'post:sendMessage', 'renderAttachments', 'renderContext', 'closeMention'],
+        'logSession', 'post:ui-debug', 'post:ui-debug', 'post:sendMessage', 'renderAttachments', 'renderContext', 'captureComposer', 'closeMention'],
       returned: undefined, queued: 0, switching: false, input: '', draft: '',
     });
     expect(run('')).toEqual({
@@ -1053,7 +1056,7 @@ describe('B4S-E4 named owner mutation rejection', () => {
     if (!sessionBody.includes('transitionActiveSessionPresentationOwner(prevSessionId, sessionId);')) errors.push('transition:session');
     if (!/rekeyKeyedChatPresentation = \(oldKey, newKey, sessionId\) => \{\s*return applyKeyedChatPresentationAliasMigration\(oldKey, newKey, sessionId\);\s*\};/.test(candidate)) errors.push('assignment:alias-boolean');
     const frozen = [
-      ['body:primary', 'function handlePrimarySendClick()', '9d3d433f243c138c8c770a1f819e73a92250fff737bd40c08a577e56a6ae2661'],
+      ['body:primary', 'function handlePrimarySendClick()', '593a063a9ce63154f162635856a652a6fde6e9ae898ef97ab05c67a26a4c711f'],
       ['body:scroll', 'function handleChatContainerScroll()', '1f0f8b57e4dd9c38d549b10ae98ed9341f0c8b2cae99ee2077914eecf0bbda4f'],
       ['body:alias', 'function applyKeyedChatPresentationAliasMigration(', '013e6cad3d3bf432449d48b1488d9f95c9f636caee5dd82cb362bb81bf8741a1'],
     ];

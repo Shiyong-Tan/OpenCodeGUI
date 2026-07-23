@@ -1292,7 +1292,11 @@ ${attachmentLines.join('\n')}`
                         });
                     } catch (error) {
                         vscode.window.showErrorMessage(`Failed to save image: ${error}`);
-                        host.postAddResponse(activeWebview, `Failed to save image: ${error}`);
+                        activeWebview.postMessage({
+                            type: 'attachmentError',
+                            value: `Failed to save image: ${error}`,
+                            sessionId: attachmentSessionId
+                        });
                     }
                     break;
                 }
@@ -1678,6 +1682,7 @@ ${attachmentLines.join('\n')}`
                     if (draftToRestore) {
                         activeWebview.postMessage({
                             type: 'restoreDraft',
+                            sessionId: cancelSessionId,
                             payload: draftToRestore
                         });
                     }
