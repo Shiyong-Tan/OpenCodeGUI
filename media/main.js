@@ -3135,6 +3135,18 @@ function replaceKeyEverywhere(oldId, newId, sessionId = activeSessionId) {
     const session = getSessionState(sessionId);
     if (!session) return;
 
+    const oldMessageForRoleGuard = session.messagesById.get(oldId) || null;
+    if (oldMessageForRoleGuard?.role === 'user' && typeof oldId === 'string' && oldId.startsWith('msg_') && typeof newId === 'string' && newId.startsWith('msg_')) {
+        if (session.currentTurnAssistantKey === oldId) session.currentTurnAssistantKey = null;
+        if (session.currentTurnAssistantMsgId === oldId) session.currentTurnAssistantMsgId = null;
+        if (session.thinkingId === oldId) session.thinkingId = null;
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: ['reject.user->assistant-role', 'oldKey', oldId, 'newKey', newId, 'sessionId', sessionId]
+        });
+        return;
+    }
+
     const preReplaceCurrentTurnAssistantKey = session.currentTurnAssistantKey;
     const preReplaceThinkingId = session.thinkingId;
     const preReplaceCurrentTurnAssistantMsgId = session.currentTurnAssistantMsgId;
@@ -13707,6 +13719,59 @@ function appendMessageImages(parentEl, message) {
         refreshSendButtonStateAfterSessionSwitch();
     }
 
+function applyAppendSuccessorProtocolTransition(message) {
+    if (message.type === 'turnInFlight') {
+        const sessionId = getEventSessionId(message, 'turnInFlight');
+        if (!sessionId) return true;
+        const session = getSessionState(sessionId, true);
+        session.backendTurnInFlight = Boolean(message?.inFlight);
+        if (message?.inFlight) {
+            session.turnFullyFinalized = false;
+            session.snapshotFinalizeReady = false;
+            const ownerMsgId = typeof message?.ownerMsgId === 'string' ? message.ownerMsgId : null;
+            if (ownerMsgId && session.messagesById.has(ownerMsgId)) {
+                const activeAssistantKey = session.currentTurnAssistantKey || session.thinkingId;
+                const hasActiveTempAssistant = typeof activeAssistantKey === 'string' && (activeAssistantKey.startsWith('tmp:') || activeAssistantKey.startsWith('local-'));
+                if (hasActiveTempAssistant && activeAssistantKey !== ownerMsgId) {
+                    vscode.postMessage({ type: 'ui-debug', payload: ['turnInFlight', 'skip-owner-over-temp', 'ownerMsgId', ownerMsgId, 'activeAssistantKey', activeAssistantKey] });
+                    updateSendGate();
+                    return true;
+                }
+                session.currentTurnAssistantKey = ownerMsgId;
+                session.currentTurnAssistantMsgId = ownerMsgId;
+                session.thinkingId = ownerMsgId;
+                const ownerMsg = session.messagesById.get(ownerMsgId);
+                if (ownerMsg) ownerMsg.meta = { ...(ownerMsg.meta || {}), isThinking: true, statusText: '' };
+            }
+        } else {
+            maybeExitAppendInputModeAfterTurnEnd(sessionId, 'turnInFlight:false');
+        }
+        updateSendGate();
+        return true;
+    }
+    if (message.type === 'assistantMessageMeta') {
+        const route = resolveContentEventRoute(message, 'assistantMessageMeta');
+        if (!route) return true;
+        const sessionId = route.sessionId;
+        const session = getSessionState(sessionId, false);
+        retainAgentLaneParentAssociation(session, route);
+        if (session?.canceledActiveTurn) { vscode.postMessage({ type: 'ui-debug', payload: ['assistantMessageMeta', 'drop-canceledActiveTurn', `sessionId=${sessionId}`] }); return true; }
+        if (session?.turnFullyFinalized === true && session?.backendTurnInFlight !== true) { vscode.postMessage({ type: 'ui-debug', payload: ['assistantMessageMeta', 'drop-turnSealed', `sessionId=${sessionId}`] }); return true; }
+        const allowedSessionIds = Array.isArray(message?.allowedSessionIds) ? message.allowedSessionIds.filter(id => typeof id === 'string' && id.length) : [];
+        const isAllowedSession = !allowedSessionIds.length || allowedSessionIds.includes(sessionId);
+        vscode.postMessage({ type: 'ui-debug', payload: ['[WV][ASSIST_META_GATE]', `current=${activeSessionId || 'null'}`, `meta=${sessionId}`, `allowedCount=${allowedSessionIds.length}`, `isAllowed=${isAllowedSession}`, `assistantMsgId=${message?.assistantMsgId || message?.messageId || 'null'}`] });
+        if (!isAllowedSession) { vscode.postMessage({ type: 'ui-debug', payload: ['[WV][ASSIST_META_BLOCKED]', `current=${activeSessionId || 'null'}`, `meta=${sessionId}`, `allowed=${allowedSessionIds.join(',') || 'none'}`] }); return true; }
+        const sessionStateForAllowed = getSessionState(sessionId, true);
+        retainAgentLaneParentAssociation(sessionStateForAllowed, route);
+        if (message.isSyntheticTurn === true) { vscode.postMessage({ type: 'ui-debug', payload: ['[WV][ASSIST_META_SYNTHETIC_SUPPRESSED]', `sessionId=${sessionId}`, `turnId=${message.turnId || 'null'}`, `msgId=${message.assistantMsgId || message.messageId || 'null'}`] }); return true; }
+        handleAssistantMeta(sessionId, message, { render: route.shouldRender });
+        if (!tryPatchAssistantStreamingBubble(sessionId, 'assistantMessageMeta').applied) renderIfActive(sessionId, 'assistantMessageMeta', { scroll: true });
+        logSessionState(sessionId, 'assistantMessageMeta');
+        return true;
+    }
+    return false;
+}
+
  window.addEventListener('message', (event) => {
         const message = event.data || {};
         vscode.postMessage({
@@ -14756,38 +14821,7 @@ function appendMessageImages(parentEl, message) {
                 break;
             }
             case 'turnInFlight': {
-                const sessionId = getEventSessionId(message, 'turnInFlight');
-                if (!sessionId) break;
-                const session = getSessionState(sessionId, true);
-                session.backendTurnInFlight = Boolean(message?.inFlight);
-                if (message?.inFlight) {
-                    session.turnFullyFinalized = false;
-                    session.snapshotFinalizeReady = false;
-                    const ownerMsgId = typeof message?.ownerMsgId === 'string' ? message.ownerMsgId : null;
-                    if (ownerMsgId && session.messagesById.has(ownerMsgId)) {
-                        const activeAssistantKey = session.currentTurnAssistantKey || session.thinkingId;
-                        const hasActiveTempAssistant = typeof activeAssistantKey === 'string' && (activeAssistantKey.startsWith('tmp:') || activeAssistantKey.startsWith('local-'));
-                        if (hasActiveTempAssistant && activeAssistantKey !== ownerMsgId) {
-                            vscode.postMessage({ type: 'ui-debug', payload: ['turnInFlight', 'skip-owner-over-temp', 'ownerMsgId', ownerMsgId, 'activeAssistantKey', activeAssistantKey] });
-                            updateSendGate();
-                            break;
-                        }
-                        session.currentTurnAssistantKey = ownerMsgId;
-                        session.currentTurnAssistantMsgId = ownerMsgId;
-                        session.thinkingId = ownerMsgId;
-                        const ownerMsg = session.messagesById.get(ownerMsgId);
-                        if (ownerMsg) {
-                            ownerMsg.meta = {
-                                ...(ownerMsg.meta || {}),
-                                isThinking: true,
-                                statusText: ''
-                            };
-                        }
-                    }
-                } else {
-                    maybeExitAppendInputModeAfterTurnEnd(sessionId, 'turnInFlight:false');
-                }
-                updateSendGate();
+                applyAppendSuccessorProtocolTransition(message);
                 break;
             }
             case 'systemNotice': {
@@ -14928,76 +14962,7 @@ function appendMessageImages(parentEl, message) {
                 break;
             }
             case 'assistantMessageMeta': {
-                const route = resolveContentEventRoute(message, 'assistantMessageMeta');
-                if (!route) break;
-                const sessionId = route.sessionId;
-                const session = getSessionState(sessionId, false);
-                retainAgentLaneParentAssociation(session, route);
-                if (session?.canceledActiveTurn) {
-                    vscode.postMessage({
-                        type: 'ui-debug',
-                        payload: ['assistantMessageMeta', 'drop-canceledActiveTurn', `sessionId=${sessionId}`]
-                    });
-                    break;
-                }
-                if (session?.turnFullyFinalized === true && session?.backendTurnInFlight !== true) {
-                    vscode.postMessage({
-                        type: 'ui-debug',
-                        payload: ['assistantMessageMeta', 'drop-turnSealed', `sessionId=${sessionId}`]
-                    });
-                    break;
-                }
-                const allowedSessionIds = Array.isArray(message?.allowedSessionIds)
-                    ? message.allowedSessionIds.filter(id => typeof id === 'string' && id.length)
-                    : [];
-                const isAllowedSession = !allowedSessionIds.length || allowedSessionIds.includes(sessionId);
-                vscode.postMessage({
-                    type: 'ui-debug',
-                    payload: [
-                        '[WV][ASSIST_META_GATE]',
-                        `current=${activeSessionId || 'null'}`,
-                        `meta=${sessionId}`,
-                        `allowedCount=${allowedSessionIds.length}`,
-                        `isAllowed=${isAllowedSession}`,
-                        `assistantMsgId=${message?.assistantMsgId || message?.messageId || 'null'}`
-                    ]
-                });
-                if (!isAllowedSession) {
-                    vscode.postMessage({
-                        type: 'ui-debug',
-                        payload: [
-                            '[WV][ASSIST_META_BLOCKED]',
-                            `current=${activeSessionId || 'null'}`,
-                            `meta=${sessionId}`,
-                            `allowed=${allowedSessionIds.join(',') || 'none'}`
-                        ]
-                    });
-                    break;
-                }
-                const sessionStateForAllowed = getSessionState(sessionId, true);
-                retainAgentLaneParentAssociation(sessionStateForAllowed, route);
-
-                // P2: Suppress synthetic auto-continuation turns
-                if (message.isSyntheticTurn === true) {
-                    // State tracking still happens (getSessionState above),
-                    // but skip all display side-effects.
-                    vscode.postMessage({
-                        type: 'ui-debug',
-                        payload: [
-                            '[WV][ASSIST_META_SYNTHETIC_SUPPRESSED]',
-                            `sessionId=${sessionId}`,
-                            `turnId=${message.turnId || 'null'}`,
-                            `msgId=${message.assistantMsgId || message.messageId || 'null'}`
-                        ]
-                    });
-                    break;
-                }
-                handleAssistantMeta(sessionId, message, { render: route.shouldRender });
-                // Removed: reconcilePendingSegments - new system uses applyHydratedSegments
-                if (!tryPatchAssistantStreamingBubble(sessionId, 'assistantMessageMeta').applied) {
-                    renderIfActive(sessionId, 'assistantMessageMeta', { scroll: true });
-                }
-                logSessionState(sessionId, 'assistantMessageMeta');
+                applyAppendSuccessorProtocolTransition(message);
                 break;
             }
             case 'assistantPhase': {
