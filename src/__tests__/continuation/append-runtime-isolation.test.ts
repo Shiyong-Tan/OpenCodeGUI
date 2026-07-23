@@ -183,6 +183,17 @@ function loadUserAckBindHarness() {
         },
         getEventSessionId: (message: any) => message?.sessionId || null,
         getSessionState: (sessionId: string) => sessions.get(sessionId),
+        messageIdentityStore: {
+            bindCanonical: (message: any, canonicalId: string) => {
+                message.meta = {
+                    ...(message.meta || {}),
+                    identity: {
+                        entityId: message.meta?.identity?.entityId || 'entity:test',
+                        canonicalId,
+                    },
+                };
+            },
+        },
         logTimelineSnapshot: jest.fn(),
         syncAppendSnapshotMetadata: jest.fn(),
     };

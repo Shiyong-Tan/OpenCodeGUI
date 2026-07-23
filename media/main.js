@@ -2669,13 +2669,15 @@ function buildCanonicalSnapshotEntries(session, keys) {
 
 function createMessage(session, payload) {
     const order = typeof payload.order === 'number' ? payload.order : session.nextOrder++;
-    return {
+    const message = {
         id: payload.id,
         role: payload.role,
         text: payload.text || '',
         meta: { ...(payload.meta || {}) },
         order
     };
+    messageIdentityStore.ensure(message);
+    return message;
 }
 
 function upsertMessage(session, payload) {
@@ -2699,6 +2701,7 @@ function upsertMessage(session, payload) {
             text: typeof payload.text === 'string' ? payload.text : existing.text,
             meta: { ...existing.meta, ...(payload.meta || {}) }
         };
+        messageIdentityStore.ensure(next);
         session.messagesById.set(payload.id, next);
         return next;
     }
@@ -3219,11 +3222,17 @@ function replaceKeyEverywhere(oldId, newId, sessionId = activeSessionId) {
     if (message) {
         session.messagesById.delete(oldId);
         if (!existing) {
+            if (typeof newId === 'string' && newId.startsWith('msg_')) {
+                messageIdentityStore.bindCanonical(message, newId);
+            }
             message.id = newId;
             session.messagesById.set(newId, message);
         } else {
             const selected = pickCompleteMessage(message, existing);
             if (selected) {
+                if (typeof newId === 'string' && newId.startsWith('msg_')) {
+                    messageIdentityStore.bindCanonical(selected, newId);
+                }
                 selected.id = newId;
                 session.messagesById.set(newId, selected);
             }
@@ -3683,6 +3692,10 @@ if (typeof selectAssistantUpgradeCandidate !== 'function') {
 const turnLifecycleController = window.__ocContinuation?.createTurnLifecycleController?.();
 if (!turnLifecycleController) {
     throw new Error('Turn lifecycle controller is unavailable');
+}
+const messageIdentityStore = window.__ocContinuation?.createMessageIdentityStore?.();
+if (!messageIdentityStore) {
+    throw new Error('Message identity store is unavailable');
 }
 
 function attemptAssistantUpgrade(sessionId, payload, source) {
