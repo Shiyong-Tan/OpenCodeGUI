@@ -76,4 +76,20 @@ describe('cross-session runtime repository audit', () => {
     expect(commit).toContain('if (!isCurrent(token)) return false;');
     expect(commit).toContain("options.renderSession(token.sessionId, 'session-hydrated');");
   });
+
+  test('visible controls and background assistant routing do not use global busy state', () => {
+    const compactGate = extractFunction(main, 'function isCompactDisabledForSession(');
+    const assistantMetaStart = main.indexOf('function handleAssistantMeta(');
+    const assistantChunkStart = main.indexOf('function handleChatChunk(', assistantMetaStart);
+    const assistantDoneStart = main.indexOf('function handleChatDone(', assistantChunkStart);
+    const assistantMeta = main.slice(assistantMetaStart, assistantChunkStart);
+    const assistantChunk = main.slice(assistantChunkStart, assistantDoneStart);
+    expect(compactGate).toContain('isSessionBusy(sessionId)');
+    expect(compactGate).not.toContain('if (isBusy)');
+    expect(assistantMeta).toContain('isSessionBusy(sessionId)');
+    expect(assistantChunk).toContain('isSessionBusy(sessionId)');
+    expect(main).not.toContain('busy: isBusy, appendHoverActive');
+    expect(main).not.toContain("Undo unavailable: ${isBusy ? 'busy'");
+    expect(main).not.toContain("segment.state === 'restorable' && !isBusy");
+  });
 });

@@ -211,7 +211,11 @@ function createHarness(options: { appendable?: boolean; undoAllowed?: boolean; b
     posted: [] as any[], gitDiff: [] as any[], segmentRich: 0, segmentRestore: [] as any[], segmentToggle: [] as any[],
   };
   const clipboard = options.clipboard || Promise.resolve(true);
-  const session: any = { messagesById: new Map(), backendTurnInFlight: true };
+  const session: any = {
+    messagesById: new Map(),
+    backendTurnInFlight: options.busy === true,
+    turnFullyFinalized: options.busy !== true,
+  };
   const deps: any = {
     document,
     window: {

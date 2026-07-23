@@ -339,7 +339,7 @@ const BASELINE_PREPARING_MAX_MS = 45000;
 
 function isCompactDisabledForSession(sessionId) {
     if (!sessionId) return true;
-    if (isBusy) return true;
+    if (isSessionBusy(sessionId)) return true;
     if (getHeaderStateController().isCompacting(sessionId)) return true;
     const session = getSessionState(sessionId);
     return isSendBlockedByPendingState(session);
@@ -6852,7 +6852,8 @@ function shouldHideDcpUiMessage(message) {
         restoreBtn.className = 'reverted-segment-btn';
         restoreBtn.textContent = 'Restore all';
         const anchorMsgId = segment.anchorMsgId || segment.anchor?.msgId || '';
-        const canRestore = segment.state === 'restorable' && !isBusy && Boolean(anchorMsgId);
+        const sessionBusy = Boolean(session && (session.turnFullyFinalized === false || session.backendTurnInFlight === true));
+        const canRestore = segment.state === 'restorable' && !sessionBusy && Boolean(anchorMsgId);
         restoreBtn.disabled = !canRestore;
         restoreBtn.addEventListener('click', () => {
             if (!canRestore) {
@@ -7686,7 +7687,8 @@ function shouldHideDcpUiMessage(message) {
             undoSegment: getUndoSegmentPlaceholderPresentation(session, message),
             actions: {
                 canAppend: canAppendToMessage(session, message), canUndo: message?.role === 'user' && gitUndoEnabled,
-                busy: isBusy, appendHoverActive: appendHoverActiveKey === buildAppendHoverKey(activeSessionId, message?.id)
+                busy: Boolean(session && (session.turnFullyFinalized === false || session.backendTurnInFlight === true)),
+                appendHoverActive: appendHoverActiveKey === buildAppendHoverKey(activeSessionId, message?.id)
             },
             backgroundSubagent: shouldShowBackgroundSubagentIndicator(session, message),
             subagentExpansion: getSubagentExpansionPresentation(message)
@@ -8119,6 +8121,7 @@ function shouldHideDcpUiMessage(message) {
         if (presentationSelection?.mode !== 'safe-shell' || presentationSelection?.family !== 'message-user') return null;
         const message = unit.value?.message;
         if (!message || message.role !== 'user') return null;
+        const sessionBusy = Boolean(session && (session.turnFullyFinalized === false || session.backendTurnInFlight === true));
 
         const initialSpec = rendering.getSafeShellSpec({
             mode: presentationSelection.mode,
@@ -8297,9 +8300,10 @@ function shouldHideDcpUiMessage(message) {
             } else if (spec.actions.includes('undo')) {
                 const undoVerdict = canUndo(session, message.id);
                 const undoButton = makeButton('undo', actionLabels.undo, () => {
-                    if (isBusy) return;
                     const sessionId = activeSessionId;
                     const currentSession = getSessionState(sessionId);
+                    const currentSessionBusy = Boolean(currentSession && (currentSession.turnFullyFinalized === false || currentSession.backendTurnInFlight === true));
+                    if (currentSessionBusy) return;
                     const currentMessage = currentSession?.messagesById?.get?.(message.id);
                     if (!currentMessage) return;
                     const verdict = canUndo(currentSession, message.id);
@@ -8307,8 +8311,8 @@ function shouldHideDcpUiMessage(message) {
                     discardAllSegments(sessionId, 'undo', selectedMode || 'unknown', { anchorMsgId: verdict.msgId });
                     handleUndoToMessage(sessionId, verdict.msgId);
                 });
-                undoButton.disabled = isBusy || undoVerdict.allowed !== true;
-                undoButton.title = undoButton.disabled ? `Undo unavailable: ${isBusy ? 'busy' : undoVerdict.reason}` : actionLabels.undo;
+                undoButton.disabled = sessionBusy || undoVerdict.allowed !== true;
+                undoButton.title = undoButton.disabled ? `Undo unavailable: ${sessionBusy ? 'busy' : undoVerdict.reason}` : actionLabels.undo;
                 actions.appendChild(undoButton);
             }
 
@@ -8985,6 +8989,7 @@ function shouldHideDcpUiMessage(message) {
                 ? session?.segmentsByNoticeKey?.get?.(noticeKey)
                 : null;
         if (!segment || (unit.kind !== 'segment' && !isPlaceholder)) return null;
+        const sessionBusy = Boolean(session && (session.turnFullyFinalized === false || session.backendTurnInFlight === true));
 
         const memberIds = Array.isArray(segment.memberMsgIds)
             ? segment.memberMsgIds
@@ -9008,7 +9013,7 @@ function shouldHideDcpUiMessage(message) {
         const isDirect = unit.kind === 'segment';
         const anchorMsgId = segment.anchorMsgId || segment.anchor?.msgId || '';
         const restoreEligible = isDirect
-            ? segment.state === 'restorable' && !isBusy && Boolean(anchorMsgId)
+            ? segment.state === 'restorable' && !sessionBusy && Boolean(anchorMsgId)
             : segment.restoreAllowed === true;
         const stateLabel = isDirect
             ? (typeof segment.state === 'string' && segment.state ? segment.state : 'unknown')
@@ -12072,7 +12077,7 @@ function applyPromptToSession(sessionId, payload) {
             vscode.postMessage({ type: 'registerPendingUserLocal', sessionId, localKey: payload.clientMessageId });
         }
 
-    if (payload.mode === 'build' && !isBusy) {
+    if (payload.mode === 'build' && !isSessionBusy(sessionId)) {
         vscode.postMessage({
             type: 'ui-debug',
             payload: ['[WV][FREEZE_DROP]', 'isBusy=false', 'wouldFreeze=true']
@@ -12206,7 +12211,7 @@ function handleAssistantMeta(sessionId, message, options = {}) {
         let targetId = session.currentTurnAssistantKey || session.thinkingId;
 
         if (!targetId && msgId && session.messagesById.has(msgId)) {
-            if (isBusy && (!session.currentTurnAssistantKey || session.currentTurnAssistantKey === msgId)) {
+            if (isSessionBusy(sessionId) && (!session.currentTurnAssistantKey || session.currentTurnAssistantKey === msgId)) {
                 targetId = msgId;
                 session.currentTurnAssistantKey = msgId;
             } else {
@@ -12343,7 +12348,7 @@ function handleChatChunk(sessionId, message) {
         let targetId = session.currentTurnAssistantKey || session.thinkingId;
 
         if (!targetId && msgId && session.messagesById.has(msgId)) {
-            if (isBusy && (!session.currentTurnAssistantKey || session.currentTurnAssistantKey === msgId)) {
+            if (isSessionBusy(sessionId) && (!session.currentTurnAssistantKey || session.currentTurnAssistantKey === msgId)) {
                 targetId = msgId;
                 session.currentTurnAssistantKey = msgId;
             } else {
