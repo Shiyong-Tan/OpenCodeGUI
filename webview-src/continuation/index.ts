@@ -8,6 +8,7 @@ import { createSessionViewStore } from '../session-runtime/session-view-store';
 import { selectAssistantUpgradeCandidate } from '../session-runtime/assistant-binding';
 import { createTurnLifecycleController } from '../session-runtime/turn-lifecycle';
 import { createMessageIdentityStore } from '../session-runtime/message-identity';
+import { createMessageRekeyController } from '../session-runtime/message-rekey-controller';
 
 export const CONTINUATION_FACADE_VERSION = 1 as const;
 
@@ -24,6 +25,7 @@ const facade = Object.freeze({
   selectAssistantUpgradeCandidate,
   createTurnLifecycleController,
   createMessageIdentityStore,
+  createMessageRekeyController,
 });
 
 declare global {

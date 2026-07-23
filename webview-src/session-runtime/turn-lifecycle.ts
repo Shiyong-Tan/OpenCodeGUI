@@ -90,6 +90,22 @@ export function createTurnLifecycleController(options: { now?(): number } = {}) 
       return current;
     },
 
+    rebindCanonical(
+      session: TurnLifecycleSession,
+      oldId: string,
+      newId: string,
+    ): WebviewTurnLifecycle {
+      const current = infer(session);
+      if (current.canonicalAssistantId !== oldId) return current;
+      if (!newId.startsWith('msg_')) return current;
+      const next: WebviewTurnLifecycle = {
+        ...current,
+        canonicalAssistantId: newId,
+      };
+      project(session, next, now());
+      return next;
+    },
+
     start(session: TurnLifecycleSession): WebviewTurnLifecycle {
       const current = infer(session);
       const next: WebviewTurnLifecycle = {
