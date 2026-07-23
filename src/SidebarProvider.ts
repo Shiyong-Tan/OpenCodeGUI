@@ -3574,6 +3574,41 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
     }
 
+    private async applyUtilityModelSelection(value: unknown, webview: vscode.Webview): Promise<void> {
+        this.selectedModel = (value || undefined) as string | undefined;
+        await this._context.globalState.update('opencode.model', this.selectedModel);
+        await this.postModelQuota(webview, 'model-change');
+    }
+
+    private async applyUtilityModeSelection(value: unknown): Promise<void> {
+        const requestedMode = typeof value === 'string' ? value : '';
+        const mode = this.availableModes.includes(requestedMode)
+            ? requestedMode
+            : (this.availableModes[0] || 'plan');
+        this.selectedMode = mode || undefined;
+        await this._context.globalState.update('opencode.mode', this.selectedMode);
+    }
+
+    private async applyUtilityVariantSelection(value: unknown): Promise<void> {
+        this.selectedVariant = (value || undefined) as string | undefined;
+        await this._context.globalState.update('opencode.variant', this.selectedVariant);
+    }
+
+    private resolveUtilityLocalQuestion(
+        callId: string,
+        result: unknown
+    ): { resolved: boolean; sessionId?: string } {
+        const pending = callId ? this.pendingLocalQuestionRequests.get(callId) : undefined;
+        if (!pending) return { resolved: false };
+        this.pendingLocalQuestionRequests.delete(callId);
+        const answer = result && typeof result === 'object' ? result as Record<string, unknown> : {};
+        pending.resolve({
+            selectedId: typeof answer.selectedId === 'string' ? answer.selectedId : undefined,
+            selectedLabel: typeof answer.selectedLabel === 'string' ? answer.selectedLabel : undefined
+        });
+        return { resolved: true, sessionId: pending.sessionId };
+    }
+
     private async listWorkspaceFiles(query: string, limit = 50): Promise<WorkspaceFileResult[]> {
         const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         if (!workspaceRoot) return [];

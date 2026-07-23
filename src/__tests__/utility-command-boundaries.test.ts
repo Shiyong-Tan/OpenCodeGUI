@@ -81,6 +81,32 @@ function createHarness(overrides: Record<string, unknown> = {}) {
         availableModes: ['plan', 'build'],
         _context: { globalState: { update: jest.fn(async () => undefined) } },
         postModelQuota: jest.fn(async () => undefined),
+        applyUtilityModelSelection: async function (this: any, value: unknown, targetWebview: unknown) {
+            this.selectedModel = value || undefined;
+            await this._context.globalState.update('opencode.model', this.selectedModel);
+            await this.postModelQuota(targetWebview, 'model-change');
+        },
+        applyUtilityModeSelection: async function (this: any, value: unknown) {
+            const requestedMode = typeof value === 'string' ? value : '';
+            this.selectedMode = this.availableModes.includes(requestedMode)
+                ? requestedMode
+                : (this.availableModes[0] || 'plan');
+            await this._context.globalState.update('opencode.mode', this.selectedMode);
+        },
+        applyUtilityVariantSelection: async function (this: any, value: unknown) {
+            this.selectedVariant = value || undefined;
+            await this._context.globalState.update('opencode.variant', this.selectedVariant);
+        },
+        resolveUtilityLocalQuestion: function (this: any, callId: string, result: any) {
+            const pending = callId ? this.pendingLocalQuestionRequests.get(callId) : undefined;
+            if (!pending) return { resolved: false };
+            this.pendingLocalQuestionRequests.delete(callId);
+            pending.resolve({
+                selectedId: typeof result?.selectedId === 'string' ? result.selectedId : undefined,
+                selectedLabel: typeof result?.selectedLabel === 'string' ? result.selectedLabel : undefined,
+            });
+            return { resolved: true, sessionId: pending.sessionId };
+        },
         refreshModels: jest.fn(async () => undefined),
         listWorkspaceFiles: jest.fn(async () => []),
         smartSearch: { run: jest.fn() },
@@ -114,6 +140,23 @@ function createHarness(overrides: Record<string, unknown> = {}) {
 }
 
 describe('utility command family characterization', () => {
+    test('routes utility-owned mutable state through bounded provider domain methods', () => {
+        const providerSource = fs.readFileSync(
+            path.join(process.cwd(), 'src', 'SidebarProvider.ts'),
+            'utf8',
+        );
+        expect(controllerSource).toContain('host.applyUtilityModelSelection(data.value, activeWebview)');
+        expect(controllerSource).toContain('host.applyUtilityModeSelection(data.value)');
+        expect(controllerSource).toContain('host.applyUtilityVariantSelection(data.value)');
+        expect(controllerSource).toContain('host.resolveUtilityLocalQuestion(callId, data?.result)');
+        expect(controllerSource).not.toMatch(/host\.selected(Model|Mode|Variant)\s*=/);
+        expect(controllerSource).not.toContain('host.pendingLocalQuestionRequests.');
+        for (const method of [
+            'applyUtilityModelSelection', 'applyUtilityModeSelection',
+            'applyUtilityVariantSelection', 'resolveUtilityLocalQuestion',
+        ]) expect(providerSource).toMatch(new RegExp(`private (?:async )?${method}\\b`));
+    });
+
     test('keeps every utility command in the single top-level dispatcher', () => {
         const commands = [
             'setModel', 'compactSession', 'setMode', 'setVariant', 'refreshModels',
@@ -274,5 +317,34 @@ describe('utility command family characterization', () => {
             response: 'once',
             reason: 'Error: backend unavailable',
         });
+    });
+
+    test('consumes a pending local question exactly once through its domain method', async () => {
+        const resolve = jest.fn();
+        const pendingLocalQuestionRequests = new Map([[
+            'call-1',
+            { sessionId: 'session-a', resolve },
+        ]]);
+        const harness = createHarness({ pendingLocalQuestionRequests });
+        const input = {
+            type: 'localQuestionResult',
+            callId: 'call-1',
+            result: { selectedId: 'keep', selectedLabel: 'Keep Changes', ignored: true },
+        };
+        await harness.send(input);
+        await harness.send(input);
+
+        expect(resolve).toHaveBeenCalledTimes(1);
+        expect(resolve).toHaveBeenCalledWith({
+            selectedId: 'keep',
+            selectedLabel: 'Keep Changes',
+        });
+        expect(pendingLocalQuestionRequests.has('call-1')).toBe(false);
+        expect(harness.host.uiDebugChannel.appendLine).toHaveBeenCalledWith(
+            'EXT: localQuestionResult.ok | sessionId=session-a | callId=call-1',
+        );
+        expect(harness.host.uiDebugChannel.appendLine).toHaveBeenCalledWith(
+            'EXT: localQuestionResult.skip | callId=call-1 | reason=missing-pending',
+        );
     });
 });

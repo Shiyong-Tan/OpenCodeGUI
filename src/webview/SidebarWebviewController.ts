@@ -609,9 +609,7 @@ ${attachmentLines.join('\n')}`
                     break;
                 }
                 case "setModel": {
-                    host.selectedModel = data.value || undefined;
-                    await host._context.globalState.update('opencode.model', host.selectedModel);
-                    await host.postModelQuota(activeWebview, 'model-change');
+                    await host.applyUtilityModelSelection(data.value, activeWebview);
                     break;
                 }
                 case "compactSession": {
@@ -657,17 +655,11 @@ ${attachmentLines.join('\n')}`
                     break;
                 }
                 case "setMode": {
-                    const requestedMode = typeof data.value === 'string' ? data.value : '';
-                    const mode = host.availableModes.includes(requestedMode)
-                        ? requestedMode
-                        : (host.availableModes[0] || 'plan');
-                    host.selectedMode = mode || undefined;
-                    await host._context.globalState.update('opencode.mode', host.selectedMode);
+                    await host.applyUtilityModeSelection(data.value);
                     break;
                 }
                 case "setVariant": {
-                    host.selectedVariant = data.value || undefined;
-                    await host._context.globalState.update('opencode.variant', host.selectedVariant);
+                    await host.applyUtilityVariantSelection(data.value);
                     break;
                 }
                 case "refreshModels": {
@@ -1921,17 +1913,12 @@ ${attachmentLines.join('\n')}`
                 }
                 case "localQuestionResult": {
                     const callId = typeof data.callId === 'string' ? data.callId : '';
-                    const pending = callId ? host.pendingLocalQuestionRequests.get(callId) : undefined;
-                    if (!pending) {
+                    const resolution = host.resolveUtilityLocalQuestion(callId, data?.result);
+                    if (!resolution.resolved) {
                         host.uiDebugChannel.appendLine(`EXT: localQuestionResult.skip | callId=${callId || 'null'} | reason=missing-pending`);
                         break;
                     }
-                    host.pendingLocalQuestionRequests.delete(callId);
-                    pending.resolve({
-                        selectedId: typeof data?.result?.selectedId === 'string' ? data.result.selectedId : undefined,
-                        selectedLabel: typeof data?.result?.selectedLabel === 'string' ? data.result.selectedLabel : undefined
-                    });
-                    host.uiDebugChannel.appendLine(`EXT: localQuestionResult.ok | sessionId=${pending.sessionId} | callId=${callId}`);
+                    host.uiDebugChannel.appendLine(`EXT: localQuestionResult.ok | sessionId=${resolution.sessionId} | callId=${callId}`);
                     break;
                 }
                 case "permissionResult": {
