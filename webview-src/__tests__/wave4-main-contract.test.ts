@@ -37,7 +37,7 @@ describe('Wave 4 main-script local older contract', () => {
     const appendEnd = source.indexOf("case 'revertedSegment':", appendStart);
     const appendBranch = source.slice(appendStart, appendEnd);
     expect(appendBranch).toContain('session?.canceledActiveTurn');
-    expect(appendBranch).toContain('session?.turnFullyFinalized === true');
+    expect(appendBranch).toContain('!turnLifecycleController.canAcceptAssistantActivity(session,');
   });
 
   test('session-scoped background events cannot render or scroll the active virtual window', () => {

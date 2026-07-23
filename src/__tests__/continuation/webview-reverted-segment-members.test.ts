@@ -154,6 +154,20 @@ function loadUndoSenderHarness() {
                 createSessionEventRouter,
                 createSessionRenderScheduler,
                 createAppendSnapshotController,
+                createSessionSelectionController: () => ({
+                    select: jest.fn(),
+                }),
+                selectAssistantUpgradeCandidate: jest.fn(),
+                createTurnLifecycleController: () => ({}),
+                createMessageIdentityStore: () => ({
+                    ensure: (message: any) => {
+                        message.meta = {
+                            ...(message.meta || {}),
+                            identity: message.meta?.identity || { entityId: `entity:${message.id || 'test'}` },
+                        };
+                        return message.meta.identity;
+                    },
+                }),
             },
         },
     };
