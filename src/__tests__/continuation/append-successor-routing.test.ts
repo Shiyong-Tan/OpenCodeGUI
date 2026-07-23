@@ -73,7 +73,7 @@ describe('append followup same-turn handoff', () => {
         expect(client.mapServerEventToChatEvents('message.updated', { info: { id: 'msg_b', sessionID: 'ses', role: 'assistant', parentID: 'msg_u', finish: 'stop' } }, 'sse')).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'assistantMessageMeta', assistantMsgId: 'msg_b' })]));
     });
 
-    it('finalizes an inactive session latest text-only successor when idle is the terminal signal', () => {
+    it('finalizes an inactive session latest delta-only successor when idle is the terminal signal', async () => {
         const client = createSameTurnFixture();
         client.mapServerEventToChatEvents('message.updated', {
             info: { id: 'msg_a', sessionID: 'ses', role: 'assistant', parentID: 'msg_root', finish: 'tool-calls' },
@@ -87,6 +87,7 @@ describe('append followup same-turn handoff', () => {
             expect.objectContaining({ type: 'text', sessionId: 'ses', assistantMsgId: 'msg_b', text: 'OK' }),
         ]));
         expect(client.getTurnAssistantMsgId('ses')).toBe('msg_b');
+        expect((client as any).assistantTextLengths.get('msg_b')).toBe(2);
 
         client.mapServerEventToChatEvents('message.part.updated', {
             part: { sessionID: 'ses', messageID: 'msg_b', type: 'step-finish' },
@@ -98,6 +99,8 @@ describe('append followup same-turn handoff', () => {
         expect(client.getFinalizingMsgId('ses')).toBe('msg_b');
         expect((client as any).turnFinalMsgIdBySession.get('ses')).toBe('msg_b');
         expect((client as any).turnFinalSourceBySession.get('ses')).toBe('session-idle');
+        await (client as any).runResyncSettleCheck('ses', 'sse-drain');
+        expect((client as any).turnFinalResolvedBySession.has('ses')).toBe(true);
         expect(client.getSessionId()).toBe('other-visible-session');
     });
 });

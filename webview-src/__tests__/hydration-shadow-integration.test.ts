@@ -45,6 +45,9 @@ describe('hydration integration production activation', () => {
     expect(block).toContain("syncAppendSnapshotMetadata(sessionId, 'sessionData-hydrate');");
     expect(block).toContain("renderIfActive(sessionId, 'sessionData'");
     expect(block).toContain("renderIfActive(sessionId, 'sessionData-finally'");
+    expect(main).toMatch(
+      /session\.appendFollowupIdentity = \{ \.\.\.followup \};\s*if \(session\.pendingAssistantUpgrade\?\.assistantMsgId !== followup\.assistantMsgId\) \{\s*session\.pendingAssistantUpgrade = null;\s*session\.awaitingFinalMapBind = false;/,
+    );
   });
 
   test('does not give the hydration application owner DOM, render, or transport access', () => {

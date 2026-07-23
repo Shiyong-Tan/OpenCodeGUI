@@ -4509,6 +4509,10 @@ export class OpenCodeClient {
         if (existing.length >= this.assistantTextCacheMax) return;
         const next = (existing + chunk).slice(0, this.assistantTextCacheMax);
         this.assistantTextById.set(msgId, next);
+        this.assistantTextLengths.set(
+            msgId,
+            Math.max(this.assistantTextLengths.get(msgId) || 0, next.length),
+        );
     }
 
     private isCompactionSummaryInfo(info: any): boolean {

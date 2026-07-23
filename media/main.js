@@ -14423,6 +14423,10 @@ function appendMessageImages(parentEl, message) {
                         session.timeline.splice(userIndex + 1, 0, successor.id);
                     }
                     session.appendFollowupIdentity = { ...followup };
+                    if (session.pendingAssistantUpgrade?.assistantMsgId !== followup.assistantMsgId) {
+                        session.pendingAssistantUpgrade = null;
+                        session.awaitingFinalMapBind = false;
+                    }
                     const followupLifecycle = turnLifecycleController.setBackendInFlight(session, true);
                     if (followupLifecycle.phase !== 'active') {
                         vscode.postMessage({ type: 'ui-debug', payload: ['append-followup', 'drop-terminal-turn', followupLifecycle.phase] });

@@ -124,6 +124,60 @@ describe('hydration volatile state controller', () => {
     expect(result.snapshotNoticeId).toBe('system:snapshot:test');
   });
 
+  test('keeps append handoff identity while dropping the predecessor pending upgrade', () => {
+    const active: any = createSessionState();
+    active.timeline = ['msg_root', 'msg_predecessor', 'msg_append', 'msg_successor'];
+    for (const [id, role] of [
+      ['msg_root', 'user'],
+      ['msg_predecessor', 'assistant'],
+      ['msg_append', 'user'],
+      ['msg_successor', 'assistant'],
+    ]) active.messagesById.set(id, { id, role, text: id, meta: {} });
+    active.turnLifecycle = {
+      generation: 1,
+      phase: 'active',
+      backendInFlight: true,
+      canonicalAssistantId: null,
+    };
+    active.backendTurnInFlight = true;
+    active.turnFullyFinalized = false;
+    active.currentTurnAssistantKey = 'msg_successor';
+    active.currentTurnAssistantMsgId = 'msg_successor';
+    active.thinkingId = 'msg_successor';
+    active.pendingAssistantUpgrade = {
+      tmpKey: 'tmp:predecessor',
+      assistantMsgId: 'msg_predecessor',
+      source: 'assistantMessageMeta',
+    };
+    active.awaitingFinalMapBind = true;
+    active.appendFollowupIdentity = {
+      kind: 'append-followup',
+      mode: 'same-turn-handoff',
+      generation: 1,
+      predecessorAssistantMsgId: 'msg_predecessor',
+      appendUserMsgId: 'msg_append',
+      assistantMsgId: 'msg_successor',
+    };
+
+    const prepared = controller.prepareIntegration({
+      sessionId: 'session-a',
+      activeSessionId: 'session-a',
+      hasSegments: false,
+      turnFullyFinalized: false,
+      messages: [
+        { id: 'msg_root', role: 'user', text: 'root' },
+        { id: 'msg_predecessor', role: 'assistant', text: 'first stage' },
+      ],
+      meta: { timelineMessageIds: ['msg_root', 'msg_predecessor'] },
+    }, integrationOptions, controller.capture(active));
+
+    expect(prepared.state.appendFollowupIdentity).toEqual(active.appendFollowupIdentity);
+    expect(prepared.state.currentTurnAssistantKey).toBe('msg_successor');
+    expect(prepared.state.messagesById.has('msg_successor')).toBe(true);
+    expect(prepared.state.pendingAssistantUpgrade).toBeNull();
+    expect(prepared.state.awaitingFinalMapBind).toBe(false);
+  });
+
   test('restores missing live messages while excluding persistence artifacts', () => {
     const before: any = createSessionState();
     before.timeline = ['local-user', 'system:changeList:one'];

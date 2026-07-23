@@ -115,6 +115,7 @@ export function createHydrationStateController(options: HydrationStateController
           }
           : undefined),
       ),
+      appendFollowupIdentity: clonePlainValue(session.appendFollowupIdentity),
       appendRootUserKey: session.appendRootUserKey,
       appendComposerFor: session.appendComposerFor,
       appendComposerDrafts: cloneMap(session.appendComposerDrafts),
@@ -158,6 +159,9 @@ export function createHydrationStateController(options: HydrationStateController
       preserved.appendRootUserKey,
       preserved.pendingAssistantUpgrade?.tmpKey,
       preserved.pendingAssistantUpgrade?.assistantMsgId,
+      preserved.appendFollowupIdentity?.predecessorAssistantMsgId,
+      preserved.appendFollowupIdentity?.appendUserMsgId,
+      preserved.appendFollowupIdentity?.assistantMsgId,
     ].filter((id) => typeof id === 'string' && id.length));
     const mergeCollidingActiveMessage = (id: string, preservedMessage: any) => {
       if (!preservedTurnIsActive || !activeMessageIds.has(id) || !preservedMessage) return;
@@ -273,6 +277,10 @@ export function createHydrationStateController(options: HydrationStateController
     preserveField('streamMode', Boolean(preserved.streamMode));
     preserveField('earlyFinalAssistantId', Boolean(preserved.earlyFinalAssistantId));
     preserveField('turnLifecycle', preservedTurnIsActive && Boolean(preserved.turnLifecycle));
+    preserveField(
+      'appendFollowupIdentity',
+      preservedTurnIsActive && Boolean(preserved.appendFollowupIdentity),
+    );
     preserveField('appendRootUserKey', Boolean(preserved.appendRootUserKey));
     preserveField('appendComposerFor', Boolean(preserved.appendComposerFor));
     preserveField('inputDraft', typeof preserved.inputDraft === 'string' && preserved.inputDraft.length > 0);
@@ -370,6 +378,7 @@ export function createHydrationStateController(options: HydrationStateController
         canonicalAssistantId: null,
       },
       finalAssistantLock: null,
+      appendFollowupIdentity: null,
     };
     if (!plan.accepted) return Object.freeze({ plan, state, preservedResult: restore(null, null) });
     for (const message of plan.messages) state.messagesById.set(message.id, cloneShadowMessage(message));
@@ -425,6 +434,16 @@ export function createHydrationStateController(options: HydrationStateController
       && state.messagesById.get(state.appendRootUserKey)?.role === 'user';
     if (!protectedAppendRoot && plan.appendRoots.length > 0) {
       state.appendRootUserKey = plan.appendRoots[0].rootMessageId;
+    }
+    const followupAssistantId = state.appendFollowupIdentity?.assistantMsgId;
+    if (
+      typeof followupAssistantId === 'string'
+      && followupAssistantId
+      && state.currentTurnAssistantKey === followupAssistantId
+      && state.pendingAssistantUpgrade?.assistantMsgId !== followupAssistantId
+    ) {
+      state.pendingAssistantUpgrade = null;
+      state.awaitingFinalMapBind = false;
     }
     return Object.freeze({ plan, state, preservedResult });
   }
@@ -513,6 +532,7 @@ export function createHydrationStateController(options: HydrationStateController
       'turnFullyFinalized',
       'turnLifecycle',
       'finalAssistantLock',
+      'appendFollowupIdentity',
       'appendRootUserKey',
       'appendComposerFor',
       'inputDraft',
@@ -596,15 +616,11 @@ export function createHydrationStateController(options: HydrationStateController
   ): Readonly<{
     matched: boolean;
     mismatches: readonly string[];
-    details: readonly string[];
-    summary: Readonly<Record<string, number>>;
   }> {
     if (!actual || !shadow?.plan?.accepted) {
       return Object.freeze({
         matched: false,
         mismatches: Object.freeze(['unavailable-shadow']),
-        details: Object.freeze(['unavailable-shadow']),
-        summary: Object.freeze({ timeline: 0, messages: 0, segments: 0 }),
       });
     }
     const expected = shadow.state;
@@ -655,12 +671,6 @@ export function createHydrationStateController(options: HydrationStateController
     return Object.freeze({
       matched: mismatches.length === 0,
       mismatches: Object.freeze(mismatches),
-      details: Object.freeze([]),
-      summary: Object.freeze({
-        timeline: visibleTimeline(actual).length,
-        messages: visibleMessages(actual).length,
-        segments: actual.segmentsByNoticeKey instanceof Map ? actual.segmentsByNoticeKey.size : 0,
-      }),
     });
   }
 
