@@ -782,10 +782,26 @@ Production ownership rules now enforced:
   commands capture and retain their session owner across asynchronous work;
 - Webview busy checks for controls, assistant routing, safe-shell, and segment
   actions are derived from the target session rather than a global busy flag.
+- question, permission, stall, system-notice, and conflict-card state is owned
+  per session; background interaction events are retained and projected only
+  when their owner becomes visible;
+- pending undo/restore conflict decisions are stored per session on the
+  Extension side, so resolving A cannot consume B's pending conflict;
+- text and Smart search state is independent per session, and an asynchronous
+  Smart result updates only its captured search owner;
+- composer drafts, attachments, context tokens, cancellation restores, and
+  VS Code selection prefills are stored by session and restored on selection;
+- real reverted-segment file state and reverted-segment presentation history
+  are stored per session in `OpenCodeClient` and the Extension application;
+- the global optimistic user identity was removed; acknowledgement, error,
+  cancellation, and finalization use `pendingLocalKeyBySession` exclusively;
+- owned Webview commands and asynchronous Webview responses reject missing
+  session ownership rather than borrowing the selected Extension or Webview
+  session.
 
 Automated acceptance at this checkpoint:
 
-- 137 Jest suites and 1084 tests pass;
+- 144 Jest suites and 1112 tests pass;
 - Extension and Webview compilation pass;
 - all four Webview bundles remain within size limits;
 - deterministic rendering bundle check passes;
