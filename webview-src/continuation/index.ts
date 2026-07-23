@@ -7,6 +7,7 @@ import { createSessionSelectionController } from '../session-runtime/session-sel
 import { createSessionViewStore } from '../session-runtime/session-view-store';
 import { selectAssistantUpgradeCandidate } from '../session-runtime/assistant-binding';
 import { createTurnLifecycleController } from '../session-runtime/turn-lifecycle';
+import { createMessageIdentityStore } from '../session-runtime/message-identity';
 
 export const CONTINUATION_FACADE_VERSION = 1 as const;
 
@@ -22,6 +23,7 @@ const facade = Object.freeze({
   createSessionViewStore,
   selectAssistantUpgradeCandidate,
   createTurnLifecycleController,
+  createMessageIdentityStore,
 });
 
 declare global {
