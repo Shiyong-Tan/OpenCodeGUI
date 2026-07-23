@@ -69,6 +69,8 @@ describe('hydration integration planner', () => {
     });
     expect(result.timeline).toEqual(['msg_user', 'msg_assistant']);
     expect(result.backingMessageIds).toEqual(['msg_nested']);
+    expect(result.messages.slice(0, 2).map((item) => item.id))
+      .toEqual(['msg_assistant', 'msg_user']);
     expect(result.messages.find((item) => item.id === 'msg_user')?.text).toBe('prompt');
     expect(result.snapshotNoticeRequired).toBe(true);
     expect(result.coverage).toBe('deltaContinuityUnknown');

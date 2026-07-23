@@ -300,6 +300,10 @@ const segmentTopology = createSegmentTopology({
     debug: (payload) => vscode.postMessage({ type: 'ui-debug', payload }),
     now: () => Date.now()
 });
+const hydrationShadowSegmentTopology = createSegmentTopology({
+    debug: () => {},
+    now: () => Date.now()
+});
 const shownQuestionCallIds = new Set();
 const sentQuestionCallIds = new Set();
 let permissionOverlayEl = null;
@@ -14050,6 +14054,7 @@ function appendMessageImages(parentEl, message) {
                 const isExplicitSelectionTarget = Boolean(pendingExplicitSessionSelectionId && pendingExplicitSessionSelectionId === sessionId);
                 const isFirstBootstrap = !activeSessionId;
                 const shouldActivateSession = wasActiveSession || isExplicitSelectionTarget || isFirstBootstrap;
+                const hydrationSelectionActiveSessionId = activeSessionId;
 
                 vscode.postMessage({
                     type: 'ui-debug',
@@ -14083,9 +14088,66 @@ function appendMessageImages(parentEl, message) {
                     
                     const session = getSessionState(sessionId, true);
                     applyPayloadHydrationCoverage(sessionId, message);
-                    const preservedHydrationState = captureVolatileHydrationState(session);
-                    
                     const hasSegments = Array.isArray(message.segments);
+                    const rawSessionMessages = Array.isArray(message.messages) ? message.messages : [];
+                    const fallbackDisplayMessages = message?.meta?.source === 'snapshot'
+                        ? rawSessionMessages
+                        : collapseSessionDataMessagesForDisplay(
+                            rawSessionMessages,
+                            new Set(
+                                (hasSegments ? message.segments : [])
+                                    .map((seg) => seg?.anchorMsgId)
+                                    .filter((id) => typeof id === 'string' && id.startsWith('msg_'))
+                            )
+                        );
+                    const preservedHydrationState = captureVolatileHydrationState(session);
+                    let hydrationIntegrationShadow = null;
+                    try {
+                        hydrationIntegrationShadow = hydrationStateController.createIntegrationShadow({
+                            sessionId,
+                            activeSessionId: hydrationSelectionActiveSessionId,
+                            pendingExplicitSessionSelectionId: isExplicitSelectionTarget
+                                ? sessionId
+                                : pendingExplicitSessionSelectionId,
+                            messages: rawSessionMessages,
+                            fallbackDisplayMessages,
+                            segments: hasSegments ? message.segments : [],
+                            hasSegments,
+                            meta: message.meta || {},
+                            turnFullyFinalized: preservedHydrationState?.turnLifecycle?.phase === 'active'
+                                ? false
+                                : session.turnFullyFinalized === true,
+                            preservedVolatileMessageIds: Array.isArray(preservedHydrationState?.timeline)
+                                ? preservedHydrationState.timeline
+                                : [],
+                            clientKeyToServerId: session.clientKeyToServerId,
+                            serverIdToClientKey: session.serverIdToClientKey
+                        }, {
+                            isHiddenControlUserText,
+                            isHiddenControlAssistantText,
+                            cleanUserText: (text) => stripSystemInjections(text.replace(/^(\r?\n)+/, '')),
+                            toStableMessageKey: (messageId) => toStableMessageKey(session, messageId),
+                            normalizeSegment: (timeline, segment) => hydrationShadowSegmentTopology.normalizeMembers(
+                                {
+                                    timeline: [...timeline],
+                                    clientKeyToServerId: session.clientKeyToServerId,
+                                    serverIdToClientKey: session.serverIdToClientKey
+                                },
+                                segment.anchorMsgId,
+                                segment.endMsgId,
+                                segment.memberMsgIds,
+                                segment.noticeKey
+                            ),
+                            normalizeAppendItems: (_rootMessageId, items) =>
+                                appendSnapshotController.sanitizeItems(items, session)
+                        }, preservedHydrationState);
+                    } catch (shadowError) {
+                        vscode.postMessage({
+                            type: 'ui-debug',
+                            payload: ['[WV][HYDRATION_SHADOW_ERROR]', `sessionId=${sessionId}`, `phase=plan`, `err=${String(shadowError)}`]
+                        });
+                    }
+
                     // Clear everything
                     session.messagesById.clear();
                     session.timeline = [];
@@ -14104,7 +14166,6 @@ function appendMessageImages(parentEl, message) {
                     session.nextOrder = 0;
                     
                     // Load messages into timeline
-                    const rawSessionMessages = Array.isArray(message.messages) ? message.messages : [];
                     for (const item of rawSessionMessages) {
                         if (!item || item.role !== 'user' || typeof item.id !== 'string') continue;
                         if (isHiddenControlUserText(item.text || '')) {
@@ -14206,21 +14267,7 @@ function appendMessageImages(parentEl, message) {
                         logTimelineSnapshot('snapshot-restore', session.timeline, `count=${session.timeline.length}`);
                     } else {
                         // Fallback: no explicit timeline IDs — use old logic
-                        const sessionMessages = message?.meta?.source === 'snapshot'
-                            ? rawSessionMessages.filter((item) => {
-                                if (!item || !item.id) return false;
-                                if (item.role === 'user' && isHiddenControlUserText(item.text || '')) return false;
-                                if (item.role === 'assistant' && isHiddenControlAssistantText(item.text || '')) return false;
-                                return true;
-                            })
-                            : collapseSessionDataMessagesForDisplay(
-                                rawSessionMessages,
-                                new Set(
-                                    (Array.isArray(message.segments) ? message.segments : [])
-                                        .map((seg) => seg?.anchorMsgId)
-                                        .filter((id) => typeof id === 'string' && id.startsWith('msg_'))
-                                )
-                            );
+                        const sessionMessages = fallbackDisplayMessages;
                         for (const item of sessionMessages) {
                             if (!item || !item.id) continue;
                             const key = item.id;
@@ -14354,6 +14401,29 @@ function appendMessageImages(parentEl, message) {
                     const restoredAppendMeta = restoreAppendHydrationMetadata(sessionId, session);
                     if (restoredAppendMeta.rootCount > 0) {
                         syncAppendSnapshotMetadata(sessionId, 'sessionData-hydrate');
+                    }
+                    if (hydrationIntegrationShadow) {
+                        try {
+                            const shadowComparison = hydrationStateController.compareIntegrationShadow(
+                                session,
+                                hydrationIntegrationShadow
+                            );
+                            vscode.postMessage({
+                                type: 'ui-debug',
+                                payload: ['[WV][HYDRATION_SHADOW]',
+                                    `sessionId=${sessionId}`,
+                                    `matched=${shadowComparison.matched ? 'true' : 'false'}`,
+                                    `mismatches=${shadowComparison.mismatches.join(',') || 'none'}`,
+                                    `timeline=${shadowComparison.summary.timeline}`,
+                                    `messages=${shadowComparison.summary.messages}`,
+                                    `segments=${shadowComparison.summary.segments}`]
+                            });
+                        } catch (shadowError) {
+                            vscode.postMessage({
+                                type: 'ui-debug',
+                                payload: ['[WV][HYDRATION_SHADOW_ERROR]', `sessionId=${sessionId}`, `phase=compare`, `err=${String(shadowError)}`]
+                            });
+                        }
                     }
                     const skippedTimelineArtifacts = preservedLive.skippedArtifacts?.timeline || 0;
                     const skippedBackingArtifacts = preservedLive.skippedArtifacts?.backing || 0;

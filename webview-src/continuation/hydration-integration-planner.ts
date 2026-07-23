@@ -56,6 +56,7 @@ export type HydrationIntegrationPlannerOptions = Readonly<{
     timeline: readonly string[],
     segment: HydrationSegment,
   ): Readonly<{ anchorMsgId: string | null; endMsgId: string | null; memberMsgIds: readonly string[] }>;
+  normalizeAppendItems?(rootMessageId: string, items: readonly any[]): readonly any[];
 }>;
 
 export type HydrationIntegrationPlan = Readonly<{
@@ -241,7 +242,9 @@ export function planHydrationIntegration(
     : [];
   const hasExplicitTimeline = explicitTimelineIds.length > 0;
   const displaySource = hasExplicitTimeline
-    ? explicitTimelineIds.map((id) => rawById.get(id)).filter(Boolean) as HydrationMessage[]
+    ? rawMessages.filter((message) => (
+      typeof message?.id === 'string' && explicitTimelineIds.includes(message.id)
+    ))
     : (
       input.meta?.source === 'snapshot'
         ? rawMessages
@@ -305,8 +308,8 @@ export function planHydrationIntegration(
         anchorMsgId: memberMsgIds[0] || normalized.anchorMsgId,
         endMsgId: memberMsgIds[memberMsgIds.length - 1] || normalized.endMsgId,
         memberMsgIds,
-        collapsed: segment.collapsed !== false,
-        restoreAllowed: segment.restoreAllowed !== false,
+        collapsed: true,
+        restoreAllowed: segment.restoreAllowed === true,
       });
       segmentPlans.push(plannedSegment);
       const placeholderId = `system:undo-seg:${segment.noticeKey}`;
@@ -341,10 +344,13 @@ export function planHydrationIntegration(
   }>> = [];
   for (const [id, message] of messagesById) {
     if (message?.role !== 'user' || !Array.isArray(message.meta?.appendedPrompts)) continue;
+    const normalizedItems = options.normalizeAppendItems
+      ? options.normalizeAppendItems(id, message.meta.appendedPrompts)
+      : message.meta.appendedPrompts;
     const finalized = input.turnFullyFinalized === true;
     const appendPlan = finalized
-      ? planFinalizedItems(message.meta.appendedPrompts)
-      : { items: freezeArray(message.meta.appendedPrompts.map((item: any) => Object.freeze({ ...item }))) };
+      ? planFinalizedItems(normalizedItems)
+      : { items: freezeArray(normalizedItems.map((item: any) => Object.freeze({ ...item }))) };
     if (!appendPlan.items.length) continue;
     appendRoots.push(Object.freeze({
       rootMessageId: id,

@@ -1,3 +1,10 @@
+import {
+  planHydrationIntegration,
+  type HydrationIntegrationInput,
+  type HydrationIntegrationPlan,
+  type HydrationIntegrationPlannerOptions,
+} from './hydration-integration-planner';
+
 type HydrationStateControllerOptions = {
   toStableMessageKey(session: any, key: string): string | null;
   now?(): number;
@@ -309,6 +316,217 @@ export function createHydrationStateController(options: HydrationStateController
     };
   }
 
+  const cloneShadowMessage = (message: any) => ({
+    ...message,
+    meta: message?.meta && typeof message.meta === 'object' ? { ...message.meta } : {},
+  });
+
+  function createIntegrationShadow(
+    input: HydrationIntegrationInput,
+    plannerOptions: HydrationIntegrationPlannerOptions,
+    preserved: any,
+  ): Readonly<{ plan: HydrationIntegrationPlan; state: any }> {
+    const plan = planHydrationIntegration(input, plannerOptions);
+    const state: any = {
+      hydrationCoverage: plan.coverage,
+      messagesById: new Map(),
+      timeline: [...plan.timeline],
+      messageIndexMap: new Map(),
+      segmentsByNoticeKey: new Map(),
+      hiddenSet: new Set(),
+      hiddenControlUserIds: new Set(plan.hiddenControlUserIds),
+      assistantUpgradeSeen: new Set(),
+      serverIdToKey: new Map(),
+      clientKeyToServerId: new Map(),
+      serverIdToClientKey: new Map(),
+      appendComposerDrafts: new Map(),
+      thinkingId: null,
+      currentTurnAssistantKey: null,
+      currentTurnAssistantMsgId: null,
+      lastTurnUserId: null,
+      lastTurnAssistantId: null,
+      cancelledTurn: false,
+      canceledActiveTurn: false,
+      activeTurnOpId: null,
+      backendTurnInFlight: false,
+      pendingAssistantUpgrade: null,
+      awaitingFinalMapBind: false,
+      streamMode: null,
+      earlyFinalAssistantId: null,
+      turnFullyFinalized: true,
+      appendRootUserKey: null,
+      appendComposerFor: null,
+      inputDraft: '',
+      backgroundSubagentIndicatorVisible: false,
+      backgroundSubagentIndicatorUntil: 0,
+      backgroundSubagentIndicatorAnchorId: null,
+      turnLifecycle: {
+        generation: typeof preserved?.turnLifecycle?.generation === 'number'
+          ? preserved.turnLifecycle.generation
+          : 0,
+        phase: 'effects-finalized',
+        backendInFlight: false,
+        canonicalAssistantId: null,
+      },
+      finalAssistantLock: null,
+    };
+    if (!plan.accepted) return Object.freeze({ plan, state });
+    for (const message of plan.messages) state.messagesById.set(message.id, cloneShadowMessage(message));
+    for (const segment of plan.segments) {
+      state.segmentsByNoticeKey.set(segment.noticeKey, {
+        ...segment,
+        memberMsgIds: [...segment.memberMsgIds],
+      });
+      if (segment.collapsed === false) continue;
+      for (const id of segment.memberMsgIds) {
+        if (state.messagesById.has(id)) state.hiddenSet.add(id);
+      }
+    }
+    for (const id of state.timeline) {
+      const message = state.messagesById.get(id);
+      if (message?.role === 'user' && message.meta?.syntheticUser === true) {
+        state.hiddenSet.add(id);
+      }
+    }
+    for (const root of plan.appendRoots) {
+      const message = state.messagesById.get(root.rootMessageId);
+      if (!message) continue;
+      message.meta = { ...(message.meta || {}), appendedPrompts: [...root.items] };
+    }
+    restore(state, preserved);
+    if (state.turnLifecycle) {
+      state.backendTurnInFlight = state.turnLifecycle.backendInFlight === true;
+      state.turnFullyFinalized = ['effects-finalized', 'failed', 'cancelled']
+        .includes(state.turnLifecycle.phase);
+      const canonicalAssistantId = state.turnLifecycle.canonicalAssistantId;
+      state.finalAssistantLock = typeof canonicalAssistantId === 'string' && canonicalAssistantId
+        ? { assistantMsgId: canonicalAssistantId, ts: options.now?.() ?? Date.now() }
+        : null;
+    }
+    const protectedAppendRoot = state.backendTurnInFlight === true
+      && state.turnFullyFinalized !== true
+      && state.canceledActiveTurn !== true
+      && !state.finalAssistantLock?.assistantMsgId
+      && typeof state.appendRootUserKey === 'string'
+      && state.messagesById.get(state.appendRootUserKey)?.role === 'user';
+    if (!protectedAppendRoot && plan.appendRoots.length > 0) {
+      state.appendRootUserKey = plan.appendRoots[0].rootMessageId;
+    }
+    return Object.freeze({ plan, state });
+  }
+
+  const stableValue = (value: any): any => {
+    if (value instanceof Map) {
+      return [...value.entries()]
+        .map(([key, entry]) => [key, stableValue(entry)])
+        .sort(([left], [right]) => String(left).localeCompare(String(right)));
+    }
+    if (value instanceof Set) return [...value].sort();
+    if (Array.isArray(value)) return value.map(stableValue);
+    if (!value || typeof value !== 'object') return value;
+    const output: Record<string, any> = {};
+    for (const key of Object.keys(value).sort()) {
+      if (key === 'identity') continue;
+      if (key === 'createdAt' && value.kind === 'undoSegmentPlaceholder') continue;
+      output[key] = stableValue(value[key]);
+    }
+    return output;
+  };
+  const stableJson = (value: any) => JSON.stringify(stableValue(value));
+  const visibleTimeline = (session: any) => (Array.isArray(session?.timeline) ? session.timeline : [])
+    .filter((id: unknown) => session?.messagesById?.get?.(id)?.meta?.kind !== 'snapshotNotice');
+  const visibleMessages = (session: any) => {
+    if (!(session?.messagesById instanceof Map)) return [];
+    return [...session.messagesById.entries()]
+      .filter(([, message]) => message?.meta?.kind !== 'snapshotNotice')
+      .map(([id, message]) => [id, stableValue(message)])
+      .sort(([left], [right]) => String(left).localeCompare(String(right)));
+  };
+  const normalizedSegments = (session: any) => {
+    if (!(session?.segmentsByNoticeKey instanceof Map)) return [];
+    const normalizeSegment = (segment: any): any => ({
+      noticeKey: segment?.noticeKey,
+      anchorMsgId: segment?.anchorMsgId,
+      endMsgId: segment?.endMsgId,
+      memberMsgIds: Array.isArray(segment?.memberMsgIds) ? segment.memberMsgIds : [],
+      restoreAllowed: segment?.restoreAllowed === true,
+      collapsed: segment?.collapsed !== false,
+      mergedInvalidSegments: Array.isArray(segment?.mergedInvalidSegments)
+        ? segment.mergedInvalidSegments.map(normalizeSegment)
+        : [],
+    });
+    return [...session.segmentsByNoticeKey.entries()]
+      .map(([noticeKey, segment]) => [noticeKey, stableValue(normalizeSegment(segment))])
+      .sort(([left], [right]) => String(left).localeCompare(String(right)));
+  };
+
+  function compareIntegrationShadow(
+    actual: any,
+    shadow: Readonly<{ plan: HydrationIntegrationPlan; state: any }> | null | undefined,
+  ): Readonly<{ matched: boolean; mismatches: readonly string[]; summary: Readonly<Record<string, number>> }> {
+    if (!actual || !shadow?.plan?.accepted) {
+      return Object.freeze({
+        matched: false,
+        mismatches: Object.freeze(['unavailable-shadow']),
+        summary: Object.freeze({ timeline: 0, messages: 0, segments: 0 }),
+      });
+    }
+    const expected = shadow.state;
+    const mismatches: string[] = [];
+    const compare = (name: string, left: any, right: any) => {
+      if (stableJson(left) !== stableJson(right)) mismatches.push(name);
+    };
+    compare('timeline', visibleTimeline(actual), visibleTimeline(expected));
+    compare('messages', visibleMessages(actual), visibleMessages(expected));
+    if (shadow.plan.reset.segments) {
+      compare('segments', normalizedSegments(actual), normalizedSegments(expected));
+      compare('hiddenSet', actual.hiddenSet, expected.hiddenSet);
+    }
+    compare('hiddenControlUserIds', actual.hiddenControlUserIds, expected.hiddenControlUserIds);
+    compare('hydrationCoverage', actual.hydrationCoverage, expected.hydrationCoverage);
+    for (const field of [
+      'pendingAssistantUpgrade',
+      'thinkingId',
+      'currentTurnAssistantKey',
+      'currentTurnAssistantMsgId',
+      'lastTurnUserId',
+      'lastTurnAssistantId',
+      'cancelledTurn',
+      'canceledActiveTurn',
+      'activeTurnOpId',
+      'backendTurnInFlight',
+      'awaitingFinalMapBind',
+      'streamMode',
+      'earlyFinalAssistantId',
+      'turnFullyFinalized',
+      'turnLifecycle',
+      'appendRootUserKey',
+      'appendComposerFor',
+      'inputDraft',
+      'backgroundSubagentIndicatorVisible',
+      'backgroundSubagentIndicatorUntil',
+      'backgroundSubagentIndicatorAnchorId',
+      'activeSubagents',
+    ]) compare(`field:${field}`, actual[field], expected[field]);
+    for (const field of [
+      'messageIndexMap',
+      'serverIdToKey',
+      'clientKeyToServerId',
+      'serverIdToClientKey',
+      'appendComposerDrafts',
+      'assistantUpgradeSeen',
+    ]) compare(`collection:${field}`, actual[field], expected[field]);
+    return Object.freeze({
+      matched: mismatches.length === 0,
+      mismatches: Object.freeze(mismatches),
+      summary: Object.freeze({
+        timeline: visibleTimeline(actual).length,
+        messages: visibleMessages(actual).length,
+        segments: actual.segmentsByNoticeKey instanceof Map ? actual.segmentsByNoticeKey.size : 0,
+      }),
+    });
+  }
+
   return Object.freeze({
     cloneMap,
     cloneSet,
@@ -320,5 +538,7 @@ export function createHydrationStateController(options: HydrationStateController
     resolveCanonicalId,
     capture,
     restore,
+    createIntegrationShadow,
+    compareIntegrationShadow,
   });
 }

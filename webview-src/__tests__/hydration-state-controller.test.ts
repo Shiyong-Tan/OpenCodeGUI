@@ -1,12 +1,84 @@
 import { createHydrationStateController } from '../continuation/hydration-state-controller';
 import { createSessionState } from '../continuation/session-store';
+import { createSegmentTopology } from '../features/segments/segment-topology';
 
 const controller = createHydrationStateController({
   toStableMessageKey: (session, key) => session.clientKeyToServerId?.get(key) || null,
   now: () => 1_000,
 });
+const segmentTopology = createSegmentTopology({ debug: () => undefined, now: () => 1_000 });
+const integrationOptions = {
+  isHiddenControlUserText: (text: string) => text.startsWith('[hidden]'),
+  isHiddenControlAssistantText: () => false,
+  cleanUserText: (text: string) => text,
+  toStableMessageKey: (id: string) => id,
+  normalizeSegment: (timeline: readonly string[], segment: any) => segmentTopology.normalizeMembers(
+    { timeline: [...timeline] },
+    segment.anchorMsgId,
+    segment.endMsgId,
+    segment.memberMsgIds,
+    segment.noticeKey,
+  ),
+};
 
 describe('hydration volatile state controller', () => {
+  test('builds a side-effect-free integration shadow and reports normalized equivalence', () => {
+    const preservedSession: any = createSessionState();
+    preservedSession.backendTurnInFlight = true;
+    preservedSession.turnFullyFinalized = false;
+    preservedSession.lastTurnUserId = 'msg_user';
+    preservedSession.currentTurnAssistantKey = 'msg_assistant';
+    preservedSession.messagesById.set('msg_user', {
+      id: 'msg_user',
+      role: 'user',
+      text: 'prompt',
+    });
+    preservedSession.messagesById.set('msg_assistant', {
+      id: 'msg_assistant',
+      role: 'assistant',
+      text: 'live answer',
+    });
+    preservedSession.timeline = ['msg_user', 'msg_assistant'];
+    const preserved = controller.capture(preservedSession);
+    const shadow = controller.createIntegrationShadow({
+      sessionId: 'session-a',
+      activeSessionId: 'session-a',
+      hasSegments: false,
+      turnFullyFinalized: false,
+      messages: [
+        { id: 'msg_user', role: 'user', text: 'prompt' },
+        { id: 'msg_assistant', role: 'assistant', text: '' },
+      ],
+      meta: {
+        timelineMessageIds: ['msg_user', 'msg_assistant'],
+        hydrationCoverage: 'authoritativeHistoryComplete',
+      },
+    }, integrationOptions, preserved);
+
+    const equivalent: any = {
+      ...shadow.state,
+      messagesById: new Map(shadow.state.messagesById),
+      timeline: [...shadow.state.timeline],
+    };
+    equivalent.messagesById.set('system:snapshot:dynamic', {
+      id: 'system:snapshot:dynamic',
+      role: 'system',
+      meta: { kind: 'snapshotNotice' },
+    });
+    equivalent.timeline.unshift('system:snapshot:dynamic');
+    expect(controller.compareIntegrationShadow(equivalent, shadow)).toMatchObject({
+      matched: true,
+      mismatches: [],
+      summary: { timeline: 2, messages: 2 },
+    });
+
+    equivalent.timeline.reverse();
+    expect(controller.compareIntegrationShadow(equivalent, shadow)).toMatchObject({
+      matched: false,
+      mismatches: ['timeline'],
+    });
+  });
+
   test('restores missing live messages while excluding persistence artifacts', () => {
     const before: any = createSessionState();
     before.timeline = ['local-user', 'system:changeList:one'];
