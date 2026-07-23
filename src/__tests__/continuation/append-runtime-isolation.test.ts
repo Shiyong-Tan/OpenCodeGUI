@@ -941,7 +941,7 @@ describe('append runtime isolation', () => {
         )).toBe(true);
     });
 
-    it('keeps the predecessor visible until an append successor has presentable content', () => {
+    it('does not revive a hidden predecessor while an append successor is still empty', () => {
         const { context } = loadAppendPresentationHarness();
         const session = {
             messagesById: new Map<string, any>([
@@ -993,7 +993,7 @@ describe('append runtime isolation', () => {
 
         expect(context.isAppendChainTopLevelAssistantHidden(
             session, session.messagesById.get('msg_predecessor'), 'msg_predecessor', appendIndex,
-        )).toBe(false);
+        )).toBe(true);
         expect(context.isAppendChainTopLevelAssistantHidden(
             session, session.messagesById.get('msg_successor'), 'msg_successor', appendIndex,
         )).toBe(true);

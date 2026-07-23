@@ -2681,11 +2681,10 @@ function isAppendChainTopLevelAssistantHidden(session, msg, id, appendChildPrese
             }
             return false;
         };
-        // Keep the predecessor presentation in place until the successor has
-        // content. This makes the handoff visually atomic instead of flashing
-        // an empty canonical bubble between the running and final states.
+        // Suppress the empty successor without reviving a predecessor that the
+        // append chain already hid. Reviving it here makes completed temporary
+        // content flash immediately before the successor's first real payload.
         if (matchesFollowupKey(followup.assistantMsgId)) return true;
-        if (matchesFollowupKey(followup.predecessorAssistantMsgId)) return false;
     }
     if (session.backendTurnInFlight === true && session.turnFullyFinalized !== true && session.canceledActiveTurn !== true) {
         const messageKeys = new Set();
