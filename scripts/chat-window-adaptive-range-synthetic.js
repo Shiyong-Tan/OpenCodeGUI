@@ -414,8 +414,8 @@ function runSessionOwner() {
     clearAppendInputForSessionChange: () => calls.push('append-clear'), renderHeaderUsage: () => calls.push('header'),
     transitionActiveSessionPresentationOwner: () => calls.push('transition'),
     destroyChatWindowAdapter: () => calls.push('destroy'),
-    activateSessionOverlays: () => calls.push('overlays'), closeStallCard: () => calls.push('stall'),
-    setSystemNotice: () => calls.push('notice'), applyPromptToSession: () => calls.push('prompt'),
+    activateSessionOverlays: () => calls.push('overlays'),
+    activateSessionTransientStatus: () => calls.push('status'), applyPromptToSession: () => calls.push('prompt'),
     getSessionState: (id) => sessions.get(id), window: { __oc: { renderFromState: () => calls.push('render') } },
     logSessionState: () => calls.push('log'), refreshSendButtonStateAfterSessionSwitch: () => calls.push('refresh-after'),
   });

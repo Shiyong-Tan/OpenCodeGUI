@@ -313,6 +313,11 @@ if (typeof createSessionConflictStore !== 'function') {
 const sessionConflictStore = createSessionConflictStore({
     identity: (conflict) => conflict?.conflictId || conflict?.operationId || ''
 });
+const createSessionTransientStatusStore = window.__ocContinuation?.createSessionTransientStatusStore;
+if (typeof createSessionTransientStatusStore !== 'function') {
+    throw new Error('Session transient status store is unavailable');
+}
+const sessionTransientStatusStore = createSessionTransientStatusStore();
 let gitUndoEnabled = false;
 let gitUndoReason = null;
 let baselineReady = true;
@@ -527,7 +532,10 @@ function setSendBlockedNotice(text) {
     }
 }
 
-function setSystemNotice(text) {
+function setSystemNotice(text, sessionId = activeSessionId) {
+    if (!sessionId) return;
+    sessionTransientStatusStore.setNotice(sessionId, typeof text === 'string' ? text : '');
+    if (sessionId !== activeSessionId) return;
     systemNoticeText = typeof text === 'string' ? text : '';
     const pendingEl = document.getElementById('pending-indicator');
     if (!pendingEl) return;
@@ -540,15 +548,24 @@ function setSystemNotice(text) {
     pendingEl.classList.add('hidden');
 }
 
-function closeStallCard() {
-    if (stallCardEl && stallCardEl.parentElement) {
+function closeStallCard(sessionId = activeSessionId, clearState = true) {
+    if (clearState && sessionId) {
+        sessionTransientStatusStore.setStall(sessionId, null);
+    }
+    if (sessionId === activeSessionId && stallCardEl && stallCardEl.parentElement) {
         stallCardEl.parentElement.removeChild(stallCardEl);
     }
-    stallCardEl = null;
+    if (sessionId === activeSessionId) {
+        stallCardEl = null;
+    }
 }
 
 function showStallCard(payload) {
-    closeStallCard();
+    const sessionId = typeof payload?.sessionId === 'string' ? payload.sessionId : '';
+    if (!sessionId) return;
+    sessionTransientStatusStore.setStall(sessionId, payload);
+    if (sessionId !== activeSessionId) return;
+    closeStallCard(sessionId, false);
     const wrapper = document.createElement('div');
     wrapper.className = 'question-overlay';
 
@@ -573,14 +590,14 @@ function showStallCard(payload) {
     secondaryButton.className = 'conflict-card-btn question-card-btn';
     secondaryButton.textContent = payload?.secondaryActionLabel || 'Keep waiting';
     secondaryButton.addEventListener('click', () => {
-        closeStallCard();
+        closeStallCard(sessionId);
     });
 
     const primaryButton = document.createElement('button');
     primaryButton.className = 'conflict-card-btn question-card-btn question-card-submit';
     primaryButton.textContent = payload?.actionLabel || 'Reload Window';
     primaryButton.addEventListener('click', () => {
-        vscode.postMessage({ type: 'reloadWindow', sessionId: activeSessionId });
+        vscode.postMessage({ type: 'reloadWindow', sessionId });
     });
 
     actions.appendChild(secondaryButton);
@@ -592,6 +609,23 @@ function showStallCard(payload) {
     wrapper.appendChild(card);
     document.body.appendChild(wrapper);
     stallCardEl = wrapper;
+}
+
+function activateSessionTransientStatus(sessionId) {
+    if (stallCardEl && stallCardEl.parentElement) {
+        stallCardEl.parentElement.removeChild(stallCardEl);
+    }
+    stallCardEl = null;
+    const state = sessionTransientStatusStore.get(sessionId);
+    systemNoticeText = state.notice;
+    const pendingEl = document.getElementById('pending-indicator');
+    if (pendingEl) {
+        pendingEl.textContent = systemNoticeText;
+        pendingEl.classList.toggle('hidden', !systemNoticeText);
+    }
+    if (state.stall) {
+        showStallCard(state.stall);
+    }
 }
 
 function formatList(values, max = 20) {
@@ -11963,8 +11997,7 @@ function shouldHideDcpUiMessage(message) {
                 activeSessionId = item.id;
                 clearAppendInputForSessionChange(item.id);
                 activateSessionOverlays(item.id);
-                closeStallCard();
-                setSystemNotice('');
+                activateSessionTransientStatus(item.id);
                 closeSessionPanel();
                 renderHeaderUsage();
                 updateUndoStatusDisplay(item.id);
@@ -13375,10 +13408,10 @@ function appendMessageImages(parentEl, message) {
         renderHeaderUsage();
         if (prevSessionId && prevSessionId !== sessionId) {
             activateSessionOverlays(sessionId);
-            closeStallCard();
-            setSystemNotice('');
+            activateSessionTransientStatus(sessionId);
         } else {
             activateSessionOverlays(sessionId);
+            activateSessionTransientStatus(sessionId);
         }
         if (isSwitchingSession) {
             isSwitchingSession = false;
@@ -13731,6 +13764,7 @@ function appendMessageImages(parentEl, message) {
                 }
                 sessionOverlayStore.deleteSession(sessionId);
                 sessionConflictStore.deleteSession(sessionId);
+                sessionTransientStatusStore.deleteSession(sessionId);
                 sessions = sessions.filter((item) => item?.id !== sessionId);
                 renderSessionList();
                 break;
@@ -14515,21 +14549,21 @@ function appendMessageImages(parentEl, message) {
             }
             case 'systemNotice': {
                 const sessionId = getEventSessionId(message, 'systemNotice');
-                if (sessionId && sessionId !== activeSessionId) break;
+                if (!sessionId) break;
                 const text = typeof message?.message === 'string' ? message.message : '';
-                setSystemNotice(text);
+                setSystemNotice(text, sessionId);
                 break;
             }
             case 'systemNoticeClear': {
                 const sessionId = getEventSessionId(message, 'systemNoticeClear');
-                if (sessionId && sessionId !== activeSessionId) break;
-                setSystemNotice('');
+                if (!sessionId) break;
+                setSystemNotice('', sessionId);
                 break;
             }
             case 'stallCard': {
                 const sessionId = getEventSessionId(message, 'stallCard');
-                if (sessionId && sessionId !== activeSessionId) break;
-                showStallCard(message);
+                if (!sessionId) break;
+                showStallCard({ ...message, sessionId });
                 break;
             }
             case 'messageIndexMapDelta': {
@@ -15994,6 +16028,7 @@ function appendMessageImages(parentEl, message) {
                 pendingExplicitSessionSelectionId = '';
                 clearAppendInputForSessionChange(activeSessionId);
                 activateSessionOverlays(activeSessionId);
+                activateSessionTransientStatus(activeSessionId);
                 getHeaderStateController().setBaseTitle('OpenCode: Chat');
                 renderHeaderTitle();
                 renderHeaderUsage();

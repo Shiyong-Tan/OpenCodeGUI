@@ -122,4 +122,19 @@ describe('cross-session runtime repository audit', () => {
     expect(conflictCase).toContain('if (sessionId === activeSessionId)');
     expect(clearConflict).toContain('sessionConflictStore.clear(sessionId, identity || undefined)');
   });
+
+  test('background notices and stall prompts survive selection changes', () => {
+    const activateStatus = extractFunction(main, 'function activateSessionTransientStatus(');
+    const showStall = extractFunction(main, 'function showStallCard(');
+    const sessionIdHandler = extractFunction(main, 'function handleSessionIdMessage(');
+    const stallCaseStart = main.indexOf("case 'stallCard':");
+    const stallCaseEnd = main.indexOf("case 'messageIndexMapDelta':", stallCaseStart);
+    const stallCase = main.slice(stallCaseStart, stallCaseEnd);
+
+    expect(activateStatus).toContain('sessionTransientStatusStore.get(sessionId)');
+    expect(showStall).toContain('sessionTransientStatusStore.setStall(sessionId, payload)');
+    expect(showStall).toContain('if (sessionId !== activeSessionId) return;');
+    expect(stallCase).not.toContain('sessionId !== activeSessionId');
+    expect(sessionIdHandler).toContain('activateSessionTransientStatus(sessionId);');
+  });
 });
