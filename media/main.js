@@ -210,14 +210,29 @@ const createSessionSearchState = window.__ocFeatures?.createSessionSearchState;
 if (typeof createSessionSearchState !== 'function') {
     throw new Error('Session search state is unavailable');
 }
+const createSessionSearchRegistry = window.__ocContinuation?.createSessionSearchRegistry;
+if (typeof createSessionSearchRegistry !== 'function') {
+    throw new Error('Session search registry is unavailable');
+}
+const sessionSearchRegistry = createSessionSearchRegistry(() => createSessionSearchState());
 let sessionSearch = createSessionSearchState();
+const sessionSearchControllerState = new Proxy({}, {
+    get(_target, property) {
+        const value = sessionSearch[property];
+        return typeof value === 'function' ? value.bind(sessionSearch) : value;
+    },
+    set(_target, property, value) {
+        sessionSearch[property] = value;
+        return true;
+    }
+});
 const createSessionSearchDomController = window.__ocFeatures?.createSessionSearchDomController;
 if (typeof createSessionSearchDomController !== 'function') {
     throw new Error('Session search DOM controller is unavailable');
 }
 const sessionSearchDomController = createSessionSearchDomController({
     document,
-    state: sessionSearch,
+    state: sessionSearchControllerState,
     onManualScroll: () => { autoScrollPinnedToBottom = false; },
     collectTextMatchKeys: (query) => collectLoadedTextSearchKeys(query),
     ensureKeyMounted: (key) => ensureChatWindowKeyMounted(key, 'search')
@@ -227,7 +242,7 @@ if (typeof createSmartSearchRequestController !== 'function') {
     throw new Error('Smart Search request controller is unavailable');
 }
 const smartSearchRequestController = createSmartSearchRequestController({
-    state: sessionSearch,
+    state: sessionSearchControllerState,
     clearHighlights: () => clearSessionSearchHighlights(),
     updateControls: () => updateSessionSearchControls(),
     collectMessages: () => collectSmartSearchMessages(),
@@ -240,7 +255,7 @@ if (typeof createSessionSearchInteractionController !== 'function') {
     throw new Error('Session search interaction controller is unavailable');
 }
 const sessionSearchInteractionController = createSessionSearchInteractionController({
-    state: sessionSearch,
+    state: sessionSearchControllerState,
     dom: sessionSearchDomController,
     refresh: (options) => refreshSessionSearchHighlights(options),
     navigate: (delta) => goToSessionSearchMatch(delta),
@@ -3219,9 +3234,7 @@ function replaceKeyEverywhere(oldId, newId, sessionId) {
         });
         return;
     }
-    if (sessionId === activeSessionId && typeof sessionSearch !== 'undefined') {
-        sessionSearch.rekey(oldId, newId);
-    }
+    getSessionSearchState(sessionId, false)?.rekey(oldId, newId);
     if (typeof subagentTextExpandedByKey !== 'undefined' && subagentTextExpandedByKey instanceof Map) {
         const expansionNeedle = `:${oldId}:`;
         for (const [key, expanded] of Array.from(subagentTextExpandedByKey.entries())) {
@@ -5053,6 +5066,20 @@ function wrapTables(root) {
 
 function getSessionSearchElements() {
     return sessionSearchDomController.elements();
+}
+
+function getSessionSearchState(sessionId, create = true) {
+    return sessionSearchRegistry.get(sessionId, create);
+}
+
+function activateSessionSearch(sessionId) {
+    sessionSearchInteractionController.dispose();
+    sessionSearchDomController.clearHighlights();
+    sessionSearch = getSessionSearchState(sessionId, true) || createSessionSearchState();
+    const { bar, input } = sessionSearchDomController.elements();
+    if (input) input.value = sessionSearch.query || '';
+    bar?.classList.toggle('hidden', !sessionSearch.open);
+    sessionSearchDomController.updateControls();
 }
 
 function clearSessionSearchHighlights() {
@@ -11996,6 +12023,7 @@ function shouldHideDcpUiMessage(message) {
                 transitionActiveSessionPresentationOwner(previousSessionId, item.id);
                 activeSessionId = item.id;
                 clearAppendInputForSessionChange(item.id);
+                activateSessionSearch(item.id);
                 activateSessionOverlays(item.id);
                 activateSessionTransientStatus(item.id);
                 closeSessionPanel();
@@ -13405,6 +13433,7 @@ function appendMessageImages(parentEl, message) {
             pendingExplicitSessionSelectionId = '';
         }
         clearAppendInputForSessionChange(sessionId);
+        activateSessionSearch(sessionId);
         renderHeaderUsage();
         if (prevSessionId && prevSessionId !== sessionId) {
             activateSessionOverlays(sessionId);
@@ -13437,15 +13466,25 @@ function appendMessageImages(parentEl, message) {
 
         switch (message.type) {
             case 'smartSessionSearchResult': {
-                if (!sessionSearch.acceptSmartSearchResponse(message.requestId)) break;
-                applySmartSessionSearchResults(message.messageIds || []);
-                updateSessionSearchControls();
+                const sessionId = typeof message.sessionId === 'string' ? message.sessionId : '';
+                const targetSearch = getSessionSearchState(sessionId, false);
+                if (!targetSearch?.acceptSmartSearchResponse(message.requestId)) break;
+                if (sessionId === activeSessionId) {
+                    applySmartSessionSearchResults(message.messageIds || []);
+                    updateSessionSearchControls();
+                } else {
+                    targetSearch.setSmartResults(message.messageIds || []);
+                }
                 break;
             }
             case 'smartSessionSearchError': {
-                if (!sessionSearch.failSmartSearch(message.requestId)) break;
-                sessionSearch.clearMountedMatches();
-                updateSessionSearchControls();
+                const sessionId = typeof message.sessionId === 'string' ? message.sessionId : '';
+                const targetSearch = getSessionSearchState(sessionId, false);
+                if (!targetSearch?.failSmartSearch(message.requestId)) break;
+                if (sessionId === activeSessionId) {
+                    targetSearch.clearMountedMatches();
+                    updateSessionSearchControls();
+                }
                 break;
             }
             case 'gitUndoAvailability': {
@@ -13561,6 +13600,7 @@ function appendMessageImages(parentEl, message) {
                 if (!hydrated) {
                     transitionActiveSessionPresentationOwner(activeSessionId, incomingSessionId || activeSessionId || '');
                     activeSessionId = incomingSessionId || activeSessionId || '';
+                    activateSessionSearch(activeSessionId);
                 }
                 modeSelect.value = selectedMode;
                 applyModeStyles(selectedMode);
@@ -13677,6 +13717,7 @@ function appendMessageImages(parentEl, message) {
                 }
                 transitionActiveSessionPresentationOwner(activeSessionId, incomingSessionId || activeSessionId || '');
                 activeSessionId = incomingSessionId || activeSessionId || '';
+                activateSessionSearch(activeSessionId);
                 getComposerContextStateController().clear();
                 renderContextTokens();
                 closeFileMentionList();
@@ -13765,6 +13806,7 @@ function appendMessageImages(parentEl, message) {
                 sessionOverlayStore.deleteSession(sessionId);
                 sessionConflictStore.deleteSession(sessionId);
                 sessionTransientStatusStore.deleteSession(sessionId);
+                sessionSearchRegistry.deleteSession(sessionId);
                 sessions = sessions.filter((item) => item?.id !== sessionId);
                 renderSessionList();
                 break;
@@ -16027,6 +16069,7 @@ function appendMessageImages(parentEl, message) {
                 activeSessionId = nextSessionId;
                 pendingExplicitSessionSelectionId = '';
                 clearAppendInputForSessionChange(activeSessionId);
+                activateSessionSearch(activeSessionId);
                 activateSessionOverlays(activeSessionId);
                 activateSessionTransientStatus(activeSessionId);
                 getHeaderStateController().setBaseTitle('OpenCode: Chat');

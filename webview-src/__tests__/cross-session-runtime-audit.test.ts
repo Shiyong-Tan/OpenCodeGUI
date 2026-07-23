@@ -137,4 +137,19 @@ describe('cross-session runtime repository audit', () => {
     expect(stallCase).not.toContain('sessionId !== activeSessionId');
     expect(sessionIdHandler).toContain('activateSessionTransientStatus(sessionId);');
   });
+
+  test('search state and asynchronous smart results remain session-owned', () => {
+    const activateSearch = extractFunction(main, 'function activateSessionSearch(');
+    const sessionIdHandler = extractFunction(main, 'function handleSessionIdMessage(');
+    const smartResultStart = main.indexOf("case 'smartSessionSearchResult':");
+    const smartResultEnd = main.indexOf("case 'smartSessionSearchError':", smartResultStart);
+    const smartResult = main.slice(smartResultStart, smartResultEnd);
+
+    expect(activateSearch).toContain('getSessionSearchState(sessionId, true)');
+    expect(sessionIdHandler).toContain('activateSessionSearch(sessionId);');
+    expect(smartResult).toContain("const sessionId = typeof message.sessionId === 'string' ? message.sessionId : '';");
+    expect(smartResult).toContain('getSessionSearchState(sessionId, false)');
+    expect(smartResult).toContain('if (sessionId === activeSessionId)');
+    expect(smartResult).not.toContain('sessionSearch.acceptSmartSearchResponse');
+  });
 });

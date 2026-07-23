@@ -414,6 +414,7 @@ function runSessionOwner() {
     clearAppendInputForSessionChange: () => calls.push('append-clear'), renderHeaderUsage: () => calls.push('header'),
     transitionActiveSessionPresentationOwner: () => calls.push('transition'),
     destroyChatWindowAdapter: () => calls.push('destroy'),
+    activateSessionSearch: () => calls.push('search'),
     activateSessionOverlays: () => calls.push('overlays'),
     activateSessionTransientStatus: () => calls.push('status'), applyPromptToSession: () => calls.push('prompt'),
     getSessionState: (id) => sessions.get(id), window: { __oc: { renderFromState: () => calls.push('render') } },

@@ -12,6 +12,7 @@ import { createMessageRekeyController } from '../session-runtime/message-rekey-c
 import { createSessionOverlayStore } from '../session-runtime/session-overlay-store';
 import { createSessionConflictStore } from '../session-runtime/session-conflict-store';
 import { createSessionTransientStatusStore } from '../session-runtime/session-transient-status-store';
+import { createSessionSearchRegistry } from '../session-runtime/session-search-registry';
 
 export const CONTINUATION_FACADE_VERSION = 1 as const;
 
@@ -32,6 +33,7 @@ const facade = Object.freeze({
   createSessionOverlayStore,
   createSessionConflictStore,
   createSessionTransientStatusStore,
+  createSessionSearchRegistry,
 });
 
 declare global {

@@ -838,6 +838,7 @@ describe('B4S-R3 recovered anonymous owner behavior matrices', () => {
           trace.push(`transition:${previous || 'none'}->${target}`);
           if (previous && previous !== target) trace.push('destroy:session-switch');
         },
+        activateSessionSearch: (sessionId: string) => trace.push(`search:${sessionId}`),
         activateSessionOverlays: (sessionId: string) => trace.push(`overlays:${sessionId}`),
         activateSessionTransientStatus: (sessionId: string) => trace.push(`status:${sessionId}`),
         closeStallCard: () => trace.push('stall'), setSystemNotice: () => trace.push('notice'),
@@ -855,12 +856,12 @@ describe('B4S-R3 recovered anonymous owner behavior matrices', () => {
     };
     expect(run({ route: null })).toEqual({ trace: [], returned: undefined, activeSessionId: 'same', pendingExplicit: '', switching: false, pending: 0 });
     expect(run({ route: { sessionId: 'background' } }).trace).toEqual(['post:ui-debug', 'background', 'refresh']);
-    expect(run({ route: { sessionId: 'same' } }).trace).toEqual(['transition:same->same', 'clearAppend', 'header', 'overlays:same', 'status:same', 'refreshAfter']);
+    expect(run({ route: { sessionId: 'same' } }).trace).toEqual(['transition:same->same', 'clearAppend', 'search:same', 'header', 'overlays:same', 'status:same', 'refreshAfter']);
     expect(run({ route: { sessionId: 'next' }, activeSessionId: '', pendingUiPrompts: [] }).trace)
-      .toEqual(['transition:none->next', 'clearAppend', 'header', 'overlays:next', 'status:next', 'refreshAfter']);
+      .toEqual(['transition:none->next', 'clearAppend', 'search:next', 'header', 'overlays:next', 'status:next', 'refreshAfter']);
     const switched = run({ route: { sessionId: 'next' }, activeSessionId: 'same', pendingExplicitSessionSelectionId: 'next',
       isSwitchingSession: true, pendingUiPrompts: [{ id: 1 }] });
-    expect(switched.trace).toEqual(['transition:same->next', 'destroy:session-switch', 'clearAppend', 'header', 'overlays:next',
+    expect(switched.trace).toEqual(['transition:same->next', 'destroy:session-switch', 'clearAppend', 'search:next', 'header', 'overlays:next',
       'status:next', 'prompt', 'post:registerTmpKey', 'render', 'logSession', 'refreshAfter']);
     expect(switched).toMatchObject({ returned: undefined, activeSessionId: 'next', pendingExplicit: '', switching: false, pending: 0 });
   });

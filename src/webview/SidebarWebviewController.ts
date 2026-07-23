@@ -675,6 +675,7 @@ ${attachmentLines.join('\n')}`
                 }
                 case "smartSessionSearch": {
                     const requestId = typeof data.requestId === 'string' ? data.requestId : '';
+                    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
                     const query = typeof data.query === 'string' ? data.query : '';
                     const messages: SmartSearchMessage[] = Array.isArray(data.messages)
                         ? data.messages
@@ -686,9 +687,13 @@ ${attachmentLines.join('\n')}`
                             }))
                         : [];
                     const liveWebview = host._view?.webview || activeWebview;
+                    if (!sessionId) {
+                        host.uiDebugChannel.appendLine(`EXT: smartSearch.drop | requestId=${requestId || 'null'} | reason=missing-session-owner`);
+                        break;
+                    }
                     try {
                         const result = await host.smartSearch.run(
-                            typeof data.sessionId === 'string' ? data.sessionId : host.currentSessionId,
+                            sessionId,
                             query,
                             messages
                         );
@@ -698,7 +703,7 @@ ${attachmentLines.join('\n')}`
                         liveWebview.postMessage({
                             type: 'smartSessionSearchResult',
                             requestId,
-                            sessionId: typeof data.sessionId === 'string' ? data.sessionId : host.currentSessionId,
+                            sessionId,
                             messageIds: result.messageIds,
                             modelId: result.modelId
                         });
@@ -707,7 +712,7 @@ ${attachmentLines.join('\n')}`
                         liveWebview.postMessage({
                             type: 'smartSessionSearchError',
                             requestId,
-                            sessionId: typeof data.sessionId === 'string' ? data.sessionId : host.currentSessionId,
+                            sessionId,
                             error: String(error)
                         });
                     }
