@@ -25,6 +25,16 @@ describe('OpenCodeEventMapper', () => {
     expect(host.logUiDebug).toHaveBeenCalledTimes(1);
   });
 
+  test('CLI transport output cannot replace the explicitly selected session', () => {
+    const source = fs.readFileSync(path.join(process.cwd(), 'src', 'OpenCodeClient.ts'), 'utf8');
+    const start = source.indexOf('private handleCliOutputLine(');
+    const end = source.indexOf('private resolveBin(', start);
+    const handler = source.slice(start, end);
+    expect(handler).toContain("const resolvedSessionId = sessionId || this.currentSessionId;");
+    expect(handler).not.toContain('this.currentSessionId = sessionId;');
+    expect(source).toContain('public setSessionId(sessionId: string | undefined): void');
+  });
+
   test('maps usage and preserves the idle lifecycle callback order', () => {
     const calls: string[] = [];
     const host = {

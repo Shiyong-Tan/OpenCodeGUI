@@ -3489,9 +3489,8 @@ export class OpenCodeClient {
                     if (sessionId && onEvent) {
                         onEvent({ type: 'session', sessionId });
                     }
-                    if (sessionId) {
-                        this.currentSessionId = sessionId;
-                    }
+                    // Transport ownership is not UI selection. Concurrent session output
+                    // must never replace the session selected through setSessionId().
                     const messageId = parsed.part?.messageID || parsed.part?.messageId || parsed.messageID || parsed.messageId;
                     const assistantMsgId = typeof parsed.part?.messageID === 'string' ? parsed.part.messageID : undefined;
                     // if (assistantMsgId || messageId) {
