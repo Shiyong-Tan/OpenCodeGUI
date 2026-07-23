@@ -16244,11 +16244,18 @@ function appendMessageImages(parentEl, message) {
 });
 
 function postOpenGitDiff(filePath, sessionId, commitHead, commitBase) {
-    if (!filePath) return;
+    const ownerSessionId = typeof sessionId === 'string' ? sessionId : '';
+    if (!filePath || !ownerSessionId) {
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: ['[WV][OPEN_DIFF_DROP]', `filePath=${filePath || 'null'}`, 'reason=missing-session-owner']
+        });
+        return;
+    }
     vscode.postMessage({
         type: 'openGitDiff',
         filePath,
-        sessionId: sessionId || activeSessionId || '',
+        sessionId: ownerSessionId,
         commitHead: commitHead || undefined,
         commitBase: commitBase || undefined
     });
@@ -16603,7 +16610,7 @@ function renderConflictCard(payload, options = {}) {
         summary.textContent = item.path || 'unknown';
         summary.addEventListener('click', () => {
             if (item.path) {
-                const sessionId = payload.sessionId || activeSessionId;
+                const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId : '';
                 postOpenGitDiff(item.path, sessionId);
             }
         });
@@ -17133,7 +17140,7 @@ function showQuestionOverlay(payload) {
         logQuestionDebug('show.skip', 'reason=bad-payload');
         return;
     }
-    const sessionId = payload.sessionId || activeSessionId || '';
+    const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId : '';
     const callId = typeof payload.callId === 'string' ? payload.callId : '';
     const requestId = typeof payload.requestId === 'string' ? payload.requestId : '';
     const questionItems = normalizeQuestionItems(payload);
@@ -17191,7 +17198,7 @@ function showPermissionOverlay(payload) {
     if (!payload || typeof payload !== 'object') {
         return;
     }
-    const sessionId = payload.sessionId || activeSessionId || '';
+    const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId : '';
     const permissionId = typeof payload.permissionId === 'string' ? payload.permissionId : '';
     const requestId = typeof payload.requestId === 'string' ? payload.requestId : '';
     const permission = typeof payload.permission === 'string' ? payload.permission : '';

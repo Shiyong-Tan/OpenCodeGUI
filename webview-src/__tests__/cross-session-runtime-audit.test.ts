@@ -100,8 +100,12 @@ describe('cross-session runtime repository audit', () => {
     const sessionIdHandler = extractFunction(main, 'function handleSessionIdMessage(');
 
     expect(showQuestion).toContain('sessionOverlayStore.enqueueQuestion(sessionId, state)');
+    expect(showQuestion).toContain("const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId : ''");
+    expect(showQuestion).not.toContain('payload.sessionId || activeSessionId');
     expect(showQuestion).not.toContain('reason=session-mismatch');
     expect(showPermission).toContain('sessionOverlayStore.setPermission(sessionId, {');
+    expect(showPermission).toContain("const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId : ''");
+    expect(showPermission).not.toContain('payload.sessionId || activeSessionId');
     expect(showPermission).not.toContain('payload.sessionId !== activeSessionId');
     expect(activateOverlays).toContain('renderQuestionOverlayModal();');
     expect(activateOverlays).toContain('renderPermissionOverlayModal();');
@@ -121,6 +125,9 @@ describe('cross-session runtime repository audit', () => {
     expect(conflictCase).toContain('sessionConflictStore.set(sessionId, message);');
     expect(conflictCase).toContain('if (sessionId === activeSessionId)');
     expect(clearConflict).toContain('sessionConflictStore.clear(sessionId, identity || undefined)');
+    const openDiff = extractFunction(main, 'function postOpenGitDiff(');
+    expect(openDiff).toContain("const ownerSessionId = typeof sessionId === 'string' ? sessionId : ''");
+    expect(openDiff).not.toContain('activeSessionId');
   });
 
   test('background notices and stall prompts survive selection changes', () => {
