@@ -1271,6 +1271,9 @@ ${attachmentLines.join('\n')}`
 
                 case "clipboardImage": {
                     if (!data.dataUrl || !data.mime) return;
+                    const attachmentSessionId = typeof data.sessionId === 'string' && data.sessionId
+                        ? data.sessionId
+                        : host.currentSessionId;
                     try {
                         const saved = await host.attachmentStorage.saveClipboardImage(data.dataUrl, data.mime);
                         activeWebview.postMessage({
@@ -1280,7 +1283,7 @@ ${attachmentLines.join('\n')}`
                             filePath: saved.filePath,
                             dataUrl: data.dataUrl,
                             mime: data.mime,
-                            sessionId: host.currentSessionId
+                            sessionId: attachmentSessionId
                         });
                     } catch (error) {
                         vscode.window.showErrorMessage(`Failed to save image: ${error}`);
@@ -1289,6 +1292,9 @@ ${attachmentLines.join('\n')}`
                     break;
                 }
                 case "selectAttachments": {
+                    const attachmentSessionId = typeof data.sessionId === 'string' && data.sessionId
+                        ? data.sessionId
+                        : host.currentSessionId;
                     try {
                         const picks = await vscode.window.showOpenDialog({
                             canSelectMany: true,
@@ -1318,12 +1324,12 @@ ${attachmentLines.join('\n')}`
                                 filePath,
                                 dataUrl,
                                 mime,
-                                sessionId: host.currentSessionId
+                                sessionId: attachmentSessionId
                             });
                         }
                     } catch (error) {
                         vscode.window.showErrorMessage(`Failed to add attachments: ${error}`);
-                        activeWebview.postMessage({ type: 'attachmentError', value: `Failed to add attachments: ${error}`, sessionId: host.currentSessionId });
+                        activeWebview.postMessage({ type: 'attachmentError', value: `Failed to add attachments: ${error}`, sessionId: attachmentSessionId });
                     }
                     break;
                 }

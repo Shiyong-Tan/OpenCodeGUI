@@ -5,10 +5,12 @@ export function getClipboardImageItems(items: ArrayLike<DataTransferItem> | null
 
 export function createClipboardAttachmentController(options: {
   createFileReader(): FileReader;
+  getSessionId(): string;
   postMessage(message: unknown): void;
 }): { handlePaste(event: ClipboardEvent): void } {
   return {
     handlePaste: (event) => {
+      const sessionId = options.getSessionId();
       for (const item of getClipboardImageItems(event.clipboardData?.items)) {
         const file = item.getAsFile();
         if (!file) continue;
@@ -18,6 +20,7 @@ export function createClipboardAttachmentController(options: {
             type: 'clipboardImage',
             dataUrl: reader.result,
             mime: file.type,
+            sessionId,
           });
         };
         reader.readAsDataURL(file);

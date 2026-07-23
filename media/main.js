@@ -5221,6 +5221,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     const clipboardAttachmentController = createClipboardAttachmentController({
         createFileReader: () => new FileReader(),
+        getSessionId: () => activeSessionId || '',
         postMessage: (message) => vscode.postMessage(message)
     });
     const createComposerInputController = window.__ocFeatures?.createComposerInputController;
