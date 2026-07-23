@@ -761,10 +761,20 @@ Production ownership rules now enforced:
   before hydration returns;
 - hydration cannot restore unrelated cached durable records that are absent
   from the authoritative payload.
+- assistant temporary-to-canonical binding no longer waits for or guesses from
+  the global message-index map; the owning session identity is sufficient;
+- ownerless asynchronous chat events are rejected at the actor router before
+  reaching compatibility handlers;
+- plan-file cards use the event-owned session for both assistant anchoring and
+  Webview routing;
+- background identity changes cannot mutate the selected session's search
+  index;
+- a repository audit now enforces actor ingress, explicit event ownership,
+  identity/lifecycle writer boundaries, and render-only session selection.
 
 Automated acceptance at this checkpoint:
 
-- 134 Jest suites and 1061 tests pass;
+- 136 Jest suites and 1073 tests pass;
 - Extension and Webview compilation pass;
 - all four Webview bundles remain within size limits;
 - deterministic rendering bundle check passes;
