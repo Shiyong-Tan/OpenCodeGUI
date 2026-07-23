@@ -13902,25 +13902,33 @@ function appendMessageImages(parentEl, message) {
                 break;
             }
             case 'webviewLivenessPing': {
+                const sessionId = typeof message.sessionId === 'string' ? message.sessionId : '';
+                if (!sessionId) {
+                    vscode.postMessage({
+                        type: 'ui-debug',
+                        payload: ['[WV][LIVENESS_DROP]', 'reason=missing-session-owner', 'pingId', message.pingId || 'null']
+                    });
+                    break;
+                }
                 if (typeof message.panelId === 'string' && message.panelId.length > 0) {
                     currentWebviewLivenessPanelId = message.panelId;
                 }
                 if (debugWebviewLivenessAckDrop) {
                     vscode.postMessage({
                         type: 'ui-debug',
-                        payload: ['WV', 'webviewLiveness.ackDrop.drop', 'pingId', message.pingId || 'null', 'sessionId', message.sessionId || activeSessionId || 'null', 'token', message.token || 'null']
+                        payload: ['WV', 'webviewLiveness.ackDrop.drop', 'pingId', message.pingId || 'null', 'sessionId', sessionId, 'token', message.token || 'null']
                     });
                     break;
                 }
                 vscode.postMessage({
                     type: 'ui-debug',
-                    payload: ['WV', 'webviewLiveness.ack', 'pingId', message.pingId || 'null', 'sessionId', message.sessionId || activeSessionId || 'null', 'token', message.token || 'null']
+                    payload: ['WV', 'webviewLiveness.ack', 'pingId', message.pingId || 'null', 'sessionId', sessionId, 'token', message.token || 'null']
                 });
                 vscode.postMessage({
                     type: 'webviewLivenessAck',
                     pingId: message.pingId,
                     token: message.token,
-                    sessionId: message.sessionId || activeSessionId || '',
+                    sessionId,
                     panelId: message.panelId,
                     webviewInstanceId: message.webviewInstanceId,
                     ts: Date.now()
@@ -16108,7 +16116,9 @@ function appendMessageImages(parentEl, message) {
                 break;
             }
             case 'questionOverlayClose': {
-                clearQuestionOverlay('external-close', false, message.sessionId || activeSessionId);
+                const sessionId = typeof message.sessionId === 'string' ? message.sessionId : '';
+                if (!sessionId) break;
+                clearQuestionOverlay('external-close', false, sessionId);
                 scheduleRenderFromState('question-overlay-close');
                 break;
             }
@@ -16117,15 +16127,20 @@ function appendMessageImages(parentEl, message) {
                 break;
             }
             case 'permissionOverlayClose': {
-                clearPermissionOverlay('external-close', message.sessionId || activeSessionId);
+                const sessionId = typeof message.sessionId === 'string' ? message.sessionId : '';
+                if (!sessionId) break;
+                clearPermissionOverlay('external-close', sessionId);
                 break;
             }
             case 'permissionResultAck': {
-                clearPermissionOverlay('result-ack', message.sessionId || activeSessionId);
+                const sessionId = typeof message.sessionId === 'string' ? message.sessionId : '';
+                if (!sessionId) break;
+                clearPermissionOverlay('result-ack', sessionId);
                 break;
             }
             case 'permissionResultFailed': {
-                const sessionId = message.sessionId || activeSessionId;
+                const sessionId = typeof message.sessionId === 'string' ? message.sessionId : '';
+                if (!sessionId) break;
                 const permissionOverlayState = sessionOverlayStore.updatePermission(sessionId, (state) => ({
                     ...state,
                     pending: false,

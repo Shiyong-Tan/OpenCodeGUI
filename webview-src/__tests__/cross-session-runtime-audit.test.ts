@@ -234,4 +234,13 @@ describe('cross-session runtime repository audit', () => {
       expect(block).not.toContain('|| host.currentSessionId');
     }
   });
+
+  test('owned liveness and overlay responses do not borrow visible session', () => {
+    expect(main).not.toContain('message.sessionId || activeSessionId');
+    const livenessStart = main.indexOf("case 'webviewLivenessPing':");
+    const livenessEnd = main.indexOf("case 'liveTurnResume':", livenessStart);
+    expect(main.slice(livenessStart, livenessEnd)).toContain(
+      "const sessionId = typeof message.sessionId === 'string' ? message.sessionId : '';",
+    );
+  });
 });
