@@ -2,8 +2,12 @@
 
 ## Status
 
-Proposed replacement architecture for active-turn rendering, assistant identity
-binding, session switching, hydration, append continuation, and finalization.
+Superseded by
+[`cross-session-isolated-single-session-architecture.md`](./cross-session-isolated-single-session-architecture.md).
+This document remains as the v1 investigation record and root-cause inventory.
+The v2 design makes existing single-session behavior the compatibility oracle
+and limits the cross-session layer to instance isolation, routing, and
+selection.
 
 This design intentionally replaces the current collection of independently
 mutable flags and identity maps. Adding more ordering checks to the existing
@@ -512,4 +516,3 @@ A narrowly scoped containment patch may:
 
 These changes reduce current failures but are not substitutes for the target
 architecture.
-
