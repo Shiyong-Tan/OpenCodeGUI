@@ -8,7 +8,7 @@ export class TurnFinalizationCoordinator {
     constructor(private readonly options: {
         getAssistantMessageId(sessionId: string): string | undefined;
         emitPhase(target: TurnFinalizationTarget, sessionId: string, phase: 'stream_done' | 'commit_done' | 'upgrade_done' | 'finalize_done'): void;
-        postMessageIndexMap(target: TurnFinalizationTarget): void;
+        postMessageIndexMap(target: TurnFinalizationTarget, sessionId: string): void;
         buildIdentity(sessionId: string, partial: Partial<FinalizeTurnIdentity>): FinalizeTurnIdentity;
         commitChanges(identity: FinalizeTurnIdentity): Promise<any>;
         finalizeBinding(sessionId: string, assistantMessageId: string): Promise<void>;
@@ -33,7 +33,7 @@ export class TurnFinalizationCoordinator {
             lastAssistantMsgId: resolvedAssistantMessageId,
         });
         this.options.emitPhase(target, sessionId, 'stream_done');
-        this.options.postMessageIndexMap(target);
+        this.options.postMessageIndexMap(target, sessionId);
         const commitResult = await this.options.commitChanges(this.options.buildIdentity(sessionId, {
             assistantMessageId: resolvedAssistantMessageId,
             reqId: 'finalizeResolvedTurn',
@@ -48,7 +48,7 @@ export class TurnFinalizationCoordinator {
             await this.options.promoteContinuationOwner(sessionId, resolvedAssistantMessageId);
             await this.options.consolidateContinuationOwner(sessionId);
         }
-        this.options.postMessageIndexMap(target);
+        this.options.postMessageIndexMap(target, sessionId);
         const identity = this.options.buildIdentity(sessionId, {
             assistantMessageId: resolvedAssistantMessageId,
             commitResult,

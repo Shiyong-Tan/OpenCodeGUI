@@ -7,7 +7,7 @@ describe('TurnFinalizationCoordinator', () => {
         const coordinator = new TurnFinalizationCoordinator({
             getAssistantMessageId: () => 'msg_assistant',
             emitPhase: (_target, _sessionId, phase) => calls.push(`phase:${phase}`),
-            postMessageIndexMap: () => calls.push('index'),
+            postMessageIndexMap: (_target, sessionId) => calls.push(`index:${sessionId}`),
             buildIdentity: (sessionId, partial) => ({ sessionId, ...partial }),
             commitChanges: async (identity) => {
                 calls.push(`commit:${identity.assistantMessageId}`);
@@ -30,9 +30,9 @@ describe('TurnFinalizationCoordinator', () => {
             { type: 'turnInFlight', sessionId: 'session-a', inFlight: false },
         ]);
         expect(calls).toEqual([
-            'phase:stream_done', 'index', 'commit:msg_assistant', 'binding',
+            'phase:stream_done', 'index:session-a', 'commit:msg_assistant', 'binding',
             'phase:commit_done', 'upgrade', 'phase:upgrade_done', 'promote', 'consolidate',
-            'index', 'changes:committed', 'snapshot', 'clear-in-flight', 'finish',
+            'index:session-a', 'changes:committed', 'snapshot', 'clear-in-flight', 'finish',
             'sync-in-flight', 'phase:finalize_done', 'compensation',
         ]);
     });

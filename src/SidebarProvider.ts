@@ -3909,7 +3909,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.turnFinalizationCoordinator = new TurnFinalizationCoordinator({
             getAssistantMessageId: (sessionId) => this.client.getTurnAssistantMsgId(sessionId),
             emitPhase: (target, sessionId, phase) => this.emitTurnFinalizePhase(target as vscode.Webview, sessionId, phase),
-            postMessageIndexMap: (target) => this.postMessageIndexMap(target as vscode.Webview),
+            postMessageIndexMap: (target, sessionId) => this.postMessageIndexMap(target as vscode.Webview, sessionId),
             buildIdentity: (sessionId, partial) => this.buildFinalizeTurnIdentity(sessionId, partial),
             commitChanges: (identity) => this.commitPendingTurnChangesFromAuthoritativeFiles(identity),
             finalizeBinding: (sessionId, messageId) => this.client.finalizeTurnBindingFromResolvedAssistant(sessionId, messageId),
@@ -5495,13 +5495,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         });
     }
 
-    private postMessageIndexMap(webview: vscode.Webview, sessionId?: string): void {
-        const map = this.client.getMessageIndexMap(sessionId || this.currentSessionId);
+    private postMessageIndexMap(webview: vscode.Webview, sessionId: string): void {
+        if (!sessionId) {
+            this.uiDebugChannel.appendLine('[EXT][MESSAGE_INDEX_DROP] reason=missing-session-owner');
+            return;
+        }
+        const map = this.client.getMessageIndexMap(sessionId);
         const liveWebview = this._view?.webview || webview;
         liveWebview.postMessage({
             type: 'messageIndexMap',
             map,
-            sessionId: sessionId || this.currentSessionId
+            sessionId
         });
     }
 

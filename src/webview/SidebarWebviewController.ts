@@ -388,7 +388,7 @@ ${attachmentLines.join('\n')}`
                             lastAssistantMsgId: doneAssistantMsgId
                         });
                         host.emitTurnFinalizePhase(liveWebview, targetSessionId, 'stream_done');
-                        host.postMessageIndexMap(liveWebview);
+                        host.postMessageIndexMap(liveWebview, targetSessionId);
                         host.uiDebugChannel.appendLine(`EXT: finalize.order | sessionId=${targetSessionId} | phase=commit-start`);
                         host.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=commit_start reqId=${reqId} payloadSessionId=${payloadSessionId || 'none'} currentSessionId=${currentSessionIdAtSend || 'none'} targetSessionId=${targetSessionId} routeSource=${routeSource}`);
                         const preCommitIdentity = host.buildFinalizeTurnIdentity(targetSessionId, {
@@ -406,7 +406,7 @@ ${attachmentLines.join('\n')}`
                         host.uiDebugChannel.appendLine(`EXT: finalize.order | sessionId=${targetSessionId} | phase=upgrade-done`);
                         host.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=upgrade_done reqId=${reqId} payloadSessionId=${payloadSessionId || 'none'} currentSessionId=${currentSessionIdAtSend || 'none'} targetSessionId=${targetSessionId} routeSource=${routeSource}`);
                         host.emitTurnFinalizePhase(liveWebview, targetSessionId, 'upgrade_done');
-                        host.postMessageIndexMap(liveWebview);
+                        host.postMessageIndexMap(liveWebview, targetSessionId);
                         host.uiDebugChannel.appendLine(`[EXT][SESSION_ROUTE] event=sendMessage phase=diff_list_start reqId=${reqId} payloadSessionId=${payloadSessionId || 'none'} currentSessionId=${currentSessionIdAtSend || 'none'} targetSessionId=${targetSessionId} routeSource=${routeSource}`);
                         const finalizeIdentity = host.buildFinalizeTurnIdentity(targetSessionId, {
                             reqId,
