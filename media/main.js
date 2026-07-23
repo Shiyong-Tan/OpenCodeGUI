@@ -14747,6 +14747,14 @@ function appendMessageImages(parentEl, message) {
                     if (!hadPresentableContent && hasPresentableContent) {
                         const trace = appendPresentationDiagnostics.get(sessionId);
                         if (trace?.generation === followup.generation) trace.stage = 'handoff';
+                        const predecessor = session.messagesById.get(followup.predecessorAssistantMsgId);
+                        if (predecessor?.role === 'assistant') {
+                            predecessor.meta = {
+                                ...(predecessor.meta || {}),
+                                isThinking: false,
+                                statusText: null
+                            };
+                        }
                         if (Array.isArray(target.meta?.subagents)) {
                             target.meta = { ...(target.meta || {}) };
                             delete target.meta.subagents;

@@ -36,9 +36,14 @@ describe('append followup same-turn handoff', () => {
         expect(assistantMetaBlock).toContain(
             'applyKeyedChatPresentationAliasMigration(',
         );
+        const retirePredecessorIndex = assistantMetaBlock.indexOf(
+            "session.messagesById.get(followup.predecessorAssistantMsgId)",
+        );
         const migrationIndex = assistantMetaBlock.indexOf('applyKeyedChatPresentationAliasMigration(');
         const synchronousReconcileIndex = assistantMetaBlock.indexOf('renderFromState();', migrationIndex);
         const scheduledReconcileIndex = assistantMetaBlock.indexOf("renderIfActive(sessionId, 'append-followup-meta'");
+        expect(retirePredecessorIndex).toBeGreaterThanOrEqual(0);
+        expect(retirePredecessorIndex).toBeLessThan(migrationIndex);
         expect(migrationIndex).toBeLessThan(synchronousReconcileIndex);
         expect(synchronousReconcileIndex).toBeLessThan(scheduledReconcileIndex);
     });
