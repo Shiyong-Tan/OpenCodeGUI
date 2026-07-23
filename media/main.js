@@ -3135,6 +3135,15 @@ function replaceKeyEverywhere(oldId, newId, sessionId = activeSessionId) {
     const session = getSessionState(sessionId);
     if (!session) return;
 
+    const oldMessageForRoleGuard = session.messagesById.get(oldId) || null;
+    if (oldMessageForRoleGuard?.role === 'user' && typeof oldId === 'string' && oldId.startsWith('msg_') && typeof newId === 'string' && newId.startsWith('msg_')) {
+        if (session.currentTurnAssistantKey === oldId) session.currentTurnAssistantKey = null;
+        if (session.currentTurnAssistantMsgId === oldId) session.currentTurnAssistantMsgId = null;
+        if (session.thinkingId === oldId) session.thinkingId = null;
+        vscode.postMessage({ type: 'ui-debug', payload: ['reject.user->assistant-role', 'oldKey', oldId, 'newKey', newId, 'sessionId', sessionId] });
+        return;
+    }
+
     const preReplaceCurrentTurnAssistantKey = session.currentTurnAssistantKey;
     const preReplaceThinkingId = session.thinkingId;
     const preReplaceCurrentTurnAssistantMsgId = session.currentTurnAssistantMsgId;
@@ -3322,6 +3331,52 @@ function replaceKeyEverywhere(oldId, newId, sessionId = activeSessionId) {
 }
 
 // Removed obsolete freezeSegments function - new system uses segmentsByNoticeKey
+
+function applyAppendSuccessorProtocolTransition(message) {
+    if (message.type === 'turnInFlight') {
+        const sessionId = getEventSessionId(message, 'turnInFlight');
+        if (!sessionId) return true;
+        const session = getSessionState(sessionId, true);
+        session.backendTurnInFlight = Boolean(message?.inFlight);
+        if (message?.inFlight) {
+            session.turnFullyFinalized = false;
+            session.snapshotFinalizeReady = false;
+            const ownerMsgId = typeof message?.ownerMsgId === 'string' ? message.ownerMsgId : null;
+            if (ownerMsgId && session.messagesById.has(ownerMsgId)) {
+                const activeAssistantKey = session.currentTurnAssistantKey || session.thinkingId;
+                if (!(typeof activeAssistantKey === 'string' && (activeAssistantKey.startsWith('tmp:') || activeAssistantKey.startsWith('local-')) && activeAssistantKey !== ownerMsgId)) {
+                    session.currentTurnAssistantKey = ownerMsgId;
+                    session.currentTurnAssistantMsgId = ownerMsgId;
+                    session.thinkingId = ownerMsgId;
+                    const ownerMsg = session.messagesById.get(ownerMsgId);
+                    if (ownerMsg) ownerMsg.meta = { ...(ownerMsg.meta || {}), isThinking: true, statusText: '' };
+                }
+            }
+        } else maybeExitAppendInputModeAfterTurnEnd(sessionId, 'turnInFlight:false');
+        updateSendGate();
+        return true;
+    }
+    if (message.type === 'assistantMessageMeta') {
+        const route = resolveContentEventRoute(message, 'assistantMessageMeta');
+        if (!route) return true;
+        const sessionId = route.sessionId;
+        const session = getSessionState(sessionId, false);
+        retainAgentLaneParentAssociation(session, route);
+        if (session?.canceledActiveTurn || (session?.turnFullyFinalized === true && session?.backendTurnInFlight !== true)) return true;
+        const allowed = Array.isArray(message?.allowedSessionIds) ? message.allowedSessionIds.filter(id => typeof id === 'string' && id.length) : [];
+        if (allowed.length && !allowed.includes(sessionId)) return true;
+        const allowedSession = getSessionState(sessionId, true);
+        retainAgentLaneParentAssociation(allowedSession, route);
+        if (message.isSyntheticTurn !== true) {
+            handleAssistantMeta(sessionId, message, { render: route.shouldRender });
+            if (!tryPatchAssistantStreamingBubble(sessionId, 'assistantMessageMeta').applied) renderIfActive(sessionId, 'assistantMessageMeta', { scroll: true });
+            logSessionState(sessionId, 'assistantMessageMeta');
+        }
+        vscode.postMessage({ type: 'ui-debug', payload: ['[WV][ASSIST_META_GATE]', `meta=${sessionId}`] });
+        return true;
+    }
+    return false;
+}
 
 function ensureThinkingUnique(session, source) {
     const thinkingMessages = [];
@@ -14756,6 +14811,7 @@ function appendMessageImages(parentEl, message) {
                 break;
             }
             case 'turnInFlight': {
+                if (applyAppendSuccessorProtocolTransition(message)) break;
                 const sessionId = getEventSessionId(message, 'turnInFlight');
                 if (!sessionId) break;
                 const session = getSessionState(sessionId, true);
@@ -14928,6 +14984,7 @@ function appendMessageImages(parentEl, message) {
                 break;
             }
             case 'assistantMessageMeta': {
+                if (applyAppendSuccessorProtocolTransition(message)) break;
                 const route = resolveContentEventRoute(message, 'assistantMessageMeta');
                 if (!route) break;
                 const sessionId = route.sessionId;

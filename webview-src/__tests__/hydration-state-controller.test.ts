@@ -132,4 +132,41 @@ describe('hydration volatile state controller', () => {
     expect(hydrated.messagesById.get('msg_assistant').text).toBe('authoritative history');
     expect(result.mergedIds).toEqual([]);
   });
+
+  test('restores active subagents with an active assistant target after a volatile switch reset', () => {
+    const before: any = createSessionState();
+    before.timeline = ['msg_assistant'];
+    before.messagesById.set('msg_assistant', { id: 'msg_assistant', role: 'assistant', text: 'working' });
+    before.currentTurnAssistantKey = 'msg_assistant';
+    before.currentTurnAssistantMsgId = 'msg_assistant';
+    before.backendTurnInFlight = true;
+    before.turnFullyFinalized = false;
+    before.activeSubagents = [{ sessionId: 'ses_child', state: 'running' }];
+    const preserved = controller.capture(before);
+    const hydrated: any = createSessionState();
+    hydrated.timeline = ['msg_assistant'];
+    hydrated.messagesById.set('msg_assistant', { id: 'msg_assistant', role: 'assistant', text: '' });
+    controller.restore(hydrated, preserved);
+    expect(hydrated.currentTurnAssistantMsgId).toBe('msg_assistant');
+    expect(hydrated.activeSubagents).toEqual([{ sessionId: 'ses_child', state: 'running' }]);
+    expect(hydrated.activeSubagents).not.toBe(before.activeSubagents);
+  });
+
+  test('does not capture or resurrect subagents for finalized, cancelled, or authoritative hydrated sessions', () => {
+    for (const state of [{ finalized: true }, { cancelled: true }]) {
+      const before: any = createSessionState();
+      before.backendTurnInFlight = !state.finalized;
+      before.turnFullyFinalized = Boolean(state.finalized);
+      before.canceledActiveTurn = Boolean(state.cancelled);
+      before.activeSubagents = [{ sessionId: 'ses_child', state: 'running' }];
+      expect(controller.capture(before).activeSubagents).toBeUndefined();
+    }
+    const before: any = createSessionState();
+    before.backendTurnInFlight = true; before.turnFullyFinalized = false;
+    before.activeSubagents = [{ sessionId: 'ses_old', state: 'running' }];
+    const hydrated: any = createSessionState();
+    hydrated.activeSubagents = [{ sessionId: 'ses_authoritative', state: 'running' }];
+    controller.restore(hydrated, controller.capture(before));
+    expect(hydrated.activeSubagents).toEqual([{ sessionId: 'ses_authoritative', state: 'running' }]);
+  });
 });
