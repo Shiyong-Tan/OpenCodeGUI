@@ -798,10 +798,23 @@ Production ownership rules now enforced:
 - owned Webview commands and asynchronous Webview responses reject missing
   session ownership rather than borrowing the selected Extension or Webview
   session.
+- finalization message-index projections retain their captured turn session
+  across commit, identity binding, and changelist awaits;
+- aborted-message cleanup and removal events retain their captured session,
+  including error, cancellation, and background-finalization paths;
+- synthetic assistant responses require an explicit owner; global
+  initialization failures without a session are diagnostic-only;
+- `OpenCodeClient` chat, question, permission, undo, and legacy CLI-stream
+  boundaries require or capture an explicit session and never fall back to
+  `currentSessionId`;
+- send commands and transport `session` events are selection-neutral; only
+  explicit selection/initialization commands update the selected session;
+- question, permission, conflict-diff, and other interactive Webview
+  callbacks reject missing owners instead of borrowing `activeSessionId`.
 
 Automated acceptance at this checkpoint:
 
-- 144 Jest suites and 1112 tests pass;
+- 144 Jest suites and 1116 tests pass;
 - Extension and Webview compilation pass;
 - all four Webview bundles remain within size limits;
 - deterministic rendering bundle check passes;
