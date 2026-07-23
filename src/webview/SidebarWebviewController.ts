@@ -232,9 +232,7 @@ export function resolveSidebarWebviewView(
                     }
 
                     if (payloadSessionId) {
-                        host.currentSessionId = payloadSessionId;
                         host.trackUserOwnedSession(payloadSessionId);
-                        host.client.setSessionId(payloadSessionId);
                     }
 
                     if (host.sendInFlightBySession.has(targetSessionId)) {

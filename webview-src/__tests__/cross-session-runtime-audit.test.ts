@@ -275,6 +275,17 @@ describe('cross-session runtime repository audit', () => {
     expect(client).not.toContain('const sessionId = payload.sessionId || this.currentSessionId;');
   });
 
+  test('sending to an owned session does not mutate session selection', () => {
+    const controller = read('src', 'webview', 'SidebarWebviewController.ts');
+    const sendStart = controller.indexOf('case "sendMessage":');
+    const sendEnd = controller.indexOf('case "appendSnapshotMeta":', sendStart);
+    const send = controller.slice(sendStart, sendEnd);
+
+    expect(send).toContain('host.trackUserOwnedSession(payloadSessionId);');
+    expect(send).not.toContain('host.currentSessionId = payloadSessionId');
+    expect(send).not.toContain('host.client.setSessionId(payloadSessionId)');
+  });
+
   test('owned liveness and overlay responses do not borrow visible session', () => {
     expect(main).not.toContain('message.sessionId || activeSessionId');
     const livenessStart = main.indexOf("case 'webviewLivenessPing':");
