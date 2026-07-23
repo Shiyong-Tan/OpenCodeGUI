@@ -67,7 +67,9 @@ export async function handleSidebarChatEvent(
         }
         if (event.type === 'turnResolved' && event.sessionId) {
             const liveWebview = host._view?.webview || webview;
+            const successor = host.client.getActiveAppendSuccessor?.(event.sessionId, event.assistantMsgId);
             await host.finalizeResolvedTurn(event.sessionId, liveWebview, event.assistantMsgId);
+            if (successor) host.uiDebugChannel.appendLine(`[EXT][APPEND_SUCCESSOR_FINAL] sessionId=${event.sessionId} rootUserMsgId=${successor.rootUserMsgId} appendUserMsgId=${successor.appendUserMsgId} successorAssistantMsgId=${successor.assistantMsgId} generation=${successor.generation} outcome=success`);
             return;
         }
         if (event.type === 'session' && event.sessionId) {
@@ -498,7 +500,9 @@ export async function handleSidebarChatEvent(
             const sessionId = event.sessionId || host.currentSessionId;
             const eventTmpKey = typeof (event as any).tmpKey === 'string' ? (event as any).tmpKey : undefined;
             const sessionTmpKey = sessionId ? host.pendingAssistantTmpKeyBySession.get(sessionId) : undefined;
-            const tmpKey = eventTmpKey || sessionTmpKey;
+            const isSuccessor = Boolean(event.appendSuccessor);
+            const tmpKey = isSuccessor ? undefined : (eventTmpKey || sessionTmpKey);
+            if (isSuccessor && sessionId) host.consumeAppendSuccessorTmpKey?.(sessionId, event.appendSuccessor);
             if (sessionId && tmpKey && tmpKey.startsWith('tmp:')) {
                 host.pendingAssistantTmpKeyBySession.set(sessionId, tmpKey);
                 const pendingLocalKey = host.pendingLocalKeyBySession.get(sessionId);
@@ -523,7 +527,7 @@ export async function handleSidebarChatEvent(
                 agentSessionId: event.agentSessionId,
                 displayTarget: event.displayTarget,
                 assistantMsgId: event.assistantMsgId,
-                tmpKey,
+                ...(isSuccessor ? {} : { tmpKey }),
                 isStatusUpdate: event.isStatusUpdate,
                 allowedSessionIds: event.displayTarget === 'agent-lane' && event.agentSessionId
                     ? [event.agentSessionId, ...(event.parentSessionId ? [event.parentSessionId] : [])]
@@ -550,13 +554,15 @@ export async function handleSidebarChatEvent(
                 // Push latest chunk to webview (no cumulative text)
                 const liveWebview = host._view?.webview || webview;
                 const isSyntheticTurn = host.isCurrentTurnSynthetic(sessionId);
+                const isSuccessor = Boolean(event.appendSuccessor);
                 liveWebview?.postMessage({
                     type: 'assistantMessageMeta',
                     sessionId,
                     parentSessionId: event.parentSessionId,
                     agentSessionId: event.agentSessionId,
                     displayTarget: event.displayTarget,
-                    tmpKey: host.pendingAssistantTmpKeyBySession?.get(sessionId),
+                    assistantMsgId: event.assistantMsgId,
+                    ...(isSuccessor ? {} : { tmpKey: host.pendingAssistantTmpKeyBySession?.get(sessionId) }),
                     lastText: event.text,
                     isStatusUpdate: false,
                     allowedSessionIds: event.displayTarget === 'agent-lane' && event.agentSessionId
@@ -569,6 +575,7 @@ export async function handleSidebarChatEvent(
         }
 
         if (event.type === 'error' && event.text) {
+            const appendSuccessor = event.appendSuccessor;
             const liveWebview = host._view?.webview || webview;
             const sessionId = event.sessionId || host.currentSessionId;
             liveWebview.postMessage({ type: 'addResponse', value: `Error: ${event.text}`, sessionId, skipSnapshot: true });
@@ -618,6 +625,9 @@ export async function handleSidebarChatEvent(
             }
             host.emitTurnFinalizePhase(liveWebview, sessionId, 'finalize_done');
             await host.runPendingSendInitGuardCompensation(sessionId, liveWebview, 'event-error-finalize');
+            if (appendSuccessor && event.appendSuccessorOutcome === 'aborted' && sessionId) {
+                host.uiDebugChannel.appendLine(`[EXT][APPEND_SUCCESSOR_FINAL] sessionId=${sessionId} rootUserMsgId=${appendSuccessor.rootUserMsgId} appendUserMsgId=${appendSuccessor.appendUserMsgId} successorAssistantMsgId=${appendSuccessor.assistantMsgId} generation=${appendSuccessor.generation} outcome=aborted`);
+            }
             return;
         }
 

@@ -3135,6 +3135,15 @@ function replaceKeyEverywhere(oldId, newId, sessionId = activeSessionId) {
     const session = getSessionState(sessionId);
     if (!session) return;
 
+    const oldMessageForRoleGuard = session.messagesById.get(oldId) || null;
+    if (oldMessageForRoleGuard?.role === 'user' && typeof oldId === 'string' && oldId.startsWith('msg_') && typeof newId === 'string' && newId.startsWith('msg_')) {
+        if (session.currentTurnAssistantKey === oldId) session.currentTurnAssistantKey = null;
+        if (session.currentTurnAssistantMsgId === oldId) session.currentTurnAssistantMsgId = null;
+        if (session.thinkingId === oldId) session.thinkingId = null;
+        vscode.postMessage({ type: 'ui-debug', payload: ['reject.user->assistant-role', 'oldKey', oldId, 'newKey', newId, 'sessionId', sessionId] });
+        return;
+    }
+
     const preReplaceCurrentTurnAssistantKey = session.currentTurnAssistantKey;
     const preReplaceThinkingId = session.thinkingId;
     const preReplaceCurrentTurnAssistantMsgId = session.currentTurnAssistantMsgId;
