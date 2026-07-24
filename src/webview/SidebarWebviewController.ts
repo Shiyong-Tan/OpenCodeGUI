@@ -4,7 +4,6 @@ import { OpenCodeClient } from '../OpenCodeClient';
 import type { AttachmentPayload, SavedAttachment } from '../attachments/AttachmentStorageService';
 import type { SessionMessage } from '../changes/ChangeListInjection';
 import { serializeUndoSegments, type SegmentState } from '../undo/UndoSegmentPersistence';
-import { captureCancelTurnOwner } from './CancelTurnOwner';
 import type { UtilityCommandHandler } from './controllers/UtilityCommandController';
 import type { SessionCommandHandler } from './controllers/SessionCommandController';
 
@@ -244,7 +243,7 @@ export function resolveSidebarWebviewView(
                         host.trackUserOwnedSession(payloadSessionId);
                     }
 
-                    if (host.sendInFlightBySession.has(targetSessionId)) {
+                    if (host.isTurnCommandInFlight(targetSessionId)) {
                         host.uiDebugChannel.appendLine(`EXT: send.blocked | sessionId=${targetSessionId} | payloadSessionId=${payloadSessionId || 'none'} | currentSessionId=${currentSessionIdAtSend || 'none'} | routeSource=${routeSource} | reason=turn-in-flight`);
                         const liveWebview = host._view?.webview || activeWebview;
                         liveWebview.postMessage({ type: 'turnInFlight', sessionId: targetSessionId, inFlight: true });
@@ -281,23 +280,18 @@ export function resolveSidebarWebviewView(
                         turnTmpAssistantKey = tmpAssistantKey;
                         host.uiDebugChannel.appendLine(`[EXT][TURN_BIND] phase=capture reqId=${reqId} payloadSessionId=${payloadSessionId || 'none'} currentSessionId=${currentSessionIdAtSend || 'none'} targetSessionId=${targetSessionId} routeSource=${routeSource} clientMessageId=${clientMessageId} tmpAssistantKey=${tmpAssistantKey || 'none'}`);
                         host.rememberDraft(clientMessageId, initialDraft);
-                        host.rawUserTextByLocalKey.set(clientMessageId, userText);
                         const opId = typeof data.opId === 'string' ? data.opId : undefined;
                         if (targetSessionId) {
                             activeSendSessionId = targetSessionId;
-                            host.sendInFlightBySession.add(targetSessionId);
-                            host.markWebviewActiveTurnUpdated(targetSessionId, 'send:start');
-                            host.pendingLocalKeyBySession.set(targetSessionId, clientMessageId);
-                            host.pendingAssistantTmpKeyBySession.delete(targetSessionId);
+                            host.startTurnCommandState(
+                                targetSessionId,
+                                clientMessageId,
+                                userText,
+                                tmpAssistantKey,
+                                opId
+                            );
                             const liveWebview = host._view?.webview || activeWebview;
                             liveWebview.postMessage({ type: 'turnInFlight', sessionId: targetSessionId, inFlight: true });
-                            host.client.startTurnWithOp(targetSessionId, clientMessageId, opId);
-                            host.assistantTextBufferBySession.set(targetSessionId, '');
-                        }
-                        if (tmpAssistantKey) {
-                            host.pendingAssistantTmpKeyBySession.set(targetSessionId, tmpAssistantKey);
-                            host.pendingAssistantTmpKeyByLocalKey.set(clientMessageId, tmpAssistantKey);
-                            host.client.setPendingAssistantTmpKey(targetSessionId, tmpAssistantKey);
                         }
 
                         const messageIndex = host.client.registerMessage(clientMessageId, targetSessionId);
@@ -318,7 +312,7 @@ export function resolveSidebarWebviewView(
 ${attachmentLines.join('\n')}`
                                 : attachmentLines.join('\n'))
                             : userText;
-                        host.pendingSnapshotUserTextBySession.set(targetSessionId, displayText);
+                        host.setTurnPendingSnapshotUserText(targetSessionId, displayText);
                         const pendingUserMessage: SessionMessage = {
                             role: 'user',
                             text: displayText,
@@ -328,8 +322,7 @@ ${attachmentLines.join('\n')}`
 
                         const assistantMessageId = host.client.createInternalMessageId('assistant', targetSessionId);
                         const assistantMessageIndex = host.client.registerMessage(assistantMessageId, targetSessionId);
-                        host.pendingAssistantMessageIdBySession.set(targetSessionId, assistantMessageId);
-                        host.markWebviewActiveTurnUpdated(targetSessionId, 'send:assistant-message-bound');
+                        host.bindTurnAssistantMessage(targetSessionId, assistantMessageId);
                         liveWebview.postMessage({
                             type: 'messageAppend',
                             message: pendingUserMessage,
@@ -440,10 +433,10 @@ ${attachmentLines.join('\n')}`
                         host.uiDebugChannel.appendLine(`[EXT][TURN_BIND] phase=finalize_done reqId=${reqId} payloadSessionId=${payloadSessionId || 'none'} currentSessionId=${currentSessionIdAtSend || 'none'} targetSessionId=${targetSessionId} routeSource=${routeSource} clientMessageId=${clientMessageId} assistantMsgId=${doneAssistantMsgId || 'none'} tmpAssistantKey=${tmpAssistantKey || 'none'}`);
                         host.emitTurnFinalizePhase(liveWebview, targetSessionId, 'finalize_done');
                         await host.postModelQuota(liveWebview, 'chat-done');
-                        if (host.pendingLocalKeyBySession.get(targetSessionId) === clientMessageId) {
+                        if (host.isTurnPendingLocalKey(targetSessionId, clientMessageId)) {
                             host.clearDraft(clientMessageId);
                             await host.handleAbortedMessage(targetSessionId, clientMessageId, liveWebview);
-                            host.pendingLocalKeyBySession.delete(targetSessionId);
+                            host.clearCompletedTurnPendingUser(targetSessionId, clientMessageId);
                         }
                         if (targetMode === 'build') {
                             const segment = host.client.getRevertedSegment(targetSessionId);
@@ -482,19 +475,13 @@ ${attachmentLines.join('\n')}`
                         }
                         await host.resolvePendingUserUpgrade(sessionId, activeWebview);
                         host.emitTurnFinalizePhase(activeWebview, sessionId, 'upgrade_done');
-                        const pendingLocalKey = sessionId ? host.pendingLocalKeyBySession.get(sessionId) : undefined;
+                        const pendingLocalKey = sessionId ? host.getTurnPendingLocalKey(sessionId) : undefined;
                         if (sessionId && pendingLocalKey) {
                             host.clearDraft(pendingLocalKey);
                             await host.handleAbortedMessage(sessionId, pendingLocalKey, activeWebview);
-                            host.pendingLocalKeyBySession.delete(sessionId);
                         }
                         if (sessionId) {
-                            if (pendingLocalKey) {
-                                host.pendingAssistantTmpKeyByLocalKey.delete(pendingLocalKey);
-                                host.rawUserTextByLocalKey.delete(pendingLocalKey);
-                            }
-                            host.assistantTextBufferBySession.delete(sessionId);
-                            host.pendingAssistantTmpKeyBySession.delete(sessionId);
+                            host.clearFailedTurnCommandState(sessionId);
                         }
                         if (sessionId) {
                             host.client.finishTurn(sessionId);
@@ -507,13 +494,7 @@ ${attachmentLines.join('\n')}`
                         await host.postModelQuota(activeWebview, 'chat-error');
                     } finally {
                         if (activeSendSessionId) {
-                            const pendingLocalKey = host.pendingLocalKeyBySession.get(activeSendSessionId);
-                            if (pendingLocalKey) {
-                                host.rawUserTextByLocalKey.delete(pendingLocalKey);
-                            }
-                            host.sendInFlightBySession.delete(activeSendSessionId);
-                            host.pendingLocalKeyBySession.delete(activeSendSessionId);
-                            host.pendingAssistantTmpKeyBySession.delete(activeSendSessionId);
+                            host.finishTurnCommandState(activeSendSessionId);
                             const liveWebview = host._view?.webview || activeWebview;
                             liveWebview.postMessage({ type: 'turnInFlight', sessionId: activeSendSessionId, inFlight: false });
                             host.syncTurnInFlightAfterFinalize(activeSendSessionId, liveWebview, 'sendMessage.finally');
@@ -542,7 +523,7 @@ ${attachmentLines.join('\n')}`
                         });
                         break;
                     }
-                    const hasTurnInFlight = host.sendInFlightBySession.has(sessionId);
+                    const hasTurnInFlight = host.isTurnCommandInFlight(sessionId);
                     const canAppend = host.client.canAppendToCurrentTurn(sessionId, requestedRootUserMsgId);
                     if (!hasTurnInFlight || !canAppend) {
                         const reason = !hasTurnInFlight ? 'turn-not-in-flight' : 'finalized';
@@ -557,7 +538,7 @@ ${attachmentLines.join('\n')}`
                         });
                         break;
                     }
-                    if (host.appendSubmitInFlightBySession.has(sessionId)) {
+                    if (host.isAppendSubmissionInFlight(sessionId)) {
                         host.uiDebugChannel.appendLine(`[EXT][APPEND_ROUTE] rejected sessionId=${sessionId} rootUserMsgId=${requestedRootUserMsgId} clientMessageId=${clientMessageId} reason=append-in-flight`);
                         liveWebview.postMessage({
                             type: 'appendStatus',
@@ -582,7 +563,7 @@ ${attachmentLines.join('\n')}`
                         });
                         break;
                     }
-                    host.appendSubmitInFlightBySession.add(sessionId);
+                    host.markAppendSubmissionStarted(sessionId);
                     host.uiDebugChannel.appendLine(`[EXT][APPEND_ROUTE] accepted sessionId=${sessionId} rootUserMsgId=${beginAppend.rootUserMsgId} clientMessageId=${clientMessageId}`);
                     try {
                         await host.client.appendPrompt(sessionId, value, {
@@ -609,7 +590,7 @@ ${attachmentLines.join('\n')}`
                             reason: String(error)
                         });
                     } finally {
-                        host.appendSubmitInFlightBySession.delete(sessionId);
+                        host.markAppendSubmissionFinished(sessionId);
                     }
                     break;
                 }
@@ -620,18 +601,13 @@ ${attachmentLines.join('\n')}`
                 case "registerTmpKey": {
                     if (typeof data.sessionId !== 'string' || typeof data.tmpKey !== 'string') break;
                     if (!data.tmpKey.startsWith('tmp:')) break;
-                    host.pendingAssistantTmpKeyBySession.set(data.sessionId, data.tmpKey);
-                    const pendingLocalKey = host.pendingLocalKeyBySession.get(data.sessionId);
-                    if (pendingLocalKey && pendingLocalKey.startsWith('local-')) {
-                        host.pendingAssistantTmpKeyByLocalKey.set(pendingLocalKey, data.tmpKey);
-                    }
-                    host.client.setPendingAssistantTmpKey(data.sessionId, data.tmpKey);
+                    host.registerTurnTemporaryKey(data.sessionId, data.tmpKey);
                     break;
                 }
                 case "registerPendingUserLocal": {
                     if (typeof data.sessionId !== 'string' || typeof data.localKey !== 'string') break;
                     if (!data.localKey.startsWith('local-')) break;
-                    const isInFlight = host.sendInFlightBySession.has(data.sessionId);
+                    const isInFlight = host.isTurnCommandInFlight(data.sessionId);
                     host.uiDebugChannel.appendLine(`EXT: registerPendingUserLocal | sessionId=${data.sessionId} | localKey=${data.localKey} | inFlight=${String(isInFlight)}`);
                     break;
                 }
@@ -1038,7 +1014,7 @@ ${attachmentLines.join('\n')}`
                     break;
                 }
                 case "cancel": {
-                    const cancelOwner = captureCancelTurnOwner(data, host);
+                    const cancelOwner = host.captureTurnCancelOwner(data);
                     const cancelSessionId = cancelOwner.sessionId;
                     const pendingLocalKey = cancelOwner.localKey;
                     const pendingTmpKey = cancelOwner.temporaryAssistantKey;
@@ -1064,13 +1040,9 @@ ${attachmentLines.join('\n')}`
                     }
                     const cancelOpId = cancelOwner.operationId;
                     if (cancelSessionId) {
-                        if (pendingLocalKey) {
-                            host.rawUserTextByLocalKey.delete(pendingLocalKey);
-                        }
+                        host.clearTurnRawUserText(pendingLocalKey);
                         host.client.cancelTurn(cancelSessionId, cancelOpId);
-                        host.sendInFlightBySession.delete(cancelSessionId);
-                        host.pendingLocalKeyBySession.delete(cancelSessionId);
-                        host.pendingAssistantTmpKeyBySession.delete(cancelSessionId);
+                        host.clearCanceledTurnCommandState(cancelSessionId);
                         activeWebview.postMessage({ type: 'turnInFlight', sessionId: cancelSessionId, inFlight: false });
                     }
                     if (cancelSessionId && pendingLocalKey) {
@@ -1091,9 +1063,7 @@ ${attachmentLines.join('\n')}`
                         if (mappedAssistant && mappedAssistant !== pendingTmpKey) {
                             await host.handleAbortedMessage(cancelSessionId, mappedAssistant, activeWebview);
                         }
-                        host.pendingAssistantTmpKeyBySession.delete(cancelSessionId);
-                        host.pendingAssistantMessageIdBySession.delete(cancelSessionId);
-                        host.assistantTextBufferBySession.delete(cancelSessionId);
+                        host.clearCanceledTurnAssistantState(cancelSessionId);
                     }
                     const draftToRestore = host.consumeDraft(restoreLocalKey);
                     if (draftToRestore) {

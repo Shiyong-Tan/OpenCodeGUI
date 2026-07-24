@@ -13,6 +13,10 @@ const utilityControllerSource = fs.readFileSync(
     path.join(process.cwd(), 'src', 'webview', 'controllers', 'UtilityCommandController.ts'),
     'utf8',
 );
+const providerSource = fs.readFileSync(
+    path.join(process.cwd(), 'src', 'SidebarProvider.ts'),
+    'utf8',
+);
 
 function extractRange(startMarker: string, endMarker: string): string {
     const start = topControllerSource.indexOf(startMarker);
@@ -29,6 +33,21 @@ function expectOrder(source: string, markers: string[]): void {
         expect(index).toBeGreaterThan(previous);
         previous = index;
     }
+}
+
+function extractProviderMethod(marker: string): string {
+    const start = providerSource.indexOf(marker);
+    expect(start).toBeGreaterThanOrEqual(0);
+    const bodyStart = providerSource.indexOf('{', start);
+    expect(bodyStart).toBeGreaterThan(start);
+    let depth = 0;
+    for (let index = bodyStart; index < providerSource.length; index += 1) {
+        if (providerSource[index] === '{') depth += 1;
+        if (providerSource[index] === '}' && --depth === 0) {
+            return providerSource.slice(start, index + 1);
+        }
+    }
+    throw new Error(`Unclosed provider method: ${marker}`);
 }
 
 describe('turn command family characterization', () => {
@@ -55,11 +74,10 @@ describe('turn command family characterization', () => {
             'const currentSessionIdAtSend = host.currentSessionId',
             'if (!payloadSessionId && !host.currentSessionId)',
             'const targetSessionId = payloadSessionId || host.currentSessionId',
-            'host.sendInFlightBySession.has(targetSessionId)',
+            'host.isTurnCommandInFlight(targetSessionId)',
             'const targetModel = host.selectedModel',
             'let activeSendSessionId: string | undefined = targetSessionId',
-            'host.sendInFlightBySession.add(targetSessionId)',
-            'host.client.startTurnWithOp(targetSessionId, clientMessageId, opId)',
+            'host.startTurnCommandState(',
             'await host.client.chat(',
         ]);
         expect(block).toContain('sessionId: targetSessionId');
@@ -90,16 +108,31 @@ describe('turn command family characterization', () => {
         expectOrder(block, [
             'const clientMessageId = data.clientMessageId',
             'const tmpAssistantKey =',
-            'host.pendingLocalKeyBySession.set(targetSessionId, clientMessageId)',
-            'host.client.startTurnWithOp(targetSessionId, clientMessageId, opId)',
-            'host.pendingAssistantTmpKeyBySession.set(targetSessionId, tmpAssistantKey)',
-            'host.pendingAssistantTmpKeyByLocalKey.set(clientMessageId, tmpAssistantKey)',
-            'host.client.setPendingAssistantTmpKey(targetSessionId, tmpAssistantKey)',
+            'host.startTurnCommandState(',
             'host.client.registerMessage(clientMessageId, targetSessionId)',
             "host.client.createInternalMessageId('assistant', targetSessionId)",
-            'host.pendingAssistantMessageIdBySession.set(targetSessionId, assistantMessageId)',
+            'host.bindTurnAssistantMessage(targetSessionId, assistantMessageId)',
             "type: 'messageAppend'",
             "type: 'assistantMessageMeta'",
+        ]);
+
+        const startState = extractProviderMethod('private startTurnCommandState(');
+        expectOrder(startState, [
+            'this.rawUserTextByLocalKey.set(clientMessageId, userText)',
+            'this.sendInFlightBySession.add(sessionId)',
+            "this.markWebviewActiveTurnUpdated(sessionId, 'send:start')",
+            'this.pendingLocalKeyBySession.set(sessionId, clientMessageId)',
+            'this.pendingAssistantTmpKeyBySession.delete(sessionId)',
+            'this.client.startTurnWithOp(sessionId, clientMessageId, operationId)',
+            "this.assistantTextBufferBySession.set(sessionId, '')",
+            'this.pendingAssistantTmpKeyBySession.set(sessionId, temporaryAssistantKey)',
+            'this.pendingAssistantTmpKeyByLocalKey.set(clientMessageId, temporaryAssistantKey)',
+            'this.client.setPendingAssistantTmpKey(sessionId, temporaryAssistantKey)',
+        ]);
+        const bindAssistant = extractProviderMethod('private bindTurnAssistantMessage(');
+        expectOrder(bindAssistant, [
+            'this.pendingAssistantMessageIdBySession.set(sessionId, assistantMessageId)',
+            "this.markWebviewActiveTurnUpdated(sessionId, 'send:assistant-message-bound')",
         ]);
     });
 
@@ -118,8 +151,17 @@ describe('turn command family characterization', () => {
             'host.client.finishTurn(targetSessionId)',
             "host.emitTurnFinalizePhase(liveWebview, targetSessionId, 'finalize_done')",
             '} finally {',
-            'host.sendInFlightBySession.delete(activeSendSessionId)',
+            'host.finishTurnCommandState(activeSendSessionId)',
             "host.syncTurnInFlightAfterFinalize(activeSendSessionId, liveWebview, 'sendMessage.finally')",
+        ]);
+
+        const finishState = extractProviderMethod('private finishTurnCommandState(');
+        expectOrder(finishState, [
+            'this.pendingLocalKeyBySession.get(sessionId)',
+            'this.rawUserTextByLocalKey.delete(pendingLocalKey)',
+            'this.sendInFlightBySession.delete(sessionId)',
+            'this.pendingLocalKeyBySession.delete(sessionId)',
+            'this.pendingAssistantTmpKeyBySession.delete(sessionId)',
         ]);
     });
 
@@ -128,17 +170,17 @@ describe('turn command family characterization', () => {
         expectOrder(block, [
             "const sessionId = typeof data.sessionId === 'string'",
             'const requestedRootUserMsgId =',
-            'host.sendInFlightBySession.has(sessionId)',
+            'host.isTurnCommandInFlight(sessionId)',
             'host.client.canAppendToCurrentTurn(sessionId, requestedRootUserMsgId)',
-            'host.appendSubmitInFlightBySession.has(sessionId)',
+            'host.isAppendSubmissionInFlight(sessionId)',
             'host.client.beginAppendPrompt(sessionId, clientMessageId, value, requestedRootUserMsgId)',
-            'host.appendSubmitInFlightBySession.add(sessionId)',
+            'host.markAppendSubmissionStarted(sessionId)',
             'await host.client.appendPrompt(sessionId, value',
             "status: 'queued'",
             '} catch (error) {',
             'host.client.failAppendPrompt(sessionId, clientMessageId)',
             '} finally {',
-            'host.appendSubmitInFlightBySession.delete(sessionId)',
+            'host.markAppendSubmissionFinished(sessionId)',
         ]);
         const appendCatch = block.slice(block.indexOf('} catch (error) {'));
         expect(appendCatch).toContain("status: 'failed'");
@@ -155,35 +197,61 @@ describe('turn command family characterization', () => {
         expectOrder(tmpBlock, [
             "typeof data.sessionId !== 'string'",
             "data.tmpKey.startsWith('tmp:')",
-            'host.pendingAssistantTmpKeyBySession.set(data.sessionId, data.tmpKey)',
-            'host.pendingLocalKeyBySession.get(data.sessionId)',
-            'host.pendingAssistantTmpKeyByLocalKey.set(pendingLocalKey, data.tmpKey)',
-            'host.client.setPendingAssistantTmpKey(data.sessionId, data.tmpKey)',
+            'host.registerTurnTemporaryKey(data.sessionId, data.tmpKey)',
+        ]);
+        const register = extractProviderMethod('private registerTurnTemporaryKey(');
+        expectOrder(register, [
+            'this.pendingAssistantTmpKeyBySession.set(sessionId, temporaryAssistantKey)',
+            'this.pendingLocalKeyBySession.get(sessionId)',
+            'this.pendingAssistantTmpKeyByLocalKey.set(pendingLocalKey, temporaryAssistantKey)',
+            'this.client.setPendingAssistantTmpKey(sessionId, temporaryAssistantKey)',
         ]);
 
         const localBlock = extractRange('case "registerPendingUserLocal"', 'case "undoSegmentUpsert"');
         expect(localBlock).toContain("data.localKey.startsWith('local-')");
-        expect(localBlock).toContain('host.sendInFlightBySession.has(data.sessionId)');
+        expect(localBlock).toContain('host.isTurnCommandInFlight(data.sessionId)');
     });
 
     test('captures cancel ownership once and cleans only that owner before chatDone', () => {
         const block = extractRange('case "cancel"', 'case "restoreAll"');
         expectOrder(block, [
-            'const cancelOwner = captureCancelTurnOwner(data, host)',
+            'const cancelOwner = host.captureTurnCancelOwner(data)',
             'const cancelSessionId = cancelOwner.sessionId',
             'await host.promptCancelRollbackDecision(activeWebview, cancelSessionId)',
             'await host.client.revertPendingTurnChangesToCurrentBase(cancelSessionId)',
             'await host.client.abortSession(cancelSessionId)',
+            'host.clearTurnRawUserText(pendingLocalKey)',
             'host.client.cancelTurn(cancelSessionId, cancelOpId)',
-            'host.sendInFlightBySession.delete(cancelSessionId)',
+            'host.clearCanceledTurnCommandState(cancelSessionId)',
             'await host.handleAbortedMessage(cancelSessionId, pendingLocalKey, activeWebview)',
-            'host.pendingAssistantMessageIdBySession.delete(cancelSessionId)',
-            'host.assistantTextBufferBySession.delete(cancelSessionId)',
+            'host.clearCanceledTurnAssistantState(cancelSessionId)',
             'await host.commitPendingTurnChangesFromAuthoritativeFiles(',
             'host.client.finishTurn(cancelSessionId)',
             "type: 'chatDone'",
             "host.syncTurnInFlightAfterFinalize(cancelSessionId, activeWebview, 'user-cancel')",
         ]);
         expect(block).not.toContain('host.currentSessionId');
+    });
+
+    test('routes turn-owned registry mutation through provider domain methods', () => {
+        const blocks = [
+            extractRange('case "sendMessage"', 'case "appendMessage"'),
+            extractRange('case "appendMessage"', 'case "appendSnapshotMeta"'),
+            extractRange('case "appendSnapshotMeta"', 'case "undoSegmentUpsert"'),
+            extractRange('case "cancel"', 'case "restoreAll"'),
+        ].join('\n');
+        for (const registry of [
+            'sendInFlightBySession',
+            'pendingLocalKeyBySession',
+            'pendingAssistantTmpKeyBySession',
+            'pendingAssistantTmpKeyByLocalKey',
+            'pendingAssistantMessageIdBySession',
+            'assistantTextBufferBySession',
+            'pendingSnapshotUserTextBySession',
+            'rawUserTextByLocalKey',
+            'appendSubmitInFlightBySession',
+        ]) {
+            expect(blocks).not.toContain(`host.${registry}`);
+        }
     });
 });

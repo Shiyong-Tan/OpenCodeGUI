@@ -23,6 +23,10 @@ import {
     createSessionCommandHandler,
     type SessionCommandHandler,
 } from './webview/controllers/SessionCommandController';
+import {
+    captureCancelTurnOwner,
+    type CapturedCancelTurnOwner,
+} from './webview/CancelTurnOwner';
 import type { SmartSearchMessage } from './search/SmartSearchService';
 import { injectChangeListRecords, type ChangeListRecord, type SessionMessage } from './changes/ChangeListInjection';
 import { ChangeListStore } from './changes/ChangeListStore';
@@ -3717,6 +3721,124 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             return;
         }
         webview.postMessage({ type: 'baselineStatus', ready: true });
+    }
+
+    private isTurnCommandInFlight(sessionId: string): boolean {
+        return this.sendInFlightBySession.has(sessionId);
+    }
+
+    private startTurnCommandState(
+        sessionId: string,
+        clientMessageId: string,
+        userText: string,
+        temporaryAssistantKey: string | undefined,
+        operationId: string | undefined
+    ): void {
+        this.rawUserTextByLocalKey.set(clientMessageId, userText);
+        this.sendInFlightBySession.add(sessionId);
+        this.markWebviewActiveTurnUpdated(sessionId, 'send:start');
+        this.pendingLocalKeyBySession.set(sessionId, clientMessageId);
+        this.pendingAssistantTmpKeyBySession.delete(sessionId);
+        this.client.startTurnWithOp(sessionId, clientMessageId, operationId);
+        this.assistantTextBufferBySession.set(sessionId, '');
+        if (temporaryAssistantKey) {
+            this.pendingAssistantTmpKeyBySession.set(sessionId, temporaryAssistantKey);
+            this.pendingAssistantTmpKeyByLocalKey.set(clientMessageId, temporaryAssistantKey);
+            this.client.setPendingAssistantTmpKey(sessionId, temporaryAssistantKey);
+        }
+    }
+
+    private setTurnPendingSnapshotUserText(sessionId: string, displayText: string): void {
+        this.pendingSnapshotUserTextBySession.set(sessionId, displayText);
+    }
+
+    private bindTurnAssistantMessage(sessionId: string, assistantMessageId: string): void {
+        this.pendingAssistantMessageIdBySession.set(sessionId, assistantMessageId);
+        this.markWebviewActiveTurnUpdated(sessionId, 'send:assistant-message-bound');
+    }
+
+    private getTurnPendingLocalKey(sessionId: string): string | undefined {
+        return this.pendingLocalKeyBySession.get(sessionId);
+    }
+
+    private isTurnPendingLocalKey(sessionId: string, clientMessageId: string): boolean {
+        return this.pendingLocalKeyBySession.get(sessionId) === clientMessageId;
+    }
+
+    private clearCompletedTurnPendingUser(sessionId: string, clientMessageId: string): boolean {
+        if (this.pendingLocalKeyBySession.get(sessionId) !== clientMessageId) return false;
+        this.pendingLocalKeyBySession.delete(sessionId);
+        return true;
+    }
+
+    private clearFailedTurnCommandState(sessionId: string): string | undefined {
+        const pendingLocalKey = this.pendingLocalKeyBySession.get(sessionId);
+        if (pendingLocalKey) {
+            this.pendingAssistantTmpKeyByLocalKey.delete(pendingLocalKey);
+            this.rawUserTextByLocalKey.delete(pendingLocalKey);
+        }
+        this.pendingLocalKeyBySession.delete(sessionId);
+        this.assistantTextBufferBySession.delete(sessionId);
+        this.pendingAssistantTmpKeyBySession.delete(sessionId);
+        return pendingLocalKey;
+    }
+
+    private finishTurnCommandState(sessionId: string): void {
+        const pendingLocalKey = this.pendingLocalKeyBySession.get(sessionId);
+        if (pendingLocalKey) {
+            this.rawUserTextByLocalKey.delete(pendingLocalKey);
+        }
+        this.sendInFlightBySession.delete(sessionId);
+        this.pendingLocalKeyBySession.delete(sessionId);
+        this.pendingAssistantTmpKeyBySession.delete(sessionId);
+    }
+
+    private isAppendSubmissionInFlight(sessionId: string): boolean {
+        return this.appendSubmitInFlightBySession.has(sessionId);
+    }
+
+    private markAppendSubmissionStarted(sessionId: string): void {
+        this.appendSubmitInFlightBySession.add(sessionId);
+    }
+
+    private markAppendSubmissionFinished(sessionId: string): void {
+        this.appendSubmitInFlightBySession.delete(sessionId);
+    }
+
+    private registerTurnTemporaryKey(sessionId: string, temporaryAssistantKey: string): void {
+        this.pendingAssistantTmpKeyBySession.set(sessionId, temporaryAssistantKey);
+        const pendingLocalKey = this.pendingLocalKeyBySession.get(sessionId);
+        if (pendingLocalKey && pendingLocalKey.startsWith('local-')) {
+            this.pendingAssistantTmpKeyByLocalKey.set(pendingLocalKey, temporaryAssistantKey);
+        }
+        this.client.setPendingAssistantTmpKey(sessionId, temporaryAssistantKey);
+    }
+
+    private captureTurnCancelOwner(payload: unknown): CapturedCancelTurnOwner {
+        return captureCancelTurnOwner(payload, {
+            currentSessionId: this.currentSessionId,
+            pendingLocalKeyBySession: this.pendingLocalKeyBySession,
+            pendingAssistantTmpKeyBySession: this.pendingAssistantTmpKeyBySession,
+            pendingAssistantMessageIdBySession: this.pendingAssistantMessageIdBySession,
+        });
+    }
+
+    private clearCanceledTurnCommandState(sessionId: string): void {
+        this.sendInFlightBySession.delete(sessionId);
+        this.pendingLocalKeyBySession.delete(sessionId);
+        this.pendingAssistantTmpKeyBySession.delete(sessionId);
+    }
+
+    private clearTurnRawUserText(pendingLocalKey: string | undefined): void {
+        if (pendingLocalKey) {
+            this.rawUserTextByLocalKey.delete(pendingLocalKey);
+        }
+    }
+
+    private clearCanceledTurnAssistantState(sessionId: string): void {
+        this.pendingAssistantTmpKeyBySession.delete(sessionId);
+        this.pendingAssistantMessageIdBySession.delete(sessionId);
+        this.assistantTextBufferBySession.delete(sessionId);
     }
 
     private async listWorkspaceFiles(query: string, limit = 50): Promise<WorkspaceFileResult[]> {

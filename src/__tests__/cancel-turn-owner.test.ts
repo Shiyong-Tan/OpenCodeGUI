@@ -43,7 +43,7 @@ describe('cancel turn ownership', () => {
     const start = controller.indexOf('case "cancel":');
     const end = controller.indexOf('case "restoreAll":', start);
     const block = controller.slice(start, end);
-    expect(block).toContain('const cancelOwner = captureCancelTurnOwner(data, host);');
+    expect(block).toContain('const cancelOwner = host.captureTurnCancelOwner(data);');
     expect(block).toContain('await host.client.abortSession(cancelSessionId);');
     expect(block).toContain('const restoreLocalKey = pendingLocalKey;');
     expect(block).toContain('localKey: pendingLocalKey');
