@@ -18,6 +18,14 @@ function extractRange(startMarker: string, endMarker: string): string {
     return controllerSource.slice(start, end);
 }
 
+function extractProviderRange(startMarker: string, endMarker: string): string {
+    const start = providerSource.indexOf(startMarker);
+    expect(start).toBeGreaterThanOrEqual(0);
+    const end = providerSource.indexOf(endMarker, start + startMarker.length);
+    expect(end).toBeGreaterThan(start);
+    return providerSource.slice(start, end);
+}
+
 function expectOrder(source: string, markers: string[]): void {
     let previous = -1;
     for (const marker of markers) {
@@ -40,12 +48,21 @@ describe('Webview lifecycle command family characterization', () => {
 
     test('establishes panel ownership before installing the message listener', () => {
         expectOrder(controllerSource, [
-            'host._view = webviewView',
-            'const panelId = `panel-${++host.webviewLivenessPanelSeq}`',
-            "host.resetWebviewLiveness('webview-recreate')",
+            'const panelId = host.beginWebviewLifecycleResolution(webviewView)',
             'webviewView.webview.options =',
             'webviewView.webview.html = host._getHtmlForWebview(webviewView.webview)',
             'webviewView.webview.onDidReceiveMessage(async (data) =>',
+        ]);
+        const begin = extractProviderRange(
+            'private beginWebviewLifecycleResolution(',
+            'private getLifecycleActiveWebview('
+        );
+        expectOrder(begin, [
+            'this._view = webviewView',
+            'const panelId = `panel-${++this.webviewLivenessPanelSeq}`',
+            "this.resetWebviewLiveness('webview-recreate')",
+            'EXT: webviewLiveness.panel',
+            'return panelId',
         ]);
     });
 
@@ -72,35 +89,38 @@ describe('Webview lifecycle command family characterization', () => {
         const ready = extractRange('case "webviewReady"', 'case "webviewLivenessAck"');
         expectOrder(ready, [
             'await host.handleWebviewCommandReloadReady(data, webviewView, panelId)',
-            'const pending = host.webviewHardRescuePending',
-            'const newWebviewInstanceId =',
-            'if (pending)',
+            'const readiness = host.prepareWebviewReady(data, webviewView, panelId)',
+            'if (!readiness.accepted)',
+            'const { pending, newWebviewInstanceId, hardRescueGuard } = readiness',
         ]);
     });
 
     test('validates every hard-rescue identity without awaiting before adoption', () => {
-        const ready = extractRange('case "webviewReady"', 'case "webviewLivenessAck"');
-        const validationStart = ready.indexOf(
-            'const currentActiveTurn = host.getWebviewLivenessActiveTurnFlags(pending.sessionId)'
+        const readiness = extractProviderRange(
+            'private prepareWebviewReady(',
+            'private getLifecycleInitPosted('
         );
-        const adoptionStart = ready.indexOf(
-            'host._webviewInstanceId = newWebviewInstanceId',
+        const validationStart = readiness.indexOf(
+            'const currentActiveTurn = this.getWebviewLivenessActiveTurnFlags(pending.sessionId)'
+        );
+        const adoptionStart = readiness.indexOf(
+            'this._webviewInstanceId = newWebviewInstanceId',
             validationStart
         );
         expect(validationStart).toBeGreaterThanOrEqual(0);
         expect(adoptionStart).toBeGreaterThan(validationStart);
-        const validation = ready.slice(validationStart, adoptionStart);
+        const validation = readiness.slice(validationStart, adoptionStart);
         expectOrder(validation, [
             'data.hardRescueGenerationToken !== pending.generationToken',
             '!newWebviewInstanceId',
             'newWebviewInstanceId === pending.oldWebviewInstanceId',
             'Date.now() > pending.timeoutAt',
-            'host._view?.webview !== pending.webview',
+            'this._view?.webview !== pending.webview',
             'panelId !== pending.panelId',
-            'host.currentSessionId !== pending.sessionId',
-            'host.sessionSelectionEpoch !== pending.selectionEpoch',
+            'this.currentSessionId !== pending.sessionId',
+            'this.sessionSelectionEpoch !== pending.selectionEpoch',
             "currentActiveTurn.turnId || ''",
-            'host.webviewHandshakeLifecycle !== pending.handshakeLifecycle',
+            'this.webviewHandshakeLifecycle !== pending.handshakeLifecycle',
             'if (rejectionReason)',
         ]);
         const executableValidation = validation.replace(/\/\/[^\n]*/g, '');
@@ -108,45 +128,49 @@ describe('Webview lifecycle command family characterization', () => {
     });
 
     test('adopts hard-rescue identity atomically before constructing the continuation guard', () => {
-        const ready = extractRange('case "webviewReady"', 'case "webviewLivenessAck"');
-        expectOrder(ready, [
-            'host._webviewInstanceId = newWebviewInstanceId',
+        const readiness = extractProviderRange(
+            'private prepareWebviewReady(',
+            'private getLifecycleInitPosted('
+        );
+        expectOrder(readiness, [
+            'this._webviewInstanceId = newWebviewInstanceId',
             'pending.newWebviewInstanceId = newWebviewInstanceId',
             'pending.handshakeAccepted = true',
-            'host._view = webviewView',
-            'hardRescueGuard = () => host.isWebviewHardRescueCurrent(pending)',
+            'this._view = webviewView',
+            'hardRescueGuard = () => this.isWebviewHardRescueCurrent(pending)',
             'EXT: webviewHardRescue.handshake.accepted',
         ]);
     });
 
     test('normal readiness rejects rescue tokens and missing identity before adoption', () => {
-        const ready = extractRange('case "webviewReady"', 'case "webviewLivenessAck"');
-        const normalStart = ready.indexOf('} else {', ready.indexOf('if (pending)'));
-        const normalEnd = ready.indexOf('host.webviewLivenessCurrent = undefined', normalStart);
-        const normal = ready.slice(normalStart, normalEnd);
+        const readiness = extractProviderRange(
+            'private prepareWebviewReady(',
+            'private getLifecycleInitPosted('
+        );
+        const normalStart = readiness.indexOf('} else {', readiness.indexOf('if (pending)'));
+        const normalEnd = readiness.indexOf('this.webviewLivenessCurrent = undefined', normalStart);
+        const normal = readiness.slice(normalStart, normalEnd);
         expectOrder(normal, [
             'if (data?.hardRescueGenerationToken)',
             'reason=unexpected-generation-token',
             'if (!newWebviewInstanceId)',
             'reason=missing-webview-instance-id',
-            'host._view = webviewView',
-            'host._webviewInstanceId = newWebviewInstanceId',
-            '++host.webviewHandshakeLifecycle',
+            'this._view = webviewView',
+            'this._webviewInstanceId = newWebviewInstanceId',
+            '++this.webviewHandshakeLifecycle',
         ]);
     });
 
     test('hydrates, acknowledges, and starts probes in the established order', () => {
         const ready = extractRange('case "webviewReady"', 'case "webviewLivenessAck"');
         expectOrder(ready, [
-            'host.webviewLivenessCurrent = undefined',
-            'const liveWebview = host._view?.webview',
+            'const readiness = host.prepareWebviewReady(',
+            'const liveWebview = host.getLifecycleActiveWebview()',
             'await host.sendInit(liveWebview',
             '[EXT][HANDSHAKE_3_DONE]',
             'const readyAckPosted = sendInitError',
             'host.finishWebviewHardRescueFailure(',
-            'pending.timeout = undefined',
-            'host.webviewHardRescuePending = undefined',
-            'EXT: webviewHardRescue.complete',
+            'host.completeWebviewHardRescueSuccess(pending)',
             'host.startWebviewLivenessProbes()',
             "host.triggerWebviewLivenessProbe('webviewReadyAck')",
         ]);
@@ -164,13 +188,18 @@ describe('Webview lifecycle command family characterization', () => {
             'webviewView.onDidChangeVisibility(() =>',
             'webviewView.onDidDispose(() =>'
         );
-        expectOrder(visibility, [
-            'if (webviewView.visible && host.initPosted)',
-            'host.initPosted = false',
-            'host.startWebviewLivenessProbes()',
-            "host.triggerWebviewLivenessProbe('visibility-visible')",
+        expect(visibility).toContain('host.handleWebviewLifecycleVisibility(webviewView)');
+        const visibilityDomain = extractProviderRange(
+            'private handleWebviewLifecycleVisibility(',
+            'private handleWebviewLifecycleDispose('
+        );
+        expectOrder(visibilityDomain, [
+            'if (webviewView.visible && this.initPosted)',
+            'this.initPosted = false',
+            'this.startWebviewLivenessProbes()',
+            "this.triggerWebviewLivenessProbe('visibility-visible')",
             'else if (!webviewView.visible)',
-            "host.stopWebviewLivenessProbes('visibility-hidden')",
+            "this.stopWebviewLivenessProbes('visibility-hidden')",
         ]);
     });
 
@@ -178,11 +207,35 @@ describe('Webview lifecycle command family characterization', () => {
         const disposal = controllerSource.slice(
             controllerSource.indexOf('webviewView.onDidDispose(() =>')
         );
-        expectOrder(disposal, [
+        expect(disposal).toContain('host.handleWebviewLifecycleDispose(panelId)');
+        const disposalDomain = extractProviderRange(
+            'private handleWebviewLifecycleDispose(',
+            'private finishWebviewHardRescueFailure('
+        );
+        expectOrder(disposalDomain, [
             'EXT: webviewReload.dispose.begin',
-            "host.stopWebviewLivenessProbes('webview-dispose')",
+            "this.stopWebviewLivenessProbes('webview-dispose')",
             'EXT: webviewReload.dispose.done',
         ]);
-        expect(disposal.match(/stopWebviewLivenessProbes\('webview-dispose'\)/g)).toHaveLength(1);
+        expect(disposalDomain.match(/stopWebviewLivenessProbes\('webview-dispose'\)/g)).toHaveLength(1);
+    });
+
+    test('routes lifecycle-owned state mutation through provider domain methods', () => {
+        for (const field of [
+            '_view',
+            '_webviewInstanceId',
+            'webviewLivenessPanelSeq',
+            'webviewLivenessCurrent',
+            'webviewHardRescuePending',
+            'webviewHandshakeLifecycle',
+            'sessionSelectionEpoch',
+            'currentSessionId',
+            'initPosted',
+        ]) {
+            expect(controllerSource).not.toContain(`host.${field}`);
+        }
+        expect(controllerSource).toContain('host.beginWebviewLifecycleResolution(webviewView)');
+        expect(controllerSource).toContain('host.prepareWebviewReady(data, webviewView, panelId)');
+        expect(controllerSource).toContain('host.completeWebviewHardRescueSuccess(pending)');
     });
 });

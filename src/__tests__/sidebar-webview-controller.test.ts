@@ -71,6 +71,13 @@ describe('SidebarWebviewController', () => {
       resetWebviewLiveness: jest.fn(),
       uiDebugChannel: { appendLine: jest.fn() },
       _getHtmlForWebview: () => '<html></html>',
+      beginWebviewLifecycleResolution: (targetView: any) => {
+        host._view = targetView;
+        return 'panel-1';
+      },
+      getLifecycleActiveWebview: (fallback?: any) => host._view?.webview || fallback,
+      handleWebviewLifecycleVisibility: jest.fn(),
+      handleWebviewLifecycleDispose: jest.fn(),
       startWebviewLivenessProbes: jest.fn(), stopWebviewLivenessProbes: jest.fn(), triggerWebviewLivenessProbe: jest.fn(),
     };
     resolveSidebarWebviewView(

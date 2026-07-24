@@ -1622,6 +1622,108 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             && this._webviewInstanceId === pending.newWebviewInstanceId;
     }
 
+    private beginWebviewLifecycleResolution(webviewView: vscode.WebviewView): string {
+        this._view = webviewView;
+        const panelId = `panel-${++this.webviewLivenessPanelSeq}`;
+        this.resetWebviewLiveness('webview-recreate');
+        this.uiDebugChannel.appendLine(`EXT: webviewLiveness.panel | phase=resolve | panelId=${panelId}`);
+        this.uiDebugChannel.appendLine(`EXT: webviewReload.external-unobservable | reason=vscode-developer-reload-webviews-command-not-interceptable | observablePoints=resolve,handshake,dispose | panelId=${panelId} | previousWebviewInstanceId=${this._webviewInstanceId || 'null'} | reload=false | recreate=false | sessionMutation=false`);
+        this.uiDebugChannel.appendLine(`EXT: webviewReload.expected-new-webview | phase=resolve | panelId=${panelId} | previousWebviewInstanceId=${this._webviewInstanceId || 'null'} | reload=false | recreate=false | sessionMutation=false`);
+        return panelId;
+    }
+
+    private getLifecycleActiveWebview(fallback?: vscode.Webview): vscode.Webview | undefined {
+        return this._view?.webview || fallback;
+    }
+
+    private prepareWebviewReady(
+        data: any,
+        webviewView: vscode.WebviewView,
+        panelId: string
+    ): {
+        accepted: boolean;
+        pending?: WebviewHardRescuePending;
+        newWebviewInstanceId: string;
+        hardRescueGuard?: () => boolean;
+    } {
+        const pending = this.webviewHardRescuePending;
+        const newWebviewInstanceId = typeof data?.webviewInstanceId === 'string'
+            ? data.webviewInstanceId.trim()
+            : '';
+        let hardRescueGuard: (() => boolean) | undefined;
+        if (pending) {
+            const currentActiveTurn = this.getWebviewLivenessActiveTurnFlags(pending.sessionId);
+            let rejectionReason = '';
+            if (data.hardRescueGenerationToken !== pending.generationToken) rejectionReason = 'generation-token-mismatch';
+            else if (!newWebviewInstanceId) rejectionReason = 'missing-webview-instance-id';
+            else if (newWebviewInstanceId === pending.oldWebviewInstanceId) rejectionReason = 'same-webview-instance-id';
+            else if (Date.now() > pending.timeoutAt) rejectionReason = 'late-handshake';
+            else if (this._view?.webview !== pending.webview || webviewView.webview !== pending.webview) rejectionReason = 'webview-object-mismatch';
+            else if (panelId !== pending.panelId) rejectionReason = 'panel-mismatch';
+            else if (this.currentSessionId !== pending.sessionId) rejectionReason = 'session-mismatch';
+            else if (this.sessionSelectionEpoch !== pending.selectionEpoch) rejectionReason = 'selection-epoch-changed';
+            else if ((currentActiveTurn.turnId || '') !== (pending.activeTurn.turnId || '')) rejectionReason = 'active-turn-changed';
+            else if (this.webviewHandshakeLifecycle !== pending.handshakeLifecycle) rejectionReason = 'lifecycle-superseded';
+            if (rejectionReason) {
+                this.uiDebugChannel.appendLine(`EXT: webviewHardRescue.handshake.rejected | reason=${rejectionReason} | generationToken=${data?.hardRescueGenerationToken || 'null'} | expectedGenerationToken=${pending.generationToken} | sessionId=${pending.sessionId} | panelId=${pending.panelId} | oldWebviewInstanceId=${pending.oldWebviewInstanceId || 'null'} | newWebviewInstanceId=${newWebviewInstanceId || 'null'} | selectionEpoch=${this.sessionSelectionEpoch}`);
+                return { accepted: false, pending, newWebviewInstanceId };
+            }
+            // No await may occur between the final validation above and identity adoption.
+            this._webviewInstanceId = newWebviewInstanceId;
+            pending.newWebviewInstanceId = newWebviewInstanceId;
+            pending.handshakeAccepted = true;
+            this._view = webviewView;
+            hardRescueGuard = () => this.isWebviewHardRescueCurrent(pending);
+            this.uiDebugChannel.appendLine(`EXT: webviewHardRescue.handshake.accepted | generationToken=${pending.generationToken} | sessionId=${pending.sessionId} | panelId=${pending.panelId} | rescueAttemptId=${pending.rescueAttemptId} | oldWebviewInstanceId=${pending.oldWebviewInstanceId || 'null'} | newWebviewInstanceId=${newWebviewInstanceId} | selectionEpoch=${pending.selectionEpoch} | elapsedMs=${Date.now() - pending.startedAt} | ownershipChecks=passed`);
+        } else {
+            if (data?.hardRescueGenerationToken) {
+                this.uiDebugChannel.appendLine(`EXT: webviewHardRescue.handshake.rejected | reason=unexpected-generation-token | generationToken=${data.hardRescueGenerationToken} | panelId=${panelId} | newWebviewInstanceId=${newWebviewInstanceId || 'null'}`);
+                return { accepted: false, newWebviewInstanceId };
+            }
+            if (!newWebviewInstanceId) {
+                this.uiDebugChannel.appendLine(`EXT: webviewReload.handshake.rejected | reason=missing-webview-instance-id | panelId=${panelId}`);
+                return { accepted: false, newWebviewInstanceId };
+            }
+            this._view = webviewView;
+            this._webviewInstanceId = newWebviewInstanceId;
+            ++this.webviewHandshakeLifecycle;
+        }
+        this.webviewLivenessCurrent = undefined;
+        this.uiDebugChannel.appendLine(`[EXT][HANDSHAKE_1_RX] webviewReady | wvId=${this._webviewInstanceId}`);
+        this.uiDebugChannel.appendLine(`EXT: webviewReload.handshake.observed | phase=webviewReady | panelId=${panelId} | webviewInstanceId=${this._webviewInstanceId || 'null'} | previousWebviewInstanceId=${data?.previousWebviewInstanceId || 'unknown'} | reload=false | recreate=false | sessionMutation=false`);
+        return { accepted: true, pending, newWebviewInstanceId, hardRescueGuard };
+    }
+
+    private getLifecycleInitPosted(): boolean {
+        return this.initPosted;
+    }
+
+    private completeWebviewHardRescueSuccess(pending: WebviewHardRescuePending): void {
+        if (pending.timeout) clearTimeout(pending.timeout);
+        pending.timeout = undefined;
+        if (this.webviewHardRescuePending === pending) {
+            this.webviewHardRescuePending = undefined;
+        }
+        this.uiDebugChannel.appendLine(`EXT: webviewHardRescue.complete | generationToken=${pending.generationToken} | sessionId=${pending.sessionId} | panelId=${pending.panelId} | rescueAttemptId=${pending.rescueAttemptId} | oldWebviewInstanceId=${pending.oldWebviewInstanceId || 'null'} | newWebviewInstanceId=${pending.newWebviewInstanceId || 'null'} | elapsedMs=${Date.now() - pending.startedAt} | initSucceeded=true | webviewReadyAckPosted=true`);
+    }
+
+    private handleWebviewLifecycleVisibility(webviewView: vscode.WebviewView): void {
+        if (webviewView.visible && this.initPosted) {
+            this.initPosted = false;
+            this.uiDebugChannel.appendLine('[EXT][INIT_RESET] Webview visible after hidden, resetting initPosted');
+            this.startWebviewLivenessProbes();
+            void this.triggerWebviewLivenessProbe('visibility-visible');
+        } else if (!webviewView.visible) {
+            this.stopWebviewLivenessProbes('visibility-hidden');
+        }
+    }
+
+    private handleWebviewLifecycleDispose(panelId: string): void {
+        this.uiDebugChannel.appendLine(`EXT: webviewReload.dispose.begin | panelId=${panelId} | webviewInstanceId=${this._webviewInstanceId || 'null'} | reload=false | recreate=false | sessionMutation=false`);
+        this.stopWebviewLivenessProbes('webview-dispose');
+        this.uiDebugChannel.appendLine(`EXT: webviewReload.dispose.done | panelId=${panelId} | webviewInstanceId=${this._webviewInstanceId || 'null'} | reload=false | recreate=false | sessionMutation=false`);
+    }
+
     private finishWebviewHardRescueFailure(pending: WebviewHardRescuePending, marker: 'timeout' | 'failed', reason: string): void {
         if (this.webviewHardRescuePending !== pending) return;
         if (pending.timeout) clearTimeout(pending.timeout);
