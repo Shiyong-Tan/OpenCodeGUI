@@ -2637,6 +2637,48 @@ select#mode-select {
     overflow: hidden;
 }
 
+.assistant-image-link {
+    cursor: pointer;
+}
+
+.assistant-image-thumbnail {
+    display: inline-flex;
+    margin: 8px 0 8px 10px;
+    max-width: min(280px, 70%);
+    max-height: 180px;
+    vertical-align: middle;
+    border: 1px solid var(--vscode-panel-border);
+    border-radius: 8px;
+    overflow: hidden;
+    background: color-mix(in srgb, var(--vscode-editor-background) 82%, transparent);
+}
+
+.assistant-image-thumbnail img,
+.assistant-image-inline {
+    display: block;
+    max-width: min(420px, 100%);
+    max-height: 260px;
+    object-fit: contain;
+}
+
+.assistant-image-inline {
+    margin: 8px 0;
+    border: 1px solid var(--vscode-panel-border);
+    border-radius: 8px;
+    cursor: pointer;
+}
+
+.assistant-image-inline.is-loading {
+    min-width: 120px;
+    min-height: 48px;
+    opacity: 0.45;
+}
+
+.assistant-image-thumbnail:hover,
+.assistant-image-inline:hover {
+    border-color: var(--vscode-focusBorder);
+}
+
 
 .message.bot.thinking {
     color: var(--vscode-descriptionForeground);

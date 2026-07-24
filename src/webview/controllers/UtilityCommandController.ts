@@ -85,6 +85,12 @@ const UTILITY_COMMANDS = new Set([
     'localQuestionResult',
     'permissionResult',
     'openFileAtLocation',
+    'resolveAssistantImageReferences',
+]);
+
+const ASSISTANT_IMAGE_EXTENSIONS = new Set([
+    '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg',
+    '.tif', '.tiff', '.ico', '.heic',
 ]);
 
 export class UtilityCommandController {
@@ -146,6 +152,9 @@ export class UtilityCommandController {
                 return true;
             case 'openFileAtLocation':
                 await this.openFileAtLocation(data);
+                return true;
+            case 'resolveAssistantImageReferences':
+                await this.resolveAssistantImageReferences(data, activeWebview);
                 return true;
             default:
                 return false;
@@ -424,6 +433,109 @@ export class UtilityCommandController {
         }
     }
 
+    private isAssistantImagePath(filePath: string): boolean {
+        return ASSISTANT_IMAGE_EXTENSIONS.has(pathModule.extname(filePath).toLowerCase());
+    }
+
+    private isInsideWorkspace(workspaceRoot: string, candidatePath: string): boolean {
+        const rel = pathModule.relative(pathModule.resolve(workspaceRoot), pathModule.resolve(candidatePath));
+        return rel === '' || (!rel.startsWith('..') && !pathModule.isAbsolute(rel));
+    }
+
+    private async isExistingFile(candidatePath: string): Promise<boolean> {
+        try {
+            return (await fs.promises.stat(candidatePath)).isFile();
+        } catch {
+            return false;
+        }
+    }
+
+    private async resolveAssistantImageCandidates(
+        rawPath: string,
+        contextPath?: string
+    ): Promise<string[]> {
+        const workspaceRoot = pathModule.resolve(this.host.getWorkspaceRootPath());
+        const cleanedPath = rawPath.trim().replace(/^["'`<]+|["'`>,.;:]+$/g, '');
+        if (!cleanedPath || !this.isAssistantImagePath(cleanedPath)) return [];
+        const candidates: string[] = [];
+        const addCandidate = async (candidatePath: string): Promise<void> => {
+            const resolved = pathModule.resolve(candidatePath);
+            if (!this.isInsideWorkspace(workspaceRoot, resolved)) return;
+            if (await this.isExistingFile(resolved) && !candidates.includes(resolved)) {
+                candidates.push(resolved);
+            }
+        };
+
+        const abbreviated = /^\.{3}[\\/]/.test(cleanedPath);
+        if (abbreviated && contextPath) {
+            const cleanContext = contextPath.trim().replace(/^["'`<]+|["'`>,.;:]+$/g, '');
+            const contextAbsolute = pathModule.isAbsolute(cleanContext)
+                ? pathModule.resolve(cleanContext)
+                : pathModule.resolve(workspaceRoot, cleanContext);
+            const contextBase = pathModule.extname(contextAbsolute)
+                ? pathModule.dirname(contextAbsolute)
+                : contextAbsolute;
+            await addCandidate(pathModule.join(contextBase, cleanedPath.replace(/^\.{3}[\\/]/, '')));
+        } else if (!abbreviated) {
+            await addCandidate(pathModule.isAbsolute(cleanedPath)
+                ? cleanedPath
+                : pathModule.join(workspaceRoot, cleanedPath));
+        }
+
+        if (candidates.length === 0 && typeof vscode.workspace.findFiles === 'function') {
+            const baseName = pathModule.basename(cleanedPath);
+            const matches = await vscode.workspace.findFiles(
+                `**/${baseName}`,
+                '**/{.git,node_modules,.opencode}/**',
+                20
+            );
+            for (const match of matches) {
+                if (this.isAssistantImagePath(match.fsPath)) await addCandidate(match.fsPath);
+            }
+        }
+        return candidates;
+    }
+
+    private async resolveAssistantImageReferences(
+        data: UtilityMessage,
+        activeWebview: vscode.Webview
+    ): Promise<void> {
+        const requestId = typeof data.requestId === 'string' ? data.requestId : '';
+        const references = Array.isArray(data.references) ? data.references.slice(0, 24) : [];
+        const items: Array<Record<string, unknown>> = [];
+        for (const reference of references) {
+            const id = typeof reference?.id === 'string' ? reference.id : '';
+            const rawPath = typeof reference?.path === 'string' ? reference.path : '';
+            const contextPath = typeof reference?.contextPath === 'string'
+                ? reference.contextPath
+                : undefined;
+            if (!id || !rawPath) continue;
+            const candidates = await this.resolveAssistantImageCandidates(rawPath, contextPath);
+            if (candidates.length === 1) {
+                items.push({
+                    id,
+                    path: rawPath,
+                    resolvedPath: candidates[0],
+                    uri: activeWebview.asWebviewUri(vscode.Uri.file(candidates[0])).toString(),
+                });
+            } else {
+                items.push({
+                    id,
+                    path: rawPath,
+                    ambiguous: candidates.length > 1,
+                    candidates: candidates.map((candidate) =>
+                        pathModule.relative(this.host.getWorkspaceRootPath(), candidate)
+                    ),
+                });
+            }
+        }
+        await activeWebview.postMessage({
+            type: 'assistantImageReferencesResolved',
+            requestId,
+            items,
+        });
+    }
+
     private async openFileAtLocation(data: UtilityMessage): Promise<void> {
         const rawPath = typeof data.path === 'string' ? data.path.trim() : '';
         const lineNum = Number.isFinite(Number(data.line)) ? Number(data.line) : 1;
@@ -435,9 +547,31 @@ export class UtilityCommandController {
             return;
         }
         const workspaceRoot = this.host.getWorkspaceRootPath();
-        const absPath = pathModule.isAbsolute(rawPath)
+        let absPath = pathModule.isAbsolute(rawPath)
             ? pathModule.resolve(rawPath)
             : pathModule.resolve(pathModule.join(workspaceRoot, rawPath));
+        if (this.isAssistantImagePath(rawPath)) {
+            const contextPath = typeof data.contextPath === 'string' ? data.contextPath : undefined;
+            const candidates = await this.resolveAssistantImageCandidates(rawPath, contextPath);
+            if (candidates.length === 0) {
+                this.host.log(`EXT: openFileAtLocation | path=${rawPath} | error=image-not-found`);
+                return;
+            }
+            if (candidates.length > 1) {
+                const selected = await vscode.window.showQuickPick(
+                    candidates.map((candidate) => ({
+                        label: pathModule.relative(workspaceRoot, candidate),
+                        description: candidate,
+                        candidate,
+                    })),
+                    { placeHolder: `Select image for ${rawPath}` }
+                );
+                if (!selected) return;
+                absPath = selected.candidate;
+            } else {
+                absPath = candidates[0];
+            }
+        }
         const normalizedRoot = pathModule.resolve(workspaceRoot);
         const rel = pathModule.relative(normalizedRoot, absPath);
         if (rel.startsWith('..') || pathModule.isAbsolute(rel)) {
@@ -447,6 +581,17 @@ export class UtilityCommandController {
             return;
         }
         try {
+            if (this.isAssistantImagePath(absPath)) {
+                await vscode.commands.executeCommand(
+                    'vscode.open',
+                    vscode.Uri.file(absPath),
+                    { preview: true }
+                );
+                this.host.log(
+                    `EXT: openFileAtLocation | path=${rawPath} | resolvedAbs=${absPath} | opened=image`
+                );
+                return;
+            }
             if (absPath.endsWith('.md')) {
                 await vscode.commands.executeCommand('markdown.showPreview', vscode.Uri.file(absPath));
                 this.host.log(

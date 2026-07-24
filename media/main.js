@@ -3853,8 +3853,8 @@ function toggleUndoSegmentPlaceholder(sessionId, noticeKey) {
 const FILE_REF_RE = /([A-Za-z0-9_./-]+\.[A-Za-z0-9]+):(\d{1,6})(?::(\d{1,6}))?/g;
 const FILE_REF_CODE_RE = /([A-Za-z0-9_./-]+\.[A-Za-z0-9]+):(\d{1,6})(?::(\d{1,6}))?/g;
 const FILE_REF_QUICK_RE = /([A-Za-z0-9_./-]+\.[A-Za-z0-9]+):(\d{1,6})(?::(\d{1,6}))?/;
-const FILE_ONLY_RE = /(?<![A-Za-z0-9_./-])((?:\.{1,2}\/)?(?:[A-Za-z0-9_-]+\/)+[A-Za-z0-9_-]+\.[A-Za-z][A-Za-z0-9]{0,9})(?![A-Za-z0-9_./-])/g;
-const FILE_ONLY_QUICK_RE = /(?<![A-Za-z0-9_./-])((?:\.{1,2}\/)?(?:[A-Za-z0-9_-]+\/)+[A-Za-z0-9_-]+\.[A-Za-z][A-Za-z0-9]{0,9})(?![A-Za-z0-9_./-])/;
+const FILE_ONLY_RE = /(?<![A-Za-z0-9_.\\/-])((?:(?:[A-Za-z]:[\\/]|\.{1,3}[\\/])(?:[A-Za-z0-9_-]+[\\/])*|(?:[A-Za-z0-9_-]+[\\/])+)[A-Za-z0-9_-]+\.[A-Za-z][A-Za-z0-9]{0,9})(?![A-Za-z0-9_.\\/-])/g;
+const FILE_ONLY_QUICK_RE = /(?<![A-Za-z0-9_.\\/-])((?:(?:[A-Za-z]:[\\/]|\.{1,3}[\\/])(?:[A-Za-z0-9_-]+[\\/])*|(?:[A-Za-z0-9_-]+[\\/])+)[A-Za-z0-9_-]+\.[A-Za-z][A-Za-z0-9]{0,9})(?![A-Za-z0-9_.\\/-])/;
 const ALLOWED_EXTS = null;
 
 function isAllowedFileExt(filePath) {
@@ -4961,7 +4961,21 @@ function renderSafeShellMarkdownMessage(session, unit, presentationSelection) {
     return root;
 }
 
+let assistantImageController = null;
 let markdownController = null;
+
+function getAssistantImageController() {
+    if (assistantImageController) return assistantImageController;
+    const createController = window.__ocFeatures?.createAssistantImageController;
+    if (typeof createController !== 'function') {
+        throw new Error('Assistant image controller is unavailable');
+    }
+    assistantImageController = createController({
+        document,
+        postMessage: (message) => vscode.postMessage(message)
+    });
+    return assistantImageController;
+}
 
 function getMarkdownController() {
     if (markdownController) return markdownController;
@@ -4975,6 +4989,7 @@ function getMarkdownController() {
         sanitizeHtml: (html, config) => purify.sanitize(html, config),
         wrapTables,
         linkifyFileRefs,
+        enhanceImageReferences: (root) => getAssistantImageController().enhance(root),
         highlightElement: (element) => {
             if (window.hljs && typeof window.hljs.highlightElement === 'function') {
                 window.hljs.highlightElement(element);
@@ -5450,12 +5465,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 const filePath = url.searchParams.get('path') || '';
                 const line = Number(url.searchParams.get('line') || '1');
                 const col = Number(url.searchParams.get('col') || '1');
+                const contextPath = url.searchParams.get('contextPath') || undefined;
                 if (!filePath) return;
                 vscode.postMessage({
                     type: 'openFileAtLocation',
                     path: filePath,
                     line,
                     col,
+                    contextPath,
                     sessionId: activeSessionId || null
                 });
             } catch {
@@ -13651,6 +13668,10 @@ function appendMessageImages(parentEl, message) {
         });
 
         switch (message.type) {
+            case 'assistantImageReferencesResolved': {
+                getAssistantImageController().acceptResponse(message);
+                break;
+            }
             case 'smartSessionSearchResult': {
                 const sessionId = typeof message.sessionId === 'string' ? message.sessionId : '';
                 const targetSearch = getSessionSearchState(sessionId, false);

@@ -28,6 +28,7 @@ import { createChangeListRenderer, deriveChangeListPresentation } from './change
 import { createChangeListEventController } from './change-list/change-list-events';
 import { planChangeListMaterialization } from './change-list/change-list-planner';
 import { createVirtualMeasurementCache } from './virtual-measurement-cache';
+import { createAssistantImageController } from './images/assistant-image-controller';
 
 export const FEATURE_FACADE_VERSION = 1 as const;
 
@@ -76,6 +77,7 @@ const facade = Object.freeze({
   createChangeListEventController,
   planChangeListMaterialization,
   createVirtualMeasurementCache,
+  createAssistantImageController,
 });
 
 declare global {

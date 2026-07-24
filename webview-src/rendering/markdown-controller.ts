@@ -18,6 +18,7 @@ export interface MarkdownControllerDependencies {
   readonly normalizeMarkdown?: (text: string) => string;
   readonly wrapTables: (root: HTMLElement) => unknown;
   readonly linkifyFileRefs: (root: HTMLElement) => unknown;
+  readonly enhanceImageReferences?: (root: HTMLElement) => unknown;
   readonly highlightElement?: (element: Element) => unknown;
   readonly writeClipboardText?: (text: string) => Promise<unknown>;
   readonly startRenderPhase?: () => unknown;
@@ -36,7 +37,7 @@ export interface MarkdownController {
 }
 
 const ALLOWED_TAGS = Object.freeze([
-  'a', 'p', 'br', 'strong', 'em', 'code', 'pre', 'ul', 'ol', 'li',
+  'a', 'img', 'p', 'br', 'strong', 'em', 'code', 'pre', 'ul', 'ol', 'li',
   'blockquote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hr',
   'table', 'thead', 'tbody', 'tr', 'th', 'td', 'span', 'section', 'eq', 'eqn',
   'math', 'mrow', 'mi', 'mo', 'mn', 'msup', 'msub', 'mfrac', 'msqrt', 'mroot',
@@ -44,7 +45,7 @@ const ALLOWED_TAGS = Object.freeze([
 ]);
 
 const ALLOWED_ATTR = Object.freeze([
-  'href', 'title', 'target', 'rel', 'class', 'role', 'aria-hidden', 'style',
+  'href', 'src', 'alt', 'loading', 'title', 'target', 'rel', 'class', 'role', 'aria-hidden', 'style',
   'mathvariant', 'display', 'xmlns', 'encoding',
 ]);
 
@@ -222,6 +223,7 @@ export function createMarkdownController(dependencies: MarkdownControllerDepende
       content.innerHTML = message._renderHtml;
       resetCachedCodeBlockCopyEnhancements(content);
       enhanceCodeBlocksWithCopyButtons(content);
+      if (linkifyRefs) dependencies.enhanceImageReferences?.(content);
       return;
     }
     renderMarkdownInto(content, text, { linkifyRefs });
@@ -229,6 +231,7 @@ export function createMarkdownController(dependencies: MarkdownControllerDepende
       message._renderSignature = signature;
       message._renderHtml = content.innerHTML;
     }
+    if (linkifyRefs) dependencies.enhanceImageReferences?.(content);
   }
 
   function renderUserMarkdown(content: HTMLElement, text: string): void {

@@ -170,6 +170,30 @@ describe('markdown controller', () => {
     expect(root.querySelector('.code-copy-btn')?.listeners.has('click')).toBe(true);
   });
 
+  it('rebinds image references after cached assistant HTML is remounted', () => {
+    const root = new FakeElement('div');
+    const enhanceImageReferences = jest.fn();
+    const controller = createMarkdownController({
+      document: {
+        body: new FakeElement('body'),
+        createElement: (tagName: string) => new FakeElement(tagName),
+        execCommand: jest.fn(() => true),
+      } as unknown as Document,
+      renderMarkdown: (text) => `<p>${text}</p>`,
+      sanitizeHtml: (html) => html,
+      normalizeMarkdown: (text) => text,
+      wrapTables: () => undefined,
+      linkifyFileRefs: () => undefined,
+      enhanceImageReferences,
+    });
+    const message = { text: '![plot](results/plot.png)' };
+
+    controller.renderAssistantMarkdown(root as unknown as HTMLElement, message, true);
+    controller.renderAssistantMarkdown(root as unknown as HTMLElement, message, true);
+
+    expect(enhanceImageReferences).toHaveBeenCalledTimes(2);
+  });
+
   it('falls back to the document copy command when the Clipboard API fails', async () => {
     const body = new FakeElement('body');
     const execCommand = jest.fn(() => true);

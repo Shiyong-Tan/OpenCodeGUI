@@ -4760,7 +4760,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             log: (message) => this.uiDebugChannel.appendLine(message),
         });
         this.sidebarWebviewDependencies = {
-            localResourceRoots: [this._extensionUri],
+            localResourceRoots: [
+                this._extensionUri,
+                vscode.Uri.file(this.getWorkspaceRootPath()),
+            ],
             getHtmlForWebview: (webview) => this._getHtmlForWebview(webview),
             log: (message) => this.uiDebugChannel.appendLine(message),
             utilityCommandHandler: this.utilityCommandHandler,

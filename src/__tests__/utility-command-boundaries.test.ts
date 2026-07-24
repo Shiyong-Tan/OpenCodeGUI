@@ -2,6 +2,7 @@ jest.mock('vscode', () => {
     const executeCommand = jest.fn();
     const showOpenDialog = jest.fn();
     const showErrorMessage = jest.fn();
+    const showQuickPick = jest.fn();
     const openTextDocument = jest.fn();
     const showTextDocument = jest.fn();
     return {
@@ -12,8 +13,13 @@ jest.mock('vscode', () => {
             showErrorMessage,
             showInformationMessage: jest.fn(),
             showTextDocument,
+            showQuickPick,
         },
-        workspace: { workspaceFolders: [], openTextDocument },
+        workspace: {
+            workspaceFolders: [],
+            openTextDocument,
+            findFiles: jest.fn(async () => []),
+        },
         Uri: {
             joinPath: (...parts: any[]) => parts.join('/'),
             file: (fsPath: string) => ({ fsPath }),
@@ -53,6 +59,7 @@ function createHarness(overrides: Record<string, unknown> = {}) {
     const webview: any = {
         options: {},
         html: '',
+        asWebviewUri: (uri: any) => ({ toString: () => `webview:${uri.fsPath}` }),
         postMessage: jest.fn(async (message: any) => {
             posts.push(message);
             return true;
@@ -230,6 +237,7 @@ describe('utility command family characterization', () => {
             'smartSessionSearch', 'listWorkspaceFiles', 'ping', 'reloadWindow',
             'clipboardImage', 'selectAttachments', 'openGitDiff', 'toolResult',
             'localQuestionResult', 'permissionResult', 'openFileAtLocation',
+            'resolveAssistantImageReferences',
         ];
         for (const command of commands) {
             expect(utilityControllerSource).toContain(`case '${command}'`);
@@ -319,6 +327,54 @@ describe('utility command family characterization', () => {
         });
         expect(harness.posts).toContainEqual({ type: 'pong', ts: 123 });
         expect(vscode.commands.executeCommand).toHaveBeenCalledWith('workbench.action.reloadWindow');
+    });
+
+    test('resolves abbreviated assistant image paths and opens images in the native editor', async () => {
+        const os = require('os') as typeof import('os');
+        const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'opencode-assistant-image-'));
+        const reportDir = path.join(tempRoot, 'results', 'case-a');
+        const imagePath = path.join(reportDir, 'eta_kappa.png');
+        fs.mkdirSync(reportDir, { recursive: true });
+        fs.writeFileSync(path.join(reportDir, 'summary.json'), '{}');
+        fs.writeFileSync(imagePath, 'image');
+        const executeCommand = vscode.commands.executeCommand as jest.Mock;
+        executeCommand.mockClear();
+        try {
+            const harness = createHarness({ getWorkspaceRootPath: jest.fn(() => tempRoot) });
+            await harness.send({
+                type: 'resolveAssistantImageReferences',
+                requestId: 'images-1',
+                references: [{
+                    id: 'image-1',
+                    path: '.../eta_kappa.png',
+                    contextPath: 'results/case-a/summary.json',
+                }],
+            });
+
+            expect(harness.posts).toContainEqual({
+                type: 'assistantImageReferencesResolved',
+                requestId: 'images-1',
+                items: [{
+                    id: 'image-1',
+                    path: '.../eta_kappa.png',
+                    resolvedPath: imagePath,
+                    uri: `webview:${imagePath}`,
+                }],
+            });
+
+            await harness.send({
+                type: 'openFileAtLocation',
+                path: '.../eta_kappa.png',
+                contextPath: 'results/case-a/summary.json',
+            });
+            expect(executeCommand).toHaveBeenCalledWith(
+                'vscode.open',
+                { fsPath: imagePath },
+                { preview: true },
+            );
+        } finally {
+            fs.rmSync(tempRoot, { recursive: true, force: true });
+        }
     });
 
     test('keeps clipboard attachment responses bound to the payload session', async () => {
