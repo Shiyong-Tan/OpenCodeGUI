@@ -314,13 +314,13 @@ describe('cross-session runtime repository audit', () => {
   });
 
   test('sending to an owned session does not mutate session selection', () => {
-    const controller = read('src', 'webview', 'SidebarWebviewController.ts');
+    const controller = read('src', 'webview', 'controllers', 'TurnCommandController.ts');
     const sendStart = controller.indexOf('case "sendMessage":');
-    const sendEnd = controller.indexOf('case "appendSnapshotMeta":', sendStart);
+    const sendEnd = controller.indexOf('case "appendMessage":', sendStart);
     const send = controller.slice(sendStart, sendEnd);
 
     expect(send).toContain('host.trackUserOwnedSession(payloadSessionId);');
-    expect(send).not.toContain('host.currentSessionId = payloadSessionId');
+    expect(send).not.toContain('host.currentSessionId');
     expect(send).not.toContain('host.client.setSessionId(payloadSessionId)');
   });
 

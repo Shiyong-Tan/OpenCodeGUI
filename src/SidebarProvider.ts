@@ -24,6 +24,10 @@ import {
     type SessionCommandHandler,
 } from './webview/controllers/SessionCommandController';
 import {
+    createTurnCommandHandler,
+    type TurnCommandHandler,
+} from './webview/controllers/TurnCommandController';
+import {
     captureCancelTurnOwner,
     type CapturedCancelTurnOwner,
 } from './webview/CancelTurnOwner';
@@ -644,6 +648,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private readonly smartSearch: SmartSearchService;
     private readonly utilityCommandHandler: UtilityCommandHandler;
     private readonly sessionCommandHandler: SessionCommandHandler;
+    private readonly turnCommandHandler: TurnCommandHandler;
     private uiTimelineBySession = new Map<string, string[]>();
     private lastSnapshotPayloadBySession = new Map<string, any>();
     private snapshotStore?: SnapshotStore;
@@ -3727,6 +3732,26 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return this.sendInFlightBySession.has(sessionId);
     }
 
+    private async createTurnSession(): Promise<string> {
+        const sessionInfo = await this.client.createSession();
+        this.currentSessionId = sessionInfo.id;
+        this.trackUserOwnedSession(sessionInfo.id);
+        this.client.setSessionId(sessionInfo.id);
+        const workspaceFolder = this.client.getWorkspaceRoot()
+            || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (workspaceFolder) {
+            const workspaceKey = this.getWorkspaceKeyForRoot(workspaceFolder);
+            await this._context.globalState.update(
+                `recentSession.${workspaceKey}`,
+                sessionInfo.id
+            );
+            this.uiDebugChannel.appendLine(
+                `[EXT][RECENT_SESSION_UPDATED] sessionId=${sessionInfo.id} reason=sendMessage-createSession workspace=${workspaceFolder}`
+            );
+        }
+        return sessionInfo.id;
+    }
+
     private startTurnCommandState(
         sessionId: string,
         clientMessageId: string,
@@ -3839,6 +3864,33 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.pendingAssistantTmpKeyBySession.delete(sessionId);
         this.pendingAssistantMessageIdBySession.delete(sessionId);
         this.assistantTextBufferBySession.delete(sessionId);
+    }
+
+    private bindTurnMessageIdentity(sourceId: string, targetId: string): void {
+        this.clientMessageIdMap.set(sourceId, targetId);
+    }
+
+    private resolveTurnMessageIdentity(messageId: string): string | undefined {
+        return this.clientMessageIdMap.get(messageId);
+    }
+
+    private clearPostFinalWatchDiffFocus(sessionId: string): void {
+        this.postFinalWatchDiffFocusedBySession.delete(sessionId);
+    }
+
+    private async discardRevertedSegmentAfterBuild(sessionId: string): Promise<void> {
+        const segment = this.client.getRevertedSegment(sessionId);
+        if (!segment) return;
+        segment.discarded = true;
+        segment.isActive = true;
+        segment.collapsed = true;
+        this.client.setRevertedSegment(sessionId, segment);
+        await this.persistRevertedSegment(
+            sessionId,
+            segment,
+            segment.conflicts || [],
+            true
+        );
     }
 
     private async listWorkspaceFiles(query: string, limit = 50): Promise<WorkspaceFileResult[]> {
@@ -4303,6 +4355,154 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 this.initializeNewSessionBaseline(webview),
             handleSnapshotTimelineIds: (payload) => this.handleSnapshotTimelineIds(payload),
         });
+        this.turnCommandHandler = createTurnCommandHandler({
+            client: {
+                abortSession: (sessionId) => this.client.abortSession(sessionId),
+                appendPrompt: (sessionId, text, options) =>
+                    this.client.appendPrompt(sessionId, text, options),
+                beginAppendPrompt: (sessionId, clientMessageId, text, rootUserMsgId) =>
+                    this.client.beginAppendPrompt(
+                        sessionId,
+                        clientMessageId,
+                        text,
+                        rootUserMsgId
+                    ),
+                canAppendToCurrentTurn: (sessionId, rootUserMsgId) =>
+                    this.client.canAppendToCurrentTurn(sessionId, rootUserMsgId),
+                cancelTurn: (sessionId, operationId) =>
+                    this.client.cancelTurn(sessionId, operationId),
+                chat: (text, options) => this.client.chat(text, options),
+                createInternalMessageId: (role, sessionId) =>
+                    this.client.createInternalMessageId(role, sessionId),
+                failAppendPrompt: (sessionId, clientMessageId) =>
+                    this.client.failAppendPrompt(sessionId, clientMessageId),
+                finishTurn: (sessionId) => this.client.finishTurn(sessionId),
+                getPendingTurnMessageIds: (sessionId) =>
+                    this.client.getPendingTurnMessageIds(sessionId),
+                getTurnAssistantMsgId: (sessionId) =>
+                    this.client.getTurnAssistantMsgId(sessionId),
+                registerMessage: (messageId, sessionId) =>
+                    this.client.registerMessage(messageId, sessionId),
+                revertPendingTurnChangesToCurrentBase: (sessionId) =>
+                    this.client.revertPendingTurnChangesToCurrentBase(sessionId),
+                waitForSessionIdleGate: (sessionId, options) =>
+                    this.client.waitForSessionIdleGate(sessionId, options),
+                waitForTurnAssistantMsgId: (sessionId, timeoutMs) =>
+                    this.client.waitForTurnAssistantMsgId(sessionId, timeoutMs),
+            },
+            attachments: {
+                buildAttachmentManifest: (attachments) =>
+                    this.attachmentStorage.buildAttachmentManifest(attachments),
+                isImageFileName: (name) =>
+                    this.attachmentStorage.isImageFileName(name),
+                sanitizeFilename: (name) =>
+                    this.attachmentStorage.sanitizeFilename(name),
+                saveAttachment: (sessionId, attachment, requestId) =>
+                    this.attachmentStorage.saveAttachment(sessionId, attachment, requestId),
+            },
+            getLiveWebview: (fallback) => this._view?.webview || fallback,
+            getCurrentSessionId: () => this.currentSessionId,
+            getTurnSelection: () => ({
+                model: this.selectedModel,
+                variant: this.selectedVariant,
+                mode: this.selectedMode,
+            }),
+            log: (message) => this.uiDebugChannel.appendLine(message),
+            logBridge: (message) => OpenCodeClient.outputChannel.appendLine(message),
+            createTurnSession: () => this.createTurnSession(),
+            trackUserOwnedSession: (sessionId) => this.trackUserOwnedSession(sessionId),
+            postAddResponse: (webview, value, meta) =>
+                this.postAddResponse(webview, value, meta),
+            isTurnCommandInFlight: (sessionId) => this.isTurnCommandInFlight(sessionId),
+            startTurnCommandState: (
+                sessionId,
+                clientMessageId,
+                userText,
+                temporaryAssistantKey,
+                operationId
+            ) => this.startTurnCommandState(
+                sessionId,
+                clientMessageId,
+                userText,
+                temporaryAssistantKey,
+                operationId
+            ),
+            rememberDraft: (clientMessageId, draft) =>
+                this.rememberDraft(clientMessageId, draft),
+            normalizeReferencedWorkspaceFiles: (files) =>
+                this.normalizeReferencedWorkspaceFiles(files),
+            bindMessageIdentity: (sourceId, targetId) =>
+                this.bindTurnMessageIdentity(sourceId, targetId),
+            buildContextBlock: (contextItems) => this.buildContextBlock(contextItems),
+            setTurnPendingSnapshotUserText: (sessionId, displayText) =>
+                this.setTurnPendingSnapshotUserText(sessionId, displayText),
+            bindTurnAssistantMessage: (sessionId, assistantMessageId) =>
+                this.bindTurnAssistantMessage(sessionId, assistantMessageId),
+            emitTurnFinalizePhase: (webview, sessionId, phase) =>
+                this.emitTurnFinalizePhase(webview, sessionId, phase),
+            postMessageIndexMap: (webview, sessionId) =>
+                this.postMessageIndexMap(webview, sessionId),
+            buildFinalizeTurnIdentity: (sessionId, partial) =>
+                this.buildFinalizeTurnIdentity(sessionId, partial),
+            commitPendingTurnChangesFromAuthoritativeFiles: (identity) =>
+                this.commitPendingTurnChangesFromAuthoritativeFiles(identity),
+            resolvePendingUserUpgrade: (sessionId, webview) =>
+                this.resolvePendingUserUpgrade(sessionId, webview),
+            emitDiffFileListWithRetry: (identity, webview) =>
+                this.emitDiffFileListWithRetry(identity, webview),
+            writeFinalizeSnapshotFromCanonicalSession: (identity) =>
+                this.writeFinalizeSnapshotFromCanonicalSession(identity),
+            clearPostFinalWatchDiffFocus: (sessionId) =>
+                this.clearPostFinalWatchDiffFocus(sessionId),
+            markSubagentsTerminalForParent: (sessionId, state, reason) =>
+                this.markSubagentsTerminalForParent(sessionId, state, reason),
+            emitSubagentStatus: () => this.emitSubagentStatus(),
+            clearSubagentSessionsForParent: (sessionId, reason) =>
+                this.clearSubagentSessionsForParent(sessionId, reason),
+            postModelQuota: (webview, reason) => this.postModelQuota(webview, reason),
+            isTurnPendingLocalKey: (sessionId, clientMessageId) =>
+                this.isTurnPendingLocalKey(sessionId, clientMessageId),
+            clearDraft: (clientMessageId) => this.clearDraft(clientMessageId),
+            handleAbortedMessage: (sessionId, messageId, webview) =>
+                this.handleAbortedMessage(sessionId, messageId, webview),
+            clearCompletedTurnPendingUser: (sessionId, clientMessageId) =>
+                this.clearCompletedTurnPendingUser(sessionId, clientMessageId),
+            discardRevertedSegmentAfterBuild: (sessionId) =>
+                this.discardRevertedSegmentAfterBuild(sessionId),
+            getTurnPendingLocalKey: (sessionId) =>
+                this.getTurnPendingLocalKey(sessionId),
+            clearFailedTurnCommandState: (sessionId) =>
+                this.clearFailedTurnCommandState(sessionId),
+            finishTurnCommandState: (sessionId) =>
+                this.finishTurnCommandState(sessionId),
+            syncTurnInFlightAfterFinalize: (sessionId, webview, reason) =>
+                this.syncTurnInFlightAfterFinalize(sessionId, webview, reason),
+            runPendingSendInitGuardCompensation: (sessionId, webview, reason) =>
+                this.runPendingSendInitGuardCompensation(sessionId, webview, reason),
+            isAppendSubmissionInFlight: (sessionId) =>
+                this.isAppendSubmissionInFlight(sessionId),
+            markAppendSubmissionStarted: (sessionId) =>
+                this.markAppendSubmissionStarted(sessionId),
+            markAppendSubmissionFinished: (sessionId) =>
+                this.markAppendSubmissionFinished(sessionId),
+            cacheAppendSnapshotMeta: (data) => this.cacheAppendSnapshotMeta(data),
+            registerTurnTemporaryKey: (sessionId, temporaryAssistantKey) =>
+                this.registerTurnTemporaryKey(sessionId, temporaryAssistantKey),
+            captureTurnCancelOwner: (payload) => this.captureTurnCancelOwner(payload),
+            promptCancelRollbackDecision: (webview, sessionId) =>
+                this.promptCancelRollbackDecision(webview, sessionId),
+            upsertCanceledTurn: (sessionId, record) =>
+                this.upsertCanceledTurn(sessionId, record),
+            clearTurnRawUserText: (pendingLocalKey) =>
+                this.clearTurnRawUserText(pendingLocalKey),
+            clearCanceledTurnCommandState: (sessionId) =>
+                this.clearCanceledTurnCommandState(sessionId),
+            resolveMessageIdentity: (messageId) =>
+                this.resolveTurnMessageIdentity(messageId),
+            clearCanceledTurnAssistantState: (sessionId) =>
+                this.clearCanceledTurnAssistantState(sessionId),
+            consumeDraft: (clientMessageId) => this.consumeDraft(clientMessageId),
+        });
         this.userOwnedSessionsLoaded = this.loadUserOwnedSessions();
         this.client.setServerStatusHandler((status, reason) => {
             this.sendServerStatus(status, reason);
@@ -4430,7 +4630,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             context,
             _token,
             this.utilityCommandHandler,
-            this.sessionCommandHandler
+            this.sessionCommandHandler,
+            this.turnCommandHandler
         );
     }
 

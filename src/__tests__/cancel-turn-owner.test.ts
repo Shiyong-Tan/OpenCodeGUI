@@ -37,11 +37,11 @@ describe('cancel turn ownership', () => {
 
   test('controller aborts and cleans only the captured owner', () => {
     const controller = fs.readFileSync(
-      path.join(process.cwd(), 'src', 'webview', 'SidebarWebviewController.ts'),
+      path.join(process.cwd(), 'src', 'webview', 'controllers', 'TurnCommandController.ts'),
       'utf8',
     );
     const start = controller.indexOf('case "cancel":');
-    const end = controller.indexOf('case "restoreAll":', start);
+    const end = controller.indexOf('default:', start);
     const block = controller.slice(start, end);
     expect(block).toContain('const cancelOwner = host.captureTurnCancelOwner(data);');
     expect(block).toContain('await host.client.abortSession(cancelSessionId);');

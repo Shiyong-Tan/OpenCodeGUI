@@ -13,17 +13,21 @@ const utilityControllerSource = fs.readFileSync(
     path.join(process.cwd(), 'src', 'webview', 'controllers', 'UtilityCommandController.ts'),
     'utf8',
 );
+const turnControllerSource = fs.readFileSync(
+    path.join(process.cwd(), 'src', 'webview', 'controllers', 'TurnCommandController.ts'),
+    'utf8',
+);
 const providerSource = fs.readFileSync(
     path.join(process.cwd(), 'src', 'SidebarProvider.ts'),
     'utf8',
 );
 
 function extractRange(startMarker: string, endMarker: string): string {
-    const start = topControllerSource.indexOf(startMarker);
+    const start = turnControllerSource.indexOf(startMarker);
     expect(start).toBeGreaterThanOrEqual(0);
-    const end = topControllerSource.indexOf(endMarker, start + startMarker.length);
+    const end = turnControllerSource.indexOf(endMarker, start + startMarker.length);
     expect(end).toBeGreaterThan(start);
-    return topControllerSource.slice(start, end);
+    return turnControllerSource.slice(start, end);
 }
 
 function expectOrder(source: string, markers: string[]): void {
@@ -51,7 +55,7 @@ function extractProviderMethod(marker: string): string {
 }
 
 describe('turn command family characterization', () => {
-    test('keeps every turn command in the single top-level dispatcher before extraction', () => {
+    test('extracts every turn command behind the single top-level dispatcher', () => {
         for (const command of [
             'sendMessage',
             'appendMessage',
@@ -60,22 +64,33 @@ describe('turn command family characterization', () => {
             'registerPendingUserLocal',
             'cancel',
         ]) {
-            expect(topControllerSource).toContain(`case "${command}"`);
+            expect(turnControllerSource).toContain(`case "${command}"`);
+            expect(topControllerSource).not.toContain(`case "${command}"`);
             expect(sessionControllerSource).not.toContain(`case '${command}'`);
             expect(utilityControllerSource).not.toContain(`case '${command}'`);
         }
         expect(topControllerSource.match(/onDidReceiveMessage\(/g)).toHaveLength(1);
+        expect(topControllerSource).toContain(
+            'const turnHandling = turnCommandHandler(data, activeWebview, webviewView.webview)'
+        );
+        expect(topControllerSource).toContain('turnHandling !== false && await turnHandling');
+        expect(turnControllerSource).toContain('if (!TURN_COMMANDS.has(data?.type))');
+        expect(turnControllerSource).toContain('return false;');
+        expect(providerSource).toContain(
+            'this.turnCommandHandler = createTurnCommandHandler({'
+        );
+        expect(providerSource).not.toContain('createTurnCommandHandler(this)');
     });
 
     test('captures the explicit send owner before asynchronous work and never reroutes it', () => {
         const block = extractRange('case "sendMessage"', 'case "appendMessage"');
         expectOrder(block, [
             'const payloadSessionId =',
-            'const currentSessionIdAtSend = host.currentSessionId',
-            'if (!payloadSessionId && !host.currentSessionId)',
-            'const targetSessionId = payloadSessionId || host.currentSessionId',
+            'const currentSessionIdAtSend = host.getCurrentSessionId()',
+            'if (!payloadSessionId && !host.getCurrentSessionId())',
+            'const targetSessionId = payloadSessionId || host.getCurrentSessionId()',
             'host.isTurnCommandInFlight(targetSessionId)',
-            'const targetModel = host.selectedModel',
+            '} = host.getTurnSelection()',
             'let activeSendSessionId: string | undefined = targetSessionId',
             'host.startTurnCommandState(',
             'await host.client.chat(',
@@ -83,24 +98,30 @@ describe('turn command family characterization', () => {
         expect(block).toContain('sessionId: targetSessionId');
         expect(block).toContain('host.client.waitForSessionIdleGate(targetSessionId');
         expect(block).toContain('host.client.finishTurn(targetSessionId)');
-        expect(block).not.toContain(
-            'const targetSessionId = payloadSessionId || host.currentSessionId;\n' +
-            '                    await'
-        );
+        expect(block).not.toContain('host.currentSessionId');
     });
 
     test('creates a session only when neither payload nor current selection owns the send', () => {
         const block = extractRange('case "sendMessage"', 'case "appendMessage"');
-        const createStart = block.indexOf('if (!payloadSessionId && !host.currentSessionId)');
+        const createStart = block.indexOf('if (!payloadSessionId && !host.getCurrentSessionId())');
         const createEnd = block.indexOf("if (data.value.toLowerCase() === 'ping')", createStart);
         expect(createStart).toBeGreaterThanOrEqual(0);
         expect(createEnd).toBeGreaterThan(createStart);
         const createBlock = block.slice(createStart, createEnd);
-        expect(createBlock).toContain('await host.client.createSession()');
-        expect(createBlock).toContain('host.currentSessionId = sessionInfo.id');
+        expect(createBlock).toContain('await host.createTurnSession()');
         expect(createBlock).toContain("type: 'sessionId'");
         expect(block.indexOf('if (payloadSessionId)')).toBeGreaterThan(createEnd);
         expect(block).toContain('host.trackUserOwnedSession(payloadSessionId)');
+
+        const createSession = extractProviderMethod('private async createTurnSession(');
+        expectOrder(createSession, [
+            'await this.client.createSession()',
+            'this.currentSessionId = sessionInfo.id',
+            'this.trackUserOwnedSession(sessionInfo.id)',
+            'this.client.setSessionId(sessionInfo.id)',
+            'await this._context.globalState.update(',
+            'return sessionInfo.id',
+        ]);
     });
 
     test('binds local, temporary, and assistant identities before publishing turn messages', () => {
@@ -150,7 +171,7 @@ describe('turn command family characterization', () => {
             'await host.writeFinalizeSnapshotFromCanonicalSession(finalizeIdentity)',
             'host.client.finishTurn(targetSessionId)',
             "host.emitTurnFinalizePhase(liveWebview, targetSessionId, 'finalize_done')",
-            '} finally {',
+            'finally {',
             'host.finishTurnCommandState(activeSendSessionId)',
             "host.syncTurnInFlightAfterFinalize(activeSendSessionId, liveWebview, 'sendMessage.finally')",
         ]);
@@ -177,16 +198,17 @@ describe('turn command family characterization', () => {
             'host.markAppendSubmissionStarted(sessionId)',
             'await host.client.appendPrompt(sessionId, value',
             "status: 'queued'",
-            '} catch (error) {',
+            'catch (error) {',
             'host.client.failAppendPrompt(sessionId, clientMessageId)',
-            '} finally {',
+            'finally {',
             'host.markAppendSubmissionFinished(sessionId)',
         ]);
-        const appendCatch = block.slice(block.indexOf('} catch (error) {'));
+        const appendCatch = block.slice(block.indexOf('catch (error) {'));
         expect(appendCatch).toContain("status: 'failed'");
-        expect(block.match(/host\.currentSessionId/g)).toHaveLength(1);
-        expect(block).toContain('currentSessionId=${host.currentSessionId || \'null\'}');
-        expect(block).not.toContain('sessionId || host.currentSessionId');
+        expect(block).not.toContain('host.currentSessionId');
+        expect(block).toContain(
+            "currentSessionId=${host.getCurrentSessionId() || 'null'}"
+        );
     });
 
     test('validates temporary identity registration and delegates snapshot metadata', () => {
@@ -207,13 +229,13 @@ describe('turn command family characterization', () => {
             'this.client.setPendingAssistantTmpKey(sessionId, temporaryAssistantKey)',
         ]);
 
-        const localBlock = extractRange('case "registerPendingUserLocal"', 'case "undoSegmentUpsert"');
+        const localBlock = extractRange('case "registerPendingUserLocal"', 'case "cancel"');
         expect(localBlock).toContain("data.localKey.startsWith('local-')");
         expect(localBlock).toContain('host.isTurnCommandInFlight(data.sessionId)');
     });
 
     test('captures cancel ownership once and cleans only that owner before chatDone', () => {
-        const block = extractRange('case "cancel"', 'case "restoreAll"');
+        const block = extractRange('case "cancel"', 'default:');
         expectOrder(block, [
             'const cancelOwner = host.captureTurnCancelOwner(data)',
             'const cancelSessionId = cancelOwner.sessionId',
@@ -237,8 +259,8 @@ describe('turn command family characterization', () => {
         const blocks = [
             extractRange('case "sendMessage"', 'case "appendMessage"'),
             extractRange('case "appendMessage"', 'case "appendSnapshotMeta"'),
-            extractRange('case "appendSnapshotMeta"', 'case "undoSegmentUpsert"'),
-            extractRange('case "cancel"', 'case "restoreAll"'),
+            extractRange('case "appendSnapshotMeta"', 'case "cancel"'),
+            extractRange('case "cancel"', 'default:'),
         ].join('\n');
         for (const registry of [
             'sendInFlightBySession',
@@ -253,5 +275,40 @@ describe('turn command family characterization', () => {
         ]) {
             expect(blocks).not.toContain(`host.${registry}`);
         }
+    });
+
+    test('keeps the family host pre-bound, typed, and free of provider internals', () => {
+        const hostStart = turnControllerSource.indexOf('export interface TurnCommandHost');
+        const hostEnd = turnControllerSource.indexOf('export type TurnCommandHandler', hostStart);
+        expect(hostStart).toBeGreaterThanOrEqual(0);
+        expect(hostEnd).toBeGreaterThan(hostStart);
+        const hostInterface = turnControllerSource.slice(hostStart, hostEnd);
+        expect(hostInterface).not.toContain('[key: string]');
+        expect(hostInterface).not.toContain('host: any');
+        for (const forbidden of [
+            'currentSessionId:',
+            '_context',
+            '_view',
+            'sendInFlightBySession',
+            'pendingLocalKeyBySession',
+            'pendingAssistantTmpKeyBySession',
+            'pendingAssistantMessageIdBySession',
+            'assistantTextBufferBySession',
+            'undoSegmentsBySession',
+            'postFinalWatchDiffFocusedBySession',
+        ]) {
+            expect(hostInterface).not.toContain(forbidden);
+        }
+        const compositionStart = providerSource.indexOf(
+            'this.turnCommandHandler = createTurnCommandHandler({'
+        );
+        const compositionEnd = providerSource.indexOf(
+            'this.userOwnedSessionsLoaded =',
+            compositionStart
+        );
+        const composition = providerSource.slice(compositionStart, compositionEnd);
+        expect(composition).toContain('client: {');
+        expect(composition).not.toContain('client: this.client');
+        expect(composition).toContain('attachments: {');
     });
 });

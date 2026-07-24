@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 const source = fs.readFileSync(path.join(process.cwd(), 'src', 'SidebarProvider.ts'), 'utf8');
-const controllerSource = fs.readFileSync(path.join(process.cwd(), 'src', 'webview', 'SidebarWebviewController.ts'), 'utf8');
+const turnControllerSource = fs.readFileSync(path.join(process.cwd(), 'src', 'webview', 'controllers', 'TurnCommandController.ts'), 'utf8');
 const utilityControllerSource = fs.readFileSync(path.join(process.cwd(), 'src', 'webview', 'controllers', 'UtilityCommandController.ts'), 'utf8');
 
 describe('SidebarProvider attachment storage integration', () => {
@@ -14,10 +14,10 @@ describe('SidebarProvider attachment storage integration', () => {
   });
 
   it('routes storage, MIME, manifest, cleanup, and disposal through the service', () => {
-    expect(controllerSource).toContain('host.attachmentStorage.saveAttachment(targetSessionId, attachment, reqId)');
+    expect(turnControllerSource).toContain('host.attachments.saveAttachment(targetSessionId, attachment, reqId)');
     expect(utilityControllerSource).toContain('this.host.saveClipboardImage(data.dataUrl, data.mime)');
     expect(source).toContain('saveClipboardImage: (dataUrl, mime) => this.attachmentStorage.saveClipboardImage(dataUrl, mime)');
-    expect(controllerSource).toContain('host.attachmentStorage.buildAttachmentManifest(savedAttachments)');
+    expect(turnControllerSource).toContain('host.attachments.buildAttachmentManifest(savedAttachments)');
     expect(source).toContain("this.attachmentStorage.scheduleCleanup('activate');");
     expect(source).toContain('this.attachmentStorage.startCleanupTimer();');
     expect(source).toContain('this.attachmentStorage.dispose();');
