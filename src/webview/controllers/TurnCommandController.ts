@@ -103,7 +103,7 @@ export interface TurnCommandHost {
     ): Promise<CommitPendingTurnChangesResult>;
     resolvePendingUserUpgrade(sessionId: string | undefined, webview: vscode.Webview): Promise<void>;
     emitDiffFileListWithRetry(identity: FinalizeTurnIdentity, webview: vscode.Webview): Promise<void>;
-    writeFinalizeSnapshotFromCanonicalSession(identity: FinalizeTurnIdentity): Promise<void>;
+    writeFinalizeSnapshotFromCurrentTurn(identity: FinalizeTurnIdentity): Promise<void>;
     clearPostFinalWatchDiffFocus(sessionId: string): void;
     markSubagentsTerminalForParent(
         sessionId: string | undefined,
@@ -385,7 +385,7 @@ ${attachmentLines.join('\n')}`
                     });
                     await host.emitDiffFileListWithRetry(finalizeIdentity, liveWebview);
                     host.log(`[EXT][SESSION_ROUTE] event=sendMessage phase=diff_list_done reqId=${reqId} payloadSessionId=${payloadSessionId || 'none'} currentSessionId=${currentSessionIdAtSend || 'none'} targetSessionId=${targetSessionId} routeSource=${routeSource}`);
-                    await host.writeFinalizeSnapshotFromCanonicalSession(finalizeIdentity);
+                    await host.writeFinalizeSnapshotFromCurrentTurn(finalizeIdentity);
                     host.client.finishTurn(targetSessionId);
                     host.clearPostFinalWatchDiffFocus(targetSessionId);
                     // Do not force "done" from main finalize; only subagent final-accepted can set done.

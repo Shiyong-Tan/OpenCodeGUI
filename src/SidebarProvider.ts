@@ -3481,57 +3481,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         );
     }
 
-    private async writeFinalizeSnapshotFromCanonicalSession(identity: FinalizeTurnIdentity, title?: string): Promise<void> {
+    private async writeFinalizeSnapshotFromCurrentTurn(identity: FinalizeTurnIdentity, title?: string): Promise<void> {
         const sessionId = identity?.sessionId;
         if (!sessionId) return;
         try {
-            const exportData = await this.client.exportSession(sessionId);
-            const formatted = this.formatSession(exportData);
-            const canonicalMessages = Array.isArray(formatted.messages)
-                ? formatted.messages.filter((message): message is SessionMessage => {
-                    const id = typeof message?.id === 'string' ? message.id : '';
-                    const role = message?.role;
-                    return id.startsWith('msg_')
-                        && !id.startsWith('local-')
-                        && !id.startsWith('tmp:')
-                        && (role === 'user' || role === 'assistant' || role === 'system');
-                })
-                : [];
-            const timelineIds = Array.from(new Set(
-                canonicalMessages
-                    .map((message) => (typeof message.id === 'string' ? message.id : ''))
-                    .filter((id): id is string => id.startsWith('msg_') && !id.startsWith('local-') && !id.startsWith('tmp:'))
-            ));
-            if (!timelineIds.length || !canonicalMessages.length) {
-                this.uiDebugChannel.appendLine(
-                    `[EXT][SNAPSHOT_ROUTE] reason=finalize-owned-skip source=finalize-extension sessionId=${sessionId} activeSessionId=${this.currentSessionId || 'null'} timelineCount=${timelineIds.length} messageCount=${canonicalMessages.length} userMessageId=${identity.userMessageId || 'null'} assistantMessageId=${identity.assistantMessageId || 'null'} webviewSnapshotTimelineIdsRequired=false detail=empty-canonical-export`
-                );
-                await this.writeFinalizeSnapshotFromPendingTurn(identity, title, 'empty-canonical-export');
-                return;
-            }
-            const snapshotTitle = typeof title === 'string' && title.trim()
-                ? title
-                : formatted.title;
-            const bytes = await this.appendSnapshotIncremental(sessionId, timelineIds, canonicalMessages, snapshotTitle);
-            this.uiTimelineBySession.set(sessionId, timelineIds);
-            this.uiDebugChannel.appendLine(
-                `[EXT][SNAPSHOT_ROUTE] reason=finalize-owned-write source=finalize-extension sessionId=${sessionId} activeSessionId=${this.currentSessionId || 'null'} timelineCount=${timelineIds.length} messageCount=${canonicalMessages.length} userMessageId=${identity.userMessageId || 'null'} assistantMessageId=${identity.assistantMessageId || 'null'} webviewSnapshotTimelineIdsRequired=false bytes=${bytes}`
-            );
-        } catch (error) {
-            this.uiDebugChannel.appendLine(
-                `[EXT][SNAPSHOT_ROUTE] reason=finalize-owned-error source=finalize-extension sessionId=${sessionId} activeSessionId=${this.currentSessionId || 'null'} userMessageId=${identity.userMessageId || 'null'} assistantMessageId=${identity.assistantMessageId || 'null'} webviewSnapshotTimelineIdsRequired=false err=${String(error)}`
-            );
-            await this.writeFinalizeSnapshotFromPendingTurn(identity, title, `canonical-export-error:${String(error)}`);
+            await this.writeFinalizeSnapshotFromCurrentTurnIncremental(identity, title);
         } finally {
             this.pendingSnapshotUserTextBySession.delete(sessionId);
             this.assistantTextBufferBySession.delete(sessionId);
         }
     }
 
-    private async writeFinalizeSnapshotFromPendingTurn(
+    private async writeFinalizeSnapshotFromCurrentTurnIncremental(
         identity: FinalizeTurnIdentity,
-        title: string | undefined,
-        trigger: string
+        title?: string
     ): Promise<void> {
         const sessionId = identity.sessionId;
         try {
@@ -3574,7 +3537,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
             if (!pendingMessages.length) {
                 this.uiDebugChannel.appendLine(
-                    `[EXT][SNAPSHOT_ROUTE] reason=finalize-fallback-skip source=pending-turn sessionId=${sessionId} trigger=${trigger} userMessageId=${userMessageId || 'null'} assistantMessageId=${assistantMessageId || 'null'} userTextLength=${userText.length} assistantTextLength=${assistantText.length} detail=no-canonical-visible-records`
+                    `[EXT][SNAPSHOT_ROUTE] reason=finalize-incremental-skip source=current-turn sessionId=${sessionId} userMessageId=${userMessageId || 'null'} assistantMessageId=${assistantMessageId || 'null'} userTextLength=${userText.length} assistantTextLength=${assistantText.length} detail=no-canonical-visible-records`
                 );
                 return;
             }
@@ -3590,11 +3553,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const bytes = await this.appendSnapshotIncremental(sessionId, timelineIds, pendingMessages, title);
             this.uiTimelineBySession.set(sessionId, timelineIds);
             this.uiDebugChannel.appendLine(
-                `[EXT][SNAPSHOT_ROUTE] reason=finalize-fallback-write source=pending-turn sessionId=${sessionId} trigger=${trigger} timelineCount=${timelineIds.length} messageCount=${pendingMessages.length} userMessageId=${userMessageId || 'null'} assistantMessageId=${assistantMessageId || 'null'} bytes=${bytes}`
+                `[EXT][SNAPSHOT_ROUTE] reason=finalize-incremental-write source=current-turn sessionId=${sessionId} timelineCount=${timelineIds.length} messageCount=${pendingMessages.length} userMessageId=${userMessageId || 'null'} assistantMessageId=${assistantMessageId || 'null'} bytes=${bytes}`
             );
-        } catch (fallbackError) {
+        } catch (error) {
             this.uiDebugChannel.appendLine(
-                `[EXT][SNAPSHOT_ROUTE] reason=finalize-fallback-error source=pending-turn sessionId=${sessionId} trigger=${trigger} err=${String(fallbackError)}`
+                `[EXT][SNAPSHOT_ROUTE] reason=finalize-incremental-error source=current-turn sessionId=${sessionId} err=${String(error)}`
             );
         }
     }
@@ -4371,7 +4334,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             promoteContinuationOwner: (sessionId, messageId) => this.client.promoteContinuationOwner(sessionId, messageId),
             consolidateContinuationOwner: (sessionId) => this.client.consolidateCurrentContinuationOwner(sessionId),
             emitChangeList: (identity, target) => this.emitDiffFileListWithRetry(identity, target as vscode.Webview),
-            writeSnapshot: (identity) => this.writeFinalizeSnapshotFromCanonicalSession(identity),
+            writeSnapshot: (identity) => this.writeFinalizeSnapshotFromCurrentTurn(identity),
             clearSendInFlight: (sessionId) => { this.sendInFlightBySession.delete(sessionId); },
             finishTurn: (sessionId) => this.client.finishTurn(sessionId),
             syncTurnInFlight: (sessionId, target, reason) => this.syncTurnInFlightAfterFinalize(sessionId, target as vscode.Webview, reason),
@@ -4586,8 +4549,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 this.resolvePendingUserUpgrade(sessionId, webview),
             emitDiffFileListWithRetry: (identity, webview) =>
                 this.emitDiffFileListWithRetry(identity, webview),
-            writeFinalizeSnapshotFromCanonicalSession: (identity) =>
-                this.writeFinalizeSnapshotFromCanonicalSession(identity),
+            writeFinalizeSnapshotFromCurrentTurn: (identity) =>
+                this.writeFinalizeSnapshotFromCurrentTurn(identity),
             clearPostFinalWatchDiffFocus: (sessionId) =>
                 this.clearPostFinalWatchDiffFocus(sessionId),
             markSubagentsTerminalForParent: (sessionId, state, reason) =>

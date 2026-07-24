@@ -168,7 +168,7 @@ describe('turn command family characterization', () => {
             'await host.resolvePendingUserUpgrade(targetSessionId, liveWebview)',
             "host.emitTurnFinalizePhase(liveWebview, targetSessionId, 'upgrade_done')",
             'await host.emitDiffFileListWithRetry(finalizeIdentity, liveWebview)',
-            'await host.writeFinalizeSnapshotFromCanonicalSession(finalizeIdentity)',
+            'await host.writeFinalizeSnapshotFromCurrentTurn(finalizeIdentity)',
             'host.client.finishTurn(targetSessionId)',
             "host.emitTurnFinalizePhase(liveWebview, targetSessionId, 'finalize_done')",
             'finally {',

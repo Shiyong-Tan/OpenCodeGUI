@@ -241,18 +241,11 @@ describe('SidebarProvider Task 8 snapshot/reload current-owner semantics', () =>
             bytes: 10,
         });
         provider.writeSnapshotAtomic = jest.fn().mockResolvedValue(100);
-        provider.client.exportSession = jest.fn().mockResolvedValue({});
-        provider.formatSession = jest.fn().mockReturnValue({
-            title: 'Task 8 remote',
-            messages: [{
-                ...currentOwner,
-                text: 'remote collision text',
-                meta: { owner: 'remote', stable: false },
-                futureOwnerField: { keep: false },
-            }],
-        });
+        provider.client.exportSession = jest.fn();
+        provider.client.getMessageIndex = jest.fn().mockReturnValue(currentOwner.messageIndex);
+        provider.assistantTextBufferBySession.set('ses_task8', 'remote collision text');
 
-        await provider.writeFinalizeSnapshotFromCanonicalSession({
+        await provider.writeFinalizeSnapshotFromCurrentTurn({
             sessionId: 'ses_task8',
             assistantMessageId: 'msg_owner_b',
         });
@@ -260,5 +253,6 @@ describe('SidebarProvider Task 8 snapshot/reload current-owner semantics', () =>
         const written = provider.writeSnapshotAtomic.mock.calls[0][1];
         expect(written.sessionData.meta.timelineMessageIds).toEqual(['msg_owner_b']);
         expect(written.sessionData.messages).toEqual([currentOwner]);
+        expect(provider.client.exportSession).not.toHaveBeenCalled();
     });
 });

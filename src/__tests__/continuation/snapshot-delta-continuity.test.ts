@@ -325,19 +325,17 @@ describe('W5A snapshot export and finalize contracts', () => {
         expect(written.messages).toEqual([...base, msg('msg_new_user', 3, 'user', 'new user')]);
     });
 
-    it('persists the current visible turn when canonical export fails', async () => {
+    it('persists the current visible turn without requesting a canonical export', async () => {
         const provider = createProvider();
         const boundary = msg('msg_boundary', 2, 'assistant', 'snapshot final');
         provider.readSnapshot = jest.fn().mockResolvedValue(snapshotOf([boundary]));
         provider.writeSnapshotAtomic = jest.fn().mockResolvedValue(456);
-        provider.client.exportSession = jest.fn().mockRejectedValue(
-            new Error('Cannot create a string longer than 0x1fffffe8 characters'),
-        );
+        provider.client.exportSession = jest.fn();
         provider.client.getMessageIndex = jest.fn((id: string) => id === 'msg_user_new' ? 3 : 4);
         provider.pendingSnapshotUserTextBySession.set('ses_delta', 'reload window 未显示历史记录');
         provider.assistantTextBufferBySession.set('ses_delta', '这是本轮助手回答。');
 
-        await provider.writeFinalizeSnapshotFromCanonicalSession({
+        await provider.writeFinalizeSnapshotFromCurrentTurn({
             sessionId: 'ses_delta',
             clientMessageId: 'local-new',
             userMessageId: 'msg_user_new',
@@ -356,21 +354,22 @@ describe('W5A snapshot export and finalize contracts', () => {
             msg('msg_assistant_new', 4, 'assistant', '这是本轮助手回答。'),
         ]);
         expect(provider.uiDebugChannel.appendLine).toHaveBeenCalledWith(
-            expect.stringContaining('reason=finalize-fallback-write'),
+            expect.stringContaining('reason=finalize-incremental-write'),
         );
+        expect(provider.client.exportSession).not.toHaveBeenCalled();
         expect(provider.pendingSnapshotUserTextBySession.has('ses_delta')).toBe(false);
         expect(provider.assistantTextBufferBySession.has('ses_delta')).toBe(false);
     });
 
-    it('uses the pending display text so attachment-only turns survive export failure', async () => {
+    it('uses pending display text for an attachment-only turn without exporting history', async () => {
         const provider = createProvider();
         provider.readSnapshot = jest.fn().mockResolvedValue(undefined);
         provider.writeSnapshotAtomic = jest.fn().mockResolvedValue(99);
-        provider.client.exportSession = jest.fn().mockRejectedValue(new Error('export unavailable'));
+        provider.client.exportSession = jest.fn();
         provider.client.getMessageIndex = jest.fn().mockReturnValue(1);
         provider.pendingSnapshotUserTextBySession.set('ses_delta', '📄 report.txt');
 
-        await provider.writeFinalizeSnapshotFromCanonicalSession({
+        await provider.writeFinalizeSnapshotFromCurrentTurn({
             sessionId: 'ses_delta',
             userMessageId: 'msg_attachment_user',
         });
@@ -380,6 +379,30 @@ describe('W5A snapshot export and finalize contracts', () => {
         expect(written.messages).toEqual([
             msg('msg_attachment_user', 1, 'user', '📄 report.txt'),
         ]);
+        expect(provider.client.exportSession).not.toHaveBeenCalled();
+    });
+
+    it('releases finalize buffers when an incremental snapshot write fails', async () => {
+        const provider = createProvider();
+        provider.readSnapshot = jest.fn().mockResolvedValue(undefined);
+        provider.writeSnapshotAtomic = jest.fn().mockRejectedValue(new Error('disk unavailable'));
+        provider.client.exportSession = jest.fn();
+        provider.client.getMessageIndex = jest.fn((id: string) => id === 'msg_user_new' ? 1 : 2);
+        provider.pendingSnapshotUserTextBySession.set('ses_delta', 'new prompt');
+        provider.assistantTextBufferBySession.set('ses_delta', 'new answer');
+
+        await expect(provider.writeFinalizeSnapshotFromCurrentTurn({
+            sessionId: 'ses_delta',
+            userMessageId: 'msg_user_new',
+            assistantMessageId: 'msg_assistant_new',
+        })).resolves.toBeUndefined();
+
+        expect(provider.uiDebugChannel.appendLine).toHaveBeenCalledWith(
+            expect.stringContaining('reason=finalize-incremental-error'),
+        );
+        expect(provider.client.exportSession).not.toHaveBeenCalled();
+        expect(provider.pendingSnapshotUserTextBySession.has('ses_delta')).toBe(false);
+        expect(provider.assistantTextBufferBySession.has('ses_delta')).toBe(false);
     });
 
     it('appendSnapshotIncremental preserves existing same-ID fields/order and appends a proven canonical ID', async () => {
@@ -404,22 +427,17 @@ describe('W5A snapshot export and finalize contracts', () => {
         expect(written.messages).toEqual([baseA, boundary, msg('msg_new', 3, 'assistant', 'new canonical')]);
     });
 
-    it('preserves snapshot-only data when a full export cannot reach its boundary', async () => {
+    it('leaves an existing snapshot untouched when the current turn has no visible records', async () => {
         const provider = createProvider();
         const base = msg('msg_boundary', 2, 'assistant', 'snapshot final');
         provider.readSnapshot = jest.fn().mockResolvedValue(snapshotOf([base]));
         provider.writeSnapshotAtomic = jest.fn().mockResolvedValue(123);
-        provider.client.exportSession = jest.fn().mockResolvedValue({});
-        provider.formatSession = jest.fn().mockReturnValue({
-            title: 'Remote',
-            messages: [msg('msg_unrelated', 99, 'assistant', 'unreachable export')],
-        });
+        provider.client.exportSession = jest.fn();
 
-        await provider.writeFinalizeSnapshotFromCanonicalSession({ sessionId: 'ses_delta' });
+        await provider.writeFinalizeSnapshotFromCurrentTurn({ sessionId: 'ses_delta' });
 
-        const written = provider.writeSnapshotAtomic.mock.calls[0][1].sessionData;
-        expect(written.meta.timelineMessageIds).toEqual(['msg_boundary']);
-        expect(written.messages).toEqual([base]);
+        expect(provider.writeSnapshotAtomic).not.toHaveBeenCalled();
+        expect(provider.client.exportSession).not.toHaveBeenCalled();
     });
 
     it('does not replace an existing snapshot record on finalize collision', async () => {
@@ -427,15 +445,17 @@ describe('W5A snapshot export and finalize contracts', () => {
         const base = { ...msg('msg_boundary', 2, 'assistant', 'snapshot final'), meta: { stable: true }, future: 'keep' };
         provider.readSnapshot = jest.fn().mockResolvedValue(snapshotOf([base]));
         provider.writeSnapshotAtomic = jest.fn().mockResolvedValue(123);
-        provider.client.exportSession = jest.fn().mockResolvedValue({});
-        provider.formatSession = jest.fn().mockReturnValue({
-            title: 'Remote',
-            messages: [{ ...base, text: 'remote rewrite', meta: { stable: false }, future: 'replace' }],
+        provider.client.exportSession = jest.fn();
+        provider.client.getMessageIndex = jest.fn().mockReturnValue(2);
+        provider.assistantTextBufferBySession.set('ses_delta', 'remote rewrite');
+
+        await provider.writeFinalizeSnapshotFromCurrentTurn({
+            sessionId: 'ses_delta',
+            assistantMessageId: 'msg_boundary',
         });
 
-        await provider.writeFinalizeSnapshotFromCanonicalSession({ sessionId: 'ses_delta' });
-
         expect(provider.writeSnapshotAtomic.mock.calls[0][1].sessionData.messages).toEqual([base]);
+        expect(provider.client.exportSession).not.toHaveBeenCalled();
     });
 
     it('allows missing-snapshot full export to establish initial authoritative history', async () => {
