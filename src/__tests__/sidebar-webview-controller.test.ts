@@ -24,11 +24,14 @@ const turnControllerSource = fs.readFileSync(
 const undoControllerSource = fs.readFileSync(
   path.join(process.cwd(), 'src', 'webview', 'controllers', 'UndoCommandController.ts'), 'utf8',
 );
+const lifecycleControllerSource = fs.readFileSync(
+  path.join(process.cwd(), 'src', 'webview', 'controllers', 'WebviewLifecycleController.ts'), 'utf8',
+);
 
 describe('SidebarWebviewController', () => {
   test('SidebarProvider retains only the VS Code compatibility delegation', () => {
     const source = fs.readFileSync(path.join(process.cwd(), 'src', 'SidebarProvider.ts'), 'utf8');
-    expect(source).toMatch(/public resolveWebviewView\([\s\S]*?return resolveSidebarWebviewView\([\s\S]*?this\.utilityCommandHandler[\s\S]*?this\.sessionCommandHandler[\s\S]*?this\.turnCommandHandler[\s\S]*?this\.undoCommandHandler[\s\S]*?\);\s*}/);
+    expect(source).toMatch(/public resolveWebviewView\([\s\S]*?return resolveSidebarWebviewView\([\s\S]*?this\.sidebarWebviewDependencies[\s\S]*?\);\s*}/);
   });
 
   test('keeps the major protocol owners in one command dispatcher', () => {
@@ -45,6 +48,8 @@ describe('SidebarWebviewController', () => {
     expect(controllerSource).toContain('const sessionHandling = sessionCommandHandler(data, activeWebview, webviewView.webview)');
     expect(controllerSource).toContain('const turnHandling = turnCommandHandler(data, activeWebview, webviewView.webview)');
     expect(controllerSource).toContain('const undoHandling = undoCommandHandler(data, activeWebview, webviewView.webview)');
+    expect(controllerSource).toContain('const lifecycleHandling = lifecycleController.handleCommand(');
+    expect(lifecycleControllerSource).toContain("case 'webviewReady'");
     expect(sessionControllerSource).toContain('this.host.handleSnapshotTimelineIds(data.payload)');
   });
 
@@ -81,14 +86,25 @@ describe('SidebarWebviewController', () => {
       startWebviewLivenessProbes: jest.fn(), stopWebviewLivenessProbes: jest.fn(), triggerWebviewLivenessProbe: jest.fn(),
     };
     resolveSidebarWebviewView(
-      host,
       view,
       {} as any,
       {} as any,
-      async () => false,
-      async () => false,
-      async () => false,
-      () => false,
+      {
+        localResourceRoots: [{} as any],
+        getHtmlForWebview: () => '<html></html>',
+        log: jest.fn(),
+        utilityCommandHandler: () => false,
+        sessionCommandHandler: () => false,
+        turnCommandHandler: () => false,
+        undoCommandHandler: () => false,
+        lifecycleController: {
+          begin: (targetView: any) => host.beginWebviewLifecycleResolution(targetView),
+          getActiveWebview: (fallback: any) => host.getLifecycleActiveWebview(fallback),
+          handleCommand: () => false,
+          handleVisibility: (targetView: any) => host.handleWebviewLifecycleVisibility(targetView),
+          handleDispose: (panelId: string) => host.handleWebviewLifecycleDispose(panelId),
+        },
+      },
     );
     expect(host._view).toBe(view);
     expect(webview.options).toEqual({ enableScripts: true, localResourceRoots: [{}] });

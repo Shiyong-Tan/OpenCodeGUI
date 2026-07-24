@@ -1,5 +1,8 @@
+jest.mock('vscode', () => ({}), { virtual: true });
+
 import * as fs from 'fs';
 import * as path from 'path';
+import { createWebviewLifecycleController } from '../webview/controllers/WebviewLifecycleController';
 
 const controllerSource = fs.readFileSync(
     path.join(process.cwd(), 'src', 'webview', 'SidebarWebviewController.ts'),
@@ -7,6 +10,16 @@ const controllerSource = fs.readFileSync(
 );
 const providerSource = fs.readFileSync(
     path.join(process.cwd(), 'src', 'SidebarProvider.ts'),
+    'utf8',
+);
+const lifecycleControllerSource = fs.readFileSync(
+    path.join(
+        process.cwd(),
+        'src',
+        'webview',
+        'controllers',
+        'WebviewLifecycleController.ts'
+    ),
     'utf8',
 );
 
@@ -24,6 +37,14 @@ function extractProviderRange(startMarker: string, endMarker: string): string {
     const end = providerSource.indexOf(endMarker, start + startMarker.length);
     expect(end).toBeGreaterThan(start);
     return providerSource.slice(start, end);
+}
+
+function extractLifecycleRange(startMarker: string, endMarker: string): string {
+    const start = lifecycleControllerSource.indexOf(startMarker);
+    expect(start).toBeGreaterThanOrEqual(0);
+    const end = lifecycleControllerSource.indexOf(endMarker, start + startMarker.length);
+    expect(end).toBeGreaterThan(start);
+    return lifecycleControllerSource.slice(start, end);
 }
 
 function expectOrder(source: string, markers: string[]): void {
@@ -48,9 +69,9 @@ describe('Webview lifecycle command family characterization', () => {
 
     test('establishes panel ownership before installing the message listener', () => {
         expectOrder(controllerSource, [
-            'const panelId = host.beginWebviewLifecycleResolution(webviewView)',
+            'const panelId = lifecycleController.begin(webviewView)',
             'webviewView.webview.options =',
-            'webviewView.webview.html = host._getHtmlForWebview(webviewView.webview)',
+            'webviewView.webview.html = dependencies.getHtmlForWebview(webviewView.webview)',
             'webviewView.webview.onDidReceiveMessage(async (data) =>',
         ]);
         const begin = extractProviderRange(
@@ -73,23 +94,26 @@ describe('Webview lifecycle command family characterization', () => {
             'webviewAutoRescueAck',
             'ui-debug',
         ]) {
-            expect(controllerSource.match(new RegExp(`case "${command}"`, 'g'))).toHaveLength(1);
+            expect(lifecycleControllerSource.match(new RegExp(`case '${command}'`, 'g'))).toHaveLength(1);
+            expect(controllerSource).not.toContain(`case "${command}"`);
         }
         expectOrder(controllerSource, [
             'const utilityHandling = utilityCommandHandler(',
             'const sessionHandling = sessionCommandHandler(',
             'const turnHandling = turnCommandHandler(',
             'const undoHandling = undoCommandHandler(',
-            'switch (data.type)',
-            'case "webviewReady"',
+            'const lifecycleHandling = lifecycleController.handleCommand(',
         ]);
     });
 
     test('lets command-reload readiness consume the ready message before hard-rescue adoption', () => {
-        const ready = extractRange('case "webviewReady"', 'case "webviewLivenessAck"');
+        const ready = extractLifecycleRange(
+            "case 'webviewReady'",
+            "case 'webviewLivenessAck'"
+        );
         expectOrder(ready, [
-            'await host.handleWebviewCommandReloadReady(data, webviewView, panelId)',
-            'const readiness = host.prepareWebviewReady(data, webviewView, panelId)',
+            'await host.handleCommandReloadReady(data, webviewView, panelId)',
+            'const readiness = host.prepareReady(data, webviewView, panelId)',
             'if (!readiness.accepted)',
             'const { pending, newWebviewInstanceId, hardRescueGuard } = readiness',
         ]);
@@ -162,25 +186,34 @@ describe('Webview lifecycle command family characterization', () => {
     });
 
     test('hydrates, acknowledges, and starts probes in the established order', () => {
-        const ready = extractRange('case "webviewReady"', 'case "webviewLivenessAck"');
+        const ready = extractLifecycleRange(
+            "case 'webviewReady'",
+            "case 'webviewLivenessAck'"
+        );
         expectOrder(ready, [
-            'const readiness = host.prepareWebviewReady(',
-            'const liveWebview = host.getLifecycleActiveWebview()',
+            'const readiness = host.prepareReady(',
+            'const liveWebview = host.getActiveWebview()',
             'await host.sendInit(liveWebview',
             '[EXT][HANDSHAKE_3_DONE]',
             'const readyAckPosted = sendInitError',
-            'host.finishWebviewHardRescueFailure(',
-            'host.completeWebviewHardRescueSuccess(pending)',
-            'host.startWebviewLivenessProbes()',
-            "host.triggerWebviewLivenessProbe('webviewReadyAck')",
+            'host.finishHardRescueFailure(',
+            'host.completeHardRescueSuccess(pending)',
+            'host.startLivenessProbes()',
+            "host.triggerLivenessProbe('webviewReadyAck')",
         ]);
     });
 
     test('delegates liveness acknowledgements exactly once', () => {
-        const liveness = extractRange('case "webviewLivenessAck"', 'case "webviewAutoRescueAck"');
-        expect(liveness.match(/host\.handleWebviewLivenessAck\(data\)/g)).toHaveLength(1);
-        const rescue = extractRange('case "webviewAutoRescueAck"', 'case "ui-debug"');
-        expect(rescue.match(/host\.handleWebviewAutoRescueAck\(data\)/g)).toHaveLength(1);
+        const liveness = extractLifecycleRange(
+            "case 'webviewLivenessAck'",
+            "case 'webviewAutoRescueAck'"
+        );
+        expect(liveness.match(/host\.handleLivenessAck\(data\)/g)).toHaveLength(1);
+        const rescue = extractLifecycleRange(
+            "case 'webviewAutoRescueAck'",
+            "case 'ui-debug'"
+        );
+        expect(rescue.match(/host\.handleAutoRescueAck\(data\)/g)).toHaveLength(1);
     });
 
     test('restarts visible lifecycle only after clearing the init gate', () => {
@@ -188,7 +221,10 @@ describe('Webview lifecycle command family characterization', () => {
             'webviewView.onDidChangeVisibility(() =>',
             'webviewView.onDidDispose(() =>'
         );
-        expect(visibility).toContain('host.handleWebviewLifecycleVisibility(webviewView)');
+        expect(visibility).toContain('lifecycleController.handleVisibility(webviewView)');
+        expect(lifecycleControllerSource).toContain(
+            'handleVisibility: (webviewView) => host.handleVisibility(webviewView)'
+        );
         const visibilityDomain = extractProviderRange(
             'private handleWebviewLifecycleVisibility(',
             'private handleWebviewLifecycleDispose('
@@ -207,7 +243,10 @@ describe('Webview lifecycle command family characterization', () => {
         const disposal = controllerSource.slice(
             controllerSource.indexOf('webviewView.onDidDispose(() =>')
         );
-        expect(disposal).toContain('host.handleWebviewLifecycleDispose(panelId)');
+        expect(disposal).toContain('lifecycleController.handleDispose(panelId)');
+        expect(lifecycleControllerSource).toContain(
+            'handleDispose: (panelId) => host.handleDispose(panelId)'
+        );
         const disposalDomain = extractProviderRange(
             'private handleWebviewLifecycleDispose(',
             'private finishWebviewHardRescueFailure('
@@ -221,21 +260,100 @@ describe('Webview lifecycle command family characterization', () => {
     });
 
     test('routes lifecycle-owned state mutation through provider domain methods', () => {
-        for (const field of [
-            '_view',
-            '_webviewInstanceId',
-            'webviewLivenessPanelSeq',
-            'webviewLivenessCurrent',
-            'webviewHardRescuePending',
-            'webviewHandshakeLifecycle',
-            'sessionSelectionEpoch',
-            'currentSessionId',
-            'initPosted',
-        ]) {
-            expect(controllerSource).not.toContain(`host.${field}`);
-        }
-        expect(controllerSource).toContain('host.beginWebviewLifecycleResolution(webviewView)');
-        expect(controllerSource).toContain('host.prepareWebviewReady(data, webviewView, panelId)');
-        expect(controllerSource).toContain('host.completeWebviewHardRescueSuccess(pending)');
+        expect(controllerSource).not.toContain('host: any');
+        expect(controllerSource).not.toContain('host.');
+        expect(controllerSource).toContain('dependencies: SidebarWebviewDependencies');
+        expect(controllerSource).toContain('lifecycleController.begin(webviewView)');
+        expect(lifecycleControllerSource).toContain(
+            'export interface WebviewLifecycleHost'
+        );
+        expect(lifecycleControllerSource).not.toContain('[key: string]');
+        expect(providerSource).toContain(
+            'this.webviewLifecycleController = createWebviewLifecycleController({'
+        );
+        expect(providerSource).toContain('this.sidebarWebviewDependencies = {');
+        expect(providerSource).not.toContain('createWebviewLifecycleController(this)');
+    });
+
+    test('dispatches ready and acknowledgement commands once through the pre-bound host', async () => {
+        const order: string[] = [];
+        const webview = {
+            postMessage: jest.fn((message: { type: string }) => {
+                order.push(`post:${message.type}`);
+                return Promise.resolve(true);
+            }),
+        } as any;
+        const view = { webview, visible: true } as any;
+        const host: any = {
+            beginResolution: jest.fn(() => 'panel-1'),
+            getActiveWebview: jest.fn(() => webview),
+            handleCommandReloadReady: jest.fn(async () => {
+                order.push('reload-ready');
+                return false;
+            }),
+            prepareReady: jest.fn(() => {
+                order.push('prepare-ready');
+                return {
+                    accepted: true,
+                    newWebviewInstanceId: 'wv-1',
+                };
+            }),
+            getInitPosted: jest.fn(() => false),
+            sendInit: jest.fn(async () => {
+                order.push('send-init');
+            }),
+            finishHardRescueFailure: jest.fn(),
+            completeHardRescueSuccess: jest.fn(),
+            startLivenessProbes: jest.fn(() => order.push('start-probes')),
+            triggerLivenessProbe: jest.fn(async () => {
+                order.push('trigger-probe');
+            }),
+            handleLivenessAck: jest.fn(),
+            handleAutoRescueAck: jest.fn(),
+            handleVisibility: jest.fn(),
+            handleDispose: jest.fn(),
+            log: jest.fn(),
+        };
+        const lifecycle = createWebviewLifecycleController(host);
+
+        expect(lifecycle.handleCommand({ type: 'unowned' }, webview, webview, view, 'panel-1'))
+            .toBe(false);
+        await lifecycle.handleCommand(
+            { type: 'webviewReady', webviewInstanceId: 'wv-1' },
+            webview,
+            webview,
+            view,
+            'panel-1'
+        );
+        expect(order).toEqual([
+            'reload-ready',
+            'prepare-ready',
+            'send-init',
+            'post:webviewReadyAck',
+            'start-probes',
+            'trigger-probe',
+        ]);
+
+        await lifecycle.handleCommand(
+            { type: 'webviewLivenessAck' },
+            webview,
+            webview,
+            view,
+            'panel-1'
+        );
+        await lifecycle.handleCommand(
+            { type: 'webviewAutoRescueAck' },
+            webview,
+            webview,
+            view,
+            'panel-1'
+        );
+        expect(host.handleLivenessAck).toHaveBeenCalledTimes(1);
+        expect(host.handleAutoRescueAck).toHaveBeenCalledTimes(1);
+
+        lifecycle.handleVisibility(view);
+        lifecycle.handleDispose('panel-1');
+        expect(host.handleVisibility).toHaveBeenCalledWith(view);
+        expect(host.handleDispose).toHaveBeenCalledWith('panel-1');
     });
 });

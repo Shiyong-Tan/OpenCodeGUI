@@ -164,14 +164,25 @@ function createHarness(overrides: Record<string, unknown> = {}) {
         getWorkspaceRootPath: () => host.getWorkspaceRootPath(),
     });
     resolveSidebarWebviewView(
-        host,
         view,
         {} as any,
         {} as any,
-        utilityCommandHandler,
-        async () => false,
-        async () => false,
-        () => false,
+        {
+            localResourceRoots: [{} as any],
+            getHtmlForWebview: () => host._getHtmlForWebview(),
+            log: jest.fn(),
+            utilityCommandHandler,
+            sessionCommandHandler: () => false,
+            turnCommandHandler: () => false,
+            undoCommandHandler: () => false,
+            lifecycleController: {
+                begin: (targetView: any) => host.beginWebviewLifecycleResolution(targetView),
+                getActiveWebview: (fallback: any) => host.getLifecycleActiveWebview(fallback),
+                handleCommand: () => false,
+                handleVisibility: jest.fn(),
+                handleDispose: jest.fn(),
+            },
+        },
     );
     return {
         host,

@@ -14,7 +14,10 @@ import { SmartSearchSessionRegistry } from './search/SmartSearchSessionRegistry'
 import { SmartSearchService } from './search/SmartSearchService';
 import { handleSidebarChatEvent } from './events/SidebarChatEventHandler';
 import { initializeSidebarSession } from './history/SidebarSessionInitializer';
-import { resolveSidebarWebviewView } from './webview/SidebarWebviewController';
+import {
+    resolveSidebarWebviewView,
+    type SidebarWebviewDependencies,
+} from './webview/SidebarWebviewController';
 import {
     createUtilityCommandHandler,
     type UtilityCommandHandler,
@@ -31,6 +34,10 @@ import {
     createUndoCommandHandler,
     type UndoCommandHandler,
 } from './webview/controllers/UndoCommandController';
+import {
+    createWebviewLifecycleController,
+    type WebviewLifecycleController,
+} from './webview/controllers/WebviewLifecycleController';
 import {
     captureCancelTurnOwner,
     type CapturedCancelTurnOwner,
@@ -657,6 +664,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private readonly sessionCommandHandler: SessionCommandHandler;
     private readonly turnCommandHandler: TurnCommandHandler;
     private readonly undoCommandHandler: UndoCommandHandler;
+    private readonly webviewLifecycleController: WebviewLifecycleController;
+    private readonly sidebarWebviewDependencies: SidebarWebviewDependencies;
     private uiTimelineBySession = new Map<string, string[]>();
     private lastSnapshotPayloadBySession = new Map<string, any>();
     private snapshotStore?: SnapshotStore;
@@ -4705,6 +4714,61 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 webview
             ),
         });
+        this.webviewLifecycleController = createWebviewLifecycleController({
+            beginResolution: (webviewView) =>
+                this.beginWebviewLifecycleResolution(webviewView),
+            getActiveWebview: (fallback) =>
+                this.getLifecycleActiveWebview(fallback),
+            handleCommandReloadReady: (data, webviewView, panelId) =>
+                this.handleWebviewCommandReloadReady(data, webviewView, panelId),
+            prepareReady: (data, webviewView, panelId) => {
+                const readiness = this.prepareWebviewReady(data, webviewView, panelId);
+                const pending = readiness.pending
+                    ? {
+                        handle: readiness.pending,
+                        generationToken: readiness.pending.generationToken,
+                        sessionId: readiness.pending.sessionId,
+                        panelId: readiness.pending.panelId,
+                        rescueAttemptId: readiness.pending.rescueAttemptId,
+                        oldWebviewInstanceId: readiness.pending.oldWebviewInstanceId,
+                        newWebviewInstanceId: readiness.pending.newWebviewInstanceId,
+                        startedAt: readiness.pending.startedAt,
+                        activeTurn: readiness.pending.activeTurn,
+                    }
+                    : undefined;
+                return { ...readiness, pending };
+            },
+            getInitPosted: () => this.getLifecycleInitPosted(),
+            sendInit: (webview, options) => this.sendInit(webview, options),
+            finishHardRescueFailure: (pending, marker, reason) =>
+                this.finishWebviewHardRescueFailure(
+                    pending.handle as WebviewHardRescuePending,
+                    marker,
+                    reason
+                ),
+            completeHardRescueSuccess: (pending) =>
+                this.completeWebviewHardRescueSuccess(
+                    pending.handle as WebviewHardRescuePending
+                ),
+            startLivenessProbes: () => this.startWebviewLivenessProbes(),
+            triggerLivenessProbe: (reason) => this.triggerWebviewLivenessProbe(reason),
+            handleLivenessAck: (data) => this.handleWebviewLivenessAck(data),
+            handleAutoRescueAck: (data) => this.handleWebviewAutoRescueAck(data),
+            handleVisibility: (webviewView) =>
+                this.handleWebviewLifecycleVisibility(webviewView),
+            handleDispose: (panelId) => this.handleWebviewLifecycleDispose(panelId),
+            log: (message) => this.uiDebugChannel.appendLine(message),
+        });
+        this.sidebarWebviewDependencies = {
+            localResourceRoots: [this._extensionUri],
+            getHtmlForWebview: (webview) => this._getHtmlForWebview(webview),
+            log: (message) => this.uiDebugChannel.appendLine(message),
+            utilityCommandHandler: this.utilityCommandHandler,
+            sessionCommandHandler: this.sessionCommandHandler,
+            turnCommandHandler: this.turnCommandHandler,
+            undoCommandHandler: this.undoCommandHandler,
+            lifecycleController: this.webviewLifecycleController,
+        };
         this.userOwnedSessionsLoaded = this.loadUserOwnedSessions();
         this.client.setServerStatusHandler((status, reason) => {
             this.sendServerStatus(status, reason);
@@ -4827,14 +4891,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         _token: vscode.CancellationToken
     ): void {
         return resolveSidebarWebviewView(
-            this,
             webviewView,
             context,
             _token,
-            this.utilityCommandHandler,
-            this.sessionCommandHandler,
-            this.turnCommandHandler,
-            this.undoCommandHandler
+            this.sidebarWebviewDependencies
         );
     }
 
