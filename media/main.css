@@ -2909,10 +2909,27 @@ code:has(> .oc-file-link) {
 }
 
 .message.streaming {
-  border: 1px solid transparent;
-  background:
-    linear-gradient(var(--vscode-editor-inactiveSelectionBackground), var(--vscode-editor-inactiveSelectionBackground)) padding-box,
-    conic-gradient(
+  border-color: var(--vscode-focusBorder);
+}
+
+/*
+ * Keep the animated gradient on a one-pixel ring. Theme selection colors are
+ * commonly translucent, so using one as a padding-box cover lets the gradient
+ * bleed through the whole bubble on some themes.
+ */
+@supports (-webkit-mask-composite: xor) {
+  .message.streaming {
+    border-color: transparent;
+  }
+
+  .message.streaming::before {
+    content: "";
+    position: absolute;
+    inset: -1px;
+    padding: 1px;
+    border-radius: inherit;
+    box-sizing: border-box;
+    background: conic-gradient(
       from var(--thinking-ring-angle),
       rgba(100, 190, 255, 0.12) 0deg,
       rgba(100, 190, 255, 0.28) 90deg,
@@ -2920,8 +2937,20 @@ code:has(> .oc-file-link) {
       rgba(100, 190, 255, 0.34) 190deg,
       rgba(100, 190, 255, 0.12) 270deg,
       rgba(100, 190, 255, 0.12) 360deg
-    ) border-box;
-  animation: thinking-border-flow 3.8s linear infinite;
+    );
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    animation: thinking-border-flow 3.8s linear infinite;
+    pointer-events: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .message.streaming::before {
+    animation: none;
+  }
 }
 
 /* --- Subagent Cards (Alias/New) --- */
