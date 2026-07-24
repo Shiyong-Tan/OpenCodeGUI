@@ -17,17 +17,21 @@ const turnControllerSource = fs.readFileSync(
     path.join(process.cwd(), 'src', 'webview', 'controllers', 'TurnCommandController.ts'),
     'utf8',
 );
+const undoControllerSource = fs.readFileSync(
+    path.join(process.cwd(), 'src', 'webview', 'controllers', 'UndoCommandController.ts'),
+    'utf8',
+);
 const providerSource = fs.readFileSync(
     path.join(process.cwd(), 'src', 'SidebarProvider.ts'),
     'utf8',
 );
 
 function extractRange(startMarker: string, endMarker: string): string {
-    const start = topControllerSource.indexOf(startMarker);
+    const start = undoControllerSource.indexOf(startMarker);
     expect(start).toBeGreaterThanOrEqual(0);
-    const end = topControllerSource.indexOf(endMarker, start + startMarker.length);
+    const end = undoControllerSource.indexOf(endMarker, start + startMarker.length);
     expect(end).toBeGreaterThan(start);
-    return topControllerSource.slice(start, end);
+    return undoControllerSource.slice(start, end);
 }
 
 function expectOrder(source: string, markers: string[]): void {
@@ -76,12 +80,21 @@ describe('undo command family characterization', () => {
             'setRevertedSegmentCollapsed',
         ];
         for (const command of commands) {
-            expect(topControllerSource.match(new RegExp(`case "${command}"`, 'g'))).toHaveLength(1);
+            expect(undoControllerSource.match(new RegExp(`case "${command}"`, 'g'))).toHaveLength(1);
+            expect(topControllerSource).not.toContain(`case "${command}"`);
             expect(utilityControllerSource).not.toContain(`case "${command}"`);
             expect(sessionControllerSource).not.toContain(`case "${command}"`);
             expect(turnControllerSource).not.toContain(`case "${command}"`);
         }
         expect(topControllerSource.match(/onDidReceiveMessage\(/g)).toHaveLength(1);
+        expect(topControllerSource).toContain(
+            'const undoHandling = undoCommandHandler(data, activeWebview, webviewView.webview)'
+        );
+        expect(topControllerSource).toContain('undoHandling !== false && await undoHandling');
+        expect(undoControllerSource).toContain('if (!UNDO_COMMANDS.has(data?.type))');
+        expect(undoControllerSource).toContain('return false;');
+        expect(providerSource).toContain('this.undoCommandHandler = createUndoCommandHandler({');
+        expect(providerSource).not.toContain('createUndoCommandHandler(this)');
     });
 
     test('persists segment metadata under the explicit owner and preserves the restore lock', () => {
@@ -252,7 +265,10 @@ describe('undo command family characterization', () => {
         ]);
         expect(discard).not.toContain('host.currentSessionId');
 
-        const collapse = extractRange('case "setRevertedSegmentCollapsed"', 'case "ui-debug"');
+        const collapse = extractRange(
+            'case "setRevertedSegmentCollapsed"',
+            '})().then(() => true as const)'
+        );
         expectOrder(collapse, [
             "const sessionId = typeof data.sessionId === 'string' ? data.sessionId : ''",
             'host.client.setRevertedSegmentCollapsed(sessionId, data.collapsed)',
@@ -263,7 +279,10 @@ describe('undo command family characterization', () => {
     });
 
     test('routes undo-owned registry access through provider domain methods', () => {
-        const blocks = extractRange('case "undoSegmentUpsert"', 'case "ui-debug"');
+        const blocks = extractRange(
+            'case "undoSegmentUpsert"',
+            '})().then(() => true as const)'
+        );
         for (const registry of [
             'undoSegmentsBySession',
             'revertedSegmentHistoryStore',
@@ -302,5 +321,39 @@ describe('undo command family characterization', () => {
         expect(appendHistory).toContain(
             'this.revertedSegmentHistoryStore.update(sessionId, (entries) => [...entries, entry])'
         );
+    });
+
+    test('keeps the undo host pre-bound, typed, and free of unrelated provider state', () => {
+        const hostStart = undoControllerSource.indexOf('export interface UndoCommandHost');
+        const hostEnd = undoControllerSource.indexOf('export type UndoCommandHandler', hostStart);
+        expect(hostStart).toBeGreaterThanOrEqual(0);
+        expect(hostEnd).toBeGreaterThan(hostStart);
+        const hostInterface = undoControllerSource.slice(hostStart, hostEnd);
+        expect(hostInterface).not.toContain('[key: string]');
+        expect(hostInterface).not.toContain('host: any');
+        for (const forbidden of [
+            'currentSessionId:',
+            '_context',
+            '_view',
+            'sendInFlightBySession',
+            'pendingLocalKeyBySession',
+            'pendingAssistantTmpKeyBySession',
+            'webviewLiveness',
+            'undoSegmentsBySession',
+            'pendingConflictStore',
+            'revertedSegmentHistoryStore',
+        ]) {
+            expect(hostInterface).not.toContain(forbidden);
+        }
+        const compositionStart = providerSource.indexOf(
+            'this.undoCommandHandler = createUndoCommandHandler({'
+        );
+        const compositionEnd = providerSource.indexOf(
+            'this.userOwnedSessionsLoaded =',
+            compositionStart
+        );
+        const composition = providerSource.slice(compositionStart, compositionEnd);
+        expect(composition).toContain('client: {');
+        expect(composition).not.toContain('client: this.client');
     });
 });

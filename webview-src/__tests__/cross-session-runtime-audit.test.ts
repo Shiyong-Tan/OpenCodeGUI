@@ -280,16 +280,17 @@ describe('cross-session runtime repository audit', () => {
   test('owned Webview commands do not fall back to Extension selection', () => {
     const client = read('src', 'OpenCodeClient.ts');
     const controller = read('src', 'webview', 'SidebarWebviewController.ts');
+    const undoController = read('src', 'webview', 'controllers', 'UndoCommandController.ts');
     const utilityController = read('src', 'webview', 'controllers', 'UtilityCommandController.ts');
     for (const command of [
       'undoSegmentUpsert',
       'undoSegmentRemove',
       'undoSegmentDelete',
     ]) {
-      const start = controller.indexOf(`case "${command}":`);
+      const start = undoController.indexOf(`case "${command}":`);
       expect(start).toBeGreaterThanOrEqual(0);
-      const end = controller.indexOf('\n                case "', start + 10);
-      const block = controller.slice(start, end > start ? end : undefined);
+      const end = undoController.indexOf('\n                case "', start + 10);
+      const block = undoController.slice(start, end > start ? end : undefined);
       expect(block).not.toContain(': host.currentSessionId');
       expect(block).not.toContain('|| host.currentSessionId');
     }

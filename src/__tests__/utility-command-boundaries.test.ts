@@ -166,6 +166,7 @@ function createHarness(overrides: Record<string, unknown> = {}) {
         utilityCommandHandler,
         async () => false,
         async () => false,
+        () => false,
     );
     return {
         host,

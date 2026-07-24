@@ -28,6 +28,10 @@ import {
     type TurnCommandHandler,
 } from './webview/controllers/TurnCommandController';
 import {
+    createUndoCommandHandler,
+    type UndoCommandHandler,
+} from './webview/controllers/UndoCommandController';
+import {
     captureCancelTurnOwner,
     type CapturedCancelTurnOwner,
 } from './webview/CancelTurnOwner';
@@ -652,6 +656,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private readonly utilityCommandHandler: UtilityCommandHandler;
     private readonly sessionCommandHandler: SessionCommandHandler;
     private readonly turnCommandHandler: TurnCommandHandler;
+    private readonly undoCommandHandler: UndoCommandHandler;
     private uiTimelineBySession = new Map<string, string[]>();
     private lastSnapshotPayloadBySession = new Map<string, any>();
     private snapshotStore?: SnapshotStore;
@@ -4506,6 +4511,98 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 this.clearCanceledTurnAssistantState(sessionId),
             consumeDraft: (clientMessageId) => this.consumeDraft(clientMessageId),
         });
+        this.undoCommandHandler = createUndoCommandHandler({
+            client: {
+                discardRevertedSegment: (sessionId) =>
+                    this.client.discardRevertedSegment(sessionId),
+                getRevertedSegment: (sessionId) =>
+                    this.client.getRevertedSegment(sessionId),
+                getUndoRangeForAnchor: (messageId, sessionId) =>
+                    this.client.getUndoRangeForAnchor(messageId, sessionId),
+                restoreAll: (options) => this.client.restoreAll(options),
+                restoreFromMessage: (startMessageId, endMessageId, options) =>
+                    this.client.restoreFromMessage(startMessageId, endMessageId, options),
+                setRevertedSegment: (sessionId, segment) =>
+                    this.client.setRevertedSegment(sessionId, segment),
+                setRevertedSegmentCollapsed: (sessionId, collapsed) =>
+                    this.client.setRevertedSegmentCollapsed(sessionId, collapsed),
+                undoFromMessage: (messageId, options) =>
+                    this.client.undoFromMessage(messageId, options),
+            },
+            uiDebugChannel: {
+                appendLine: (message) => this.uiDebugChannel.appendLine(message),
+            },
+            getLiveWebview: (fallback) => this._view?.webview || fallback,
+            getCurrentSessionId: () => this.currentSessionId,
+            isGitUndoEnabled: () => this.gitUndoEnabled,
+            isUndoBaselineReady: () => this.baselineReady,
+            resolveUndoMessageId: (messageId) => this.resolveUndoMessageId(messageId),
+            getUndoSegmentState: (sessionId, noticeKey) =>
+                this.getUndoSegmentState(sessionId, noticeKey),
+            setUndoSegmentState: (sessionId, noticeKey, segment) =>
+                this.setUndoSegmentState(sessionId, noticeKey, segment),
+            deleteUndoSegmentState: (sessionId, noticeKey) =>
+                this.deleteUndoSegmentState(sessionId, noticeKey),
+            sanitizeUndoRangeMessageIds: (value) => this.sanitizeUndoRangeMessageIds(value),
+            resolveUndoUiVisibleRange: (data, anchorMessageId, canonicalMessageIds, extAnchorIndex) =>
+                this.resolveUndoUiVisibleRange(
+                    data,
+                    anchorMessageId,
+                    canonicalMessageIds,
+                    extAnchorIndex
+                ),
+            clearClientRevertedSegmentIfNonRestorable: (sessionId) =>
+                this.clearClientRevertedSegmentIfNonRestorable(sessionId),
+            getInvalidSegmentMessageIds: (sessionId, options) =>
+                this.getInvalidSegmentMessageIds(sessionId, options),
+            createConflictId: (kind, operationId) =>
+                this.createConflictId(kind, operationId),
+            setPendingUndoConflict: (conflict) => this.setPendingUndoConflict(conflict),
+            getPendingUndoConflict: (sessionId) => this.getPendingUndoConflict(sessionId),
+            takePendingUndoConflict: (sessionId) => this.takePendingUndoConflict(sessionId),
+            getPendingUndoConflictCount: () => this.getPendingUndoConflictCount(),
+            appendRevertedSegmentHistory: (sessionId, entry) =>
+                this.appendRevertedSegmentHistory(sessionId, entry),
+            trimRevertedSegmentHistory: (sessionId, excludedMessageIds) =>
+                this.trimRevertedSegmentHistory(sessionId, excludedMessageIds),
+            clearRevertedSegmentHistory: (sessionId) =>
+                this.clearRevertedSegmentHistory(sessionId),
+            getRevertedSegmentHistory: (sessionId) =>
+                this.getRevertedSegmentHistory(sessionId),
+            postAddResponse: (webview, value, meta) =>
+                this.postAddResponse(webview, value, meta),
+            postMessageIndexMap: (webview, sessionId) =>
+                this.postMessageIndexMap(webview, sessionId),
+            resolveChangeListCommits: (sessionId, messageIds, fallbackCommits) =>
+                this.resolveChangeListCommits(sessionId, messageIds, fallbackCommits),
+            setChangeListReverted: (sessionId, commitHead, reverted, webview) =>
+                this.setChangeListReverted(sessionId, commitHead, reverted, webview),
+            persistRevertedSegment: (sessionId, segment, conflicts, discarded) =>
+                this.persistRevertedSegment(sessionId, segment, conflicts, discarded),
+            clearPersistedSegment: (sessionId) => this.clearPersistedSegment(sessionId),
+            refreshDiffIfTouched: (touchedFiles) => this.refreshDiffIfTouched(touchedFiles),
+            buildRestoreMessageScope: (sessionId, noticeKey, baseMessageIds, segment) =>
+                this.buildRestoreMessageScope(sessionId, noticeKey, baseMessageIds, segment),
+            applyRestoreSegmentSuccess: (
+                sessionId,
+                noticeKey,
+                anchorMsgId,
+                endMsgId,
+                result,
+                commitsToClear,
+                operationId,
+                webview
+            ) => this.applyRestoreSegmentSuccess(
+                sessionId,
+                noticeKey,
+                anchorMsgId,
+                endMsgId,
+                result,
+                commitsToClear,
+                operationId,
+                webview
+            ),
+        });
         this.userOwnedSessionsLoaded = this.loadUserOwnedSessions();
         this.client.setServerStatusHandler((status, reason) => {
             this.sendServerStatus(status, reason);
@@ -4634,7 +4731,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             _token,
             this.utilityCommandHandler,
             this.sessionCommandHandler,
-            this.turnCommandHandler
+            this.turnCommandHandler,
+            this.undoCommandHandler
         );
     }
 

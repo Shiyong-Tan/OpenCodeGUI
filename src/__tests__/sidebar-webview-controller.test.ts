@@ -21,16 +21,20 @@ const sessionControllerSource = fs.readFileSync(
 const turnControllerSource = fs.readFileSync(
   path.join(process.cwd(), 'src', 'webview', 'controllers', 'TurnCommandController.ts'), 'utf8',
 );
+const undoControllerSource = fs.readFileSync(
+  path.join(process.cwd(), 'src', 'webview', 'controllers', 'UndoCommandController.ts'), 'utf8',
+);
 
 describe('SidebarWebviewController', () => {
   test('SidebarProvider retains only the VS Code compatibility delegation', () => {
     const source = fs.readFileSync(path.join(process.cwd(), 'src', 'SidebarProvider.ts'), 'utf8');
-    expect(source).toMatch(/public resolveWebviewView\([\s\S]*?return resolveSidebarWebviewView\([\s\S]*?this\.utilityCommandHandler[\s\S]*?this\.sessionCommandHandler[\s\S]*?this\.turnCommandHandler[\s\S]*?\);\s*}/);
+    expect(source).toMatch(/public resolveWebviewView\([\s\S]*?return resolveSidebarWebviewView\([\s\S]*?this\.utilityCommandHandler[\s\S]*?this\.sessionCommandHandler[\s\S]*?this\.turnCommandHandler[\s\S]*?this\.undoCommandHandler[\s\S]*?\);\s*}/);
   });
 
   test('keeps the major protocol owners in one command dispatcher', () => {
     for (const command of ['undoToMessage', 'restoreSegment']) {
-      expect(controllerSource).toContain(`case "${command}"`);
+      expect(undoControllerSource).toContain(`case "${command}"`);
+      expect(controllerSource).not.toContain(`case "${command}"`);
     }
     expect(turnControllerSource).toContain('case "sendMessage"');
     for (const command of ['selectSession', 'snapshotTimelineIds']) {
@@ -40,6 +44,7 @@ describe('SidebarWebviewController', () => {
     expect(controllerSource).toContain('utilityHandling !== false && await utilityHandling');
     expect(controllerSource).toContain('const sessionHandling = sessionCommandHandler(data, activeWebview, webviewView.webview)');
     expect(controllerSource).toContain('const turnHandling = turnCommandHandler(data, activeWebview, webviewView.webview)');
+    expect(controllerSource).toContain('const undoHandling = undoCommandHandler(data, activeWebview, webviewView.webview)');
     expect(sessionControllerSource).toContain('this.host.handleSnapshotTimelineIds(data.payload)');
   });
 
@@ -76,6 +81,7 @@ describe('SidebarWebviewController', () => {
       async () => false,
       async () => false,
       async () => false,
+      () => false,
     );
     expect(host._view).toBe(view);
     expect(webview.options).toEqual({ enableScripts: true, localResourceRoots: [{}] });
