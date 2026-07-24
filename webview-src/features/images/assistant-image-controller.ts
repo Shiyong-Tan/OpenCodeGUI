@@ -178,7 +178,21 @@ export function createAssistantImageController(
       image.alt = resolved.path;
       image.loading = 'lazy';
       preview.appendChild(image);
-      element.parentNode.insertBefore(preview, element.nextSibling);
+      let insertionAnchor: Element = element;
+      const visibleLabel = (element.textContent || '').trim();
+      const hidesRawPath = visibleLabel === reference.path
+        || decodeLocalReference(visibleLabel) === reference.path;
+      if (hidesRawPath) {
+        element.classList.add('assistant-image-path-hidden');
+        const code = element.parentElement?.tagName.toLowerCase() === 'code'
+          ? element.parentElement
+          : null;
+        if (code && (code.textContent || '').trim() === visibleLabel) {
+          code.classList.add('assistant-image-path-hidden');
+          insertionAnchor = code;
+        }
+      }
+      insertionAnchor.parentNode?.insertBefore(preview, insertionAnchor.nextSibling);
     }
     return true;
   }

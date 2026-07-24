@@ -2641,6 +2641,16 @@ select#mode-select {
     cursor: pointer;
 }
 
+code:has(> .oc-file-link) {
+    padding: 0;
+    border-radius: 0;
+    background: transparent;
+}
+
+.assistant-image-path-hidden {
+    display: none !important;
+}
+
 .assistant-image-thumbnail {
     display: flex;
     width: 80%;

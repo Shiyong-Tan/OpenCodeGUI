@@ -17,8 +17,10 @@ class FakeElement {
   readonly children: FakeElement[] = [];
   readonly attributes = new Map<string, string>();
   parentNode: FakeElement | null = null;
+  parentElement: FakeElement | null = null;
   isConnected = true;
   className = '';
+  textContent = '';
   tabIndex = -1;
   loading = '';
   alt = '';
@@ -29,11 +31,13 @@ class FakeElement {
   removeAttribute(name: string) { this.attributes.delete(name); }
   appendChild(child: FakeElement) {
     child.parentNode = this;
+    child.parentElement = this;
     this.children.push(child);
     return child;
   }
   insertBefore(child: FakeElement, before: FakeElement | null) {
     child.parentNode = this;
+    child.parentElement = this;
     const index = before ? this.children.indexOf(before) : -1;
     this.children.splice(index < 0 ? this.children.length : index, 0, child);
     return child;
@@ -97,8 +101,11 @@ describe('assistant image controller', () => {
     summary.href = 'data/results/case-a/summary.json';
     const abbreviated = root.appendChild(new FakeImage()) as FakeImage;
     abbreviated.src = '.../eta_kappa.png';
-    const linked = root.appendChild(new FakeAnchor()) as FakeAnchor;
+    const code = root.appendChild(new FakeElement('code'));
+    const linked = code.appendChild(new FakeAnchor()) as FakeAnchor;
     linked.href = 'data/results/case-a/relative_deltaD_energy.png';
+    linked.textContent = 'data/results/case-a/relative_deltaD_energy.png';
+    code.textContent = linked.textContent;
     const document = {
       createElement: (tag: string) => tag === 'a' ? new FakeAnchor() : new FakeImage(),
     } as unknown as Document;
@@ -149,6 +156,7 @@ describe('assistant image controller', () => {
     expect(abbreviated.loading).toBe('lazy');
     expect(root.children).toHaveLength(4);
     expect(root.children[3].className).toBe('assistant-image-thumbnail');
+    expect(code.classList.contains('assistant-image-path-hidden')).toBe(true);
     abbreviated.click();
     expect(posts[1]).toEqual({
       type: 'openFileAtLocation',

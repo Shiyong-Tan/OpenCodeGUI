@@ -3944,6 +3944,7 @@ function linkifyFileRefs(rootEl) {
             const line = match[2];
             const col = match[3] || '1';
             const link = document.createElement('a');
+            link.className = 'oc-file-link';
             link.href = `ocfile://open?path=${encodeURIComponent(filePath)}&line=${line}&col=${col}`;
             link.textContent = full;
             return link;
@@ -3952,6 +3953,7 @@ function linkifyFileRefs(rootEl) {
             const filePath = match[1];
             if (!isAllowedFileExt(filePath)) return null;
             const link = document.createElement('a');
+            link.className = 'oc-file-link';
             link.href = `ocfile://open?path=${encodeURIComponent(filePath)}`;
             link.textContent = full;
             return link;
