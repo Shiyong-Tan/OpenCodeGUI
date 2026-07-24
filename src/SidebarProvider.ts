@@ -75,6 +75,12 @@ import {
     RevertedSegmentHistoryStore,
     type RevertedSegmentHistoryEntry,
 } from './session-runtime/RevertedSegmentHistoryStore';
+import {
+    captureAutomaticEditorContext,
+    collectOpenWorkspaceFileRanks,
+    getOpenWorkspaceFileUris,
+    workspaceFileKey,
+} from './context/EditorContextService';
 
 type CanceledTurnRecord = {
     opId?: string;
@@ -280,6 +286,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private subagentProgressBySession = new Map<string, { taskId: string; parentSessionId: string; description: string; startedAt: number; title?: string; mode?: string; model?: string; providerId?: string; latestText?: string; latestFullText?: string; latestTool?: string; latestToolInput?: string; isDone?: boolean; state?: SubagentLifecycleState; finishedAt?: number; dismissAt?: number; lastEventAt?: number; finalMessageId?: string; finalReason?: string }>();
     private readonly subagentDoneRetentionMs = 5000;
     private subagentRetentionTimer?: NodeJS.Timeout;
+    private autoEditorContextTimer?: NodeJS.Timeout;
     private task1DoneVisibleTotalMs = 0;
     private task1DoneVisibleCount = 0;
     private task1FalseDoneEvents = 0;
@@ -4018,8 +4025,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const normalizedQuery = String(query || '').trim().replace(/\\/g, '/').toLowerCase();
         const exclude = '{**/.git/**,**/node_modules/**,**/.opencode/**,**/.sisyphus/**}';
         const maxScan = normalizedQuery.length >= 2 ? 2500 : 500;
-        const uris = await vscode.workspace.findFiles(new vscode.RelativePattern(workspaceRoot, '**/*'), exclude, maxScan);
-        const scored = uris
+        const discoveredUris = await vscode.workspace.findFiles(new vscode.RelativePattern(workspaceRoot, '**/*'), exclude, maxScan);
+        const openRanks = collectOpenWorkspaceFileRanks(workspaceRoot);
+        const uriByPath = new Map(discoveredUris.map((uri) => [workspaceFileKey(uri.fsPath), uri]));
+        for (const uri of getOpenWorkspaceFileUris()) {
+            uriByPath.set(workspaceFileKey(uri.fsPath), uri);
+        }
+        const scored = Array.from(uriByPath.values())
             .map((uri) => {
                 const relPath = pathModule.relative(workspaceRoot, uri.fsPath).replace(/\\/g, '/');
                 const lower = relPath.toLowerCase();
@@ -4032,12 +4044,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     : (lower === normalizedQuery ? 0
                         : (lower.endsWith(`/${normalizedQuery}`) || pathModule.basename(lower) === normalizedQuery ? 1
                             : (pathModule.basename(lower).includes(normalizedQuery) ? 2 : 3)));
-                return { path: relPath, name, directory: directory === '.' ? '' : directory, score };
+                const openRank = openRanks.get(workspaceFileKey(uri.fsPath)) ?? 3;
+                return { path: relPath, name, directory: directory === '.' ? '' : directory, score, openRank };
             })
-            .filter((item): item is WorkspaceFileResult & { score: number } => Boolean(item))
-            .sort((a, b) => a.score - b.score || a.path.length - b.path.length || a.path.localeCompare(b.path))
+            .filter((item): item is WorkspaceFileResult & { score: number; openRank: number } => Boolean(item))
+            .sort((a, b) => a.openRank - b.openRank
+                || a.score - b.score
+                || a.path.length - b.path.length
+                || a.path.localeCompare(b.path))
             .slice(0, limit)
-            .map(({ score, ...item }) => item);
+            .map(({ score, openRank, ...item }) => item);
         return scored;
     }
 
@@ -4398,6 +4414,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             refreshModels: (webview) => this.refreshModels(webview),
             runSmartSearch: (sessionId, query, messages) => this.smartSearch.run(sessionId, query, messages),
             listWorkspaceFiles: (query) => this.listWorkspaceFiles(query),
+            getAutoEditorContext: () => captureAutomaticEditorContext(),
             saveClipboardImage: (dataUrl, mime) => this.attachmentStorage.saveClipboardImage(dataUrl, mime),
             getImageMimeFromName: (name) => this.attachmentStorage.getImageMimeFromName(name),
             isImageFileName: (name) => this.attachmentStorage.isImageFileName(name),
@@ -4916,7 +4933,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const label = typeof item?.displayText === 'string' && item.displayText
                 ? item.displayText
                 : (item?.source === 'output' ? 'vscode output' : 'editor selection');
-            const source = item?.source === 'output' ? 'VS Code Output' : 'Editor Selection';
+            const source = item?.source === 'output'
+                ? 'VS Code Output'
+                : (item?.source === 'editor-auto' ? 'Active Editor' : 'Editor Selection');
             blocks.push(`---\n[Context ${i + 1}] ${label} (${source})\n${text}`);
         }
         if (!blocks.length) return '';
@@ -5156,6 +5175,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const shadowObservation = this.observeTurnRuntimeShadow(event);
         await handleSidebarChatEvent(this, event, webview);
         this.reportTurnRuntimeShadow(event, await shadowObservation);
+    }
+
+    public scheduleAutoEditorContextRefresh(delayMs = 100): void {
+        if (this.autoEditorContextTimer) clearTimeout(this.autoEditorContextTimer);
+        this.autoEditorContextTimer = setTimeout(() => {
+            this.autoEditorContextTimer = undefined;
+            this._view?.webview.postMessage({
+                type: 'autoEditorContextChanged',
+                context: captureAutomaticEditorContext(),
+            });
+        }, Math.max(0, delayMs));
     }
 
     private async observeTurnRuntimeShadow(event: ChatEvent): Promise<TurnShadowObservation | undefined> {
@@ -5630,6 +5660,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         if (this.subagentRetentionTimer) {
             clearTimeout(this.subagentRetentionTimer);
             this.subagentRetentionTimer = undefined;
+        }
+        if (this.autoEditorContextTimer) {
+            clearTimeout(this.autoEditorContextTimer);
+            this.autoEditorContextTimer = undefined;
         }
         await this.smartSearchSessions.dispose();
         await this.client.dispose();

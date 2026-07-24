@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as pathModule from 'path';
 import * as vscode from 'vscode';
 import type { SmartSearchMessage } from '../../search/SmartSearchService';
+import type { AutomaticEditorContext } from '../../context/EditorContextService';
 
 type UtilityMessage = Record<string, any>;
 type LocalQuestionResolution = { resolved: boolean; sessionId?: string };
@@ -31,6 +32,7 @@ export interface UtilityCommandHost {
         messages: SmartSearchMessage[]
     ): Promise<{ messageIds: string[]; modelId?: string }>;
     listWorkspaceFiles(query: string): Promise<Array<{ path: string; name: string; directory: string }>>;
+    getAutoEditorContext(): AutomaticEditorContext | null;
     saveClipboardImage(dataUrl: string, mime: string): Promise<{
         id: string;
         name: string;
@@ -76,6 +78,7 @@ const UTILITY_COMMANDS = new Set([
     'refreshModels',
     'smartSessionSearch',
     'listWorkspaceFiles',
+    'getAutoEditorContext',
     'ping',
     'reloadWindow',
     'clipboardImage',
@@ -124,6 +127,9 @@ export class UtilityCommandController {
                 return true;
             case 'listWorkspaceFiles':
                 await this.listWorkspaceFiles(data, activeWebview);
+                return true;
+            case 'getAutoEditorContext':
+                this.getAutoEditorContext(data, activeWebview);
                 return true;
             case 'ping':
                 this.host.getLiveWebview(fallbackWebview).postMessage({ type: 'pong', ts: data.ts });
@@ -253,6 +259,15 @@ export class UtilityCommandController {
             requestId,
             query,
             files,
+        });
+    }
+
+    private getAutoEditorContext(data: UtilityMessage, activeWebview: vscode.Webview): void {
+        const requestId = typeof data.requestId === 'string' ? data.requestId : '';
+        this.host.getLiveWebview(activeWebview).postMessage({
+            type: 'autoEditorContextResult',
+            requestId,
+            context: this.host.getAutoEditorContext(),
         });
     }
 

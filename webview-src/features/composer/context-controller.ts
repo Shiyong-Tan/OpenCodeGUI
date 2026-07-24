@@ -39,6 +39,7 @@ export function createContextTokenUiController(options: {
   listElement: HTMLElement;
   isAppendActive(): boolean;
   exitAppend(): void;
+  onContextRemoved?(item: ComposerContextItem): void;
 }): { render(): void } {
   const render = (): void => {
     options.listElement.innerHTML = '';
@@ -67,6 +68,7 @@ export function createContextTokenUiController(options: {
         const changed = token.kind === 'context'
           ? options.state.removeContext(token.item)
           : options.state.removeFileRef(token.path);
+        if (changed && token.kind === 'context') options.onContextRemoved?.(token.item);
         if (changed) render();
       });
       chip.appendChild(removeButton);

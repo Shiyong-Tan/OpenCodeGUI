@@ -5318,12 +5318,25 @@ document.addEventListener('DOMContentLoaded', () => {
     if (typeof createContextTokenUiController !== 'function' || !inputTokenList) {
         throw new Error('Composer context token controller is unavailable');
     }
+    let autoEditorContextController = null;
     const contextTokenUiController = createContextTokenUiController({
         state: getComposerContextStateController(),
         document,
         listElement: inputTokenList,
         isAppendActive: () => Boolean(appendInputMode && appendInputMode.sessionId === activeSessionId),
-        exitAppend: () => exitAppendInputMode({ restoreDraft: true })
+        exitAppend: () => exitAppendInputMode({ restoreDraft: true }),
+        onContextRemoved: (item) => autoEditorContextController?.dismiss(item)
+    });
+    const createAutoEditorContextController = window.__ocFeatures?.createAutoEditorContextController;
+    if (typeof createAutoEditorContextController !== 'function') {
+        throw new Error('Automatic editor context controller is unavailable');
+    }
+    autoEditorContextController = createAutoEditorContextController({
+        state: getComposerContextStateController(),
+        window,
+        postMessage: (message) => vscode.postMessage(message),
+        onContextChanged: () => renderContextTokens(),
+        getScopeKey: () => activeSessionId || 'new-session'
     });
     const createFileMentionController = window.__ocFeatures?.createFileMentionController;
     if (typeof createFileMentionController !== 'function' || !fileMentionList || !input) {
@@ -5656,6 +5669,7 @@ document.addEventListener('DOMContentLoaded', () => {
             contextState.addFileRef(file);
         }
         renderContextTokens();
+        void autoEditorContextController?.refresh();
         updateAppendInputUi();
     }
 
@@ -5670,7 +5684,9 @@ document.addEventListener('DOMContentLoaded', () => {
         sessionComposerStore.capture(sessionId, {
             draft: session.inputDraft || '',
             attachments: Array.from(getAttachmentStateController().getItems(), (item) => ({ ...item })),
-            contextItems: Array.from(contextState.getContextItems(), (item) => ({ ...item })),
+            contextItems: Array.from(contextState.getContextItems())
+                .filter((item) => item?.automatic !== true)
+                .map((item) => ({ ...item })),
             fileRefs: Array.from(contextState.getFileRefs(), (file) => ({ ...file }))
         });
     }
@@ -13008,6 +13024,10 @@ function appendMessageImages(parentEl, message) {
     }
 
     composerInputController.install();
+    input.addEventListener('focus', () => {
+        if (!appendInputMode) void autoEditorContextController.refresh();
+    });
+    void autoEditorContextController.refresh();
     sendBtn.addEventListener('click', () => {
         handlePrimarySendClick();
     });
@@ -13071,6 +13091,7 @@ function appendMessageImages(parentEl, message) {
         renderAttachments();
         getComposerContextStateController().clear();
         renderContextTokens();
+        void autoEditorContextController.refresh();
         closeFileMentionList();
         isSwitchingSession = true;
         vscode.postMessage({ type: 'newSession' });
@@ -13939,6 +13960,7 @@ function appendMessageImages(parentEl, message) {
                 activateSessionSearch(activeSessionId);
                 getComposerContextStateController().clear();
                 renderContextTokens();
+                void autoEditorContextController.refresh();
                 closeFileMentionList();
                 window.__oc?.renderFromState?.();
                 logSegmentState(activeSessionId, 'after-reset');
@@ -14503,6 +14525,14 @@ function appendMessageImages(parentEl, message) {
             case 'workspaceFileResults': {
                 const files = Array.isArray(message.files) ? message.files : [];
                 fileMentionController.handleResults(message.requestId, files);
+                break;
+            }
+            case 'autoEditorContextResult': {
+                autoEditorContextController.handleResult(message.requestId, message.context);
+                break;
+            }
+            case 'autoEditorContextChanged': {
+                autoEditorContextController.handleChanged(message.context);
                 break;
             }
             case 'messageIdMap': {

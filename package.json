@@ -101,6 +101,16 @@
           "when": "resourceScheme == 'output' && editorHasSelection"
         }
       ]
+    },
+    "configuration": {
+      "title": "OpenCode",
+      "properties": {
+        "opencode.autoEditorContext.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically include the active editor file or selected lines as visible chat context."
+        }
+      }
     }
   },
   "scripts": {

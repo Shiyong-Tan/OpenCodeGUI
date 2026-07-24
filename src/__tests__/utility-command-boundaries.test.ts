@@ -126,6 +126,7 @@ function createHarness(overrides: Record<string, unknown> = {}) {
         },
         refreshModels: jest.fn(async () => undefined),
         listWorkspaceFiles: jest.fn(async () => []),
+        getAutoEditorContext: jest.fn(() => null),
         smartSearch: { run: jest.fn() },
         attachmentStorage: {
             saveClipboardImage: jest.fn(),
@@ -159,6 +160,7 @@ function createHarness(overrides: Record<string, unknown> = {}) {
         refreshModels: (targetWebview) => host.refreshModels(targetWebview),
         runSmartSearch: (sessionId, query, messages) => host.smartSearch.run(sessionId, query, messages),
         listWorkspaceFiles: (query) => host.listWorkspaceFiles(query),
+        getAutoEditorContext: () => host.getAutoEditorContext(),
         saveClipboardImage: (dataUrl, mime) => host.attachmentStorage.saveClipboardImage(dataUrl, mime),
         getImageMimeFromName: (name) => host.attachmentStorage.getImageMimeFromName(name),
         isImageFileName: (name) => host.attachmentStorage.isImageFileName(name),
@@ -235,6 +237,7 @@ describe('utility command family characterization', () => {
         const commands = [
             'setModel', 'compactSession', 'setMode', 'setVariant', 'refreshModels',
             'smartSessionSearch', 'listWorkspaceFiles', 'ping', 'reloadWindow',
+            'getAutoEditorContext',
             'clipboardImage', 'selectAttachments', 'openGitDiff', 'toolResult',
             'localQuestionResult', 'permissionResult', 'openFileAtLocation',
             'resolveAssistantImageReferences',
@@ -327,6 +330,26 @@ describe('utility command family characterization', () => {
         });
         expect(harness.posts).toContainEqual({ type: 'pong', ts: 123 });
         expect(vscode.commands.executeCommand).toHaveBeenCalledWith('workbench.action.reloadWindow');
+    });
+
+    test('returns correlated automatic editor context', async () => {
+        const context = {
+            displayText: 'src/a.ts:2-3',
+            text: 'selected',
+            source: 'editor-auto',
+            filePath: 'C:\\workspace\\src\\a.ts',
+            workspacePath: 'src/a.ts',
+            range: { startLine: 2, endLine: 3 },
+            contextKey: 'file:///workspace/src/a.ts:2-3:v1',
+            automatic: true,
+        };
+        const harness = createHarness({ getAutoEditorContext: jest.fn(() => context) });
+        await harness.send({ type: 'getAutoEditorContext', requestId: 'editor-1' });
+        expect(harness.posts).toContainEqual({
+            type: 'autoEditorContextResult',
+            requestId: 'editor-1',
+            context,
+        });
     });
 
     test('resolves abbreviated assistant image paths and opens images in the native editor', async () => {

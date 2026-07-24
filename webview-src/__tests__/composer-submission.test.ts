@@ -33,4 +33,18 @@ describe('composer submission', () => {
       text: '', attachments: createAttachmentState([{ name: 'img-paste', mime: 'image/png' }]), context: createComposerContextState(),
     })?.messageText).toBe('Image attached.');
   });
+
+  it('does not send an empty prompt solely because automatic context exists', () => {
+    const context = createComposerContextState();
+    context.setAutomaticContext({
+      displayText: 'src/a.ts', text: 'contents', source: 'editor-auto',
+      contextKey: 'a:v1', automatic: true,
+    });
+    expect(buildComposerSubmission({
+      text: '', attachments: createAttachmentState(), context,
+    })).toBeNull();
+    expect(buildComposerSubmission({
+      text: 'explain this', attachments: createAttachmentState(), context,
+    })?.contextPayload).toHaveLength(1);
+  });
 });

@@ -36,12 +36,32 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.window.onDidChangeTextEditorSelection((event) => {
             diffProvider.handleSelectionChange(event.textEditor);
+            if (event.textEditor === vscode.window.activeTextEditor) {
+                sidebarProvider.scheduleAutoEditorContextRefresh();
+            }
         })
     );
 
     context.subscriptions.push(
         vscode.workspace.onDidChangeTextDocument((event) => {
             diffProvider.handleDocumentChange(event.document.uri);
+            if (event.document === vscode.window.activeTextEditor?.document) {
+                sidebarProvider.scheduleAutoEditorContextRefresh();
+            }
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.window.onDidChangeActiveTextEditor(() => {
+            sidebarProvider.scheduleAutoEditorContextRefresh(0);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeConfiguration((event) => {
+            if (event.affectsConfiguration('opencode.autoEditorContext.enabled')) {
+                sidebarProvider.scheduleAutoEditorContextRefresh(0);
+            }
         })
     );
 

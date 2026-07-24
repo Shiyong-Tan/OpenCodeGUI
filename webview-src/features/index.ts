@@ -6,6 +6,7 @@ import { createFileMentionController, findActiveFileMention, normalizeFileRef } 
 import { buildComposerSubmission } from './composer/submission';
 import { createClipboardAttachmentController, getClipboardImageItems } from './composer/clipboard-controller';
 import { createComposerInputController, decideComposerInputKeyAction } from './composer/input-controller';
+import { createAutoEditorContextController } from './composer/auto-editor-context-controller';
 import { createHeaderUiController } from './header/header-controller';
 import { createHeaderState, recomputeSessionUsage } from './header/header-state';
 import { createModelUiController } from './models/model-controller';
@@ -49,6 +50,7 @@ const facade = Object.freeze({
   getClipboardImageItems,
   createComposerInputController,
   decideComposerInputKeyAction,
+  createAutoEditorContextController,
   createHeaderState,
   recomputeSessionUsage,
   createHeaderUiController,

@@ -32,4 +32,21 @@ describe('composer context state', () => {
     expect(state.getContextItems()).toEqual([]);
     expect(state.getFileRefs()).toEqual([]);
   });
+
+  it('keeps one automatic context and deduplicates its workspace file reference', () => {
+    const state = createComposerContextState();
+    expect(state.setAutomaticContext({
+      displayText: 'src/a.ts',
+      text: 'buffer contents',
+      source: 'editor-auto',
+      filePath: 'C:\\workspace\\src\\a.ts',
+      workspacePath: 'src/a.ts',
+      contextKey: 'a:v1',
+      automatic: true,
+    })).toBe(true);
+    expect(state.addFileRef({ path: 'src/a.ts' })).toBe(false);
+    expect(state.hasNonAutomaticContext()).toBe(false);
+    expect(state.getFilesPayload()).toEqual([]);
+    expect(state.setAutomaticContext(null)).toBe(true);
+  });
 });

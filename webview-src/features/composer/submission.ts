@@ -15,7 +15,10 @@ export function buildComposerSubmission(options: {
   context: ComposerContextState;
 }): ComposerSubmission | null {
   const text = options.text.trim();
-  if (!text && !options.attachments.hasItems() && !options.context.hasContext() && !options.context.hasFileRefs()) {
+  if (!text
+    && !options.attachments.hasItems()
+    && !options.context.hasNonAutomaticContext()
+    && !options.context.hasFileRefs()) {
     return null;
   }
   const fallbackText = options.attachments.hasNonImage() ? 'Attachment added.' : 'Image attached.';
