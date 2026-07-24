@@ -59,8 +59,11 @@ import {
     type TurnShadowObservation,
 } from './session-runtime/turn/TurnRuntimeShadow';
 import { ChatEventActorRouter } from './session-runtime/ChatEventActorRouter';
-import { PendingConflictStore } from './session-runtime/PendingConflictStore';
-import { RevertedSegmentHistoryStore } from './session-runtime/RevertedSegmentHistoryStore';
+import { PendingConflictStore, type PendingConflict } from './session-runtime/PendingConflictStore';
+import {
+    RevertedSegmentHistoryStore,
+    type RevertedSegmentHistoryEntry,
+} from './session-runtime/RevertedSegmentHistoryStore';
 
 type CanceledTurnRecord = {
     opId?: string;
@@ -5085,6 +5088,100 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             this.UNDO_SEGMENTS_KEY,
             serializeUndoSegments(this.undoSegmentsBySession)
         );
+    }
+
+    private resolveUndoMessageId(messageId: string): string {
+        return this.clientMessageIdMap.get(messageId) || messageId;
+    }
+
+    private getUndoSegmentState(sessionId: string, noticeKey: string): SegmentState | undefined {
+        return this.undoSegmentsBySession.get(sessionId)?.get(noticeKey);
+    }
+
+    private async setUndoSegmentState(
+        sessionId: string,
+        noticeKey: string,
+        segment: SegmentState
+    ): Promise<{ before: number; after: number }> {
+        let segments = this.undoSegmentsBySession.get(sessionId);
+        if (!segments) {
+            segments = new Map<string, SegmentState>();
+            this.undoSegmentsBySession.set(sessionId, segments);
+        }
+        const before = segments.size;
+        segments.set(noticeKey, segment);
+        await this.saveUndoSegmentsState();
+        return { before, after: segments.size };
+    }
+
+    private async deleteUndoSegmentState(
+        sessionId: string,
+        noticeKey: string
+    ): Promise<{ deleted: boolean; before: number; after: number }> {
+        const segments = this.undoSegmentsBySession.get(sessionId);
+        const before = segments?.size ?? 0;
+        const deleted = segments?.delete(noticeKey) ?? false;
+        const after = segments?.size ?? 0;
+        if (deleted) {
+            await this.saveUndoSegmentsState();
+        }
+        return { deleted, before, after };
+    }
+
+    private getRevertedSegmentHistory(sessionId: string): RevertedSegmentHistoryEntry[] {
+        return this.revertedSegmentHistoryStore.get(sessionId);
+    }
+
+    private appendRevertedSegmentHistory(
+        sessionId: string,
+        entry: RevertedSegmentHistoryEntry
+    ): void {
+        this.revertedSegmentHistoryStore.update(sessionId, (entries) => [...entries, entry]);
+    }
+
+    private removeRevertedSegmentHistoryByStartMessage(
+        sessionId: string,
+        startMessageId: string
+    ): void {
+        this.revertedSegmentHistoryStore.update(
+            sessionId,
+            (entries) => entries.filter((entry) => entry.startMessageId !== startMessageId)
+        );
+    }
+
+    private trimRevertedSegmentHistory(
+        sessionId: string,
+        excludedMessageIds: ReadonlySet<string>
+    ): void {
+        this.revertedSegmentHistoryStore.update(
+            sessionId,
+            (entries) => entries
+                .map((entry) => ({
+                    ...entry,
+                    messageIds: (entry.messageIds ?? []).filter((id) => !excludedMessageIds.has(id))
+                }))
+                .filter((entry) => (entry.messageIds ?? []).length > 0)
+        );
+    }
+
+    private clearRevertedSegmentHistory(sessionId: string): void {
+        this.revertedSegmentHistoryStore.clearSession(sessionId);
+    }
+
+    private setPendingUndoConflict(conflict: PendingConflict): void {
+        this.pendingConflictStore.set(conflict);
+    }
+
+    private getPendingUndoConflict(sessionId: string): PendingConflict | undefined {
+        return this.pendingConflictStore.get(sessionId);
+    }
+
+    private takePendingUndoConflict(sessionId: string): PendingConflict | undefined {
+        return this.pendingConflictStore.take(sessionId);
+    }
+
+    private getPendingUndoConflictCount(): number {
+        return this.pendingConflictStore.size;
     }
 
     private async rmPathIfExists(targetPath: string): Promise<void> {

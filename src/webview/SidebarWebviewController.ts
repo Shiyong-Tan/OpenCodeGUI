@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { serializeUndoSegments, type SegmentState } from '../undo/UndoSegmentPersistence';
+import type { SegmentState } from '../undo/UndoSegmentPersistence';
 import type { UtilityCommandHandler } from './controllers/UtilityCommandController';
 import type { SessionCommandHandler } from './controllers/SessionCommandController';
 import type { TurnCommandHandler } from './controllers/TurnCommandController';
@@ -205,21 +205,13 @@ export function resolveSidebarWebviewView(
                         host.uiDebugChannel.appendLine(`[EXT][SEGMENT_INVARIANT_FAIL] reason=invalid-anchor-fallback-used noticeKey=${seg.noticeKey} fallbackAnchor=${anchorMsgId}`);
                     }
                     
-                    // Get or create segment map for this session
-                    let segMap = host.undoSegmentsBySession.get(sessionId);
-                    if (!segMap) {
-                        segMap = new Map<string, SegmentState>();
-                        host.undoSegmentsBySession.set(sessionId, segMap);
-                    }
-                    
-                    const beforeCount = segMap.size;
                     host.uiDebugChannel.appendLine(
                         `[EXT][SEG_UPSERT_RX] sessionId=${sessionId} noticeKey=${seg.noticeKey} ` +
                         `anchor=${anchorMsgId} end=${seg.endMsgId || anchorMsgId} members=${memberMsgIds.length}`
                     );
 
                     // Create/update segment
-                    const previousSegment = segMap.get(seg.noticeKey);
+                    const previousSegment = host.getUndoSegmentState(sessionId, seg.noticeKey);
                     const incomingRestoreAllowed = typeof seg.restoreAllowed === 'boolean' ? seg.restoreAllowed : undefined;
                     const nextRestoreAllowed = previousSegment?.restoreAllowed === false
                         ? false
@@ -257,16 +249,10 @@ export function resolveSidebarWebviewView(
                         updatedAt: Date.now()
                     };
                     
-                    segMap.set(seg.noticeKey, segmentState);
-                    
-                    // Save to globalState
-                    await host._context.globalState.update(
-                        host.UNDO_SEGMENTS_KEY,
-                        serializeUndoSegments(host.undoSegmentsBySession)
-                    );
+                    const saved = await host.setUndoSegmentState(sessionId, seg.noticeKey, segmentState);
                     
                     host.uiDebugChannel.appendLine(
-                        `[EXT][SEG_UPSERT_SAVE] sessionId=${sessionId} before=${beforeCount} after=${segMap.size}`
+                        `[EXT][SEG_UPSERT_SAVE] sessionId=${sessionId} before=${saved.before} after=${saved.after}`
                     );
                     host.uiDebugChannel.appendLine(
                         `[EXT][SEG_SAVE] noticeKey=${seg.noticeKey} restoreAllowed=${segmentState.restoreAllowed === true}`
@@ -284,18 +270,7 @@ export function resolveSidebarWebviewView(
                         break;
                     }
                     
-                    const segMap = host.undoSegmentsBySession.get(sessionId);
-                    const before = segMap?.size ?? 0;
-                    const deleted = segMap?.delete(noticeKey) ?? false;
-                    const after = segMap?.size ?? 0;
-                    
-                    if (deleted) {
-                        // Save to globalState
-                        await host._context.globalState.update(
-                            host.UNDO_SEGMENTS_KEY,
-                            serializeUndoSegments(host.undoSegmentsBySession)
-                        );
-                    }
+                    const { deleted, before, after } = await host.deleteUndoSegmentState(sessionId, noticeKey);
                     
                     host.uiDebugChannel.appendLine(
                         `[EXT][SEG_REMOVE_SAVE] sessionId=${sessionId} noticeKey=${noticeKey} ` +
@@ -317,17 +292,7 @@ export function resolveSidebarWebviewView(
                         `[EXT][SEG_DELETE_RX] sessionId=${sessionId} noticeKey=${noticeKey}`
                     );
 
-                    const segMap = host.undoSegmentsBySession.get(sessionId);
-                    const before = segMap?.size ?? 0;
-                    const deleted = segMap?.delete(noticeKey) ?? false;
-                    const after = segMap?.size ?? 0;
-
-                    if (deleted) {
-                        await host._context.globalState.update(
-                            host.UNDO_SEGMENTS_KEY,
-                            serializeUndoSegments(host.undoSegmentsBySession)
-                        );
-                    }
+                    const { before, after } = await host.deleteUndoSegmentState(sessionId, noticeKey);
 
                     host.uiDebugChannel.appendLine(
                         `[EXT][SEG_DELETE_SAVE] sessionId=${sessionId} before=${before} after=${after}`
@@ -350,7 +315,7 @@ export function resolveSidebarWebviewView(
                         return;
                     }
                     const ownerSessionId = payloadSessionId;
-                    const resolvedMessageId = host.clientMessageIdMap.get(payloadMessageId) || payloadMessageId;
+                    const resolvedMessageId = host.resolveUndoMessageId(payloadMessageId);
                     host.uiDebugChannel.appendLine(`[EXT][UNDO_ROUTE] phase=owner-captured ownerSessionId=${ownerSessionId} opId=${operationId} anchorMsgId=${resolvedMessageId}`);
                     if (!host.gitUndoEnabled) {
                         host.uiDebugChannel.appendLine(`[EXT][UNDO_TX] type=addResponse sessionId=${ownerSessionId} opId=${operationId}`);
@@ -396,7 +361,7 @@ export function resolveSidebarWebviewView(
                         host.uiDebugChannel.appendLine(`[EXT][UNDO_DONE] applied=${result.applied} conflicts=${result.conflicts.length} sessionId=${ownerSessionId}`);
                             if (!result.applied && result.conflicts.length) {
                                 const conflictId = host.createConflictId('undo', operationId);
-                                host.pendingConflictStore.set({
+                                host.setPendingUndoConflict({
                                     kind: 'undo',
                                     sessionId: ownerSessionId,
                                     operationId,
@@ -482,14 +447,9 @@ export function resolveSidebarWebviewView(
                                 operationId: previousSegment.operationId
                             };
                             if (trimmedPrevIds.length) {
-                                host.revertedSegmentHistoryStore.update(ownerSessionId, (entries: any[]) => [...entries, historyEntry]);
+                                host.appendRevertedSegmentHistory(ownerSessionId, historyEntry);
                             }
-                            host.revertedSegmentHistoryStore.update(ownerSessionId, (entries: any[]) => entries
-                                .map((e: any) => ({
-                                    ...e,
-                                    messageIds: (e.messageIds ?? []).filter((id: string) => !currentSet.has(id))
-                                }))
-                                .filter((e: any) => (e.messageIds ?? []).length > 0));
+                            host.trimRevertedSegmentHistory(ownerSessionId, currentSet);
                         }
                         const segment = host.client.getRevertedSegment(ownerSessionId);
                         const liveWebview = host._view?.webview || activeWebview;
@@ -532,7 +492,7 @@ export function resolveSidebarWebviewView(
                                     collapsed: uiSegment.collapsed,
                                     messageIds: uiSegment.messageIds,
                                     operationId,
-                                    historySegments: host.revertedSegmentHistoryStore.get(ownerSessionId)
+                                    historySegments: host.getRevertedSegmentHistory(ownerSessionId)
                                 },
                                 sessionId: finalSessionId,
                                 operationId,
@@ -607,7 +567,7 @@ export function resolveSidebarWebviewView(
                         const result = await host.client.restoreAll({ sessionId: ownerSessionId });
                         if (!result.applied && result.conflicts.length) {
                             const conflictId = host.createConflictId('restore', operationId);
-                            host.pendingConflictStore.set({ kind: 'restore', sessionId: ownerSessionId, operationId, conflictId, noticeKey });
+                            host.setPendingUndoConflict({ kind: 'restore', sessionId: ownerSessionId, operationId, conflictId, noticeKey });
                             const liveWebview = host._view?.webview || activeWebview;
                             host.uiDebugChannel.appendLine(`[EXT][RESTORE_TX] type=conflictCard sessionId=${ownerSessionId} opId=${operationId} conflictId=${conflictId} kind=restore noticeKey=${noticeKey || 'null'}`);
                             liveWebview.postMessage({
@@ -637,7 +597,7 @@ export function resolveSidebarWebviewView(
                         host.uiDebugChannel.appendLine(`[EXT][RESTORE_TX] type=revertedSegmentDiscarded sessionId=${ownerSessionId} opId=${operationId}`);
                         activeWebview.postMessage({
                             type: 'revertedSegmentDiscarded',
-                            segment: discardedSegment ? { ...discardedSegment, historySegments: host.revertedSegmentHistoryStore.get(ownerSessionId) } : discardedSegment,
+                            segment: discardedSegment ? { ...discardedSegment, historySegments: host.getRevertedSegmentHistory(ownerSessionId) } : discardedSegment,
                             sessionId: ownerSessionId,
                             operationId
                         });
@@ -678,8 +638,9 @@ export function resolveSidebarWebviewView(
                     host.uiDebugChannel.appendLine(`[EXT][RESTORE_ROUTE] phase=owner-captured type=restoreSegment ownerSessionId=${ownerSessionId} opId=${operationId} noticeKey=${noticeKey || 'null'} anchorMsgId=${anchorMsgId} endMsgId=${endMsgId || 'null'}`);
                     try {
                         const currentSegment = host.client.getRevertedSegment(ownerSessionId);
-                        const segMap = host.undoSegmentsBySession.get(ownerSessionId);
-                        const persistedSegment = noticeKey ? segMap?.get(noticeKey) : undefined;
+                        const persistedSegment = noticeKey
+                            ? host.getUndoSegmentState(ownerSessionId, noticeKey)
+                            : undefined;
                         const messageIds = Array.isArray(persistedSegment?.memberMsgIds) && persistedSegment?.memberMsgIds?.length
                             ? persistedSegment.memberMsgIds
                             : (Array.isArray(currentSegment?.messageIds) ? currentSegment?.messageIds : []);
@@ -710,7 +671,7 @@ export function resolveSidebarWebviewView(
                             );
                         } else if (result.conflicts.length) {
                             const conflictId = host.createConflictId('restoreSegment', operationId);
-                            host.pendingConflictStore.set({ kind: 'restoreSegment', sessionId: ownerSessionId, operationId, conflictId, startMessageId: anchorMsgId, endMessageId: endMsgId, noticeKey });
+                            host.setPendingUndoConflict({ kind: 'restoreSegment', sessionId: ownerSessionId, operationId, conflictId, startMessageId: anchorMsgId, endMessageId: endMsgId, noticeKey });
                             host.uiDebugChannel.appendLine(`[EXT][RESTORE_TX] type=conflictCard sessionId=${ownerSessionId} opId=${operationId} conflictId=${conflictId} kind=restoreSegment noticeKey=${noticeKey || 'null'} anchorMsgId=${anchorMsgId} endMsgId=${endMsgId || 'null'}`);
                             liveWebview.postMessage({
                                 type: 'conflictCard',
@@ -744,10 +705,10 @@ export function resolveSidebarWebviewView(
                     host.uiDebugChannel.appendLine(`[EXT][CONFLICT_ROUTE] phase=rx decision=${decision || 'null'} payloadSessionId=${payloadSessionId || 'null'} currentSessionId=${host.currentSessionId || 'null'} opId=${operationId || 'null'} conflictId=${conflictId || 'null'} kind=${kind || 'null'}`);
                     if (!decision || !payloadSessionId || !operationId || !conflictId || !kind) {
                         const missing = [!decision ? 'decision' : undefined, !payloadSessionId ? 'sessionId' : undefined, !operationId ? 'operationId' : undefined, !conflictId ? 'conflictId' : undefined, !kind ? 'kind' : undefined].filter(Boolean).join(',');
-                        host.uiDebugChannel.appendLine(`[EXT][CONFLICT_DROP] reason=missing-${missing} payloadSessionId=${payloadSessionId || 'null'} opId=${operationId || 'null'} conflictId=${conflictId || 'null'} kind=${kind || 'null'} pendingCount=${host.pendingConflictStore.size}`);
+                        host.uiDebugChannel.appendLine(`[EXT][CONFLICT_DROP] reason=missing-${missing} payloadSessionId=${payloadSessionId || 'null'} opId=${operationId || 'null'} conflictId=${conflictId || 'null'} kind=${kind || 'null'} pendingCount=${host.getPendingUndoConflictCount()}`);
                         break;
                     }
-                    const pendingConflict = host.pendingConflictStore.get(payloadSessionId);
+                    const pendingConflict = host.getPendingUndoConflict(payloadSessionId);
                     if (!pendingConflict) {
                         host.uiDebugChannel.appendLine(`[EXT][CONFLICT_DROP] reason=no-pending sessionId=${payloadSessionId} opId=${operationId} conflictId=${conflictId} kind=${kind} decision=${decision}`);
                         break;
@@ -760,7 +721,7 @@ export function resolveSidebarWebviewView(
                         host.uiDebugChannel.appendLine(`[EXT][CONFLICT_DROP] reason=owner-mismatch payloadSessionId=${payloadSessionId} payloadOpId=${operationId} payloadConflictId=${conflictId} payloadKind=${kind} pendingSessionId=${pendingConflict.sessionId} pendingOpId=${pendingConflict.operationId} pendingConflictId=${pendingConflict.conflictId} pendingKind=${pendingConflict.kind} decision=${decision}`);
                         break;
                     }
-                    const conflictContext = host.pendingConflictStore.take(payloadSessionId);
+                    const conflictContext = host.takePendingUndoConflict(payloadSessionId);
                     if (!conflictContext) break;
                     const ownerSessionId = conflictContext.sessionId;
                     host.uiDebugChannel.appendLine(`[EXT][CONFLICT_ROUTE] phase=owner-validated sessionId=${ownerSessionId} opId=${conflictContext.operationId} conflictId=${conflictContext.conflictId} kind=${conflictContext.kind} decision=${decision}`);
@@ -810,7 +771,7 @@ export function resolveSidebarWebviewView(
                                     messageIds: previousSegment.messageIds,
                                     operationId: previousSegment.operationId
                                 };
-                                host.revertedSegmentHistoryStore.update(ownerSessionId, (entries: any[]) => [...entries, historyEntry]);
+                                host.appendRevertedSegmentHistory(ownerSessionId, historyEntry);
                             }
                             const segment = host.client.getRevertedSegment(ownerSessionId);
                             if (segment) {
@@ -830,7 +791,7 @@ export function resolveSidebarWebviewView(
                                         collapsed: segment.collapsed,
                                         messageIds: segment.messageIds,
                                         operationId: conflictContext.operationId,
-                                        historySegments: host.revertedSegmentHistoryStore.get(ownerSessionId)
+                                        historySegments: host.getRevertedSegmentHistory(ownerSessionId)
                                     },
                                     sessionId: ownerSessionId,
                                     operationId: conflictContext.operationId,
@@ -844,13 +805,13 @@ export function resolveSidebarWebviewView(
                         }
                         if (conflictContext.kind === 'restore') {
                             const result = await host.client.restoreAll({ force: true, sessionId: ownerSessionId });
-                            host.revertedSegmentHistoryStore.clearSession(ownerSessionId);
+                            host.clearRevertedSegmentHistory(ownerSessionId);
                             host.uiDebugChannel.appendLine(`[EXT][CONFLICT_TX] type=revertedSegment sessionId=${ownerSessionId} opId=${conflictContext.operationId} conflictId=${conflictContext.conflictId} kind=restore`);
                             activeWebview.postMessage({
                                 type: 'revertedSegment',
                                 conflicts: result.conflicts || [],
                                 segment: {
-                                    historySegments: host.revertedSegmentHistoryStore.get(ownerSessionId),
+                                    historySegments: host.getRevertedSegmentHistory(ownerSessionId),
                                     messageIds: [],
                                     isActive: false,
                                     discarded: false,
@@ -869,7 +830,7 @@ export function resolveSidebarWebviewView(
                             host.uiDebugChannel.appendLine(`[EXT][CONFLICT_TX] type=revertedSegmentDiscarded sessionId=${ownerSessionId} opId=${conflictContext.operationId} conflictId=${conflictContext.conflictId} kind=restore`);
                             activeWebview.postMessage({
                                 type: 'revertedSegmentDiscarded',
-                                segment: discardedSegment ? { ...discardedSegment, historySegments: host.revertedSegmentHistoryStore.get(ownerSessionId) } : discardedSegment,
+                                segment: discardedSegment ? { ...discardedSegment, historySegments: host.getRevertedSegmentHistory(ownerSessionId) } : discardedSegment,
                                 sessionId: ownerSessionId,
                                 operationId: conflictContext.operationId,
                                 conflictId: conflictContext.conflictId
@@ -881,8 +842,9 @@ export function resolveSidebarWebviewView(
                         }
                         if (conflictContext.kind === 'restoreSegment' && conflictContext.startMessageId) {
                             const currentSegment = host.client.getRevertedSegment(ownerSessionId);
-                            const segMap = host.undoSegmentsBySession.get(ownerSessionId);
-                            const persistedSegment = conflictContext.noticeKey ? segMap?.get(conflictContext.noticeKey) : undefined;
+                            const persistedSegment = conflictContext.noticeKey
+                                ? host.getUndoSegmentState(ownerSessionId, conflictContext.noticeKey)
+                                : undefined;
                             const messageIds = Array.isArray(persistedSegment?.memberMsgIds) && persistedSegment?.memberMsgIds?.length
                                 ? persistedSegment.memberMsgIds
                                 : (Array.isArray(currentSegment?.messageIds) ? currentSegment?.messageIds : []);
@@ -934,7 +896,7 @@ export function resolveSidebarWebviewView(
                     const discardedSegment = host.client.getRevertedSegment(sessionId);
                     activeWebview.postMessage({
                         type: 'revertedSegmentDiscarded',
-                        segment: discardedSegment ? { ...discardedSegment, historySegments: host.revertedSegmentHistoryStore.get(sessionId) } : discardedSegment,
+                        segment: discardedSegment ? { ...discardedSegment, historySegments: host.getRevertedSegmentHistory(sessionId) } : discardedSegment,
                         sessionId
                     });
                     host.postAddResponse(activeWebview, 'Reverted segment discarded.', { sessionId });
@@ -958,7 +920,7 @@ export function resolveSidebarWebviewView(
                     activeWebview.postMessage({
                         type: 'revertedSegmentState',
                         segment: segment
-                            ? { ...segment, historySegments: host.revertedSegmentHistoryStore.get(sessionId) }
+                            ? { ...segment, historySegments: host.getRevertedSegmentHistory(sessionId) }
                             : null,
                         sessionId
                     });

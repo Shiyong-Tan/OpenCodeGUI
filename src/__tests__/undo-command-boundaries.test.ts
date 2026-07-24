@@ -17,6 +17,10 @@ const turnControllerSource = fs.readFileSync(
     path.join(process.cwd(), 'src', 'webview', 'controllers', 'TurnCommandController.ts'),
     'utf8',
 );
+const providerSource = fs.readFileSync(
+    path.join(process.cwd(), 'src', 'SidebarProvider.ts'),
+    'utf8',
+);
 
 function extractRange(startMarker: string, endMarker: string): string {
     const start = topControllerSource.indexOf(startMarker);
@@ -33,6 +37,29 @@ function expectOrder(source: string, markers: string[]): void {
         expect(index).toBeGreaterThan(previous);
         previous = index;
     }
+}
+
+function extractProviderMethod(marker: string): string {
+    const start = providerSource.indexOf(marker);
+    expect(start).toBeGreaterThanOrEqual(0);
+    const bodyStart = providerSource.indexOf('{', start);
+    expect(bodyStart).toBeGreaterThan(start);
+    let depth = 0;
+    for (let index = bodyStart; index < providerSource.length; index += 1) {
+        if (providerSource[index] === '{') depth += 1;
+        if (providerSource[index] === '}' && --depth === 0) {
+            return providerSource.slice(start, index + 1);
+        }
+    }
+    throw new Error(`Unclosed provider method: ${marker}`);
+}
+
+function extractProviderRange(startMarker: string, endMarker: string): string {
+    const start = providerSource.indexOf(startMarker);
+    expect(start).toBeGreaterThanOrEqual(0);
+    const end = providerSource.indexOf(endMarker, start + startMarker.length);
+    expect(end).toBeGreaterThan(start);
+    return providerSource.slice(start, end);
 }
 
 describe('undo command family characterization', () => {
@@ -63,13 +90,10 @@ describe('undo command family characterization', () => {
             "const sessionId = typeof data.sessionId === 'string' ? data.sessionId : ''",
             'const memberMsgIds =',
             'const anchorMsgId =',
-            'let segMap = host.undoSegmentsBySession.get(sessionId)',
-            'const previousSegment = segMap.get(seg.noticeKey)',
+            'const previousSegment = host.getUndoSegmentState(sessionId, seg.noticeKey)',
             'const nextRestoreAllowed = previousSegment?.restoreAllowed === false',
             'const segmentState: SegmentState =',
-            'segMap.set(seg.noticeKey, segmentState)',
-            'await host._context.globalState.update(',
-            'serializeUndoSegments(host.undoSegmentsBySession)',
+            'await host.setUndoSegmentState(sessionId, seg.noticeKey, segmentState)',
         ]);
         expect(block).toContain("id.startsWith('msg_')");
         expect(block).toContain('previousSegment?.restoreAllowed === false');
@@ -85,12 +109,8 @@ describe('undo command family characterization', () => {
             expectOrder(block, [
                 "const sessionId = typeof data.sessionId === 'string' ? data.sessionId : ''",
                 "const noticeKey = typeof data.noticeKey === 'string' ? data.noticeKey : ''",
-                'const segMap = host.undoSegmentsBySession.get(sessionId)',
-                'const deleted = segMap?.delete(noticeKey) ?? false',
-                'if (deleted)',
-                'await host._context.globalState.update(',
+                'await host.deleteUndoSegmentState(sessionId, noticeKey)',
             ]);
-            expect(block.match(/globalState\.update\(/g)).toHaveLength(1);
             expect(block).not.toContain('host.currentSessionId');
         }
     });
@@ -103,7 +123,7 @@ describe('undo command family characterization', () => {
             'const payloadMessageId =',
             'if (!payloadSessionId || !operationId || !payloadMessageId)',
             'const ownerSessionId = payloadSessionId',
-            'const resolvedMessageId = host.clientMessageIdMap.get(payloadMessageId) || payloadMessageId',
+            'const resolvedMessageId = host.resolveUndoMessageId(payloadMessageId)',
             'const result = await host.client.undoFromMessage(resolvedMessageId,',
         ]);
         expect(block).toContain('sessionId: ownerSessionId');
@@ -117,7 +137,7 @@ describe('undo command family characterization', () => {
         expectOrder(block, [
             'const result = await host.client.undoFromMessage(',
             'if (!result.applied && result.conflicts.length)',
-            'host.pendingConflictStore.set({',
+            'host.setPendingUndoConflict({',
             "type: 'conflictCard'",
             'if (!result.applied && !result.conflicts.length)',
             'host.resolveUndoUiVisibleRange(',
@@ -141,7 +161,7 @@ describe('undo command family characterization', () => {
             'await host.resolveChangeListCommits(ownerSessionId',
             'const result = await host.client.restoreAll({ sessionId: ownerSessionId })',
             'if (!result.applied && result.conflicts.length)',
-            'host.pendingConflictStore.set({',
+            'host.setPendingUndoConflict({',
             "type: 'conflictCard'",
             "type: 'restoredSegment'",
             'host.client.discardRevertedSegment(ownerSessionId)',
@@ -162,7 +182,8 @@ describe('undo command family characterization', () => {
             'const anchorMsgId =',
             'const noticeKey =',
             'const ownerSessionId = payloadSessionId',
-            'const persistedSegment = noticeKey ? segMap?.get(noticeKey)',
+            'const persistedSegment = noticeKey',
+            'host.getUndoSegmentState(ownerSessionId, noticeKey)',
             'const messageIds = Array.isArray(persistedSegment?.memberMsgIds)',
             'const restoreScope = host.buildRestoreMessageScope(',
             'await host.resolveChangeListCommits(ownerSessionId, restoreScope.activeRestoreMessageIds',
@@ -172,7 +193,7 @@ describe('undo command family characterization', () => {
             'if (result.applied)',
             'await host.applyRestoreSegmentSuccess(',
             'if (result.conflicts.length)',
-            'host.pendingConflictStore.set({',
+            'host.setPendingUndoConflict({',
         ]);
         expect(block.match(/await host\.client\.restoreFromMessage\(/g)).toHaveLength(1);
         expect(block).toContain('sessionId: ownerSessionId');
@@ -185,9 +206,9 @@ describe('undo command family characterization', () => {
             'const operationId =',
             'const conflictId =',
             'const kind =',
-            'const pendingConflict = host.pendingConflictStore.get(payloadSessionId)',
+            'const pendingConflict = host.getPendingUndoConflict(payloadSessionId)',
             'pendingConflict.operationId !== operationId',
-            'const conflictContext = host.pendingConflictStore.take(payloadSessionId)',
+            'const conflictContext = host.takePendingUndoConflict(payloadSessionId)',
             'const ownerSessionId = conflictContext.sessionId',
             "if (decision === 'cancel' || decision === 'skip')",
         ]);
@@ -239,5 +260,47 @@ describe('undo command family characterization', () => {
             "type: 'revertedSegmentState'",
         ]);
         expect(collapse).not.toContain('host.currentSessionId');
+    });
+
+    test('routes undo-owned registry access through provider domain methods', () => {
+        const blocks = extractRange('case "undoSegmentUpsert"', 'case "ui-debug"');
+        for (const registry of [
+            'undoSegmentsBySession',
+            'revertedSegmentHistoryStore',
+            'pendingConflictStore',
+            'clientMessageIdMap',
+            'UNDO_SEGMENTS_KEY',
+        ]) {
+            expect(blocks).not.toContain(`host.${registry}`);
+        }
+
+        const setSegment = extractProviderRange(
+            'private async setUndoSegmentState(',
+            'private async deleteUndoSegmentState('
+        );
+        expectOrder(setSegment, [
+            'let segments = this.undoSegmentsBySession.get(sessionId)',
+            'this.undoSegmentsBySession.set(sessionId, segments)',
+            'segments.set(noticeKey, segment)',
+            'await this.saveUndoSegmentsState()',
+        ]);
+
+        const deleteSegment = extractProviderRange(
+            'private async deleteUndoSegmentState(',
+            'private getRevertedSegmentHistory('
+        );
+        expectOrder(deleteSegment, [
+            'const segments = this.undoSegmentsBySession.get(sessionId)',
+            'const deleted = segments?.delete(noticeKey) ?? false',
+            'if (deleted)',
+            'await this.saveUndoSegmentsState()',
+        ]);
+
+        const takeConflict = extractProviderMethod('private takePendingUndoConflict(');
+        expect(takeConflict).toContain('return this.pendingConflictStore.take(sessionId)');
+        const appendHistory = extractProviderMethod('private appendRevertedSegmentHistory(');
+        expect(appendHistory).toContain(
+            'this.revertedSegmentHistoryStore.update(sessionId, (entries) => [...entries, entry])'
+        );
     });
 });
