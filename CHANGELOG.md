@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## 5.0.0
+
+### Long-session performance and history
+
+- Added TanStack-based virtualized chat rendering, keyed incremental reconciliation, bounded DOM budgets, and adaptive recovery to keep very long conversations responsive and substantially reduce WebView rendering pressure.
+- Added local-history reveal controls and a floating jump-to-latest button, while preserving search navigation, scroll anchors, active streaming content, and session-switch positioning across virtualized ranges.
+- Reworked reload recovery around snapshot-first continuity: saved UI state is restored in its exact timeline order, only messages newer than the snapshot are merged, and current turns continue to be persisted even when session export fails.
+- Fixed long-session blank-window, gray-screen, rapid-scroll, hydration, change-list anchoring, nested segment ordering, and code-block copy regressions.
+
+### Independent concurrent sessions
+
+- Rebuilt cross-session runtime ownership so each session behaves like an independent single-session chat and can run, stream, finalize, cancel, search, append, undo, and restore without another session stealing its state or selection.
+- Preserved active assistant turns and append chains across session switches, including atomic temporary-to-final assistant handoff without duplicate bubbles, stale presentation flashes, or misplaced follow-up output.
+- Scoped busy state, composer drafts, attachments, overlays, conflicts, subagent activity, asynchronous responses, message identities, and background finalization to their owning sessions.
+
+### Search, context, and media
+
+- Reworked Smart Search to inspect complete session snapshots, improve descriptive-query recall and reranking, remain compatible with virtualized history, and avoid depending on model tool access.
+- Added automatic editor context: the active file is attached visibly to the prompt, selected lines take priority, unsaved editor content is supported, context can be removed per prompt, and duplicate manual file references are suppressed.
+- Prioritized the active file and other open editor tabs at the top of `@` workspace file suggestions.
+- Added assistant image-reference previews for Markdown, full, relative, and abbreviated paths; successful references render as centered thumbnails and open the original image in the editor when clicked.
+
+### UI and interaction improvements
+
+- Added a theme-independent animated border for active assistant bubbles, including stable behavior across dark, light, and high-contrast themes and a reduced-motion fallback.
+- Improved append/steering presentation, session-transition stability, expanded undo segments, nested segment rendering, image layout, and transition jitter.
+
+### Architecture and reliability
+
+- Modularized the extension host and WebView into dedicated transport, server lifecycle, history, search, composer, rendering, continuation, change-list, undo, session-runtime, and command-controller components.
+- Added isolated feature, rendering, continuation, and undo bundles with deterministic build, size, source-map, and VSIX content-policy checks.
+- Expanded regression coverage for virtualization, snapshot continuity, cross-session interleavings, active-turn finalization, append handoff, undo/restore, search, editor context, image previews, and module ownership boundaries.
+
 ## 3.0.3
 
 - Fixed assistant text streaming/delta tracking by keying lengths per message part, avoiding dropped or incorrect chunks when multiple parts share a message.
