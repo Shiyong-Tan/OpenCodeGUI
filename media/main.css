@@ -2642,11 +2642,10 @@ select#mode-select {
 }
 
 .assistant-image-thumbnail {
-    display: inline-flex;
-    margin: 8px 0 8px 10px;
-    max-width: min(280px, 70%);
-    max-height: 180px;
-    vertical-align: middle;
+    display: flex;
+    width: 80%;
+    max-width: 80%;
+    margin: 10px auto;
     border: 1px solid var(--vscode-panel-border);
     border-radius: 8px;
     overflow: hidden;
@@ -2656,13 +2655,17 @@ select#mode-select {
 .assistant-image-thumbnail img,
 .assistant-image-inline {
     display: block;
-    max-width: min(420px, 100%);
-    max-height: 260px;
+    width: 100%;
+    height: auto;
+    max-width: 100%;
+    max-height: none;
     object-fit: contain;
 }
 
 .assistant-image-inline {
-    margin: 8px 0;
+    width: 80%;
+    max-width: 80%;
+    margin: 10px auto;
     border: 1px solid var(--vscode-panel-border);
     border-radius: 8px;
     cursor: pointer;
