@@ -3,6 +3,10 @@ import * as path from 'path';
 import { handleSidebarChatEvent } from '../events/SidebarChatEventHandler';
 
 describe('SidebarChatEventHandler', () => {
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
   test('SidebarProvider shadows around a single compatibility delegation', () => {
     const source = fs.readFileSync(path.join(process.cwd(), 'src', 'SidebarProvider.ts'), 'utf8');
     const start = source.indexOf('private async handleChatEvent(');
@@ -69,6 +73,39 @@ describe('SidebarChatEventHandler', () => {
       sessionId: 'session-A',
       assistantMsgId: 'msg_A',
       allowedSessionIds: ['session-A'],
+    }));
+  });
+
+  test('throttles duplicate background activity pulses per owned route', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(1_000);
+    const webview = { postMessage: jest.fn() };
+    const host = {
+      smartSearchSessions: { owns: () => false },
+      _view: { webview },
+      activeSubagentSessionIds: new Set(),
+      subagentProgressBySession: new Map(),
+    };
+    const pulse = {
+      type: 'backgroundActivityPulse',
+      sessionId: 'session-A',
+      parentSessionId: 'session-A',
+      agentSessionId: 'agent-A',
+      assistantMsgId: 'assistant-A',
+      displayTarget: 'parent',
+    } as any;
+
+    await handleSidebarChatEvent(host, pulse, webview as any);
+    jest.advanceTimersByTime(100);
+    await handleSidebarChatEvent(host, pulse, webview as any);
+    jest.advanceTimersByTime(150);
+    await handleSidebarChatEvent(host, pulse, webview as any);
+
+    expect(webview.postMessage).toHaveBeenCalledTimes(2);
+    expect(webview.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({
+      type: 'backgroundActivityPulse',
+      sessionId: 'session-A',
+      agentSessionId: 'agent-A',
     }));
   });
 

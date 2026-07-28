@@ -40,6 +40,7 @@ export function resolveSidebarWebviewView(
 
     webviewView.webview.onDidReceiveMessage(async (data) => {
         const activeWebview = lifecycleController.getActiveWebview(webviewView.webview);
+        lifecycleController.noteActivity(data, webviewView, panelId);
         try {
             const keys = data && typeof data === 'object' ? Object.keys(data).sort() : [];
             dependencies.log(

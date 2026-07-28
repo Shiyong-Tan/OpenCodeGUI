@@ -2,6 +2,36 @@ import type * as vscode from 'vscode';
 import * as pathModule from 'path';
 import type { ChatEvent, CommitPendingTurnChangesResult } from '../OpenCodeClient';
 
+const BACKGROUND_ACTIVITY_PULSE_FORWARD_INTERVAL_MS = 250;
+const backgroundActivityPulseForwardState = new WeakMap<object, Map<string, number>>();
+
+function shouldForwardBackgroundActivityPulse(host: object, event: ChatEvent): boolean {
+    let state = backgroundActivityPulseForwardState.get(host);
+    if (!state) {
+        state = new Map<string, number>();
+        backgroundActivityPulseForwardState.set(host, state);
+    }
+    const key = [
+        event.sessionId || '',
+        event.parentSessionId || '',
+        event.agentSessionId || '',
+        event.assistantMsgId || '',
+        event.displayTarget || '',
+    ].join('|');
+    const now = Date.now();
+    const previous = state.get(key) || 0;
+    if (now - previous < BACKGROUND_ACTIVITY_PULSE_FORWARD_INTERVAL_MS) {
+        return false;
+    }
+    state.set(key, now);
+    if (state.size > 512) {
+        for (const [candidate, timestamp] of state) {
+            if (now - timestamp > 10_000) state.delete(candidate);
+        }
+    }
+    return true;
+}
+
 /**
  * Adapts client chat events to Webview protocol messages. SidebarProvider remains
  * the lifecycle/state owner and is passed explicitly as the host.
@@ -474,6 +504,7 @@ export async function handleSidebarChatEvent(
         }
 
         if (event.type === 'backgroundActivityPulse' && event.sessionId) {
+            if (!shouldForwardBackgroundActivityPulse(host, event)) return;
             const liveWebview = host._view?.webview || webview;
             liveWebview.postMessage({
                 type: 'backgroundActivityPulse',

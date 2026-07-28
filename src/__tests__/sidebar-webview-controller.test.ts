@@ -62,6 +62,7 @@ describe('SidebarWebviewController', () => {
 
   test('registers message, visibility, and disposal lifecycles once', () => {
     const callbacks: Record<string, Function> = {};
+    const noteActivity = jest.fn();
     const webview: any = {
       options: {}, html: '',
       onDidReceiveMessage: (callback: Function) => { callbacks.message = callback; },
@@ -100,6 +101,7 @@ describe('SidebarWebviewController', () => {
         lifecycleController: {
           begin: (targetView: any) => host.beginWebviewLifecycleResolution(targetView),
           getActiveWebview: (fallback: any) => host.getLifecycleActiveWebview(fallback),
+          noteActivity,
           handleCommand: () => false,
           handleVisibility: (targetView: any) => host.handleWebviewLifecycleVisibility(targetView),
           handleDispose: (panelId: string) => host.handleWebviewLifecycleDispose(panelId),
@@ -110,5 +112,11 @@ describe('SidebarWebviewController', () => {
     expect(webview.options).toEqual({ enableScripts: true, localResourceRoots: [{}] });
     expect(webview.html).toBe('<html></html>');
     expect(Object.keys(callbacks).sort()).toEqual(['dispose', 'message', 'visibility']);
+    void callbacks.message({ type: 'getAutoEditorContext' });
+    expect(noteActivity).toHaveBeenCalledWith(
+      { type: 'getAutoEditorContext' },
+      view,
+      'panel-1',
+    );
   });
 });

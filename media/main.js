@@ -2094,6 +2094,14 @@ function scheduleCoalescedSessionMetadataRender(sessionId, reason, options) {
     return sessionRenderScheduler.schedule(sessionId, reason, options || {});
 }
 
+function richContentStateFingerprint(value) {
+    try {
+        return JSON.stringify(value);
+    } catch {
+        return '';
+    }
+}
+
 function disposeSessionMetadataRenderStates() {
     sessionRenderScheduler.dispose();
 }
@@ -12626,6 +12634,9 @@ function handleAssistantMeta(sessionId, message, options = {}) {
                 return;
             }
             if (message?.isStatusUpdate) {
+                const previousText = typeof target.text === 'string' ? target.text : '';
+                const previousStatusText = typeof target.meta?.statusText === 'string' ? target.meta.statusText : '';
+                const previousThinking = target.meta?.isThinking === true;
                 // When a tool call arrives, finalize current speech segment
                 if (target.meta && target.meta.currentSegment && target.meta.currentSegment.trim()) {
                     target.meta.textSegments = [...(target.meta.textSegments || []), target.meta.currentSegment];
@@ -12636,11 +12647,19 @@ function handleAssistantMeta(sessionId, message, options = {}) {
                 const statusText = typeof message.lastText === 'string' ? message.lastText : '';
                 // isStatusUpdate: statusText only to avoid flicker. (isStatusUpdate statusText)
                 target.meta = { ...target.meta, internalId: backendId, isThinking: true, statusText };
-                const statusEl = options.render === false ? null : document.querySelector(`[data-message-id="${targetId}"] .message-status`);
-                if (statusEl) {
-                    statusEl.textContent = statusText;
-                } else {
-                    renderIfActive(sessionId, 'assistantMessageMeta:status');
+                const textChanged = previousText !== (typeof target.text === 'string' ? target.text : '');
+                const visualChanged = textChanged || previousStatusText !== statusText || !previousThinking;
+                if (!visualChanged) {
+                    return { skipRender: true, reason: 'duplicate-status' };
+                }
+                const statusEl = options.render === false ? null : document.querySelector(`[data-message-id="${targetId}"] > .message-status`);
+                if (!textChanged && statusEl) {
+                    if (statusText) statusEl.textContent = statusText;
+                    else statusEl.remove();
+                    chatWindowState.adapter?.invalidateMeasurement?.(targetId);
+                    scrollToBottom(true);
+                    vscode.postMessage({ type: 'ui-debug', payload: ['handleAssistantMeta', 'status-update-local', targetId] });
+                    return { skipRender: true, reason: 'status-dom-patched' };
                 }
                 vscode.postMessage({ type: 'ui-debug', payload: ['handleAssistantMeta', 'status-update', targetId] });
             } else {
@@ -12651,6 +12670,9 @@ function handleAssistantMeta(sessionId, message, options = {}) {
                     return;
                 }
                 console.log(`[ASSIST_META] replace mode | key=${targetId} | textLen=${typeof message.lastText === 'string' ? message.lastText.length : 0} | streaming=true`);
+                const previousText = typeof target.text === 'string' ? target.text : '';
+                const previousStatusText = typeof target.meta?.statusText === 'string' ? target.meta.statusText : '';
+                const previousThinking = target.meta?.isThinking === true;
                 const hasNonEmptyLastText = typeof message.lastText === 'string' && message.lastText.trim().length > 0;
                 const nextText = hasNonEmptyLastText ? message.lastText : target.text;
                 const normalized = typeof nextText === 'string' ? nextText.trim() : '';
@@ -12672,12 +12694,19 @@ function handleAssistantMeta(sessionId, message, options = {}) {
                     const segmentsLen = Array.isArray(target.meta?.textSegments) ? target.meta.textSegments.length : 0;
                     emitTempFinalTrace('meta.replace.reset', [`targetId=${targetId}`, `textLen=${typeof nextText === 'string' ? nextText.length : 0}`, `segments=${segmentsLen}`]);
                 }
+                const visualChanged =
+                    previousText !== (typeof target.text === 'string' ? target.text : '')
+                    || previousStatusText !== ''
+                    || !previousThinking;
+                if (!visualChanged) {
+                    return { skipRender: true, reason: 'duplicate-meta' };
+                }
                 vscode.postMessage({ type: 'ui-debug', payload: ['handleAssistantMeta', 'merged', targetId] });
-                renderIfActive(sessionId, 'assistantMessageMeta:merge');
             }
         }
 
         assertInvariants(sessionId, 'assistantMeta');
+        return { skipRender: false, reason: 'state-changed' };
     }
 
 function handleChatChunk(sessionId, message) {
@@ -14007,6 +14036,17 @@ function appendMessageImages(parentEl, message) {
               const doneJustNowCount = filteringAppendPredecessor
                 ? visibleAgents.filter((a) => a?.state === 'done').length
                 : (typeof message.doneJustNowCount === 'number' ? message.doneJustNowCount : visibleAgents.filter((a) => a?.state === 'done').length);
+              const subagentStatusFingerprint = richContentStateFingerprint({
+                targetId: currentThinking?.id || null,
+                agents: sess?.activeSubagents || visibleAgents,
+                runningCount,
+                finalizingCount,
+                doneJustNowCount
+              });
+              if (sess?.lastSubagentStatusFingerprint === subagentStatusFingerprint) {
+                break;
+              }
+              if (sess) sess.lastSubagentStatusFingerprint = subagentStatusFingerprint;
 
               const excludedPredecessorCount = Math.max(0, incomingAgents.length - visibleAgents.length);
               const subagentStatusFields = [
@@ -15121,9 +15161,9 @@ function appendMessageImages(parentEl, message) {
                     });
                     break;
                 }
-                handleAssistantMeta(sessionId, message, { render: route.shouldRender });
+                const assistantMetaResult = handleAssistantMeta(sessionId, message, { render: route.shouldRender });
                 // Removed: reconcilePendingSegments - new system uses applyHydratedSegments
-                if (!tryPatchAssistantStreamingBubble(sessionId, 'assistantMessageMeta').applied) {
+                if (!assistantMetaResult?.skipRender && !tryPatchAssistantStreamingBubble(sessionId, 'assistantMessageMeta').applied) {
                     renderIfActive(sessionId, 'assistantMessageMeta', { scroll: true });
                 }
                 logSessionState(sessionId, 'assistantMessageMeta');
@@ -15551,6 +15591,9 @@ function appendMessageImages(parentEl, message) {
                 }
                 if (!msg) break;
                 if (!msg.meta) msg.meta = {};
+                if (richContentStateFingerprint(msg.meta.todos || []) === richContentStateFingerprint(todos)) {
+                    break;
+                }
                 msg.meta.todos = todos;
                 scheduleCoalescedSessionMetadataRender(sessionId, 'todoUpdate-coalesced');
                 break;

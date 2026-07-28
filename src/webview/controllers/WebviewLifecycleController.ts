@@ -52,6 +52,11 @@ export interface WebviewLifecycleHost {
     completeHardRescueSuccess(pending: LifecycleHardRescueContext): void;
     startLivenessProbes(): void;
     triggerLivenessProbe(reason: string): Promise<void>;
+    noteActivity(
+        data: unknown,
+        webviewView: vscode.WebviewView,
+        panelId: string
+    ): void;
     handleLivenessAck(data: unknown): void;
     handleAutoRescueAck(data: unknown): void;
     handleVisibility(webviewView: vscode.WebviewView): void;
@@ -62,6 +67,11 @@ export interface WebviewLifecycleHost {
 export interface WebviewLifecycleController {
     begin(webviewView: vscode.WebviewView): string;
     getActiveWebview(fallback: vscode.Webview): vscode.Webview;
+    noteActivity(
+        data: unknown,
+        webviewView: vscode.WebviewView,
+        panelId: string
+    ): void;
     handleCommand(
         data: any,
         activeWebview: vscode.Webview,
@@ -86,6 +96,8 @@ export function createWebviewLifecycleController(
     return {
         begin: (webviewView) => host.beginResolution(webviewView),
         getActiveWebview: (fallback) => host.getActiveWebview(fallback) || fallback,
+        noteActivity: (data, webviewView, panelId) =>
+            host.noteActivity(data, webviewView, panelId),
         handleCommand: (data, activeWebview, _registeredWebview, webviewView, panelId) => {
             if (!LIFECYCLE_COMMANDS.has(data?.type)) {
                 return false;

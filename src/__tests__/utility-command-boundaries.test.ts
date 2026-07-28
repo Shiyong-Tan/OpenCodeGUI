@@ -187,6 +187,7 @@ function createHarness(overrides: Record<string, unknown> = {}) {
             lifecycleController: {
                 begin: (targetView: any) => host.beginWebviewLifecycleResolution(targetView),
                 getActiveWebview: (fallback: any) => host.getLifecycleActiveWebview(fallback),
+                noteActivity: jest.fn(),
                 handleCommand: () => false,
                 handleVisibility: jest.fn(),
                 handleDispose: jest.fn(),

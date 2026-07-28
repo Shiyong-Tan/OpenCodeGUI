@@ -214,6 +214,13 @@ describe('Webview lifecycle command family characterization', () => {
             "case 'ui-debug'"
         );
         expect(rescue.match(/host\.handleAutoRescueAck\(data\)/g)).toHaveLength(1);
+        expect(controllerSource).toContain(
+            'lifecycleController.noteActivity(data, webviewView, panelId)'
+        );
+        expect(providerSource).toContain(
+            "classification=${lateSameToken ? 'late-same-token' : 'exact'}"
+        );
+        expect(providerSource).toContain('private noteWebviewLivenessActivity(');
     });
 
     test('restarts visible lifecycle only after clearing the init gate', () => {
@@ -308,6 +315,7 @@ describe('Webview lifecycle command family characterization', () => {
             triggerLivenessProbe: jest.fn(async () => {
                 order.push('trigger-probe');
             }),
+            noteActivity: jest.fn(),
             handleLivenessAck: jest.fn(),
             handleAutoRescueAck: jest.fn(),
             handleVisibility: jest.fn(),
@@ -350,6 +358,16 @@ describe('Webview lifecycle command family characterization', () => {
         );
         expect(host.handleLivenessAck).toHaveBeenCalledTimes(1);
         expect(host.handleAutoRescueAck).toHaveBeenCalledTimes(1);
+        lifecycle.noteActivity(
+            { type: 'appendMessage' },
+            view,
+            'panel-1'
+        );
+        expect(host.noteActivity).toHaveBeenCalledWith(
+            { type: 'appendMessage' },
+            view,
+            'panel-1'
+        );
 
         lifecycle.handleVisibility(view);
         lifecycle.handleDispose('panel-1');

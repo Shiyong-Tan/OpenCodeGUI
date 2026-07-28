@@ -2509,8 +2509,57 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const record = this.webviewLivenessCurrent;
         const pingId = typeof data?.pingId === 'string' ? data.pingId : '';
         const token = typeof data?.token === 'string' ? data.token : '';
-        if (!record || record.pingId !== pingId || record.token !== token || !this.isCurrentWebviewLivenessRecord(record)) {
+        const sameSession = !data?.sessionId || data.sessionId === record?.sessionId;
+        const samePanel = !data?.panelId || data.panelId === record?.panelId;
+        const sameWebview = !data?.webviewInstanceId || data.webviewInstanceId === record?.webviewInstanceId;
+        if (!record || record.token !== token || !sameSession || !samePanel || !sameWebview || !this.isCurrentWebviewLivenessRecord(record)) {
             this.uiDebugChannel.appendLine(`EXT: webviewLiveness.ack.drop | reason=stale-or-mismatch | pingId=${pingId || 'null'} | token=${token || 'null'} | currentToken=${record?.token || 'none'} | currentPingId=${record?.pingId || 'none'} | sessionId=${data?.sessionId || 'null'}`);
+            return;
+        }
+        const lateSameToken = record.pingId !== pingId;
+        record.ackAt = Date.now();
+        for (const attempt of this.webviewAutoRescuePendingAttemptById.values()) {
+            if (attempt.sessionId === record.sessionId && attempt.panelId === record.panelId && attempt.token === record.token) {
+                attempt.lastLivenessAckAt = record.ackAt;
+            }
+        }
+        this.webviewLivenessMissedAckCountByToken.delete(record.token);
+        if (!this.getWebviewLivenessActiveTurnFlags(record.sessionId).active) {
+            this.webviewLivenessSimulatedMissedAckCountByToken.delete(record.token);
+        }
+        this.uiDebugChannel.appendLine(`EXT: webviewLiveness.ack | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | pingId=${pingId} | currentPingId=${record.pingId || 'none'} | classification=${lateSameToken ? 'late-same-token' : 'exact'} | rttMs=${record.pingSentAt ? record.ackAt - record.pingSentAt : -1}`);
+        const promptMeta = record.notificationToken
+            ? this.webviewAutoRescuePromptMetaByNotificationToken.get(record.notificationToken)
+            : undefined;
+        if (promptMeta && !promptMeta.handled && !promptMeta.expired) {
+            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.notification.ackDeferredCleanup | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | pingId=${pingId} | notificationToken=${promptMeta.notificationToken} | ackAt=${record.ackAt}`);
+            return;
+        }
+        record.pending = false;
+        if (this.webviewLivenessCurrent === record) {
+            this.webviewLivenessCurrent = undefined;
+        }
+    }
+
+    private noteWebviewLivenessActivity(
+        data: any,
+        webviewView: vscode.WebviewView,
+        panelId: string
+    ): void {
+        const type = typeof data?.type === 'string' ? data.type : 'unknown';
+        if (
+            type === 'webviewLivenessAck'
+            || type === 'webviewAutoRescueAck'
+            || type === 'webviewReady'
+            || type === 'ui-debug'
+        ) return;
+        const record = this.webviewLivenessCurrent;
+        if (
+            !record
+            || this._view !== webviewView
+            || record.panelId !== panelId
+            || !this.isCurrentWebviewLivenessRecord(record)
+        ) {
             return;
         }
         record.ackAt = Date.now();
@@ -2523,12 +2572,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         if (!this.getWebviewLivenessActiveTurnFlags(record.sessionId).active) {
             this.webviewLivenessSimulatedMissedAckCountByToken.delete(record.token);
         }
-        this.uiDebugChannel.appendLine(`EXT: webviewLiveness.ack | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | pingId=${pingId} | rttMs=${record.pingSentAt ? record.ackAt - record.pingSentAt : -1}`);
+        this.uiDebugChannel.appendLine(
+            `EXT: webviewLiveness.activity | panelId=${record.panelId} | sessionId=${record.sessionId} | ` +
+            `token=${record.token} | type=${type} | pingId=${record.pingId || 'none'} | ` +
+            `ageMs=${record.pingSentAt ? record.ackAt - record.pingSentAt : -1}`
+        );
         const promptMeta = record.notificationToken
             ? this.webviewAutoRescuePromptMetaByNotificationToken.get(record.notificationToken)
             : undefined;
         if (promptMeta && !promptMeta.handled && !promptMeta.expired) {
-            this.uiDebugChannel.appendLine(`EXT: webviewAutoRescue.notification.ackDeferredCleanup | panelId=${record.panelId} | sessionId=${record.sessionId} | token=${record.token} | pingId=${pingId} | notificationToken=${promptMeta.notificationToken} | ackAt=${record.ackAt}`);
             return;
         }
         record.pending = false;
@@ -4757,6 +4809,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 ),
             startLivenessProbes: () => this.startWebviewLivenessProbes(),
             triggerLivenessProbe: (reason) => this.triggerWebviewLivenessProbe(reason),
+            noteActivity: (data, webviewView, panelId) =>
+                this.noteWebviewLivenessActivity(data, webviewView, panelId),
             handleLivenessAck: (data) => this.handleWebviewLivenessAck(data),
             handleAutoRescueAck: (data) => this.handleWebviewAutoRescueAck(data),
             handleVisibility: (webviewView) =>
