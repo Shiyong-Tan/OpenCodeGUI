@@ -170,6 +170,25 @@ export function createAppendSnapshotController(options: AppendSnapshotController
     return plan.rootId ? session.messagesById.get(plan.rootId) || null : null;
   }
 
+  function resolveAppendItem(session: any, appendUserMsgId: unknown): { root: any; item: any } | null {
+    if (!session || !(session.messagesById instanceof Map) || typeof appendUserMsgId !== 'string' || !appendUserMsgId.length) return null;
+    const targetIds = new Set<string>([appendUserMsgId]);
+    const resolvedTarget = options.resolveMessageKey(session, appendUserMsgId);
+    if (typeof resolvedTarget === 'string' && resolvedTarget.length) targetIds.add(resolvedTarget);
+    for (const root of session.messagesById.values()) {
+      if (!root || root.role !== 'user') continue;
+      for (const item of getItems(root)) {
+        const itemId = item?.appendUserMsgId;
+        if (typeof itemId !== 'string' || !itemId.length) continue;
+        const resolvedItemId = options.resolveMessageKey(session, itemId);
+        if (targetIds.has(itemId) || (typeof resolvedItemId === 'string' && targetIds.has(resolvedItemId))) {
+          return { root, item };
+        }
+      }
+    }
+    return null;
+  }
+
   function upsertItem(message: any, item: any): any | null {
     if (!message) return null;
     if (!message.meta) message.meta = {};
@@ -200,6 +219,7 @@ export function createAppendSnapshotController(options: AppendSnapshotController
     canAppend,
     hasBlockingSubmission,
     resolveRootMessage,
+    resolveAppendItem,
     upsertItem,
     markSeenByAssistantParent,
   });

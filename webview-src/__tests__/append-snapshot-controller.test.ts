@@ -99,4 +99,14 @@ describe('append snapshot controller', () => {
     expect(controller.resolveRootMessage(session, { clientMessageId: 'c1' })).toBe(direct);
     expect(controller.resolveRootMessage(session, {})).toBe(fallback);
   });
+
+  test('resolves a folded append child before its canonical user message is materialized', () => {
+    const { controller } = createHarness();
+    const item = { appendUserMsgId: 'msg_append', text: 'follow up' };
+    const root = { id: 'msg_root', role: 'user', meta: { appendedPrompts: [item] } };
+    const session = { messagesById: new Map([['msg_root', root]]) };
+
+    expect(controller.resolveAppendItem(session, 'msg_append')).toEqual({ root, item });
+    expect(controller.resolveAppendItem(session, 'msg_missing')).toBeNull();
+  });
 });

@@ -48,6 +48,8 @@ describe('hydration integration production activation', () => {
     expect(main).toMatch(
       /session\.appendFollowupIdentity = \{ \.\.\.followup \};\s*if \(session\.pendingAssistantUpgrade\?\.assistantMsgId !== followup\.assistantMsgId\) \{\s*session\.pendingAssistantUpgrade = null;\s*session\.awaitingFinalMapBind = false;/,
     );
+    expect(main).toContain('appendSnapshotController.resolveAppendItem(session, followup.appendUserMsgId)');
+    expect(main).toContain("session.timeline.splice(insertionIndex, 0, appendUser.id, successor.id)");
   });
 
   test('does not give the hydration application owner DOM, render, or transport access', () => {

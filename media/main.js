@@ -14610,20 +14610,39 @@ function appendMessageImages(parentEl, message) {
                 if (message?.inFlight && followup?.kind === 'append-followup' && followup.mode === 'same-turn-handoff'
                     && followup.sessionId === sessionId && typeof followup.generation === 'number'
                     && followup.assistantMsgId === message.ownerMsgId) {
-                    const appendUser = session.messagesById.get(followup.appendUserMsgId);
+                    let appendUser = session.messagesById.get(followup.appendUserMsgId);
+                    const appendRecord = appendSnapshotController.resolveAppendItem(session, followup.appendUserMsgId);
+                    if ((!appendUser || appendUser.role !== 'user') && appendRecord) {
+                        appendUser = upsertMessage(session, {
+                            id: followup.appendUserMsgId,
+                            role: 'user',
+                            text: typeof appendRecord.item?.text === 'string' ? appendRecord.item.text : '',
+                            meta: {
+                                appendRootUserMsgId: appendRecord.root.id,
+                                predecessorAssistantMsgId: followup.predecessorAssistantMsgId
+                            }
+                        });
+                    }
                     if (!appendUser || appendUser.role !== 'user') {
                         vscode.postMessage({ type: 'ui-debug', payload: ['append-followup', 'drop-invalid-user', followup.appendUserMsgId] });
+                        break;
+                    }
+                    const predecessor = session.messagesById.get(followup.predecessorAssistantMsgId);
+                    if (!predecessor || predecessor.role !== 'assistant') {
+                        vscode.postMessage({ type: 'ui-debug', payload: ['append-followup', 'drop-invalid-predecessor', followup.predecessorAssistantMsgId] });
+                        break;
+                    }
+                    const predecessorTimelineIndex = session.timeline.indexOf(predecessor.id);
+                    if (predecessorTimelineIndex < 0) {
+                        vscode.postMessage({ type: 'ui-debug', payload: ['append-followup', 'drop-missing-predecessor-timeline', followup.predecessorAssistantMsgId] });
                         break;
                     }
                     const current = session.appendFollowupIdentity;
                     if (current && (current.generation !== followup.generation || current.assistantMsgId !== followup.assistantMsgId)) break;
                     const successor = upsertMessage(session, { id: followup.assistantMsgId, role: 'assistant', text: '', meta: { isThinking: true, statusText: '' } });
-                    const userIndex = session.timeline.indexOf(followup.appendUserMsgId);
-                    const successorIndex = session.timeline.indexOf(successor.id);
-                    if (userIndex >= 0 && successorIndex !== userIndex + 1) {
-                        if (successorIndex >= 0) session.timeline.splice(successorIndex, 1);
-                        session.timeline.splice(userIndex + 1, 0, successor.id);
-                    }
+                    session.timeline = session.timeline.filter((id) => id !== appendUser.id && id !== successor.id);
+                    const insertionIndex = session.timeline.indexOf(predecessor.id) + 1;
+                    session.timeline.splice(insertionIndex, 0, appendUser.id, successor.id);
                     session.appendFollowupIdentity = { ...followup };
                     if (session.pendingAssistantUpgrade?.assistantMsgId !== followup.assistantMsgId) {
                         session.pendingAssistantUpgrade = null;
