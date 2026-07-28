@@ -236,6 +236,8 @@ function loadAppendSnapshotMetaHarness() {
 this.collectAppendSnapshotMetadata = collectAppendSnapshotMetadata;
 this.syncAppendSnapshotMetadata = syncAppendSnapshotMetadata;
 this.normalizeAppendItemsForFinalize = normalizeAppendItemsForFinalize;
+this.getAppendPredecessorPresentationId = getAppendPredecessorPresentationId;
+this.resolveAppendPredecessorPresentation = resolveAppendPredecessorPresentation;
 this.collectAppendPredecessorSubagentSessionIds = collectAppendPredecessorSubagentSessionIds;
 this.filterAppendSuccessorSubagents = filterAppendSuccessorSubagents;
 this.restoreAppendHydrationMetadata = restoreAppendHydrationMetadata;`, context);
@@ -323,6 +325,93 @@ afterEach(async () => {
 });
 
 describe('append runtime isolation', () => {
+    it('resolves a canonical append predecessor to its active presentation owner', () => {
+        const { context } = loadAppendSnapshotMetaHarness();
+        const presentation = { id: 'msg_presentation', role: 'assistant', text: 'Working' };
+        const session = {
+            messagesById: new Map([[presentation.id, presentation]]),
+            timeline: [presentation.id],
+            backendTurnInFlight: true,
+            turnFullyFinalized: false,
+            canceledActiveTurn: false,
+            currentTurnAssistantKey: presentation.id,
+            currentTurnAssistantMsgId: 'msg_canonical_latest',
+            thinkingId: presentation.id,
+        };
+
+        const resolved = context.resolveAppendPredecessorPresentation(session, {
+            kind: 'append-followup',
+            generation: 7,
+            assistantMsgId: 'msg_successor',
+            predecessorAssistantMsgId: 'msg_canonical_latest',
+        });
+
+        expect(resolved?.message).toBe(presentation);
+        expect(resolved?.presentationId).toBe(presentation.id);
+        expect(resolved?.reason).toBe('active-turn-owner');
+    });
+
+    it('rejects an unrelated canonical append predecessor instead of guessing a presentation owner', () => {
+        const { context } = loadAppendSnapshotMetaHarness();
+        const presentation = { id: 'msg_presentation', role: 'assistant', text: 'Working' };
+        const session = {
+            messagesById: new Map([[presentation.id, presentation]]),
+            timeline: [presentation.id],
+            backendTurnInFlight: true,
+            turnFullyFinalized: false,
+            canceledActiveTurn: false,
+            currentTurnAssistantKey: presentation.id,
+            currentTurnAssistantMsgId: 'msg_canonical_latest',
+            thinkingId: presentation.id,
+        };
+
+        expect(context.resolveAppendPredecessorPresentation(session, {
+            kind: 'append-followup',
+            generation: 7,
+            assistantMsgId: 'msg_successor',
+            predecessorAssistantMsgId: 'msg_unrelated',
+        })).toBeNull();
+
+        session.turnFullyFinalized = true;
+        expect(context.resolveAppendPredecessorPresentation(session, {
+            kind: 'append-followup',
+            generation: 7,
+            assistantMsgId: 'msg_successor',
+            predecessorAssistantMsgId: 'msg_canonical_latest',
+        })).toBeNull();
+    });
+
+    it('reuses the stored append predecessor presentation after active ownership advances to the successor', () => {
+        const { context } = loadAppendSnapshotMetaHarness();
+        const presentation = { id: 'msg_presentation', role: 'assistant', text: 'Working' };
+        const followup = {
+            kind: 'append-followup',
+            generation: 7,
+            assistantMsgId: 'msg_successor',
+            predecessorAssistantMsgId: 'msg_canonical_latest',
+        };
+        const session = {
+            messagesById: new Map([[presentation.id, presentation]]),
+            timeline: [presentation.id, 'msg_successor'],
+            backendTurnInFlight: true,
+            turnFullyFinalized: false,
+            canceledActiveTurn: false,
+            currentTurnAssistantKey: 'msg_successor',
+            currentTurnAssistantMsgId: 'msg_successor',
+            thinkingId: 'msg_successor',
+            appendFollowupIdentity: {
+                ...followup,
+                predecessorPresentationAssistantId: presentation.id,
+            },
+        };
+
+        const resolved = context.resolveAppendPredecessorPresentation(session, followup);
+
+        expect(resolved?.message).toBe(presentation);
+        expect(resolved?.presentationId).toBe(presentation.id);
+        expect(resolved?.reason).toBe('stored-identity');
+    });
+
     it('normalizes append item statuses for finalized turns without dropping safe fields', () => {
         const { context } = loadAppendSnapshotMetaHarness();
         const terminalApplied = { clientMessageId: 'terminal-applied', status: 'applied', text: 'done' };
@@ -989,7 +1078,8 @@ describe('append runtime isolation', () => {
             currentTurnAssistantMsgId: 'msg_successor',
             thinkingId: 'msg_successor',
             appendFollowupIdentity: {
-                predecessorAssistantMsgId: 'msg_predecessor',
+                predecessorAssistantMsgId: 'msg_canonical_predecessor',
+                predecessorPresentationAssistantId: 'msg_predecessor',
                 appendUserMsgId: 'msg_append',
                 assistantMsgId: 'msg_successor',
             },

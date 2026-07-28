@@ -2501,14 +2501,86 @@ function normalizeSessionAppendItemsForFinalize(session) {
     return appendSnapshotController.normalizeSessionForFinalize(session);
 }
 
+function getAppendPredecessorPresentationId(followup) {
+    if (typeof followup?.predecessorPresentationAssistantId === 'string'
+        && followup.predecessorPresentationAssistantId.length) {
+        return followup.predecessorPresentationAssistantId;
+    }
+    return typeof followup?.predecessorAssistantMsgId === 'string'
+        ? followup.predecessorAssistantMsgId
+        : '';
+}
+
+function resolveAppendPredecessorPresentation(session, followup) {
+    const requestedId = typeof followup?.predecessorAssistantMsgId === 'string'
+        ? followup.predecessorAssistantMsgId
+        : '';
+    if (!session || !requestedId) return null;
+
+    const current = session.appendFollowupIdentity;
+    if (
+        current?.kind === 'append-followup'
+        && current.generation === followup?.generation
+        && current.assistantMsgId === followup?.assistantMsgId
+        && current.predecessorAssistantMsgId === requestedId
+    ) {
+        const storedPresentationId = getAppendPredecessorPresentationId(current);
+        const storedPresentation = session.messagesById?.get?.(storedPresentationId);
+        if (
+            storedPresentation?.role === 'assistant'
+            && session.timeline?.includes?.(storedPresentationId)
+        ) {
+            return {
+                message: storedPresentation,
+                presentationId: storedPresentationId,
+                reason: 'stored-identity'
+            };
+        }
+    }
+
+    const direct = session.messagesById?.get?.(requestedId);
+    if (direct?.role === 'assistant' && session.timeline?.includes?.(requestedId)) {
+        return { message: direct, presentationId: requestedId, reason: 'direct' };
+    }
+
+    const activeTurnCanOwnAlias = session.backendTurnInFlight === true
+        && session.turnFullyFinalized !== true
+        && session.canceledActiveTurn !== true;
+    const canonicalOwnerMatches = requestedId === session.currentTurnAssistantMsgId
+        || requestedId === session.pendingAssistantUpgrade?.assistantMsgId;
+    if (!activeTurnCanOwnAlias || !canonicalOwnerMatches) return null;
+
+    const presentationCandidates = [
+        session.currentTurnAssistantKey,
+        session.thinkingId,
+        session.pendingAssistantUpgrade?.tmpKey,
+    ];
+    for (const presentationId of presentationCandidates) {
+        if (typeof presentationId !== 'string' || !presentationId.length) continue;
+        const presentation = session.messagesById?.get?.(presentationId);
+        if (
+            presentation?.role === 'assistant'
+            && session.timeline?.includes?.(presentationId)
+        ) {
+            return {
+                message: presentation,
+                presentationId,
+                reason: 'active-turn-owner'
+            };
+        }
+    }
+    return null;
+}
+
 function collectAppendPredecessorSubagentSessionIds(session, followup = session?.appendFollowupIdentity) {
     const ids = new Set(
         Array.isArray(followup?.predecessorSubagentSessionIds)
             ? followup.predecessorSubagentSessionIds.filter((id) => typeof id === 'string' && id.length)
             : []
     );
-    const predecessor = typeof followup?.predecessorAssistantMsgId === 'string'
-        ? session?.messagesById?.get?.(followup.predecessorAssistantMsgId)
+    const predecessorPresentationId = getAppendPredecessorPresentationId(followup);
+    const predecessor = predecessorPresentationId
+        ? session?.messagesById?.get?.(predecessorPresentationId)
         : null;
     const predecessorAgents = Array.isArray(predecessor?.meta?.subagents)
         ? predecessor.meta.subagents
@@ -2717,7 +2789,7 @@ function isAppendChainTopLevelAssistantHidden(session, msg, id, appendChildPrese
         // Keep one presentation owner mounted until the successor has content.
         // The keyed handoff below then replaces that presentation atomically.
         if (matchesFollowupKey(followup.assistantMsgId)) return true;
-        if (matchesFollowupKey(followup.predecessorAssistantMsgId)) return false;
+        if (matchesFollowupKey(getAppendPredecessorPresentationId(followup))) return false;
     }
     if (session.backendTurnInFlight === true && session.turnFullyFinalized !== true && session.canceledActiveTurn !== true) {
         const messageKeys = new Set();
@@ -14677,12 +14749,14 @@ function appendMessageImages(parentEl, message) {
                         vscode.postMessage({ type: 'ui-debug', payload: ['append-followup', 'drop-invalid-user', followup.appendUserMsgId] });
                         break;
                     }
-                    const predecessor = session.messagesById.get(followup.predecessorAssistantMsgId);
-                    if (!predecessor || predecessor.role !== 'assistant') {
+                    const predecessorResolution = resolveAppendPredecessorPresentation(session, followup);
+                    if (!predecessorResolution) {
                         vscode.postMessage({ type: 'ui-debug', payload: ['append-followup', 'drop-invalid-predecessor', followup.predecessorAssistantMsgId] });
                         break;
                     }
-                    const predecessorTimelineIndex = session.timeline.indexOf(predecessor.id);
+                    const predecessor = predecessorResolution.message;
+                    const predecessorPresentationId = predecessorResolution.presentationId;
+                    const predecessorTimelineIndex = session.timeline.indexOf(predecessorPresentationId);
                     if (predecessorTimelineIndex < 0) {
                         vscode.postMessage({ type: 'ui-debug', payload: ['append-followup', 'drop-missing-predecessor-timeline', followup.predecessorAssistantMsgId] });
                         break;
@@ -14691,7 +14765,7 @@ function appendMessageImages(parentEl, message) {
                     if (current && (current.generation !== followup.generation || current.assistantMsgId !== followup.assistantMsgId)) break;
                     const successor = upsertMessage(session, { id: followup.assistantMsgId, role: 'assistant', text: '', meta: { isThinking: true, statusText: '' } });
                     session.timeline = session.timeline.filter((id) => id !== appendUser.id && id !== successor.id);
-                    const insertionIndex = session.timeline.indexOf(predecessor.id) + 1;
+                    const insertionIndex = session.timeline.indexOf(predecessorPresentationId) + 1;
                     session.timeline.splice(insertionIndex, 0, appendUser.id, successor.id);
                     const predecessorSubagentSessionIds = Array.from(new Set([
                         ...(Array.isArray(current?.predecessorSubagentSessionIds) ? current.predecessorSubagentSessionIds : []),
@@ -14704,6 +14778,7 @@ function appendMessageImages(parentEl, message) {
                     ].filter((id) => typeof id === 'string' && id.length)));
                     session.appendFollowupIdentity = {
                         ...followup,
+                        predecessorPresentationAssistantId: predecessorPresentationId,
                         predecessorSubagentSessionIds
                     };
                     session.activeSubagents = filterAppendSuccessorSubagents(
@@ -14716,10 +14791,17 @@ function appendMessageImages(parentEl, message) {
                         session.pendingAssistantUpgrade = null;
                         session.awaitingFinalMapBind = false;
                     }
+                    vscode.postMessage({
+                        type: 'ui-debug',
+                        payload: ['append-followup', 'predecessor-resolved',
+                            `canonical=${followup.predecessorAssistantMsgId}`,
+                            `presentation=${predecessorPresentationId}`,
+                            `reason=${predecessorResolution.reason}`]
+                    });
                     appendPresentationDiagnostics.set(sessionId, {
                         sessionId,
                         generation: followup.generation,
-                        predecessorAssistantMsgId: followup.predecessorAssistantMsgId,
+                        predecessorAssistantMsgId: predecessorPresentationId,
                         successorAssistantMsgId: followup.assistantMsgId,
                         stage: 'start',
                         renderOrdinal: 0
@@ -14802,7 +14884,8 @@ function appendMessageImages(parentEl, message) {
                     const followup = message?.appendFollowup;
                     if (followup?.kind === 'append-followup' && session.appendFollowupIdentity?.generation === followup.generation
                         && followup.assistantMsgId === messageId) {
-                        const a = session.timeline.indexOf(followup.predecessorAssistantMsgId);
+                        const predecessorPresentationId = getAppendPredecessorPresentationId(session.appendFollowupIdentity);
+                        const a = session.timeline.indexOf(predecessorPresentationId);
                         const u = session.timeline.indexOf(followup.appendUserMsgId);
                         const b = session.timeline.indexOf(messageId);
                         if (!(a >= 0 && u > a && b > u)) vscode.postMessage({ type: 'ui-debug', payload: ['append-followup', 'index-order-contradiction'] });
@@ -14928,7 +15011,9 @@ function appendMessageImages(parentEl, message) {
                     if (!hadPresentableContent && hasPresentableContent) {
                         const trace = appendPresentationDiagnostics.get(sessionId);
                         if (trace?.generation === followup.generation) trace.stage = 'handoff';
-                        const predecessor = session.messagesById.get(followup.predecessorAssistantMsgId);
+                        const resolvedFollowup = session.appendFollowupIdentity;
+                        const predecessorPresentationId = getAppendPredecessorPresentationId(resolvedFollowup);
+                        const predecessor = session.messagesById.get(predecessorPresentationId);
                         if (predecessor?.role === 'assistant') {
                             predecessor.meta = {
                                 ...(predecessor.meta || {}),
@@ -14940,7 +15025,7 @@ function appendMessageImages(parentEl, message) {
                             session,
                             target,
                             target.meta?.subagents,
-                            followup
+                            resolvedFollowup
                         );
                         if (successorSubagents.length > 0) {
                             target.meta = { ...(target.meta || {}), subagents: successorSubagents };
@@ -14949,12 +15034,12 @@ function appendMessageImages(parentEl, message) {
                             delete target.meta.subagents;
                         }
                         const predecessorKeys = [
-                            followup.predecessorAssistantMsgId,
-                            ...getPresentationMessageKeyVariants(session, followup.predecessorAssistantMsgId),
+                            predecessorPresentationId,
+                            ...getPresentationMessageKeyVariants(session, predecessorPresentationId),
                         ];
                         const predecessorPresentationKey =
                             predecessorKeys.find((key) => keyedRootForKey(key))
-                            || followup.predecessorAssistantMsgId;
+                            || predecessorPresentationId;
                         const migrated = applyKeyedChatPresentationAliasMigration(
                             predecessorPresentationKey,
                             followup.assistantMsgId,

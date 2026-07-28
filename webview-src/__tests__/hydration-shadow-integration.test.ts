@@ -46,7 +46,7 @@ describe('hydration integration production activation', () => {
     expect(block).toContain("renderIfActive(sessionId, 'sessionData'");
     expect(block).toContain("renderIfActive(sessionId, 'sessionData-finally'");
     expect(main).toMatch(
-      /session\.appendFollowupIdentity = \{\s*\.\.\.followup,\s*predecessorSubagentSessionIds\s*\};\s*session\.activeSubagents = filterAppendSuccessorSubagents\([\s\S]*?session\.appendFollowupIdentity\s*\);\s*if \(session\.pendingAssistantUpgrade\?\.assistantMsgId !== followup\.assistantMsgId\) \{\s*session\.pendingAssistantUpgrade = null;\s*session\.awaitingFinalMapBind = false;/,
+      /session\.appendFollowupIdentity = \{\s*\.\.\.followup,\s*predecessorPresentationAssistantId:\s*predecessorPresentationId,\s*predecessorSubagentSessionIds\s*\};\s*session\.activeSubagents = filterAppendSuccessorSubagents\([\s\S]*?session\.appendFollowupIdentity\s*\);\s*if \(session\.pendingAssistantUpgrade\?\.assistantMsgId !== followup\.assistantMsgId\) \{\s*session\.pendingAssistantUpgrade = null;\s*session\.awaitingFinalMapBind = false;/,
     );
     expect(main).toContain('appendSnapshotController.resolveAppendItem(session, followup.appendUserMsgId)');
     expect(main).toContain("session.timeline.splice(insertionIndex, 0, appendUser.id, successor.id)");

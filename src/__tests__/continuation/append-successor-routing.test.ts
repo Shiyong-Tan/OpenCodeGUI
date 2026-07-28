@@ -37,7 +37,7 @@ describe('append followup same-turn handoff', () => {
             'applyKeyedChatPresentationAliasMigration(',
         );
         const retirePredecessorIndex = assistantMetaBlock.indexOf(
-            "session.messagesById.get(followup.predecessorAssistantMsgId)",
+            "session.messagesById.get(predecessorPresentationId)",
         );
         const migrationIndex = assistantMetaBlock.indexOf('applyKeyedChatPresentationAliasMigration(');
         const synchronousReconcileIndex = assistantMetaBlock.indexOf('renderFromState();', migrationIndex);
