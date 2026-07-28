@@ -97,6 +97,13 @@ type WorkspaceFileResult = {
     directory: string;
 };
 
+type AppendSnapshotTurnState = {
+    rootUserMessageId?: string;
+    orderedIds: string[];
+    messagesById: Map<string, SessionMessage>;
+    preparedGenerations: Set<number>;
+};
+
 type PersistedRevertedSegment = {
     sessionId: string;
     segment: {
@@ -681,6 +688,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private readonly changeListEmitter: ChangeListEmitter;
     private assistantTextBufferBySession = new Map<string, string>();
     private pendingSnapshotUserTextBySession = new Map<string, string>();
+    private appendSnapshotTurnStateBySession = new Map<string, AppendSnapshotTurnState>();
     private lastKnownModels: ModelInfo[] = [];
     private modelQuotaInFlight?: Promise<void>;
     private workspaceSwitchInFlight = false;
@@ -3489,6 +3497,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         } finally {
             this.pendingSnapshotUserTextBySession.delete(sessionId);
             this.assistantTextBufferBySession.delete(sessionId);
+            this.appendSnapshotTurnStateBySession.delete(sessionId);
         }
     }
 
@@ -3511,16 +3520,26 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 this.pendingAssistantMessageIdBySession.get(sessionId),
                 this.client.getTurnAssistantMsgId(sessionId)
             ].find((id) => this.isResolvableMessageId(id));
-            const rawUserText = this.pendingSnapshotUserTextBySession.get(sessionId)
-                ?? (userMessageId ? this.rawUserTextByMsgId.get(userMessageId) : undefined)
+            const rawUserText = (userMessageId ? this.rawUserTextByMsgId.get(userMessageId) : undefined)
+                ?? this.pendingSnapshotUserTextBySession.get(sessionId)
                 ?? (pendingLocalKey ? this.rawUserTextByLocalKey.get(pendingLocalKey) : undefined)
                 ?? (pendingLocalKey ? this.draftByLocalKey.get(pendingLocalKey)?.text : undefined)
                 ?? '';
             const userText = this.normalizeUserTextForSnapshot(rawUserText);
             const assistantText = this.assistantTextBufferBySession.get(sessionId) || '';
+            const appendState = this.appendSnapshotTurnStateBySession.get(sessionId);
             const pendingMessages: SessionMessage[] = [];
+            const pendingIds = new Set<string>();
+            const addPendingMessage = (message: SessionMessage | undefined) => {
+                if (!message || typeof message.id !== 'string' || !message.id || pendingIds.has(message.id)) return;
+                pendingMessages.push(message);
+                pendingIds.add(message.id);
+            };
+            for (const id of appendState?.orderedIds || []) {
+                addPendingMessage(appendState?.messagesById.get(id));
+            }
             if (userMessageId && userText && !this.isHiddenControlUserText(userText)) {
-                pendingMessages.push({
+                addPendingMessage({
                     role: 'user',
                     id: userMessageId,
                     text: userText,
@@ -3528,11 +3547,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 });
             }
             if (assistantMessageId && assistantText && !this.isHiddenControlAssistantText(assistantText)) {
-                pendingMessages.push({
+                addPendingMessage({
                     role: 'assistant',
                     id: assistantMessageId,
                     text: assistantText,
-                    messageIndex: this.client.getMessageIndex(assistantMessageId, sessionId)
+                    messageIndex: this.client.getMessageIndex(assistantMessageId, sessionId),
+                    ...(identity.latestAppendUserMessageId
+                        ? { meta: { parentID: identity.latestAppendUserMessageId } }
+                        : {})
                 });
             }
             if (!pendingMessages.length) {
@@ -3855,6 +3877,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.pendingAssistantTmpKeyBySession.delete(sessionId);
         this.client.startTurnWithOp(sessionId, clientMessageId, operationId);
         this.assistantTextBufferBySession.set(sessionId, '');
+        this.appendSnapshotTurnStateBySession.delete(sessionId);
         if (temporaryAssistantKey) {
             this.pendingAssistantTmpKeyBySession.set(sessionId, temporaryAssistantKey);
             this.pendingAssistantTmpKeyByLocalKey.set(clientMessageId, temporaryAssistantKey);
@@ -3893,6 +3916,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
         this.pendingLocalKeyBySession.delete(sessionId);
         this.assistantTextBufferBySession.delete(sessionId);
+        this.appendSnapshotTurnStateBySession.delete(sessionId);
         this.pendingAssistantTmpKeyBySession.delete(sessionId);
         return pendingLocalKey;
     }
@@ -3953,6 +3977,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.pendingAssistantTmpKeyBySession.delete(sessionId);
         this.pendingAssistantMessageIdBySession.delete(sessionId);
         this.assistantTextBufferBySession.delete(sessionId);
+        this.appendSnapshotTurnStateBySession.delete(sessionId);
     }
 
     private bindTurnMessageIdentity(sourceId: string, targetId: string): void {
@@ -5217,6 +5242,111 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.assistantTextBufferBySession.set(sessionId, next);
     }
 
+    private getOrCreateAppendSnapshotTurnState(sessionId: string): AppendSnapshotTurnState {
+        let state = this.appendSnapshotTurnStateBySession.get(sessionId);
+        if (!state) {
+            state = {
+                orderedIds: [],
+                messagesById: new Map<string, SessionMessage>(),
+                preparedGenerations: new Set<number>(),
+            };
+            this.appendSnapshotTurnStateBySession.set(sessionId, state);
+        }
+        return state;
+    }
+
+    private recordAppendSnapshotUserMessage(
+        sessionId: string,
+        rootUserMessageId: string | undefined,
+        appendUserMessageId: string | undefined,
+        text: string
+    ): void {
+        if (!sessionId || !appendUserMessageId || !this.isResolvableMessageId(appendUserMessageId)) return;
+        const state = this.getOrCreateAppendSnapshotTurnState(sessionId);
+        if (rootUserMessageId && this.isResolvableMessageId(rootUserMessageId)) {
+            state.rootUserMessageId = rootUserMessageId;
+        }
+        const normalizedText = this.normalizeUserTextForSnapshot(text);
+        if (normalizedText) {
+            this.rawUserTextByMsgId.set(appendUserMessageId, normalizedText);
+            state.messagesById.set(appendUserMessageId, {
+                role: 'user',
+                id: appendUserMessageId,
+                text: normalizedText,
+                messageIndex: this.client.getMessageIndex(appendUserMessageId, sessionId)
+            });
+        }
+    }
+
+    private prepareAppendSnapshotHandoff(sessionId: string, followup: any): void {
+        const generation = Number(followup?.generation);
+        const predecessorAssistantMsgId = typeof followup?.predecessorAssistantMsgId === 'string'
+            ? followup.predecessorAssistantMsgId
+            : '';
+        const appendUserMsgId = typeof followup?.appendUserMsgId === 'string'
+            ? followup.appendUserMsgId
+            : '';
+        if (!sessionId || !Number.isFinite(generation) || !predecessorAssistantMsgId || !appendUserMsgId) return;
+        const state = this.getOrCreateAppendSnapshotTurnState(sessionId);
+        if (state.preparedGenerations.has(generation)) return;
+
+        const addOrdered = (message: SessionMessage | undefined) => {
+            if (!message || typeof message.id !== 'string' || !message.id) return;
+            state.messagesById.set(message.id, message);
+            if (!state.orderedIds.includes(message.id)) state.orderedIds.push(message.id);
+        };
+        const rootUserMessageId = state.rootUserMessageId
+            || this.client.getAppendRootUserMsgId(sessionId);
+        const rootUserText = rootUserMessageId
+            ? this.normalizeUserTextForSnapshot(
+                this.rawUserTextByMsgId.get(rootUserMessageId)
+                ?? this.pendingSnapshotUserTextBySession.get(sessionId)
+                ?? ''
+            )
+            : '';
+        if (rootUserMessageId && rootUserText) {
+            state.rootUserMessageId = rootUserMessageId;
+            addOrdered({
+                role: 'user',
+                id: rootUserMessageId,
+                text: rootUserText,
+                messageIndex: this.client.getMessageIndex(rootUserMessageId, sessionId)
+            });
+        }
+
+        const predecessorText = this.assistantTextBufferBySession.get(sessionId) || '';
+        if (predecessorText && !this.isHiddenControlAssistantText(predecessorText)) {
+            addOrdered({
+                role: 'assistant',
+                id: predecessorAssistantMsgId,
+                text: predecessorText,
+                messageIndex: this.client.getMessageIndex(predecessorAssistantMsgId, sessionId),
+                ...(rootUserMessageId ? { meta: { parentID: rootUserMessageId } } : {})
+            });
+        }
+
+        const appendUser = state.messagesById.get(appendUserMsgId);
+        const appendUserText = this.normalizeUserTextForSnapshot(
+            appendUser?.text
+            ?? this.rawUserTextByMsgId.get(appendUserMsgId)
+            ?? ''
+        );
+        if (appendUserText) {
+            addOrdered({
+                role: 'user',
+                id: appendUserMsgId,
+                text: appendUserText,
+                messageIndex: this.client.getMessageIndex(appendUserMsgId, sessionId)
+            });
+        }
+
+        state.preparedGenerations.add(generation);
+        this.assistantTextBufferBySession.set(sessionId, '');
+        this.uiDebugChannel.appendLine(
+            `[EXT][SNAPSHOT_APPEND_STAGE] sessionId=${sessionId} generation=${generation} rootUserMessageId=${rootUserMessageId || 'null'} predecessorAssistantMessageId=${predecessorAssistantMsgId} appendUserMessageId=${appendUserMsgId} predecessorTextLength=${predecessorText.length} appendTextLength=${appendUserText.length}`
+        );
+    }
+
     private getAssistantMetaAllowedSessionIds(targetSessionId: string): string[] {
         if (!targetSessionId) {
             return [];
@@ -6247,6 +6377,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const retainedPendingAssistantMessageIdBySession = new Map<string, string>();
         const retainedAssistantTextBufferBySession = new Map<string, string>();
         const retainedPendingSnapshotUserTextBySession = new Map<string, string>();
+        const retainedAppendSnapshotTurnStateBySession = new Map<string, AppendSnapshotTurnState>();
         const retainedRawUserTextByLocalKey = new Map<string, string>();
         const retainedPendingAssistantTmpKeyByLocalKey = new Map<string, string>();
         const isRetainableTmpKey = (value: string | undefined): value is string => Boolean(value && (value.startsWith('tmp:') || value.startsWith('local-')));
@@ -6280,6 +6411,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             if (pendingSnapshotUserText !== undefined) {
                 retainedPendingSnapshotUserTextBySession.set(sessionId, pendingSnapshotUserText);
             }
+            const appendSnapshotTurnState = this.appendSnapshotTurnStateBySession.get(sessionId);
+            if (appendSnapshotTurnState) {
+                retainedAppendSnapshotTurnStateBySession.set(sessionId, appendSnapshotTurnState);
+            }
         }
         this.client.resetSessionState({ preserveInFlightSessionIds: retainedSendInFlightBySession });
         this.clientMessageIdMap.clear();
@@ -6294,6 +6429,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.uiTimelineBySession.clear();
         this.assistantTextBufferBySession.clear();
         this.pendingSnapshotUserTextBySession.clear();
+        this.appendSnapshotTurnStateBySession.clear();
         this.pendingAssistantTmpKeyBySession.clear();
         this.pendingAssistantTmpKeyByLocalKey.clear();
         this.pendingLocalKeyBySession.clear();
@@ -6331,6 +6467,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const pendingSnapshotUserText = retainedPendingSnapshotUserTextBySession.get(sessionId);
             if (pendingSnapshotUserText !== undefined) {
                 this.pendingSnapshotUserTextBySession.set(sessionId, pendingSnapshotUserText);
+                restored = true;
+            }
+            const appendSnapshotTurnState = retainedAppendSnapshotTurnStateBySession.get(sessionId);
+            if (appendSnapshotTurnState) {
+                this.appendSnapshotTurnStateBySession.set(sessionId, appendSnapshotTurnState);
                 restored = true;
             }
             if (restored) retainedProviderTurnBindingSessions += 1;

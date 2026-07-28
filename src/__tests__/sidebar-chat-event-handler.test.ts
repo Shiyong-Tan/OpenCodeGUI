@@ -72,6 +72,55 @@ describe('SidebarChatEventHandler', () => {
     }));
   });
 
+  test('records append user text and rotates snapshot stages before successor text is buffered', async () => {
+    const webview = { postMessage: jest.fn() };
+    const host = {
+      smartSearchSessions: { owns: () => false },
+      _view: { webview },
+      recordAppendSnapshotUserMessage: jest.fn(),
+      prepareAppendSnapshotHandoff: jest.fn(),
+      appendAssistantBuffer: jest.fn(),
+      markWebviewActiveTurnUpdated: jest.fn(),
+      isCurrentTurnSynthetic: () => false,
+      getAssistantMetaAllowedSessionIds: (sessionId: string) => [sessionId],
+      pendingAssistantTmpKeyBySession: new Map(),
+      activeSubagentSessionIds: new Set(),
+      subagentProgressBySession: new Map(),
+    };
+    const followup = {
+      kind: 'append-followup',
+      mode: 'same-turn-handoff',
+      sessionId: 'session-A',
+      appendUserMsgId: 'msg_append',
+      predecessorAssistantMsgId: 'msg_predecessor',
+      assistantMsgId: 'msg_successor',
+      generation: 1,
+    };
+
+    await handleSidebarChatEvent(host as any, {
+      type: 'appendUserMessage',
+      sessionId: 'session-A',
+      rootUserMsgId: 'msg_root',
+      appendUserMsgId: 'msg_append',
+      text: 'follow up',
+    } as any, webview as any);
+    await handleSidebarChatEvent(host as any, {
+      type: 'text',
+      sessionId: 'session-A',
+      assistantMsgId: 'msg_successor',
+      appendFollowup: followup,
+      text: 'OK',
+    } as any, webview as any);
+
+    expect(host.recordAppendSnapshotUserMessage).toHaveBeenCalledWith(
+      'session-A', 'msg_root', 'msg_append', 'follow up',
+    );
+    expect(host.prepareAppendSnapshotHandoff).toHaveBeenCalledWith('session-A', followup);
+    expect(host.prepareAppendSnapshotHandoff.mock.invocationCallOrder[0])
+      .toBeLessThan(host.appendAssistantBuffer.mock.invocationCallOrder[0]);
+    expect(host.appendAssistantBuffer).toHaveBeenCalledWith('session-A', 'OK');
+  });
+
   test('drops ownerless asynchronous assistant events instead of using visible session', async () => {
     const webview = { postMessage: jest.fn() };
     const host = {

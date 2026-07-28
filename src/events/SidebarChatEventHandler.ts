@@ -44,6 +44,12 @@ export async function handleSidebarChatEvent(
         }
         if (event.type === 'appendUserMessage' && event.sessionId) {
             const liveWebview = host._view?.webview || webview;
+            host.recordAppendSnapshotUserMessage?.(
+                event.sessionId,
+                event.rootUserMsgId,
+                event.appendUserMsgId || event.messageId,
+                event.text || ''
+            );
             liveWebview.postMessage({
                 type: 'appendUserMessage',
                 sessionId: event.sessionId,
@@ -492,6 +498,7 @@ export async function handleSidebarChatEvent(
             const sessionTmpKey = sessionId ? host.pendingAssistantTmpKeyBySession.get(sessionId) : undefined;
             const isAppendFollowup = Boolean(event.appendFollowup);
             const tmpKey = isAppendFollowup ? undefined : (eventTmpKey || sessionTmpKey);
+            if (isAppendFollowup && sessionId) host.prepareAppendSnapshotHandoff?.(sessionId, event.appendFollowup);
             if (isAppendFollowup && sessionId) host.consumeAppendSuccessorTmpKey?.(sessionId, event.appendFollowup);
             if (sessionId && tmpKey && tmpKey.startsWith('tmp:')) {
                 host.pendingAssistantTmpKeyBySession.set(sessionId, tmpKey);
@@ -546,6 +553,7 @@ export async function handleSidebarChatEvent(
             }
             if (sessionId) {
                 host.markWebviewActiveTurnUpdated(sessionId, 'event:text');
+                if (event.appendFollowup) host.prepareAppendSnapshotHandoff?.(sessionId, event.appendFollowup);
                 host.appendAssistantBuffer(sessionId, event.text);
                 // Push latest chunk to webview (no cumulative text)
                 const liveWebview = host._view?.webview || webview;

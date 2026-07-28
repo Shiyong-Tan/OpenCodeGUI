@@ -361,6 +361,106 @@ describe('W5A snapshot export and finalize contracts', () => {
         expect(provider.assistantTextBufferBySession.has('ses_delta')).toBe(false);
     });
 
+    it('persists append stages without assigning root text or predecessor text to successor identities', async () => {
+        const provider = createProvider();
+        const boundary = msg('msg_boundary', 10, 'assistant', 'older snapshot final');
+        provider.readSnapshot = jest.fn().mockResolvedValue(snapshotOf([boundary]));
+        provider.writeSnapshotAtomic = jest.fn().mockResolvedValue(789);
+        provider.client.exportSession = jest.fn();
+        const indices: Record<string, number> = {
+            msg_root: 11,
+            msg_predecessor: 12,
+            msg_append: 13,
+            msg_successor: 14,
+        };
+        provider.client.getMessageIndex = jest.fn((id: string) => indices[id]);
+        provider.pendingSnapshotUserTextBySession.set('ses_delta', '请你派遣 subagent 计时 1 分钟');
+        provider.rawUserTextByMsgId.set('msg_root', '请你派遣 subagent 计时 1 分钟');
+        provider.assistantTextBufferBySession.set('ses_delta', '将派遣子代理进行非修改性 1 分钟计时。');
+        provider.recordAppendSnapshotUserMessage(
+            'ses_delta',
+            'msg_root',
+            'msg_append',
+            '计时结束后回复 OK。',
+        );
+        provider.cacheAppendSnapshotMeta({
+            sessionId: 'ses_delta',
+            roots: [{
+                rootMessageId: 'msg_root',
+                appendRootUserKey: 'msg_root',
+                meta: {
+                    appendedPrompts: [{
+                        clientMessageId: 'append-client',
+                        appendUserMsgId: 'msg_append',
+                        text: '计时结束后回复 OK。',
+                        status: 'applied',
+                    }],
+                },
+            }],
+            reason: 'test',
+        });
+
+        provider.prepareAppendSnapshotHandoff('ses_delta', {
+            generation: 1,
+            predecessorAssistantMsgId: 'msg_predecessor',
+            appendUserMsgId: 'msg_append',
+            assistantMsgId: 'msg_successor',
+        });
+        expect(provider.assistantTextBufferBySession.get('ses_delta')).toBe('');
+        provider.appendAssistantBuffer('ses_delta', 'OK');
+
+        await provider.writeFinalizeSnapshotFromCurrentTurn({
+            sessionId: 'ses_delta',
+            rootUserMessageId: 'msg_root',
+            latestAppendUserMessageId: 'msg_append',
+            userMessageId: 'msg_append',
+            assistantMessageId: 'msg_successor',
+        });
+
+        const written = provider.writeSnapshotAtomic.mock.calls[0][1].sessionData;
+        expect(written.meta.timelineMessageIds).toEqual([
+            'msg_boundary',
+            'msg_root',
+            'msg_predecessor',
+            'msg_append',
+            'msg_successor',
+        ]);
+        expect(written.messages).toEqual([
+            boundary,
+            expect.objectContaining({
+                id: 'msg_root',
+                role: 'user',
+                text: '请你派遣 subagent 计时 1 分钟',
+                meta: expect.objectContaining({
+                    appendRootUserKey: 'msg_root',
+                    appendedPrompts: [expect.objectContaining({
+                        appendUserMsgId: 'msg_append',
+                        text: '计时结束后回复 OK。',
+                    })],
+                }),
+            }),
+            expect.objectContaining({
+                id: 'msg_predecessor',
+                role: 'assistant',
+                text: '将派遣子代理进行非修改性 1 分钟计时。',
+                meta: { parentID: 'msg_root' },
+            }),
+            expect.objectContaining({
+                id: 'msg_append',
+                role: 'user',
+                text: '计时结束后回复 OK。',
+            }),
+            expect.objectContaining({
+                id: 'msg_successor',
+                role: 'assistant',
+                text: 'OK',
+                meta: { parentID: 'msg_append' },
+            }),
+        ]);
+        expect(provider.client.exportSession).not.toHaveBeenCalled();
+        expect(provider.appendSnapshotTurnStateBySession.has('ses_delta')).toBe(false);
+    });
+
     it('uses pending display text for an attachment-only turn without exporting history', async () => {
         const provider = createProvider();
         provider.readSnapshot = jest.fn().mockResolvedValue(undefined);
