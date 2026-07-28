@@ -173,6 +173,7 @@ export class SessionCommandController {
         try {
             this.host.adoptSessionSelection(targetSessionId);
             let sessionDataSent = false;
+            let snapshotPublished = false;
             const isCurrentSelection = () =>
                 this.host.isSessionSelectionCurrent(targetSessionId, selectionEpoch);
             const postSessionData = (
@@ -249,6 +250,7 @@ export class SessionCommandController {
                         },
                     };
                     const sent = postSessionData(payload, 'snapshot');
+                    if (sent) snapshotPublished = true;
                     if (sent && snapshotMessages.length > 0) sessionDataSent = true;
                     this.host.log(
                         `[EXT][SNAP_LOAD_HIT] sessionId=${targetSessionId} file=${this.host.getSnapshotFile(targetSessionId)} bytes=${snap.bytes} costMs=${Date.now() - snapshotStart}`
@@ -364,6 +366,17 @@ export class SessionCommandController {
                 this.host.log(
                     `[EXT][EXPORT_FAIL] sessionId=${targetSessionId} stderrLastLine=${normalized.stderrLastLine || recentFailedReason || 'null'}`
                 );
+                if (snapshotPublished) {
+                    this.host.log(
+                        `[EXT][SESSION_LOAD_RETAIN_SNAPSHOT] sessionId=${targetSessionId} reason=full-export-failed-after-snapshot stderrLastLine=${normalized.stderrLastLine || recentFailedReason || 'null'}`
+                    );
+                    postSessionData({
+                        type: 'hydrationCoverage',
+                        sessionId: targetSessionId,
+                        hydrationCoverage: 'repairError' as HydrationCoverage,
+                    }, 'full');
+                    return;
+                }
                 this.host.getLiveWebview(activeWebview).postMessage({
                     type: 'sessionLoadFailed',
                     payload: {

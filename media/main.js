@@ -14453,6 +14453,13 @@ function appendMessageImages(parentEl, message) {
             case 'sessionLoadFailed': {
                 const sessionId = message?.payload?.sessionId || message?.sessionId || '';
                 if (!sessionId) break;
+                if (hydratedSessions.has(sessionId)) {
+                    vscode.postMessage({
+                        type: 'ui-debug',
+                        payload: ['[WV][SESSION_LOAD_FAILED_IGNORED]', `sessionId=${sessionId}`, 'reason=already-hydrated', `reportedReason=${message?.payload?.reason || 'unknown'}`, `stderrLastLine=${message?.payload?.stderrLastLine || 'null'}`]
+                    });
+                    break;
+                }
                 const session = getSessionState(sessionId, true);
                 const noticeId = `system:session-load-failed:${Date.now()}`;
                 upsertMessage(session, {

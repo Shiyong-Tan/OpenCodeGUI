@@ -458,6 +458,76 @@ describe('SessionCommandController runtime protocol', () => {
         expect(harness.host.exportSession).not.toHaveBeenCalled();
     });
 
+    test('retains a published snapshot when continuity repair export fails', async () => {
+        const snapshotMessage = {
+            id: 'msg_1', role: 'user', text: 'snapshot', messageIndex: 1,
+        };
+        const harness = createRuntimeHarness({
+            readSnapshot: jest.fn(async () => ({
+                bytes: 100,
+                obj: {
+                    sessionData: {
+                        title: 'Snapshot',
+                        messages: [snapshotMessage],
+                        meta: { timelineMessageIds: ['msg_1'] },
+                    },
+                },
+            })),
+            classifyRecentAppendCandidates: jest.fn(() => ({
+                proven: false,
+                suffix: [],
+            })),
+            exportSession: jest.fn(async () => {
+                throw new Error('Cannot create a string longer than 0x1fffffe8 characters');
+            }),
+        });
+
+        await harness.handler(
+            { type: 'selectSession', sessionId: 'session-a' },
+            harness.activeWebview,
+            harness.resolvingWebview,
+        );
+
+        expect(harness.posts.filter((message) => message.type === 'sessionData')
+            .map((message) => message.phase)).toEqual(['snapshot']);
+        expect(harness.posts).toContainEqual(expect.objectContaining({
+            type: 'hydrationCoverage',
+            sessionId: 'session-a',
+            hydrationCoverage: 'repairError',
+            phase: 'full',
+        }));
+        expect(harness.posts.some((message) => message.type === 'sessionLoadFailed')).toBe(false);
+        expect(harness.host.log).toHaveBeenCalledWith(
+            expect.stringContaining('[EXT][SESSION_LOAD_RETAIN_SNAPSHOT]'),
+        );
+    });
+
+    test('reports a load failure when no snapshot or remote export is available', async () => {
+        const harness = createRuntimeHarness({
+            exportSessionRecent: jest.fn(async () => {
+                throw new Error('recent unavailable');
+            }),
+            exportSession: jest.fn(async () => {
+                throw new Error('full unavailable');
+            }),
+        });
+
+        await harness.handler(
+            { type: 'selectSession', sessionId: 'session-a' },
+            harness.activeWebview,
+            harness.resolvingWebview,
+        );
+
+        expect(harness.posts).toContainEqual({
+            type: 'sessionLoadFailed',
+            payload: {
+                sessionId: 'session-a',
+                reason: 'export_failed_no_snapshot',
+                stderrLastLine: 'Error: full unavailable',
+            },
+        });
+    });
+
     test('stops a stale selection after recent export without posting newer phases', async () => {
         const current = jest.fn()
             .mockReturnValueOnce(true)
