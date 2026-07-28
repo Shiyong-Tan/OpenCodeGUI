@@ -236,6 +236,8 @@ function loadAppendSnapshotMetaHarness() {
 this.collectAppendSnapshotMetadata = collectAppendSnapshotMetadata;
 this.syncAppendSnapshotMetadata = syncAppendSnapshotMetadata;
 this.normalizeAppendItemsForFinalize = normalizeAppendItemsForFinalize;
+this.collectAppendPredecessorSubagentSessionIds = collectAppendPredecessorSubagentSessionIds;
+this.filterAppendSuccessorSubagents = filterAppendSuccessorSubagents;
 this.restoreAppendHydrationMetadata = restoreAppendHydrationMetadata;`, context);
     return { context, posts, sessions };
 }
@@ -1034,6 +1036,7 @@ describe('append runtime isolation', () => {
                 kind: 'append-followup',
                 mode: 'same-turn-handoff',
                 assistantMsgId: 'msg_successor',
+                predecessorSubagentSessionIds: ['ses_agent'],
             },
             backendTurnInFlight: true,
             turnFullyFinalized: false,
@@ -1046,6 +1049,89 @@ describe('append runtime isolation', () => {
         expect(session.activeSubagents).toEqual([]);
         expect(session.appendFollowupIdentity).toBeNull();
         expect(successor.meta.isThinking).toBe(false);
+    });
+
+    it('keeps post-handoff subagents on the append successor while excluding predecessor agents', () => {
+        const { context } = loadAppendSnapshotMetaHarness();
+        const predecessor = {
+            id: 'msg_predecessor',
+            role: 'assistant',
+            meta: {
+                subagents: [{ sessionId: 'ses_old', state: 'done', title: 'old coder' }],
+            },
+        };
+        const successor = {
+            id: 'msg_successor',
+            role: 'assistant',
+            text: 'Continuing',
+            meta: { isThinking: true },
+        };
+        const followup = {
+            kind: 'append-followup',
+            mode: 'same-turn-handoff',
+            predecessorAssistantMsgId: predecessor.id,
+            assistantMsgId: successor.id,
+            predecessorSubagentSessionIds: ['ses_old'],
+        };
+        const session = {
+            messagesById: new Map<string, any>([
+                [predecessor.id, predecessor],
+                [successor.id, successor],
+            ]),
+            appendFollowupIdentity: followup,
+        };
+
+        const visible = context.filterAppendSuccessorSubagents(session, successor, [
+            { sessionId: 'ses_old', state: 'done', title: 'old coder' },
+            { sessionId: 'ses_new', state: 'running', title: 'new verifier' },
+        ]);
+
+        expect(visible).toEqual([
+            expect.objectContaining({ sessionId: 'ses_new', state: 'running' }),
+        ]);
+        expect(predecessor.meta.subagents).toEqual([
+            expect.objectContaining({ sessionId: 'ses_old' }),
+        ]);
+    });
+
+    it('snapshots a post-handoff subagent when finalizing the append successor', () => {
+        const { context, sessions } = loadAppendChatDoneHarness();
+        const successor: any = {
+            id: 'msg_successor',
+            role: 'assistant',
+            text: 'OK',
+            meta: { isThinking: true, statusText: '' },
+        };
+        const session = {
+            messagesById: new Map<string, any>([['msg_successor', successor]]),
+            timeline: ['msg_successor'],
+            thinkingId: 'msg_successor',
+            currentTurnAssistantKey: 'msg_successor',
+            currentTurnAssistantMsgId: 'msg_successor',
+            activeSubagents: [{ sessionId: 'ses_new', state: 'done', title: 'new verifier' }],
+            appendFollowupIdentity: {
+                kind: 'append-followup',
+                mode: 'same-turn-handoff',
+                assistantMsgId: 'msg_successor',
+                predecessorSubagentSessionIds: ['ses_old'],
+            },
+            backendTurnInFlight: true,
+            turnFullyFinalized: false,
+        };
+        sessions.set('ses_A', session);
+
+        context.handleChatDone('ses_A', { lastAssistantMsgId: 'msg_successor' });
+
+        expect(successor.meta.subagents).toEqual([
+            expect.objectContaining({
+                sessionId: 'ses_new',
+                state: 'done',
+                latestText: null,
+                latestTool: null,
+            }),
+        ]);
+        expect(session.activeSubagents).toEqual([]);
+        expect(session.appendFollowupIdentity).toBeNull();
     });
 
     it('normalizes all append roots on chatDone and re-syncs append snapshot metadata', () => {

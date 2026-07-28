@@ -2501,6 +2501,38 @@ function normalizeSessionAppendItemsForFinalize(session) {
     return appendSnapshotController.normalizeSessionForFinalize(session);
 }
 
+function collectAppendPredecessorSubagentSessionIds(session, followup = session?.appendFollowupIdentity) {
+    const ids = new Set(
+        Array.isArray(followup?.predecessorSubagentSessionIds)
+            ? followup.predecessorSubagentSessionIds.filter((id) => typeof id === 'string' && id.length)
+            : []
+    );
+    const predecessor = typeof followup?.predecessorAssistantMsgId === 'string'
+        ? session?.messagesById?.get?.(followup.predecessorAssistantMsgId)
+        : null;
+    const predecessorAgents = Array.isArray(predecessor?.meta?.subagents)
+        ? predecessor.meta.subagents
+        : [];
+    for (const agent of predecessorAgents) {
+        if (typeof agent?.sessionId === 'string' && agent.sessionId.length) ids.add(agent.sessionId);
+    }
+    return ids;
+}
+
+function filterAppendSuccessorSubagents(session, assistant, agents, followup = session?.appendFollowupIdentity) {
+    const normalizedAgents = Array.isArray(agents) ? agents : [];
+    const isAppendSuccessor = Boolean(
+        assistant
+        && followup?.kind === 'append-followup'
+        && followup.mode === 'same-turn-handoff'
+        && followup.assistantMsgId === assistant.id
+    );
+    if (!isAppendSuccessor) return normalizedAgents;
+    const predecessorIds = collectAppendPredecessorSubagentSessionIds(session, followup);
+    if (!predecessorIds.size) return normalizedAgents;
+    return normalizedAgents.filter((agent) => !predecessorIds.has(agent?.sessionId));
+}
+
 function collectAppendSnapshotMetadata(session) {
     return appendSnapshotController.collect(session);
 }
@@ -12703,19 +12735,23 @@ function handleChatDone(sessionId, message) {
             msg.meta.todos = [];
             msg.text = latest || msg.text || '';
         }
-        // For subagents: snapshot into meta before clearing
-        if (session.activeSubagents && session.activeSubagents.length > 0) {
-            if (msg.meta && !finalizingAppendSuccessor) {
+        // For subagents: snapshot only the agents owned by the assistant being
+        // finalized. Append predecessors remain attached to their old bubble.
+        const finalSubagents = finalizingAppendSuccessor
+            ? filterAppendSuccessorSubagents(session, msg, session.activeSubagents, followup)
+            : (Array.isArray(session.activeSubagents) ? session.activeSubagents : []);
+        if (finalSubagents.length > 0) {
+            if (msg.meta) {
                 // Snapshot final state, clearing streaming artifacts
-                msg.meta.subagents = session.activeSubagents.map(a => ({
+                msg.meta.subagents = finalSubagents.map(a => ({
                     ...a,
                     latestText: null,
                     latestTool: null
                 }));
             }
-            session.activeSubagents = [];
         }
-        if (finalizingAppendSuccessor && msg.meta && Array.isArray(msg.meta.subagents)) {
+        session.activeSubagents = [];
+        if (finalizingAppendSuccessor && finalSubagents.length === 0 && msg.meta && Array.isArray(msg.meta.subagents)) {
             // These agents belong to the predecessor presentation. Reattaching
             // them here makes the historical temporary state flash after the
             // successor text has already replaced it.
@@ -13859,16 +13895,15 @@ function appendMessageImages(parentEl, message) {
               const sessionId = route.parentSessionId;
               const sess = getSessionState(sessionId, true);
               const incomingAgents = Array.isArray(agents) ? agents : [];
-              const runningCount = typeof message.runningCount === 'number' ? message.runningCount : incomingAgents.filter((a) => a?.state === 'running').length;
-              const finalizingCount = typeof message.finalizingCount === 'number' ? message.finalizingCount : incomingAgents.filter((a) => a?.state === 'finalizing').length;
-              const doneJustNowCount = typeof message.doneJustNowCount === 'number' ? message.doneJustNowCount : incomingAgents.filter((a) => a?.state === 'done').length;
+              let visibleAgents = incomingAgents;
               if (sess) {
                 const currentThinking = sess.thinkingId ? sess.messagesById.get(sess.thinkingId) : null;
+                visibleAgents = filterAppendSuccessorSubagents(sess, currentThinking, incomingAgents);
                 const previousAgents = Array.isArray(currentThinking?.meta?.subagents)
                   ? currentThinking.meta.subagents
                   : (Array.isArray(sess.activeSubagents) ? sess.activeSubagents : []);
                 const previousBySession = new Map(previousAgents.map((a) => [a.sessionId, a]));
-                const mergedAgents = incomingAgents.map((agent) => {
+                const mergedAgents = visibleAgents.map((agent) => {
                   const prev = previousBySession.get(agent.sessionId) || {};
                   const prevState = typeof prev.state === 'string' ? prev.state : (prev.isDone ? 'done' : '');
                   const state = typeof agent.state === 'string'
@@ -13886,23 +13921,27 @@ function appendMessageImages(parentEl, message) {
                   };
                 });
                 sess.activeSubagents = mergedAgents;
-                const appendSuccessorHasContent = Boolean(
-                  currentThinking
-                  && sess.appendFollowupIdentity?.kind === 'append-followup'
-                  && sess.appendFollowupIdentity.mode === 'same-turn-handoff'
-                  && sess.appendFollowupIdentity.assistantMsgId === currentThinking.id
-                  && (
-                    (typeof currentThinking.text === 'string' && currentThinking.text.trim())
-                    || (typeof currentThinking.meta?.statusText === 'string' && currentThinking.meta.statusText.trim())
-                  )
-                );
-                if (currentThinking && currentThinking.meta && !appendSuccessorHasContent) {
+                if (currentThinking && currentThinking.meta) {
                   currentThinking.meta.subagents = mergedAgents;
                 }
               }
+              const filteringAppendPredecessor = visibleAgents !== incomingAgents;
+              const runningCount = filteringAppendPredecessor
+                ? visibleAgents.filter((a) => a?.state === 'running').length
+                : (typeof message.runningCount === 'number' ? message.runningCount : visibleAgents.filter((a) => a?.state === 'running').length);
+              const finalizingCount = filteringAppendPredecessor
+                ? visibleAgents.filter((a) => a?.state === 'finalizing').length
+                : (typeof message.finalizingCount === 'number' ? message.finalizingCount : visibleAgents.filter((a) => a?.state === 'finalizing').length);
+              const doneJustNowCount = filteringAppendPredecessor
+                ? visibleAgents.filter((a) => a?.state === 'done').length
+                : (typeof message.doneJustNowCount === 'number' ? message.doneJustNowCount : visibleAgents.filter((a) => a?.state === 'done').length);
 
-              const subagentStatusFields = [`agentSessionId=${route.agentSessionId || 'null'}`];
-              const terminalStatusUpdate = isTerminalSubagentStatusUpdate(incomingAgents, doneJustNowCount);
+              const excludedPredecessorCount = Math.max(0, incomingAgents.length - visibleAgents.length);
+              const subagentStatusFields = [
+                `agentSessionId=${route.agentSessionId || 'null'}`,
+                `appendPredecessorExcluded=${excludedPredecessorCount}`
+              ];
+              const terminalStatusUpdate = isTerminalSubagentStatusUpdate(visibleAgents, doneJustNowCount);
               handleSubagentStatusPatchResult(
                 sessionId,
                 applySubagentStatusLocalPatch(sessionId, { runningCount, finalizingCount, doneJustNowCount }),
@@ -13919,6 +13958,17 @@ function appendMessageImages(parentEl, message) {
               const route = resolveParentVisibleSubagentRoute(message, 'backgroundActivityPulse');
               if (!route) break;
               const sessionId = route.parentSessionId;
+              const sess = getSessionState(sessionId, false);
+              const currentThinking = sess?.thinkingId ? sess.messagesById.get(sess.thinkingId) : null;
+              const predecessorIds = collectAppendPredecessorSubagentSessionIds(sess);
+              if (
+                currentThinking
+                && sess?.appendFollowupIdentity?.assistantMsgId === currentThinking.id
+                && typeof route.agentSessionId === 'string'
+                && predecessorIds.has(route.agentSessionId)
+              ) {
+                break;
+              }
               const anchorAssistantId = typeof message.assistantMsgId === 'string' ? message.assistantMsgId : null;
               armBackgroundSubagentIndicator(sessionId, anchorAssistantId, 'backgroundActivityPulse');
               break;
@@ -14643,7 +14693,25 @@ function appendMessageImages(parentEl, message) {
                     session.timeline = session.timeline.filter((id) => id !== appendUser.id && id !== successor.id);
                     const insertionIndex = session.timeline.indexOf(predecessor.id) + 1;
                     session.timeline.splice(insertionIndex, 0, appendUser.id, successor.id);
-                    session.appendFollowupIdentity = { ...followup };
+                    const predecessorSubagentSessionIds = Array.from(new Set([
+                        ...(Array.isArray(current?.predecessorSubagentSessionIds) ? current.predecessorSubagentSessionIds : []),
+                        ...(Array.isArray(predecessor.meta?.subagents)
+                            ? predecessor.meta.subagents.map((agent) => agent?.sessionId)
+                            : []),
+                        ...(!current && Array.isArray(session.activeSubagents)
+                            ? session.activeSubagents.map((agent) => agent?.sessionId)
+                            : [])
+                    ].filter((id) => typeof id === 'string' && id.length)));
+                    session.appendFollowupIdentity = {
+                        ...followup,
+                        predecessorSubagentSessionIds
+                    };
+                    session.activeSubagents = filterAppendSuccessorSubagents(
+                        session,
+                        successor,
+                        session.activeSubagents,
+                        session.appendFollowupIdentity
+                    );
                     if (session.pendingAssistantUpgrade?.assistantMsgId !== followup.assistantMsgId) {
                         session.pendingAssistantUpgrade = null;
                         session.awaitingFinalMapBind = false;
@@ -14868,7 +14936,15 @@ function appendMessageImages(parentEl, message) {
                                 statusText: null
                             };
                         }
-                        if (Array.isArray(target.meta?.subagents)) {
+                        const successorSubagents = filterAppendSuccessorSubagents(
+                            session,
+                            target,
+                            target.meta?.subagents,
+                            followup
+                        );
+                        if (successorSubagents.length > 0) {
+                            target.meta = { ...(target.meta || {}), subagents: successorSubagents };
+                        } else if (Array.isArray(target.meta?.subagents)) {
                             target.meta = { ...(target.meta || {}) };
                             delete target.meta.subagents;
                         }
