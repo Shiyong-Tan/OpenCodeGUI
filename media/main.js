@@ -12282,16 +12282,44 @@ function shouldHideDcpUiMessage(message) {
         return remaining <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX;
     }
 
+    let scrollToBottomGeneration = 0;
+
+    function scrollVirtualizedChatToBottom() {
+        const adapter = chatWindowState.adapter;
+        if (!adapter || chatWindowState.sessionId !== (activeSessionId || '__no_session__')) return false;
+        const units = Array.isArray(chatWindowState.allUnits) ? chatWindowState.allUnits : [];
+        const session = getSessionState(activeSessionId, false);
+        const candidates = [
+            session?.currentTurnAssistantKey,
+            session?.currentTurnAssistantMsgId,
+            session?.thinkingId,
+            units.length ? units[units.length - 1]?.key : ''
+        ];
+        const availableKeys = new Set(units.map((unit) => unit?.key).filter(Boolean));
+        const targetKey = candidates.find((key) => typeof key === 'string' && availableKeys.has(key));
+        return Boolean(targetKey && adapter.scrollToKey(targetKey, { align: 'end' }));
+    }
+
     function scrollToBottom(force = false) {
         if (!chatContainer) return;
         if (!force && !autoScrollPinnedToBottom) return;
+        const generation = ++scrollToBottomGeneration;
+        autoScrollPinnedToBottom = true;
+        chatWindowState.activityBelow = false;
+        chatWindowState.programmaticScroll = true;
+        scrollVirtualizedChatToBottom();
         requestAnimationFrame(() => {
-            chatWindowState.programmaticScroll = true;
+            if (generation !== scrollToBottomGeneration) return;
+            // The virtualizer owns the full logical height. Align it before
+            // applying the DOM clamp so a newly hydrated long session cannot
+            // strand the viewport at the old estimated "bottom".
+            scrollVirtualizedChatToBottom();
             chatContainer.scrollTop = chatContainer.scrollHeight;
-            autoScrollPinnedToBottom = true;
-            chatWindowState.activityBelow = false;
             updateChatJumpBottomButton();
-            requestAnimationFrame(() => { chatWindowState.programmaticScroll = false; });
+            requestAnimationFrame(() => {
+                if (generation !== scrollToBottomGeneration) return;
+                chatWindowState.programmaticScroll = false;
+            });
         });
     }
     window.__oc = window.__oc || {};

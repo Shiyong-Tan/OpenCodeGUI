@@ -261,6 +261,64 @@ describe('undo segment placeholder presentation revisions', () => {
   });
 });
 
+describe('session-switch virtual bottom alignment', () => {
+  test('forced bottom scroll aligns the virtual active assistant before the hydrated DOM clamp', () => {
+    const raf: Array<() => void> = [];
+    const adapterCalls: Array<[string, unknown]> = [];
+    const chatContainer = { scrollTop: 0, scrollHeight: 1000 };
+    const context = vm.createContext({
+      activeSessionId: 'active-session',
+      autoScrollPinnedToBottom: false,
+      scrollToBottomGeneration: 0,
+      chatContainer,
+      chatWindowState: {
+        adapter: {
+          scrollToKey(key: string, options: unknown) {
+            adapterCalls.push([key, options]);
+            return true;
+          },
+        },
+        sessionId: 'active-session',
+        allUnits: [{ key: 'history' }, { key: 'active-assistant' }],
+        activityBelow: true,
+        programmaticScroll: false,
+      },
+      getSessionState: () => ({
+        currentTurnAssistantKey: 'active-assistant',
+        thinkingId: 'active-assistant',
+      }),
+      updateChatJumpBottomButton: () => undefined,
+      requestAnimationFrame: (callback: () => void) => {
+        raf.push(callback);
+        return raf.length;
+      },
+    });
+    vm.runInContext(
+      `${extractFunction('function scrollVirtualizedChatToBottom(')}
+       ${extractFunction('function scrollToBottom(')}
+       Object.assign(globalThis, { scrollToBottom });`,
+      context,
+    );
+
+    (context as any).scrollToBottom(true);
+    expect(adapterCalls).toEqual([
+      ['active-assistant', { align: 'end' }],
+    ]);
+    expect((context as any).autoScrollPinnedToBottom).toBe(true);
+    expect((context as any).chatWindowState.programmaticScroll).toBe(true);
+
+    chatContainer.scrollHeight = 9000;
+    raf.shift()?.();
+    expect(adapterCalls).toEqual([
+      ['active-assistant', { align: 'end' }],
+      ['active-assistant', { align: 'end' }],
+    ]);
+    expect(chatContainer.scrollTop).toBe(9000);
+    raf.shift()?.();
+    expect((context as any).chatWindowState.programmaticScroll).toBe(false);
+  });
+});
+
 describe('merged undo segment ordering and restore isolation', () => {
   test('orders merged child members at their unwrapped timeline positions', () => {
     const owner = extractFunction('function orderSegmentMemberMsgIdsByTimeline(');
