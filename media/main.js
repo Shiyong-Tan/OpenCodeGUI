@@ -5582,6 +5582,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (chatContainer) {
         if (typeof installChatRenderMetrics === 'function') installChatRenderMetrics(chatContainer);
         autoScrollPinnedToBottom = isNearBottom(chatContainer);
+        chatContainer.addEventListener('wheel', (event) => {
+            handleChatContainerWheel(event);
+        }, { passive: true });
         chatContainer.addEventListener('scroll', () => {
             handleChatContainerScroll();
         }, { passive: true });
@@ -12283,6 +12286,20 @@ function shouldHideDcpUiMessage(message) {
     }
 
     let scrollToBottomGeneration = 0;
+
+    function handleChatContainerWheel(event) {
+        const deltaY = Number(event?.deltaY);
+        if (!Number.isFinite(deltaY) || deltaY >= 0) return;
+        if (!autoScrollPinnedToBottom && !chatWindowState.programmaticScroll) return;
+        // A deliberate upward wheel gesture owns the viewport immediately.
+        // Invalidate both queued bottom-alignment frames and prevent virtual
+        // measurement callbacks from scheduling another forced bottom scroll.
+        scrollToBottomGeneration += 1;
+        autoScrollPinnedToBottom = false;
+        chatWindowState.programmaticScroll = false;
+        chatWindowState.userScrollActiveUntil = Date.now() + 180;
+        chatWindowState.activityBelow = true;
+    }
 
     function scrollVirtualizedChatToBottom() {
         const adapter = chatWindowState.adapter;

@@ -262,6 +262,60 @@ describe('undo segment placeholder presentation revisions', () => {
 });
 
 describe('session-switch virtual bottom alignment', () => {
+  test('upward wheel intent cancels a queued forced-bottom generation', () => {
+    const context = vm.createContext({
+      scrollToBottomGeneration: 7,
+      autoScrollPinnedToBottom: true,
+      chatWindowState: {
+        activityBelow: false,
+        programmaticScroll: true,
+        userScrollActiveUntil: 0,
+      },
+      Date: { now: () => 1000 },
+      Number,
+    });
+    vm.runInContext(
+      `${extractFunction('function handleChatContainerWheel(')}
+       Object.assign(globalThis, { handleChatContainerWheel });`,
+      context,
+    );
+
+    (context as any).handleChatContainerWheel({ deltaY: -120 });
+
+    expect((context as any).scrollToBottomGeneration).toBe(8);
+    expect((context as any).autoScrollPinnedToBottom).toBe(false);
+    expect((context as any).chatWindowState).toEqual({
+      activityBelow: true,
+      programmaticScroll: false,
+      userScrollActiveUntil: 1180,
+    });
+  });
+
+  test('downward wheel does not cancel automatic bottom alignment', () => {
+    const context = vm.createContext({
+      scrollToBottomGeneration: 7,
+      autoScrollPinnedToBottom: true,
+      chatWindowState: {
+        activityBelow: false,
+        programmaticScroll: true,
+        userScrollActiveUntil: 0,
+      },
+      Date: { now: () => 1000 },
+      Number,
+    });
+    vm.runInContext(
+      `${extractFunction('function handleChatContainerWheel(')}
+       Object.assign(globalThis, { handleChatContainerWheel });`,
+      context,
+    );
+
+    (context as any).handleChatContainerWheel({ deltaY: 120 });
+
+    expect((context as any).scrollToBottomGeneration).toBe(7);
+    expect((context as any).autoScrollPinnedToBottom).toBe(true);
+    expect((context as any).chatWindowState.programmaticScroll).toBe(true);
+  });
+
   test('forced bottom scroll aligns the virtual active assistant before the hydrated DOM clamp', () => {
     const raf: Array<() => void> = [];
     const adapterCalls: Array<[string, unknown]> = [];
@@ -1057,6 +1111,11 @@ describe('B4S-E1 named owner extraction target', () => {
     expect(source.match(/chatContainer\.addEventListener\('scroll', \(\) => \{\s*handleChatContainerScroll\(\);\s*\}, \{ passive: true \}\);/g) || []).toHaveLength(1);
     expect(source.match(/handleChatContainerScroll\(\);/g) || []).toHaveLength(1);
   });
+  test('passive wheel delegates once to handleChatContainerWheel', () => {
+    expect(source).toContain('function handleChatContainerWheel(event) {');
+    expect(source.match(/chatContainer\.addEventListener\('wheel', \(event\) => \{\s*handleChatContainerWheel\(event\);\s*\}, \{ passive: true \}\);/g) || []).toHaveLength(1);
+    expect(source.match(/handleChatContainerWheel\(event\);/g) || []).toHaveLength(1);
+  });
   test('sessionId case delegates once with message and retains one break', () => {
     expect(source).toContain('function handleSessionIdMessage(message) {');
     expect(source.match(/case 'sessionId': \{\s*handleSessionIdMessage\(message\);\s*break;\s*\}/g) || []).toHaveLength(1);
@@ -1115,7 +1174,10 @@ describe('B4S-E4 named owner mutation rejection', () => {
   test.each([
     ['duplicate delegation', (s: string) => s.replace('handlePrimarySendClick();', 'handlePrimarySendClick();\n        handlePrimarySendClick();'), 'delegation:primary'],
     ['removed delegation', (s: string) => s.replace('handlePrimarySendClick();', ''), 'delegation:primary'],
-    ['passive option', (s: string) => s.replace('}, { passive: true });', '});'), 'listener:passive'],
+    ['passive option', (s: string) => s.replace(
+      "chatContainer.addEventListener('scroll', () => {\n            handleChatContainerScroll();\n        }, { passive: true });",
+      "chatContainer.addEventListener('scroll', () => {\n            handleChatContainerScroll();\n        });",
+    ), 'listener:passive'],
     ['side-effect order', (s: string) => s.replace('if (!autoScrollPinnedToBottom) captureChatWindowAnchor();', 'captureChatWindowAnchor();\n            if (!autoScrollPinnedToBottom) {}'), 'body:scroll'],
     ['return semantics', (s: string) => s.replace(/(function handleSessionIdMessage\(message\)[\s\S]*?)if \(!sessionId\) return;/, '$1if (!sessionId) break;'), 'return:session'],
     ['session transition', (s: string) => s.replace('transitionActiveSessionPresentationOwner(prevSessionId, sessionId);', ''), 'transition:session'],
