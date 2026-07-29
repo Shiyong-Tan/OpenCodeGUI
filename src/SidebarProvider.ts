@@ -687,6 +687,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private readonly diffFileViewer: DiffFileViewer;
     private readonly changeListEmitter: ChangeListEmitter;
     private assistantTextBufferBySession = new Map<string, string>();
+    private assistantTextBufferByMessageIdBySession = new Map<string, Map<string, string>>();
     private pendingSnapshotUserTextBySession = new Map<string, string>();
     private appendSnapshotTurnStateBySession = new Map<string, AppendSnapshotTurnState>();
     private lastKnownModels: ModelInfo[] = [];
@@ -811,10 +812,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     ): LiveTurnResumePayload | undefined {
         const userLocalId = this.pendingLocalKeyBySession.get(sessionId);
         const tmpAssistantKey = this.pendingAssistantTmpKeyBySession.get(sessionId);
-        const assistantMessageId = this.pendingAssistantMessageIdBySession.get(sessionId)
-            || this.client.getTurnAssistantMsgId(sessionId)
+        const assistantMessageId = this.client.getTurnAssistantMsgId(sessionId)
+            || this.pendingAssistantMessageIdBySession.get(sessionId)
             || undefined;
-        const assistantText = this.assistantTextBufferBySession.get(sessionId);
+        const assistantText = this.getAssistantTextBuffer(sessionId, assistantMessageId);
         const draft = userLocalId ? this.draftByLocalKey.get(userLocalId) : undefined;
         const rawUserText = userLocalId ? this.rawUserTextByLocalKey.get(userLocalId) : undefined;
         const userMessageId = userLocalId ? this.clientMessageIdMap.get(userLocalId) : undefined;
@@ -3548,7 +3549,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             await this.writeFinalizeSnapshotFromCurrentTurnIncremental(identity, title);
         } finally {
             this.pendingSnapshotUserTextBySession.delete(sessionId);
-            this.assistantTextBufferBySession.delete(sessionId);
+            this.clearAssistantTextBuffers(sessionId);
             this.appendSnapshotTurnStateBySession.delete(sessionId);
         }
     }
@@ -3569,8 +3570,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             ].find((id) => this.isResolvableMessageId(id));
             const assistantMessageId = [
                 identity.assistantMessageId,
-                this.pendingAssistantMessageIdBySession.get(sessionId),
-                this.client.getTurnAssistantMsgId(sessionId)
+                this.client.getTurnAssistantMsgId(sessionId),
+                this.pendingAssistantMessageIdBySession.get(sessionId)
             ].find((id) => this.isResolvableMessageId(id));
             const rawUserText = (userMessageId ? this.rawUserTextByMsgId.get(userMessageId) : undefined)
                 ?? this.pendingSnapshotUserTextBySession.get(sessionId)
@@ -3578,7 +3579,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 ?? (pendingLocalKey ? this.draftByLocalKey.get(pendingLocalKey)?.text : undefined)
                 ?? '';
             const userText = this.normalizeUserTextForSnapshot(rawUserText);
-            const assistantText = this.assistantTextBufferBySession.get(sessionId) || '';
+            const assistantText = this.getAssistantTextBuffer(sessionId, assistantMessageId) || '';
             const appendState = this.appendSnapshotTurnStateBySession.get(sessionId);
             const pendingMessages: SessionMessage[] = [];
             const pendingIds = new Set<string>();
@@ -3929,6 +3930,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.pendingAssistantTmpKeyBySession.delete(sessionId);
         this.client.startTurnWithOp(sessionId, clientMessageId, operationId);
         this.assistantTextBufferBySession.set(sessionId, '');
+        this.assistantTextBufferByMessageIdBySession.delete(sessionId);
         this.appendSnapshotTurnStateBySession.delete(sessionId);
         if (temporaryAssistantKey) {
             this.pendingAssistantTmpKeyBySession.set(sessionId, temporaryAssistantKey);
@@ -3967,7 +3969,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             this.rawUserTextByLocalKey.delete(pendingLocalKey);
         }
         this.pendingLocalKeyBySession.delete(sessionId);
-        this.assistantTextBufferBySession.delete(sessionId);
+        this.clearAssistantTextBuffers(sessionId);
         this.appendSnapshotTurnStateBySession.delete(sessionId);
         this.pendingAssistantTmpKeyBySession.delete(sessionId);
         return pendingLocalKey;
@@ -4028,7 +4030,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private clearCanceledTurnAssistantState(sessionId: string): void {
         this.pendingAssistantTmpKeyBySession.delete(sessionId);
         this.pendingAssistantMessageIdBySession.delete(sessionId);
-        this.assistantTextBufferBySession.delete(sessionId);
+        this.clearAssistantTextBuffers(sessionId);
         this.appendSnapshotTurnStateBySession.delete(sessionId);
     }
 
@@ -5290,10 +5292,31 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
     }
 
-    private appendAssistantBuffer(sessionId: string, chunk: string): void {
+    private appendAssistantBuffer(sessionId: string, chunk: string, assistantMessageId?: string): void {
         this.markWebviewActiveTurnUpdated(sessionId, 'appendAssistantBuffer');
         const next = (this.assistantTextBufferBySession.get(sessionId) || '') + chunk;
         this.assistantTextBufferBySession.set(sessionId, next);
+        if (this.isResolvableMessageId(assistantMessageId)) {
+            let byMessageId = this.assistantTextBufferByMessageIdBySession.get(sessionId);
+            if (!byMessageId) {
+                byMessageId = new Map<string, string>();
+                this.assistantTextBufferByMessageIdBySession.set(sessionId, byMessageId);
+            }
+            byMessageId.set(assistantMessageId, (byMessageId.get(assistantMessageId) || '') + chunk);
+        }
+    }
+
+    private getAssistantTextBuffer(sessionId: string, assistantMessageId?: string): string | undefined {
+        if (this.isResolvableMessageId(assistantMessageId)) {
+            const exact = this.assistantTextBufferByMessageIdBySession.get(sessionId)?.get(assistantMessageId);
+            if (exact !== undefined) return exact;
+        }
+        return this.assistantTextBufferBySession.get(sessionId);
+    }
+
+    private clearAssistantTextBuffers(sessionId: string): void {
+        this.assistantTextBufferBySession.delete(sessionId);
+        this.assistantTextBufferByMessageIdBySession.delete(sessionId);
     }
 
     private getOrCreateAppendSnapshotTurnState(sessionId: string): AppendSnapshotTurnState {
@@ -5368,7 +5391,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             });
         }
 
-        const predecessorText = this.assistantTextBufferBySession.get(sessionId) || '';
+        const predecessorText = this.getAssistantTextBuffer(sessionId, predecessorAssistantMsgId) || '';
         if (predecessorText && !this.isHiddenControlAssistantText(predecessorText)) {
             addOrdered({
                 role: 'assistant',
@@ -5429,8 +5452,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private flushAssistantBufferToWebview(sessionId: string, webview: vscode.Webview): void {
-        const text = this.assistantTextBufferBySession.get(sessionId) || '';
-        this.assistantTextBufferBySession.delete(sessionId);
+        const assistantMessageId = this.client.getTurnAssistantMsgId(sessionId)
+            || this.pendingAssistantMessageIdBySession.get(sessionId);
+        const text = this.getAssistantTextBuffer(sessionId, assistantMessageId) || '';
+        this.clearAssistantTextBuffers(sessionId);
         if (!text) return;
         const tmpKey = this.pendingAssistantTmpKeyBySession.get(sessionId);
         const isSyntheticTurn = this.isCurrentTurnSynthetic(sessionId);
@@ -6430,6 +6455,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const retainedPendingAssistantTmpKeyBySession = new Map<string, string>();
         const retainedPendingAssistantMessageIdBySession = new Map<string, string>();
         const retainedAssistantTextBufferBySession = new Map<string, string>();
+        const retainedAssistantTextBufferByMessageIdBySession = new Map<string, Map<string, string>>();
         const retainedPendingSnapshotUserTextBySession = new Map<string, string>();
         const retainedAppendSnapshotTurnStateBySession = new Map<string, AppendSnapshotTurnState>();
         const retainedRawUserTextByLocalKey = new Map<string, string>();
@@ -6461,6 +6487,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             if (assistantTextBuffer !== undefined) {
                 retainedAssistantTextBufferBySession.set(sessionId, assistantTextBuffer);
             }
+            const assistantTextByMessageId = this.assistantTextBufferByMessageIdBySession.get(sessionId);
+            if (assistantTextByMessageId) {
+                retainedAssistantTextBufferByMessageIdBySession.set(sessionId, new Map(assistantTextByMessageId));
+            }
             const pendingSnapshotUserText = this.pendingSnapshotUserTextBySession.get(sessionId);
             if (pendingSnapshotUserText !== undefined) {
                 retainedPendingSnapshotUserTextBySession.set(sessionId, pendingSnapshotUserText);
@@ -6482,6 +6512,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.shownDiffKeysBySession.clear();
         this.uiTimelineBySession.clear();
         this.assistantTextBufferBySession.clear();
+        this.assistantTextBufferByMessageIdBySession.clear();
         this.pendingSnapshotUserTextBySession.clear();
         this.appendSnapshotTurnStateBySession.clear();
         this.pendingAssistantTmpKeyBySession.clear();
@@ -6516,6 +6547,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const assistantTextBuffer = retainedAssistantTextBufferBySession.get(sessionId);
             if (assistantTextBuffer !== undefined) {
                 this.assistantTextBufferBySession.set(sessionId, assistantTextBuffer);
+                restored = true;
+            }
+            const assistantTextByMessageId = retainedAssistantTextBufferByMessageIdBySession.get(sessionId);
+            if (assistantTextByMessageId) {
+                this.assistantTextBufferByMessageIdBySession.set(sessionId, assistantTextByMessageId);
                 restored = true;
             }
             const pendingSnapshotUserText = retainedPendingSnapshotUserTextBySession.get(sessionId);

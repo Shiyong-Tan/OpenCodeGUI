@@ -155,7 +155,7 @@ describe('SidebarChatEventHandler', () => {
     expect(host.prepareAppendSnapshotHandoff).toHaveBeenCalledWith('session-A', followup);
     expect(host.prepareAppendSnapshotHandoff.mock.invocationCallOrder[0])
       .toBeLessThan(host.appendAssistantBuffer.mock.invocationCallOrder[0]);
-    expect(host.appendAssistantBuffer).toHaveBeenCalledWith('session-A', 'OK');
+    expect(host.appendAssistantBuffer).toHaveBeenCalledWith('session-A', 'OK', 'msg_successor');
   });
 
   test('drops ownerless asynchronous assistant events instead of using visible session', async () => {

@@ -585,7 +585,7 @@ export async function handleSidebarChatEvent(
             if (sessionId) {
                 host.markWebviewActiveTurnUpdated(sessionId, 'event:text');
                 if (event.appendFollowup) host.prepareAppendSnapshotHandoff?.(sessionId, event.appendFollowup);
-                host.appendAssistantBuffer(sessionId, event.text);
+                host.appendAssistantBuffer(sessionId, event.text, event.assistantMsgId);
                 // Push latest chunk to webview (no cumulative text)
                 const liveWebview = host._view?.webview || webview;
                 const isSyntheticTurn = host.isCurrentTurnSynthetic(sessionId);
@@ -653,6 +653,7 @@ export async function handleSidebarChatEvent(
                     host.rawUserTextByLocalKey.delete(pendingLocalKey);
                 }
                 host.assistantTextBufferBySession.delete(sessionId);
+                host.assistantTextBufferByMessageIdBySession?.delete(sessionId);
                 host.pendingAssistantTmpKeyBySession.delete(sessionId);
                 host.pendingLocalKeyBySession.delete(sessionId);
                 host.sendInFlightBySession.delete(sessionId);

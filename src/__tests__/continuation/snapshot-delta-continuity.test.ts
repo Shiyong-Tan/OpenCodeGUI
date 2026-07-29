@@ -361,6 +361,63 @@ describe('W5A snapshot export and finalize contracts', () => {
         expect(provider.assistantTextBufferBySession.has('ses_delta')).toBe(false);
     });
 
+    it('persists only the accepted final assistant message when one turn has multiple assistant stages', async () => {
+        const provider = createProvider();
+        provider.readSnapshot = jest.fn().mockResolvedValue(undefined);
+        provider.writeSnapshotAtomic = jest.fn().mockResolvedValue(456);
+        provider.client.exportSession = jest.fn();
+        provider.client.getMessageIndex = jest.fn((id: string) => id === 'msg_user_new' ? 1 : 5);
+        provider.pendingSnapshotUserTextBySession.set('ses_delta', 'inspect the implementation');
+
+        const firstTemporary = 'A'.repeat(114);
+        const secondTemporary = 'B'.repeat(164);
+        const finalText = 'F'.repeat(5001);
+        provider.appendAssistantBuffer('ses_delta', firstTemporary, 'msg_assistant_tool_1');
+        provider.appendAssistantBuffer('ses_delta', secondTemporary, 'msg_assistant_tool_2');
+        provider.appendAssistantBuffer('ses_delta', finalText, 'msg_assistant_final');
+
+        await provider.writeFinalizeSnapshotFromCurrentTurn({
+            sessionId: 'ses_delta',
+            userMessageId: 'msg_user_new',
+            assistantMessageId: 'msg_assistant_final',
+        });
+
+        const written = provider.writeSnapshotAtomic.mock.calls[0][1].sessionData;
+        expect(written.messages).toEqual([
+            msg('msg_user_new', 1, 'user', 'inspect the implementation'),
+            msg('msg_assistant_final', 5, 'assistant', finalText),
+        ]);
+        expect(written.messages[1].text).toHaveLength(5001);
+        expect(written.messages[1].text).not.toContain(firstTemporary);
+        expect(written.messages[1].text).not.toContain(secondTemporary);
+        expect(provider.assistantTextBufferByMessageIdBySession.has('ses_delta')).toBe(false);
+    });
+
+    it('resumes an active turn from the current assistant ID instead of a stale initial binding', () => {
+        const provider = createProvider();
+        provider.pendingAssistantMessageIdBySession.set('ses_delta', 'msg_assistant_initial');
+        provider.client.getTurnAssistantMsgId = jest.fn().mockReturnValue('msg_assistant_current');
+        provider.appendAssistantBuffer('ses_delta', 'temporary status', 'msg_assistant_initial');
+        provider.appendAssistantBuffer('ses_delta', 'current answer', 'msg_assistant_current');
+
+        const payload = provider.buildLiveTurnResumePayload(
+            'ses_delta',
+            'panel-1',
+            'webview-1',
+            {
+                turnId: 'turn-1',
+                source: 'sendInFlightBySession',
+                streaming: true,
+                finalizing: false,
+            },
+        );
+
+        expect(payload).toEqual(expect.objectContaining({
+            assistantMessageId: 'msg_assistant_current',
+            assistantText: 'current answer',
+        }));
+    });
+
     it('persists append stages without assigning root text or predecessor text to successor identities', async () => {
         const provider = createProvider();
         const boundary = msg('msg_boundary', 10, 'assistant', 'older snapshot final');
@@ -376,7 +433,11 @@ describe('W5A snapshot export and finalize contracts', () => {
         provider.client.getMessageIndex = jest.fn((id: string) => indices[id]);
         provider.pendingSnapshotUserTextBySession.set('ses_delta', '请你派遣 subagent 计时 1 分钟');
         provider.rawUserTextByMsgId.set('msg_root', '请你派遣 subagent 计时 1 分钟');
-        provider.assistantTextBufferBySession.set('ses_delta', '将派遣子代理进行非修改性 1 分钟计时。');
+        provider.appendAssistantBuffer(
+            'ses_delta',
+            '将派遣子代理进行非修改性 1 分钟计时。',
+            'msg_predecessor',
+        );
         provider.recordAppendSnapshotUserMessage(
             'ses_delta',
             'msg_root',
@@ -407,7 +468,7 @@ describe('W5A snapshot export and finalize contracts', () => {
             assistantMsgId: 'msg_successor',
         });
         expect(provider.assistantTextBufferBySession.get('ses_delta')).toBe('');
-        provider.appendAssistantBuffer('ses_delta', 'OK');
+        provider.appendAssistantBuffer('ses_delta', 'OK', 'msg_successor');
 
         await provider.writeFinalizeSnapshotFromCurrentTurn({
             sessionId: 'ses_delta',
