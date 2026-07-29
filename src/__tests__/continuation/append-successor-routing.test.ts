@@ -122,4 +122,31 @@ describe('append followup same-turn handoff', () => {
         expect((client as any).turnFinalResolvedBySession.has('ses')).toBe(true);
         expect(client.getSessionId()).toBe('other-visible-session');
     });
+
+    it('finalizes an idle append successor with no retained text after a confirmed drain pass', async () => {
+        const client = createSameTurnFixture();
+        client.mapServerEventToChatEvents('message.updated', {
+            info: { id: 'msg_a', sessionID: 'ses', role: 'assistant', parentID: 'msg_root', finish: 'tool-calls' },
+        }, 'sse');
+        client.mapServerEventToChatEvents('message.updated', {
+            info: { id: 'msg_b', sessionID: 'ses', role: 'assistant', parentID: 'msg_u' },
+        }, 'sse');
+        client.mapServerEventToChatEvents('session.status', {
+            sessionID: 'ses', status: { type: 'idle' },
+        }, 'sse');
+
+        expect(client.getFinalizingMsgId('ses')).toBe('msg_b');
+        expect((client as any).assistantTextLengths.get('msg_b') || 0).toBe(0);
+
+        await (client as any).runResyncSettleCheck('ses', 'sse-drain');
+        const pass2Timer = (client as any).turnSseDrainTimerBySession.get('ses');
+        expect(pass2Timer).toBeDefined();
+        clearTimeout(pass2Timer);
+        (client as any).turnSseDrainTimerBySession.delete('ses');
+
+        await (client as any).runResyncSettleCheck('ses', 'sse-drain-pass2');
+
+        expect((client as any).turnFinalResolvedBySession.has('ses')).toBe(true);
+        expect((client as any).turnFinalSourceBySession.get('ses')).toBe('session-idle');
+    });
 });

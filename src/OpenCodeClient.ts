@@ -3009,6 +3009,16 @@ export class OpenCodeClient {
             ? (len > 0 && stable >= 2)
             : (noDeltaCount >= this.settleNoDeltaThreshold && sseSilent);
         this.logUiDebug(`EXT: settle.check | sessionId=${sessionId} | reason=${reason} | msgId=${finalMsgId} | len=${len} | stable=${stable} | attempts=${attempts} | noDelta=${noDeltaCount} | sseSilent=${String(sseSilent)} | complete=${complete}`);
+        const emptyIdleFinalConfirmed = reason === 'sse-drain-pass2'
+            && len === 0
+            && this.turnFinalSourceBySession.get(sessionId) === 'session-idle'
+            && this.finalizingMsgIdBySession.get(sessionId) === finalMsgId
+            && !this.hasPendingOrRunningTools(sessionId);
+        if (emptyIdleFinalConfirmed) {
+            this.logUiDebug(`EXT: settle.empty-idle | sessionId=${sessionId} | msgId=${finalMsgId} | action=resolve`);
+            this.resolveTurnFinal(sessionId, 'settle-empty-idle');
+            return;
+        }
         if (complete) {
             const reasonLabel = noDeltaCount >= this.settleNoDeltaThreshold && sseSilent
                 ? 'settle-no-delta'
@@ -3016,7 +3026,15 @@ export class OpenCodeClient {
             this.resolveTurnFinal(sessionId, reasonLabel);
             return;
         }
-        if (reason === 'sse-drain' && len > 0 && stable === 1 && !this.hasPendingOrRunningTools(sessionId)) {
+        if (
+            reason === 'sse-drain'
+            && !this.hasPendingOrRunningTools(sessionId)
+            && ((len > 0 && stable === 1) || (
+                len === 0
+                && this.turnFinalSourceBySession.get(sessionId) === 'session-idle'
+                && this.finalizingMsgIdBySession.get(sessionId) === finalMsgId
+            ))
+        ) {
             const existing = this.turnSseDrainTimerBySession.get(sessionId);
             if (existing) {
                 clearTimeout(existing);
@@ -3026,7 +3044,7 @@ export class OpenCodeClient {
                 void this.runResyncSettleCheck(sessionId, 'sse-drain-pass2');
             }, this.sseDrainPass2DelayMs);
             this.turnSseDrainTimerBySession.set(sessionId, timer);
-            this.logUiDebug(`EXT: settle.pass2.schedule | sessionId=${sessionId} | delayMs=${this.sseDrainPass2DelayMs} | msgId=${finalMsgId}`);
+            this.logUiDebug(`EXT: settle.pass2.schedule | sessionId=${sessionId} | delayMs=${this.sseDrainPass2DelayMs} | msgId=${finalMsgId} | len=${len}`);
             return;
         }
         this.startRescueTimer(sessionId);
