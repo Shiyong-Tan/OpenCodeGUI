@@ -23,14 +23,23 @@ export function mapServerEventToChatEvents(
         let appendFollowupStart = false;
         if (source === 'sse' && type === 'message.updated' && props?.info?.role === 'assistant' && sessionId) {
             const info = props.info;
-            if (info.finish === 'tool-calls') {
-                host.recordAppendFollowupToolCallsBoundary?.(sessionId, info.id, normalized.lane);
-            }
             const active = host.getActiveAppendFollowup?.(sessionId);
             if (active) {
                 if (info.id !== active.assistantMsgId || info.parentID !== active.appendUserMsgId) {
                     // A's duplicate tool-calls update is harmless; all other late/foreign main messages fail closed.
-                    if (!(info.id === active.predecessorAssistantMsgId && info.finish === 'tool-calls')) return events;
+                    if (!(info.id === active.predecessorAssistantMsgId && info.finish === 'tool-calls')) {
+                        const advanced = host.tryAdvanceAppendFollowup?.(
+                            sessionId,
+                            info.id,
+                            info.parentID,
+                            normalized.lane
+                        );
+                        if (advanced?.status === 'new' || advanced?.status === 'existing') {
+                            appendFollowup = advanced.identity;
+                        } else {
+                            return events;
+                        }
+                    }
                 } else {
                     appendFollowup = active;
                 }
@@ -50,16 +59,32 @@ export function mapServerEventToChatEvents(
                     }
                 }
             }
+            if (info.finish === 'tool-calls') {
+                host.recordAppendFollowupToolCallsBoundary?.(sessionId, info.id, normalized.lane);
+            }
         }
         if (source === 'sse' && type === 'message.part.updated' && sessionId) {
             const part = props?.part;
             const active = host.getActiveAppendFollowup?.(sessionId);
             const messageId = typeof part?.messageID === 'string' ? part.messageID : undefined;
-            if (active && messageId && messageId !== active.assistantMsgId && part?.type !== 'tool') return events;
+            if (active && messageId && messageId !== active.assistantMsgId && part?.type !== 'tool') {
+                if (part?.type !== 'text') return events;
+                const advanced = host.tryAdvanceAppendFollowup?.(
+                    sessionId,
+                    messageId,
+                    undefined,
+                    normalized.lane
+                );
+                if (advanced?.status === 'new' || advanced?.status === 'existing') {
+                    appendFollowup = advanced.identity;
+                } else {
+                    return events;
+                }
+            }
             if (!active && part?.type === 'text' && messageId) {
                 host.clearAppendFollowupBoundaryForRenewedContent?.(sessionId, messageId);
             }
-            if (active?.assistantMsgId === messageId) appendFollowup = active;
+            if (!appendFollowup && active?.assistantMsgId === messageId) appendFollowup = active;
         }
         if (appendFollowupStart) {
             events.push({ type: 'turnInFlight', sessionId, inFlight: true, ownerMsgId: appendFollowup.assistantMsgId, assistantMsgId: appendFollowup.assistantMsgId, appendFollowup, source });

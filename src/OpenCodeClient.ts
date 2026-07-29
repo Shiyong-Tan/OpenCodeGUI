@@ -549,6 +549,7 @@ export class OpenCodeClient {
     private falsePositiveResetCountBySession = new Map<string, number>();
     private watchdogDrainDelayTimerBySession = new Map<string, NodeJS.Timeout>();
     private turnResyncEpochBySession = new Map<string, number>();
+    private authoritativeIdleResyncBySession = new Set<string>();
     private toolRunningByMessageId = new Map<string, number>();
     private toolStatusBySession = new Map<string, Map<string, string>>();
     private copilotSpeedMultiplierCache?: CopilotSpeedMultiplierCache;
@@ -714,6 +715,7 @@ export class OpenCodeClient {
         this.rescueResumeAtBySession.clear();
         this.turnRecoveryModeBySession.clear();
         this.turnResyncEpochBySession.clear();
+        this.authoritativeIdleResyncBySession.clear();
         this.toolRunningByMessageId.clear();
         this.toolStatusBySession.clear();
         this.resyncInFlightBySession.clear();
@@ -1082,6 +1084,7 @@ export class OpenCodeClient {
         this.sessionIdleReceivedBySession.delete(sessionId);
         this.turnRecoveryModeBySession.delete(sessionId);
         this.turnResyncEpochBySession.delete(sessionId);
+        this.authoritativeIdleResyncBySession.delete(sessionId);
         this.lastProgressAtBySession.delete(sessionId);
         this.lastProgressKeyBySession.delete(sessionId);
         this.noProgressEpochsBySession.delete(sessionId);
@@ -2629,6 +2632,66 @@ export class OpenCodeClient {
         return { status: 'new', identity: { ...identity } };
     }
 
+    public tryAdvanceAppendFollowup(
+        sessionId: string | undefined,
+        assistantMsgId: string | undefined,
+        parentId: string | undefined,
+        lane: EventLane
+    ): { status: 'new' | 'existing' | 'blocked' | 'conflict'; identity?: AppendFollowupIdentity } {
+        if (!sessionId || !assistantMsgId || lane !== 'main') return { status: 'blocked' };
+        const append = this.appendTurnStateBySession.get(sessionId);
+        const state = this.turnStateBySession.get(sessionId);
+        const active = append?.activeSuccessor;
+        if (!append || !state || !active) return { status: 'blocked' };
+        if (active.assistantMsgId === assistantMsgId) {
+            return { status: 'existing', identity: { ...active } };
+        }
+        const handoff = state.appendFollowupHandoff;
+        if (
+            (parentId && parentId !== active.appendUserMsgId)
+            || handoff?.phase !== 'followup-active'
+            || handoff.followupAssistantMsgId !== active.assistantMsgId
+            || handoff.followupFinishedWithToolCalls !== true
+            || this.turnFinishedBySession.has(sessionId)
+            || this.turnFinalMsgIdBySession.has(sessionId)
+            || this.finalizingMsgIdBySession.has(sessionId)
+        ) {
+            return { status: 'conflict' };
+        }
+
+        const identity: AppendFollowupIdentity = {
+            kind: 'append-followup',
+            mode: 'same-turn-handoff',
+            sessionId,
+            appendUserMsgId: active.appendUserMsgId,
+            predecessorAssistantMsgId: active.assistantMsgId,
+            assistantMsgId,
+            generation: (append.nextSuccessorGeneration || active.generation) + 1
+        };
+        append.nextSuccessorGeneration = identity.generation;
+        append.activeSuccessor = identity;
+        state.assistantMsgId = assistantMsgId;
+        state.pendingAssistantTmpKey = undefined;
+        state.turnMessageIds = state.turnMessageIds || new Set<string>();
+        state.turnMessageIds.add(active.assistantMsgId);
+        state.turnMessageIds.add(assistantMsgId);
+        state.appendFollowupHandoff = {
+            phase: 'followup-active',
+            predecessorAssistantMsgId: active.assistantMsgId,
+            appendUserMsgId: active.appendUserMsgId,
+            followupAssistantMsgId: assistantMsgId,
+            generation: identity.generation
+        };
+        this.currentTurnAssistantMsgIdBySession.set(sessionId, assistantMsgId);
+        this.pendingAssistantMsgIdBySession.set(sessionId, assistantMsgId);
+        this.currentTurnUserMsgIdBySession.set(sessionId, active.appendUserMsgId);
+        this.pendingUserMsgIdBySession.set(sessionId, active.appendUserMsgId);
+        this.logUiDebug(
+            `EXT: append.followup.advance | sessionId=${sessionId} | from=${active.assistantMsgId} | to=${assistantMsgId} | generation=${identity.generation}`
+        );
+        return { status: 'new', identity: { ...identity } };
+    }
+
     public getActiveAppendFollowup(sessionId: string | undefined): AppendFollowupIdentity | undefined {
         const identity = sessionId ? this.appendTurnStateBySession.get(sessionId)?.activeSuccessor : undefined;
         return identity ? { ...identity } : undefined;
@@ -2754,8 +2817,10 @@ export class OpenCodeClient {
         this.logUiDebug(
             `EXT: session.idle.final.defer | sessionId=${sessionId} | msgId=${assistantMsgId} | reason=append-successor-tool-calls`
         );
+        this.authoritativeIdleResyncBySession.add(sessionId);
         void this.resyncForChatResolve(sessionId, 'session-idle-append-tool-calls')
             .finally(() => {
+                this.authoritativeIdleResyncBySession.delete(sessionId);
                 if (!this.turnFinalResolvedBySession.has(sessionId) && !this.turnFinalAtBySession.has(sessionId)) {
                     this.startRescueTimer(sessionId);
                 }
@@ -2856,6 +2921,10 @@ export class OpenCodeClient {
         if (!sessionId || !msgId) return;
         if (!this.isSessionAwaitingFinal(sessionId)) return;
         if ((this.turnRecoveryModeBySession.get(sessionId) || 'sse') !== 'resync') return;
+        if (this.authoritativeIdleResyncBySession.has(sessionId)) {
+            this.logUiDebug(`EXT: resync.keep.by-sse | sessionId=${sessionId} | msgId=${msgId} | reason=${reason} | owner=session-idle-final`);
+            return;
+        }
         if (this.subagentToParentSessionMap.has(sessionId)) {
             const rootSessionId = this.subagentToParentSessionMap.get(sessionId) || sessionId;
             this.logUiDebug(`EXT: resync.root.recover.blocked | rootSessionId=${rootSessionId} | targetSessionId=${sessionId} | reason=subagent-final | source=sse`);
@@ -2876,6 +2945,10 @@ export class OpenCodeClient {
         if ((this.turnRecoveryModeBySession.get(sessionId) || 'sse') !== 'resync') return;
         if (!this.turnStateBySession.has(sessionId)) return;
         if (this.turnFinalAtBySession.has(sessionId)) return;
+        if (this.authoritativeIdleResyncBySession.has(sessionId)) {
+            this.logUiDebug(`EXT: resync.keep.by-sse | sessionId=${sessionId} | reason=${reason} | owner=session-idle-final`);
+            return;
+        }
         if (this.subagentToParentSessionMap.has(sessionId)) {
             const rootSessionId = this.subagentToParentSessionMap.get(sessionId) || sessionId;
             this.logUiDebug(`EXT: resync.root.recover.blocked | rootSessionId=${rootSessionId} | targetSessionId=${sessionId} | reason=subagent-sse | source=sse`);
