@@ -700,6 +700,43 @@ describe('append runtime isolation', () => {
         expect(client.canceledActiveTurnBySession.has('ses_keep')).toBe(false);
     });
 
+    it('retains active assistant text evidence across a session-switch reset', async () => {
+        const client = new OpenCodeClient() as any;
+        createdClients.push(client as OpenCodeClient);
+
+        client.startTurn('ses_keep', 'local-user-keep');
+        client.turnStateBySession.get('ses_keep').assistantMsgId = 'msg_assistant_keep';
+        client.currentTurnAssistantMsgIdBySession.set('ses_keep', 'msg_assistant_keep');
+        client.assistantTextLengths.set('msg_assistant_keep', 837);
+        client.assistantTextLengthsByPart.set('msg_assistant_keep:prt_final', 837);
+        client.assistantTextById.set('msg_assistant_keep', 'final response');
+        client.assistantHasDelta.add('msg_assistant_keep');
+        client.assistantStatusCleared.add('msg_assistant_keep');
+
+        client.startTurn('ses_drop', 'local-user-drop');
+        client.turnStateBySession.get('ses_drop').assistantMsgId = 'msg_assistant_drop';
+        client.currentTurnAssistantMsgIdBySession.set('ses_drop', 'msg_assistant_drop');
+        client.assistantTextLengths.set('msg_assistant_drop', 42);
+        client.assistantTextLengthsByPart.set('msg_assistant_drop:prt_final', 42);
+        client.assistantTextById.set('msg_assistant_drop', 'drop response');
+
+        client.resetSessionState({ preserveInFlightSessionIds: new Set(['ses_keep']) });
+
+        expect(client.assistantTextLengths.get('msg_assistant_keep')).toBe(837);
+        expect(client.assistantTextLengthsByPart.get('msg_assistant_keep:prt_final')).toBe(837);
+        expect(client.assistantTextById.get('msg_assistant_keep')).toBe('final response');
+        expect(client.assistantHasDelta.has('msg_assistant_keep')).toBe(true);
+        expect(client.assistantStatusCleared.has('msg_assistant_keep')).toBe(true);
+
+        expect(client.assistantTextLengths.has('msg_assistant_drop')).toBe(false);
+        expect(client.assistantTextLengthsByPart.has('msg_assistant_drop:prt_final')).toBe(false);
+        expect(client.assistantTextById.has('msg_assistant_drop')).toBe(false);
+
+        client.markTurnFinal('ses_keep', 'msg_assistant_keep', 'sse');
+        await client.runResyncSettleCheck('ses_keep', 'sse-drain');
+        expect(client.turnFinalResolvedBySession.has('ses_keep')).toBe(true);
+    });
+
     it('retains only allowlisted provider bindings for pre-reset send-in-flight sessions', () => {
         const provider = createProvider();
         provider.client.resetSessionState = jest.fn();

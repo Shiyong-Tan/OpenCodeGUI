@@ -622,6 +622,12 @@ export class OpenCodeClient {
         const retainedPendingTurnChangesBySession = new Map<string, PendingTurnChanges>();
         const retainedTurnWriteStateBySession = new Map<string, { turnKey: string; hasWrites: boolean }>();
         const retainedMessageIdAliasBySession = new Map<string, Map<string, string>>();
+        const retainedAssistantMessageIds = new Set<string>();
+        const retainedAssistantTextLengths = new Map<string, number>();
+        const retainedAssistantTextLengthsByPart = new Map<string, number>();
+        const retainedAssistantTextById = new Map<string, string>();
+        const retainedAssistantHasDelta = new Set<string>();
+        const retainedAssistantStatusCleared = new Set<string>();
         if (preserveInFlightSessionIds?.size) {
             for (const sessionId of preserveInFlightSessionIds) {
                 if (typeof sessionId !== 'string' || !sessionId) continue;
@@ -631,6 +637,19 @@ export class OpenCodeClient {
                         ...turnState,
                         turnMessageIds: turnState.turnMessageIds ? new Set(turnState.turnMessageIds) : undefined,
                     });
+                }
+                const assistantMessageIds = [
+                    turnState?.assistantMsgId,
+                    turnState?.lastResolvedAssistantMsgId,
+                    this.currentTurnAssistantMsgIdBySession.get(sessionId),
+                    this.pendingAssistantMsgIdBySession.get(sessionId),
+                    this.finalizingMsgIdBySession.get(sessionId),
+                    this.turnFinalMsgIdBySession.get(sessionId),
+                ];
+                for (const messageId of assistantMessageIds) {
+                    if (typeof messageId === 'string' && messageId) {
+                        retainedAssistantMessageIds.add(messageId);
+                    }
                 }
                 const pendingChanges = this.pendingTurnChangesBySession.get(sessionId);
                 if (pendingChanges) {
@@ -646,6 +665,21 @@ export class OpenCodeClient {
                 const aliasMap = this.messageIdAliasBySession.get(sessionId);
                 if (aliasMap) {
                     retainedMessageIdAliasBySession.set(sessionId, new Map(aliasMap));
+                }
+            }
+            for (const messageId of retainedAssistantMessageIds) {
+                const textLength = this.assistantTextLengths.get(messageId);
+                if (textLength !== undefined) retainedAssistantTextLengths.set(messageId, textLength);
+                const text = this.assistantTextById.get(messageId);
+                if (text !== undefined) retainedAssistantTextById.set(messageId, text);
+                if (this.assistantHasDelta.has(messageId)) retainedAssistantHasDelta.add(messageId);
+                if (this.assistantStatusCleared.has(messageId)) retainedAssistantStatusCleared.add(messageId);
+            }
+            for (const [partKey, textLength] of this.assistantTextLengthsByPart) {
+                const separatorIndex = partKey.indexOf(':');
+                const messageId = separatorIndex >= 0 ? partKey.slice(0, separatorIndex) : partKey;
+                if (retainedAssistantMessageIds.has(messageId)) {
+                    retainedAssistantTextLengthsByPart.set(partKey, textLength);
                 }
             }
         }
@@ -673,6 +707,21 @@ export class OpenCodeClient {
         this.assistantTextById.clear();
         this.assistantHasDelta.clear();
         this.assistantStatusCleared.clear();
+        for (const [messageId, textLength] of retainedAssistantTextLengths) {
+            this.assistantTextLengths.set(messageId, textLength);
+        }
+        for (const [partKey, textLength] of retainedAssistantTextLengthsByPart) {
+            this.assistantTextLengthsByPart.set(partKey, textLength);
+        }
+        for (const [messageId, text] of retainedAssistantTextById) {
+            this.assistantTextById.set(messageId, text);
+        }
+        for (const messageId of retainedAssistantHasDelta) {
+            this.assistantHasDelta.add(messageId);
+        }
+        for (const messageId of retainedAssistantStatusCleared) {
+            this.assistantStatusCleared.add(messageId);
+        }
         this.messageRoleById.clear();
         this.lastCwdBySession.clear();
         this.canceledActiveTurnBySession.clear();
