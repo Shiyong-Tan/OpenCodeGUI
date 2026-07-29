@@ -23,6 +23,9 @@ export function mapServerEventToChatEvents(
         let appendFollowupStart = false;
         if (source === 'sse' && type === 'message.updated' && props?.info?.role === 'assistant' && sessionId) {
             const info = props.info;
+            if (info.finish === 'tool-calls') {
+                host.recordAppendFollowupToolCallsBoundary?.(sessionId, info.id, normalized.lane);
+            }
             const active = host.getActiveAppendFollowup?.(sessionId);
             if (active) {
                 if (info.id !== active.assistantMsgId || info.parentID !== active.appendUserMsgId) {
@@ -32,9 +35,7 @@ export function mapServerEventToChatEvents(
                     appendFollowup = active;
                 }
             } else {
-                if (info.finish === 'tool-calls') {
-                    host.recordAppendFollowupToolCallsBoundary?.(sessionId, info.id, normalized.lane);
-                } else {
+                if (info.finish !== 'tool-calls') {
                     const state = host.appendTurnStateBySession.get(sessionId);
                     if (state?.appendUserMsgIds?.has(info.parentID)) {
                         const result = host.tryBindAppendFollowup?.(sessionId, info.id, info.parentID, normalized.lane);
@@ -856,9 +857,7 @@ export function mapServerEventToChatEvents(
                 return events;
             }
             if (host.turnStateBySession.has(sessionId)) {
-                const assistantMsgId = host.getTurnAssistantMsgId(sessionId);
-                host.logUiDebug(`EXT: session.idle.final | sessionId=${sessionId} | msgId=${assistantMsgId || 'null'}`);
-                host.markTurnFinal(sessionId, assistantMsgId, 'session-idle');
+                host.handleSessionIdleFinal(sessionId);
             }
             return events;
         }

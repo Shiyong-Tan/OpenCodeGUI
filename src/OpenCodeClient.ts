@@ -379,6 +379,7 @@ type AppendFollowupHandoff = {
     appendUserMsgId?: string;
     followupAssistantMsgId?: string;
     generation?: number;
+    followupFinishedWithToolCalls?: boolean;
 };
 
 type PostFinalWatchState = {
@@ -2584,7 +2585,17 @@ export class OpenCodeClient {
     public recordAppendFollowupToolCallsBoundary(sessionId: string | undefined, assistantMsgId: string | undefined, lane: EventLane): void {
         if (!sessionId || !assistantMsgId || lane !== 'main') return;
         const state = this.turnStateBySession.get(sessionId);
-        if (!state || state.assistantMsgId !== assistantMsgId || this.appendTurnStateBySession.get(sessionId)?.activeSuccessor) return;
+        const activeSuccessor = this.appendTurnStateBySession.get(sessionId)?.activeSuccessor;
+        if (
+            state
+            && activeSuccessor?.assistantMsgId === assistantMsgId
+            && state.appendFollowupHandoff?.phase === 'followup-active'
+            && state.appendFollowupHandoff.followupAssistantMsgId === assistantMsgId
+        ) {
+            state.appendFollowupHandoff.followupFinishedWithToolCalls = true;
+            return;
+        }
+        if (!state || state.assistantMsgId !== assistantMsgId || activeSuccessor) return;
         if (state.appendFollowupHandoff?.phase === 'tool-calls-complete' && state.appendFollowupHandoff.predecessorAssistantMsgId === assistantMsgId) return;
         state.appendFollowupHandoff = { phase: 'tool-calls-complete', predecessorAssistantMsgId: assistantMsgId };
     }
@@ -2718,6 +2729,37 @@ export class OpenCodeClient {
             this.turnSettleNoDeltaCountBySession.set(sessionId, 0);
         }
         this.scheduleTurnFinalQuiet(sessionId);
+    }
+
+    public handleSessionIdleFinal(sessionId: string): void {
+        if (!sessionId || !this.turnStateBySession.has(sessionId)) return;
+        const assistantMsgId = this.getTurnAssistantMsgId(sessionId);
+        const state = this.turnStateBySession.get(sessionId);
+        const activeSuccessor = this.appendTurnStateBySession.get(sessionId)?.activeSuccessor;
+        const handoff = state?.appendFollowupHandoff;
+        const deferToolCallsSuccessor = Boolean(
+            assistantMsgId
+            && activeSuccessor?.assistantMsgId === assistantMsgId
+            && handoff?.phase === 'followup-active'
+            && handoff.followupAssistantMsgId === assistantMsgId
+            && handoff.followupFinishedWithToolCalls === true
+            && !this.hasSeenFinalForAssistant(sessionId, assistantMsgId)
+        );
+        if (!deferToolCallsSuccessor) {
+            this.logUiDebug(`EXT: session.idle.final | sessionId=${sessionId} | msgId=${assistantMsgId || 'null'}`);
+            this.markTurnFinal(sessionId, assistantMsgId, 'session-idle');
+            return;
+        }
+
+        this.logUiDebug(
+            `EXT: session.idle.final.defer | sessionId=${sessionId} | msgId=${assistantMsgId} | reason=append-successor-tool-calls`
+        );
+        void this.resyncForChatResolve(sessionId, 'session-idle-append-tool-calls')
+            .finally(() => {
+                if (!this.turnFinalResolvedBySession.has(sessionId) && !this.turnFinalAtBySession.has(sessionId)) {
+                    this.startRescueTimer(sessionId);
+                }
+            });
     }
 
     private waitForTurnCompletionFinal(sessionId: string): Promise<EventSource> {

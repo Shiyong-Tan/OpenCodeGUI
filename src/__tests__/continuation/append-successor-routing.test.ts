@@ -149,4 +149,30 @@ describe('append followup same-turn handoff', () => {
         expect((client as any).turnFinalResolvedBySession.has('ses')).toBe(true);
         expect((client as any).turnFinalSourceBySession.get('ses')).toBe('session-idle');
     });
+
+    it('does not lock a tool-calls append successor as the final assistant on session idle', async () => {
+        const client = createSameTurnFixture();
+        client.mapServerEventToChatEvents('message.updated', {
+            info: { id: 'msg_a', sessionID: 'ses', role: 'assistant', parentID: 'msg_root', finish: 'tool-calls' },
+        }, 'sse');
+        client.mapServerEventToChatEvents('message.updated', {
+            info: { id: 'msg_b', sessionID: 'ses', role: 'assistant', parentID: 'msg_u' },
+        }, 'sse');
+        client.mapServerEventToChatEvents('message.part.updated', {
+            part: { sessionID: 'ses', messageID: 'msg_b', type: 'text', text: 'intermediate status' },
+        }, 'sse');
+        client.mapServerEventToChatEvents('message.updated', {
+            info: { id: 'msg_b', sessionID: 'ses', role: 'assistant', parentID: 'msg_u', finish: 'tool-calls' },
+        }, 'sse');
+
+        const resync = jest.spyOn(client as any, 'resyncForChatResolve').mockResolvedValue(undefined);
+        client.mapServerEventToChatEvents('session.status', {
+            sessionID: 'ses', status: { type: 'idle' },
+        }, 'sse');
+        await Promise.resolve();
+
+        expect(client.getFinalizingMsgId('ses')).toBeUndefined();
+        expect((client as any).turnFinalMsgIdBySession.has('ses')).toBe(false);
+        expect(resync).toHaveBeenCalledWith('ses', 'session-idle-append-tool-calls');
+    });
 });

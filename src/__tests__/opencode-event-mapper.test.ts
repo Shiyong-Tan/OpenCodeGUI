@@ -50,8 +50,7 @@ describe('OpenCodeEventMapper', () => {
       sessionIdleReceivedBySession: { add: () => calls.push('idle-store') },
       canceledActiveTurnBySession: new Map(),
       turnStateBySession: new Map([['session-a', {}]]),
-      getTurnAssistantMsgId: () => 'msg-final',
-      markTurnFinal: (_sessionId: string, messageId: string) => calls.push(`mark-final:${messageId}`),
+      handleSessionIdleFinal: (sessionId: string) => calls.push(`idle-final:${sessionId}`),
     };
     const events = mapServerEventToChatEvents(host, 'session.status', {
       sessionID: 'session-a', status: { type: 'idle', used: 12, size: 100, cost: { amount: 0.25 } },
@@ -59,6 +58,6 @@ describe('OpenCodeEventMapper', () => {
     expect(events).toEqual([{
       type: 'sessionUsage', sessionId: 'session-a', usage: { used: 12, size: 100, amount: 0.25 }, source: 'resync',
     }]);
-    expect(calls).toEqual(['normalized-log', 'status-detail', 'idle-store', 'idle-log', 'idle-final-log', 'mark-final:msg-final']);
+    expect(calls).toEqual(['normalized-log', 'status-detail', 'idle-store', 'idle-log', 'idle-final:session-a']);
   });
 });
