@@ -2743,7 +2743,14 @@ function buildAppendChildPresentationIndex(session) {
         }
     }
 
-    index.appendChainAssistantHiddenKeys = buildAppendChainAssistantHiddenKeys(session, hiddenAssistantParentKeys);
+    const hiddenAssistantKeys = buildAppendChainAssistantHiddenKeys(session, hiddenAssistantParentKeys);
+    for (const message of session.messagesById.values()) {
+        if (!message || message.role !== 'assistant') continue;
+        const predecessorPresentationId = message.meta?.appendPresentationPredecessorId;
+        if (typeof predecessorPresentationId !== 'string' || !predecessorPresentationId.length) continue;
+        addPresentationKeyVariants(session, hiddenAssistantKeys, predecessorPresentationId);
+    }
+    index.appendChainAssistantHiddenKeys = hiddenAssistantKeys;
 
     return index;
 }
@@ -14806,7 +14813,21 @@ function appendMessageImages(parentEl, message) {
                     }
                     const current = session.appendFollowupIdentity;
                     if (current && (current.generation !== followup.generation || current.assistantMsgId !== followup.assistantMsgId)) break;
-                    const successor = upsertMessage(session, { id: followup.assistantMsgId, role: 'assistant', text: '', meta: { isThinking: true, statusText: '' } });
+                    const successor = upsertMessage(session, {
+                        id: followup.assistantMsgId,
+                        role: 'assistant',
+                        text: '',
+                        meta: {
+                            isThinking: true,
+                            statusText: '',
+                            // Persist the presentation handoff on the successor.
+                            // The transient appendFollowupIdentity is cleared at
+                            // chatDone, but final and hydrated renders must still
+                            // know that this predecessor is not a second bubble.
+                            appendPresentationPredecessorId: predecessorPresentationId,
+                            appendPresentationGeneration: followup.generation
+                        }
+                    });
                     session.timeline = session.timeline.filter((id) => id !== appendUser.id && id !== successor.id);
                     const insertionIndex = session.timeline.indexOf(predecessorPresentationId) + 1;
                     session.timeline.splice(insertionIndex, 0, appendUser.id, successor.id);

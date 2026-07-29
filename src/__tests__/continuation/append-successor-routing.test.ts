@@ -31,6 +31,10 @@ describe('append followup same-turn handoff', () => {
         expect(scope.assistantMeta).toBeGreaterThan(scope.turnInFlight);
         expect(scope.indexDelta).toBeGreaterThan(scope.turnInFlight);
         expect(scope.extractedHelper).toBe(-1);
+        const turnInFlightBlock = scope.source.slice(scope.turnInFlight, scope.assistantMeta);
+        expect(turnInFlightBlock).toContain(
+            'appendPresentationPredecessorId: predecessorPresentationId',
+        );
         const assistantMetaEnd = scope.source.indexOf("case 'chatChunk':", scope.assistantMeta);
         const assistantMetaBlock = scope.source.slice(scope.assistantMeta, assistantMetaEnd);
         expect(assistantMetaBlock).toContain(
