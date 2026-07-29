@@ -31,4 +31,19 @@ describe('rich assistant render pressure guards', () => {
             'richContentStateFingerprint(msg.meta.todos || []) === richContentStateFingerprint(todos)'
         );
     });
+
+    test('keeps the subagent fingerprint target in the case scope', () => {
+        const caseStart = source.indexOf("case 'subagentStatus':");
+        const caseEnd = source.indexOf("case 'backgroundActivityPulse':", caseStart);
+        const block = source.slice(caseStart, caseEnd);
+        const declaration = block.indexOf('const currentThinking =');
+        const sessionMerge = block.indexOf('if (sess) {');
+        const fingerprint = block.indexOf('targetId: currentThinking?.id || null');
+
+        expect(caseStart).toBeGreaterThanOrEqual(0);
+        expect(caseEnd).toBeGreaterThan(caseStart);
+        expect(declaration).toBeGreaterThanOrEqual(0);
+        expect(declaration).toBeLessThan(sessionMerge);
+        expect(fingerprint).toBeGreaterThan(sessionMerge);
+    });
 });

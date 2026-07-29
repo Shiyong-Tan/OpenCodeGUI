@@ -2777,37 +2777,40 @@ function isAppendChainTopLevelAssistantHidden(session, msg, id, appendChildPrese
     if (!session || !msg || msg.role !== 'assistant') return false;
     const followup = session.appendFollowupIdentity;
     const successor = followup?.assistantMsgId ? session.messagesById.get(followup.assistantMsgId) : null;
+    const messageKeys = new Set();
+    if (typeof id === 'string' && id.length) addPresentationKeyVariants(session, messageKeys, id);
+    if (typeof msg.id === 'string' && msg.id.length) addPresentationKeyVariants(session, messageKeys, msg.id);
+    const matchesFollowupKey = (key) => {
+        if (typeof key !== 'string' || !key.length) return false;
+        if (messageKeys.has(key)) return true;
+        for (const candidate of getPresentationMessageKeyVariants(session, key)) {
+            if (messageKeys.has(candidate)) return true;
+        }
+        return false;
+    };
     const successorPresentationPending = Boolean(
         successor
         && !(typeof successor.text === 'string' && successor.text.trim())
         && !(typeof successor.meta?.statusText === 'string' && successor.meta.statusText.trim())
     );
     if (successorPresentationPending) {
-        const messageKeys = new Set();
-        if (typeof id === 'string' && id.length) addPresentationKeyVariants(session, messageKeys, id);
-        if (typeof msg.id === 'string' && msg.id.length) addPresentationKeyVariants(session, messageKeys, msg.id);
-        const matchesFollowupKey = (key) => {
-            if (typeof key !== 'string' || !key.length) return false;
-            if (messageKeys.has(key)) return true;
-            for (const candidate of getPresentationMessageKeyVariants(session, key)) {
-                if (messageKeys.has(candidate)) return true;
-            }
-            return false;
-        };
         // Keep one presentation owner mounted until the successor has content.
         // The keyed handoff below then replaces that presentation atomically.
         if (matchesFollowupKey(followup.assistantMsgId)) return true;
         if (matchesFollowupKey(getAppendPredecessorPresentationId(followup))) return false;
+    } else if (
+        successor
+        && followup?.kind === 'append-followup'
+        && followup.mode === 'same-turn-handoff'
+    ) {
+        // Once the append successor has content it is the sole presentation
+        // owner for this handoff. Stale active-turn aliases (especially a
+        // pending tmp-key upgrade) must not keep the predecessor mounted as a
+        // second assistant bubble.
+        if (matchesFollowupKey(followup.assistantMsgId)) return false;
+        if (matchesFollowupKey(getAppendPredecessorPresentationId(followup))) return true;
     }
     if (session.backendTurnInFlight === true && session.turnFullyFinalized !== true && session.canceledActiveTurn !== true) {
-        const messageKeys = new Set();
-        if (typeof id === 'string' && id.length) {
-            addPresentationKeyVariants(session, messageKeys, id);
-        }
-        if (typeof msg.id === 'string' && msg.id.length) {
-            addPresentationKeyVariants(session, messageKeys, msg.id);
-        }
-
         const activeAssistantKeys = [
             session.currentTurnAssistantKey,
             session.currentTurnAssistantMsgId,
@@ -13995,10 +13998,10 @@ function appendMessageImages(parentEl, message) {
               const { agents } = message;
               const sessionId = route.parentSessionId;
               const sess = getSessionState(sessionId, true);
+              const currentThinking = sess?.thinkingId ? sess.messagesById.get(sess.thinkingId) : null;
               const incomingAgents = Array.isArray(agents) ? agents : [];
               let visibleAgents = incomingAgents;
               if (sess) {
-                const currentThinking = sess.thinkingId ? sess.messagesById.get(sess.thinkingId) : null;
                 visibleAgents = filterAppendSuccessorSubagents(sess, currentThinking, incomingAgents);
                 const previousAgents = Array.isArray(currentThinking?.meta?.subagents)
                   ? currentThinking.meta.subagents

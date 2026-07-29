@@ -1103,6 +1103,71 @@ describe('append runtime isolation', () => {
         )).toBe(false);
     });
 
+    it('hides the append predecessor after handoff even when stale active aliases still reference it', () => {
+        const { context } = loadAppendPresentationHarness();
+        const session = {
+            messagesById: new Map<string, any>([
+                ['msg_root', {
+                    id: 'msg_root',
+                    role: 'user',
+                    text: 'root prompt',
+                    meta: {
+                        appendedPrompts: [{
+                            clientMessageId: 'append-client',
+                            appendUserMsgId: 'msg_append',
+                            text: 'follow up',
+                            status: 'received',
+                        }],
+                    },
+                }],
+                ['msg_predecessor', {
+                    id: 'msg_predecessor',
+                    role: 'assistant',
+                    text: 'first stage',
+                    parentId: 'msg_root',
+                    meta: {},
+                }],
+                ['msg_append', { id: 'msg_append', role: 'user', text: 'follow up', meta: {} }],
+                ['msg_successor', {
+                    id: 'msg_successor',
+                    role: 'assistant',
+                    text: 'second stage',
+                    parentId: 'msg_append',
+                    meta: { isThinking: true },
+                }],
+            ]),
+            timeline: ['msg_root', 'msg_predecessor', 'msg_append', 'msg_successor'],
+            clientKeyToServerId: new Map<string, string>([['tmp-assistant', 'msg_predecessor']]),
+            serverIdToClientKey: new Map<string, string>([['msg_predecessor', 'tmp-assistant']]),
+            backendTurnInFlight: true,
+            turnFullyFinalized: false,
+            canceledActiveTurn: false,
+            currentTurnAssistantKey: 'msg_successor',
+            currentTurnAssistantMsgId: 'msg_successor',
+            thinkingId: 'msg_successor',
+            pendingAssistantUpgrade: {
+                tmpKey: 'tmp-assistant',
+                assistantMsgId: 'msg_predecessor',
+            },
+            appendFollowupIdentity: {
+                kind: 'append-followup',
+                mode: 'same-turn-handoff',
+                predecessorAssistantMsgId: 'msg_predecessor',
+                predecessorPresentationAssistantId: 'msg_predecessor',
+                appendUserMsgId: 'msg_append',
+                assistantMsgId: 'msg_successor',
+            },
+        };
+        const appendIndex = context.buildAppendChildPresentationIndex(session);
+
+        expect(context.isAppendChainTopLevelAssistantHidden(
+            session, session.messagesById.get('msg_predecessor'), 'msg_predecessor', appendIndex,
+        )).toBe(true);
+        expect(context.isAppendChainTopLevelAssistantHidden(
+            session, session.messagesById.get('msg_successor'), 'msg_successor', appendIndex,
+        )).toBe(false);
+    });
+
     it('does not reattach predecessor subagent state while finalizing an append successor', () => {
         const { context, sessions } = loadAppendChatDoneHarness();
         const successor = {
