@@ -95,6 +95,7 @@ export function createWordCompletionController(options: {
   const sessionWordKeys = new Map<string, Set<string>>();
   let workspaceWordKeys = new Set<string>();
   let suggestion: { prefix: string; completion: string; suffix: string } | null = null;
+  let suffixAnchor: { left: number; top: number } | null = null;
   let timer: number | null = null;
   let composing = false;
   let enabled = options.enabled !== false;
@@ -130,9 +131,56 @@ export function createWordCompletionController(options: {
 
   const clear = () => {
     suggestion = null;
+    suffixAnchor = null;
     options.ghostPrefix.textContent = '';
     options.ghostSuffix.textContent = '';
     options.ghost.classList.add('hidden');
+  };
+
+  const positionSuffixAtCaret = () => {
+    const document = options.input.ownerDocument;
+    const getComputedStyle = options.window.getComputedStyle?.bind(options.window);
+    if (!document?.body || typeof document.createElement !== 'function' || !getComputedStyle) {
+      options.ghostPrefix.textContent = options.input.value;
+      return;
+    }
+    const computed = getComputedStyle(options.input);
+    const mirror = document.createElement('div');
+    const marker = document.createElement('span');
+    const copiedProperties = [
+      'boxSizing', 'borderLeftWidth', 'borderRightWidth', 'borderTopWidth', 'borderBottomWidth',
+      'paddingLeft', 'paddingRight', 'paddingTop', 'paddingBottom',
+      'fontFamily', 'fontSize', 'fontStyle', 'fontWeight', 'fontVariant',
+      'letterSpacing', 'lineHeight', 'textAlign', 'textIndent', 'textTransform',
+      'wordSpacing', 'tabSize',
+    ] as const;
+    mirror.style.position = 'fixed';
+    mirror.style.visibility = 'hidden';
+    mirror.style.pointerEvents = 'none';
+    mirror.style.left = '-10000px';
+    mirror.style.top = '0';
+    mirror.style.width = `${options.input.clientWidth}px`;
+    mirror.style.height = 'auto';
+    mirror.style.minHeight = '0';
+    mirror.style.whiteSpace = 'pre-wrap';
+    mirror.style.overflowWrap = 'break-word';
+    mirror.style.wordBreak = 'normal';
+    for (const property of copiedProperties) {
+      mirror.style[property] = computed[property] as string;
+    }
+    mirror.textContent = options.input.value;
+    marker.textContent = '\u200b';
+    mirror.appendChild(marker);
+    document.body.appendChild(mirror);
+    suffixAnchor = { left: marker.offsetLeft, top: marker.offsetTop };
+    options.ghostPrefix.textContent = '';
+    options.ghostSuffix.style.fontFamily = computed.fontFamily;
+    options.ghostSuffix.style.fontSize = computed.fontSize;
+    options.ghostSuffix.style.fontStyle = computed.fontStyle;
+    options.ghostSuffix.style.fontWeight = computed.fontWeight;
+    options.ghostSuffix.style.letterSpacing = computed.letterSpacing;
+    options.ghostSuffix.style.lineHeight = computed.lineHeight;
+    mirror.remove();
   };
 
   const score = (entry: CompletionEntry, prefix: string, sessionId: string): number => {
@@ -164,8 +212,9 @@ export function createWordCompletionController(options: {
   };
 
   const syncScroll = () => {
-    options.ghost.scrollTop = options.input.scrollTop;
-    options.ghost.scrollLeft = options.input.scrollLeft;
+    if (!suffixAnchor) return;
+    options.ghostSuffix.style.left = `${suffixAnchor.left - options.input.scrollLeft}px`;
+    options.ghostSuffix.style.top = `${suffixAnchor.top - options.input.scrollTop}px`;
   };
 
   const refresh = () => {
@@ -193,8 +242,8 @@ export function createWordCompletionController(options: {
       return;
     }
     suggestion = { prefix: active.prefix, completion, suffix };
-    options.ghostPrefix.textContent = options.input.value;
     options.ghostSuffix.textContent = suffix;
+    positionSuffixAtCaret();
     options.ghost.classList.remove('hidden');
     syncScroll();
   };

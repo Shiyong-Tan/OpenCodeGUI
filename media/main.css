@@ -1872,13 +1872,11 @@ textarea {
     inset: 0;
     overflow: hidden;
     pointer-events: none;
-    white-space: pre-wrap;
-    overflow-wrap: break-word;
+    text-align: left;
+    letter-spacing: normal;
+    word-spacing: normal;
     color: var(--vscode-input-foreground);
     line-height: 1.4;
-    padding: 10px;
-    font-size: 0.95em;
-    font-family: inherit;
     box-sizing: border-box;
 }
 
@@ -1887,6 +1885,8 @@ textarea {
 }
 
 .word-completion-suffix {
+    position: absolute;
+    white-space: pre;
     color: var(--vscode-input-placeholderForeground, var(--vscode-descriptionForeground));
     opacity: 0.72;
 }

@@ -9,6 +9,7 @@ function createElement() {
     textContent: '',
     scrollTop: 0,
     scrollLeft: 0,
+    style: {},
     classList: {
       values: new Set<string>(),
       add(value: string) { this.values.add(value); },
@@ -30,20 +31,21 @@ function createHarness(value = '', session = 'session-a') {
   const ghostPrefix = createElement();
   const ghostSuffix = createElement();
   const accepted: string[] = [];
+  const mockWindow: any = {
+    setTimeout(callback: () => void) { callback(); return 1; },
+    clearTimeout() {},
+  };
   const controller = createWordCompletionController({
     input,
     ghost,
     ghostPrefix,
     ghostSuffix,
-    window: {
-      setTimeout(callback: () => void) { callback(); return 1; },
-      clearTimeout() {},
-    } as any,
+    window: mockWindow,
     getSessionId: () => session,
     onAccepted: (next) => accepted.push(next),
     delayMs: 0,
   });
-  return { controller, input, ghost, ghostPrefix, ghostSuffix, accepted };
+  return { controller, input, ghost, ghostPrefix, ghostSuffix, accepted, mockWindow };
 }
 
 describe('local word completion controller', () => {
@@ -114,5 +116,55 @@ describe('local word completion controller', () => {
     other.controller.learnText('session-a', 'customWorkspaceTerm');
     other.controller.refresh();
     expect(other.controller.getSuggestion()).toBeNull();
+  });
+
+  it('positions the suffix at the measured textarea caret', () => {
+    const harness = createHarness('virtualiz');
+    const marker: any = { textContent: '', offsetLeft: 143, offsetTop: 29 };
+    const mirror: any = {
+      style: {},
+      textContent: '',
+      appendChild: jest.fn(),
+      remove: jest.fn(),
+    };
+    let created = 0;
+    harness.input.clientWidth = 500;
+    harness.input.scrollLeft = 3;
+    harness.input.scrollTop = 4;
+    harness.input.ownerDocument = {
+      body: { appendChild: jest.fn() },
+      createElement: () => (++created === 1 ? mirror : marker),
+    };
+    harness.mockWindow.getComputedStyle = () => ({
+      boxSizing: 'border-box',
+      borderLeftWidth: '0px',
+      borderRightWidth: '0px',
+      borderTopWidth: '0px',
+      borderBottomWidth: '0px',
+      paddingLeft: '10px',
+      paddingRight: '10px',
+      paddingTop: '10px',
+      paddingBottom: '10px',
+      font: '13px sans-serif',
+      fontFamily: 'sans-serif',
+      fontSize: '13px',
+      fontStyle: 'normal',
+      fontWeight: '400',
+      fontVariant: 'normal',
+      letterSpacing: 'normal',
+      lineHeight: '18px',
+      textAlign: 'left',
+      textIndent: '0px',
+      textTransform: 'none',
+      wordSpacing: 'normal',
+      tabSize: '4',
+    });
+
+    harness.controller.refresh();
+
+    expect(harness.ghostPrefix.textContent).toBe('');
+    expect(harness.ghostSuffix.style.left).toBe('140px');
+    expect(harness.ghostSuffix.style.top).toBe('25px');
+    expect(mirror.remove).toHaveBeenCalled();
   });
 });
