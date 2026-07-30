@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## 5.0.1
+
+### Cross-session active turns and append
+
+- Fixed active assistant content disappearing, reverting to an earlier temporary presentation, or attaching to the wrong bubble after switching between sessions.
+- Stabilized append follow-up ownership and presentation so predecessor and successor assistant states remain separate, subagent progress stays on the correct bubble, and the final response is accepted without duplicate or stale assistant bubbles.
+- Made final assistant text resolve by canonical message identity, preventing temporary text from being merged into or substituted for the final response.
+- Improved active-turn hydration so genuine live updates take precedence over older backend history without persisting transient presentation markers into snapshots.
+
+### Long-session reliability and interaction
+
+- Reduced repeated rich-content reconciliation work during streaming to lower WebView rendering pressure and avoid unnecessary liveness warnings.
+- Fixed background-completed sessions repeatedly forcing the chat to the bottom after users start scrolling upward.
+- Preserved finalized turns when full session export is unavailable and retained valid snapshot history when session repair fails.
+- Restored context-usage display after finalization and added on-hover quota refresh for the send button.
+
 ## 5.0.0
 
 ### Long-session performance and history
