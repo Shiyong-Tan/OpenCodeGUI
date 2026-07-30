@@ -1282,6 +1282,69 @@ describe('append runtime isolation', () => {
         )).toBe(true);
     });
 
+    it('does not hide a final successor through a preserved canonical predecessor alias', () => {
+        const { context } = loadAppendPresentationHarness();
+        const session = {
+            messagesById: new Map<string, any>([
+                ['msg_root', {
+                    id: 'msg_root',
+                    role: 'user',
+                    text: 'root prompt',
+                    meta: {
+                        appendedPrompts: [{
+                            clientMessageId: 'append-client',
+                            appendUserMsgId: 'msg_append',
+                            text: 'follow up',
+                            status: 'received',
+                        }],
+                    },
+                }],
+                ['msg_predecessor', {
+                    id: 'msg_predecessor',
+                    role: 'assistant',
+                    text: 'first stage',
+                    parentId: 'msg_root',
+                    meta: {},
+                }],
+                ['msg_append', { id: 'msg_append', role: 'user', text: 'follow up', meta: {} }],
+                ['msg_successor', {
+                    id: 'msg_successor',
+                    role: 'assistant',
+                    text: 'final stage',
+                    parentId: 'msg_append',
+                    meta: {
+                        isThinking: false,
+                        appendPresentationPredecessorId: 'msg_predecessor',
+                        appendPresentationGeneration: 1,
+                    },
+                }],
+            ]),
+            timeline: ['msg_root', 'msg_predecessor', 'msg_append', 'msg_successor'],
+            clientKeyToServerId: new Map<string, string>(),
+            // Hydration deliberately preserves this canonical handoff alias.
+            serverIdToClientKey: new Map<string, string>([
+                ['msg_predecessor', 'msg_successor'],
+                ['msg_successor', 'msg_successor'],
+            ]),
+            backendTurnInFlight: false,
+            turnFullyFinalized: true,
+            canceledActiveTurn: false,
+            currentTurnAssistantKey: null,
+            currentTurnAssistantMsgId: null,
+            thinkingId: null,
+            pendingAssistantUpgrade: null,
+            appendFollowupIdentity: null,
+        };
+        const appendIndex = context.buildAppendChildPresentationIndex(session);
+
+        expect(context.isAppendChainTopLevelAssistantHidden(
+            session, session.messagesById.get('msg_predecessor'), 'msg_predecessor', appendIndex,
+        )).toBe(true);
+        expect(context.isAppendChainTopLevelAssistantHidden(
+            session, session.messagesById.get('msg_successor'), 'msg_successor', appendIndex,
+        )).toBe(false);
+    });
+
     it('does not reattach predecessor subagent state while finalizing an append successor', () => {
         const { context, sessions } = loadAppendChatDoneHarness();
         const successor = {

@@ -3591,7 +3591,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 pendingIds.add(message.id);
             };
             for (const id of appendState?.orderedIds || []) {
-                addPendingMessage(appendState?.messagesById.get(id));
+                const stagedMessage = appendState?.messagesById.get(id);
+                // A finalized snapshot mirrors the visible conversation. Append
+                // handoffs may retain predecessor assistant stages in memory so
+                // the live presentation can transition safely, but those stages
+                // are not separate visible messages once the successor is final.
+                if (stagedMessage?.role === 'user') addPendingMessage(stagedMessage);
             }
             if (userMessageId && userText && !this.isHiddenControlUserText(userText)) {
                 addPendingMessage({
@@ -5396,15 +5401,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
 
         const predecessorText = this.getAssistantTextBuffer(sessionId, predecessorAssistantMsgId) || '';
-        if (predecessorText && !this.isHiddenControlAssistantText(predecessorText)) {
-            addOrdered({
-                role: 'assistant',
-                id: predecessorAssistantMsgId,
-                text: predecessorText,
-                messageIndex: this.client.getMessageIndex(predecessorAssistantMsgId, sessionId),
-                ...(rootUserMessageId ? { meta: { parentID: rootUserMessageId } } : {})
-            });
-        }
 
         const appendUser = state.messagesById.get(appendUserMsgId);
         const appendUserText = this.normalizeUserTextForSnapshot(

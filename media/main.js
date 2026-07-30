@@ -2693,6 +2693,19 @@ function addPresentationKeyVariants(session, targetSet, key) {
     }
 }
 
+function addAppendPredecessorHiddenKey(session, targetSet, key) {
+    if (!(targetSet instanceof Set) || typeof key !== 'string' || !key.length) return;
+    targetSet.add(key);
+    // Canonical-to-canonical handoff aliases describe identity succession, not
+    // presentation equivalence. Expanding a persisted predecessor msg_* through
+    // that alias can hide its final successor after session hydration. Transient
+    // keys still need expansion while the live DOM handoff is in progress.
+    if (!key.startsWith('tmp:') && !key.startsWith('local-')) return;
+    for (const candidate of getPresentationMessageKeyVariants(session, key)) {
+        targetSet.add(candidate);
+    }
+}
+
 function buildAppendChainAssistantHiddenKeys(session, hiddenParentKeys) {
     const hiddenAssistantKeys = new Set();
     if (!session || !(session.messagesById instanceof Map) || !(hiddenParentKeys instanceof Set) || hiddenParentKeys.size === 0) {
@@ -2717,10 +2730,10 @@ function buildAppendChainAssistantHiddenKeys(session, hiddenParentKeys) {
         if (!parentMatchesAppendChain) continue;
 
         if (typeof messageKey === 'string' && messageKey.length) {
-            addPresentationKeyVariants(session, hiddenAssistantKeys, messageKey);
+            addAppendPredecessorHiddenKey(session, hiddenAssistantKeys, messageKey);
         }
         if (typeof message.id === 'string' && message.id.length) {
-            addPresentationKeyVariants(session, hiddenAssistantKeys, message.id);
+            addAppendPredecessorHiddenKey(session, hiddenAssistantKeys, message.id);
         }
     }
 
@@ -2760,7 +2773,7 @@ function buildAppendChildPresentationIndex(session) {
         if (!message || message.role !== 'assistant') continue;
         const predecessorPresentationId = message.meta?.appendPresentationPredecessorId;
         if (typeof predecessorPresentationId !== 'string' || !predecessorPresentationId.length) continue;
-        addPresentationKeyVariants(session, hiddenAssistantKeys, predecessorPresentationId);
+        addAppendPredecessorHiddenKey(session, hiddenAssistantKeys, predecessorPresentationId);
     }
     index.appendChainAssistantHiddenKeys = hiddenAssistantKeys;
 

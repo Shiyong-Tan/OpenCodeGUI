@@ -418,7 +418,7 @@ describe('W5A snapshot export and finalize contracts', () => {
         }));
     });
 
-    it('persists append stages without assigning root text or predecessor text to successor identities', async () => {
+    it('persists append users and only the final assistant presentation', async () => {
         const provider = createProvider();
         const boundary = msg('msg_boundary', 10, 'assistant', 'older snapshot final');
         provider.readSnapshot = jest.fn().mockResolvedValue(snapshotOf([boundary]));
@@ -482,7 +482,6 @@ describe('W5A snapshot export and finalize contracts', () => {
         expect(written.meta.timelineMessageIds).toEqual([
             'msg_boundary',
             'msg_root',
-            'msg_predecessor',
             'msg_append',
             'msg_successor',
         ]);
@@ -499,12 +498,6 @@ describe('W5A snapshot export and finalize contracts', () => {
                         text: '计时结束后回复 OK。',
                     })],
                 }),
-            }),
-            expect.objectContaining({
-                id: 'msg_predecessor',
-                role: 'assistant',
-                text: '将派遣子代理进行非修改性 1 分钟计时。',
-                meta: { parentID: 'msg_root' },
             }),
             expect.objectContaining({
                 id: 'msg_append',
