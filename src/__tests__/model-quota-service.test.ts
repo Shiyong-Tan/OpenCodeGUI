@@ -40,6 +40,29 @@ describe('ModelQuotaService', () => {
         expect(requestJson).toHaveBeenCalledTimes(1);
     });
 
+    it('bypasses a fresh cached quota when an explicit refresh is requested', async () => {
+        let remaining = 80;
+        const requestJson = jest.fn(async () => ({
+            quota_snapshots: {
+                premium_interactions: { percent_remaining: remaining },
+            },
+        }));
+        const service = new ModelQuotaService({
+            requestJson,
+            homeDir: '/home/test',
+            env: {},
+            platform: 'linux',
+            readFile: async () => JSON.stringify({ 'github-copilot': { access: 'token' } }),
+        });
+        const target = model('github-copilot', 'github-copilot/gpt-test');
+
+        expect((await service.fetch(target))?.summaryRemainingPercent).toBe(80);
+        remaining = 65;
+        expect((await service.fetch(target))?.summaryRemainingPercent).toBe(80);
+        expect((await service.fetch(target, { force: true }))?.summaryRemainingPercent).toBe(65);
+        expect(requestJson).toHaveBeenCalledTimes(2);
+    });
+
     it('returns and caches null for providers without a quota adapter', async () => {
         const requestJson = jest.fn();
         const service = new ModelQuotaService({ requestJson, homeDir: '/home/test', env: {}, platform: 'linux' });

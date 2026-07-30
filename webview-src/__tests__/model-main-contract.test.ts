@@ -33,5 +33,17 @@ describe('model state production ownership', () => {
     expect(source).toContain('modelUiController.renderModelSelect();');
     expect(source).toContain('modelUiController.updateVariantOptions(notifyCurrentVariant);');
     expect(source).toContain('modelUiController.showQuotaTooltip();');
+    expect(source).toContain("vscode.postMessage({ type: 'refreshModelQuota' });");
+  });
+
+  it('redraws quota after the session lifecycle is fully finalized', () => {
+    const phaseStart = source.indexOf("case 'turnFinalizePhase': {");
+    const phaseEnd = source.indexOf("case 'chatDone': {", phaseStart);
+    const finalizePhase = source.slice(phaseStart, phaseEnd);
+    const completeEffects = finalizePhase.indexOf('turnLifecycleController.completeEffects(session);');
+    const refreshButton = finalizePhase.indexOf('refreshSendButtonState();');
+    expect(phaseStart).toBeGreaterThanOrEqual(0);
+    expect(completeEffects).toBeGreaterThanOrEqual(0);
+    expect(refreshButton).toBeGreaterThan(completeEffects);
   });
 });

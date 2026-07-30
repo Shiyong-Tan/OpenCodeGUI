@@ -26,6 +26,7 @@ export interface UtilityCommandHost {
         meta: { sessionId: string; operationId?: string }
     ): void;
     refreshModels(webview: vscode.Webview): Promise<unknown>;
+    refreshModelQuota(webview: vscode.Webview): Promise<void>;
     runSmartSearch(
         sessionId: string,
         query: string,
@@ -76,6 +77,7 @@ const UTILITY_COMMANDS = new Set([
     'setMode',
     'setVariant',
     'refreshModels',
+    'refreshModelQuota',
     'smartSessionSearch',
     'listWorkspaceFiles',
     'getAutoEditorContext',
@@ -121,6 +123,9 @@ export class UtilityCommandController {
                 return true;
             case 'refreshModels':
                 await this.host.refreshModels(activeWebview);
+                return true;
+            case 'refreshModelQuota':
+                await this.host.refreshModelQuota(activeWebview);
                 return true;
             case 'smartSessionSearch':
                 await this.smartSessionSearch(data, activeWebview);

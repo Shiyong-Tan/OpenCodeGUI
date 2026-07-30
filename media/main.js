@@ -13294,12 +13294,15 @@ function appendMessageImages(parentEl, message) {
     document.addEventListener('mouseover', (event) => {
         const target = event.target instanceof Element ? event.target.closest('#send-btn') : null;
         if (!target) return;
+        if (event.relatedTarget instanceof Node && target.contains(event.relatedTarget)) return;
         ensureQuotaTooltip();
         showQuotaTooltip();
+        vscode.postMessage({ type: 'refreshModelQuota' });
     });
     document.addEventListener('mouseout', (event) => {
         const target = event.target instanceof Element ? event.target.closest('#send-btn') : null;
         if (!target) return;
+        if (event.relatedTarget instanceof Node && target.contains(event.relatedTarget)) return;
         hideQuotaTooltip();
     });
 
@@ -15318,7 +15321,10 @@ function appendMessageImages(parentEl, message) {
                     }
                     maybeExitAppendInputModeAfterTurnEnd(sessionId, 'finalize_done');
                     clearBusyForSession(sessionId, 'turnFinalizePhase:finalize_done');
-                    updateSendGate();
+                    // chatDone may already have cleared the legacy busy flag
+                    // while the session lifecycle was still finalizing. Always
+                    // redraw here, after completeEffects makes quota visible.
+                    refreshSendButtonState();
                     renderIfActive(sessionId, 'turnFinalizePhase:finalize_done');
                 }
                 break;

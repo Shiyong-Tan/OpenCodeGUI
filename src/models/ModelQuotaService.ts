@@ -78,10 +78,10 @@ export class ModelQuotaService {
         });
     }
 
-    async fetch(model: ModelInfo): Promise<ModelQuota | null> {
+    async fetch(model: ModelInfo, options: { force?: boolean } = {}): Promise<ModelQuota | null> {
         const key = model.fullId;
         const cached = this.cache.get(key);
-        if (cached && this.now() - cached.ts < this.quotaCacheTtlMs) return cached.quota;
+        if (options.force !== true && cached && this.now() - cached.ts < this.quotaCacheTtlMs) return cached.quota;
         const active = this.inFlight.get(key);
         if (active) return active;
         const task = this.fetchUncached(model).then((quota) => {

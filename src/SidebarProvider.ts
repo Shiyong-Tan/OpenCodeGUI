@@ -4454,6 +4454,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             fetchSessionUsage: (sessionId) => this.client.fetchSessionUsage(sessionId),
             postAddResponse: (webview, value, meta) => this.postAddResponse(webview, value, meta),
             refreshModels: (webview) => this.refreshModels(webview),
+            refreshModelQuota: (webview) => this.postModelQuota(webview, 'send-button-hover', true),
             runSmartSearch: (sessionId, query, messages) => this.smartSearch.run(sessionId, query, messages),
             listWorkspaceFiles: (query) => this.listWorkspaceFiles(query),
             getAutoEditorContext: () => captureAutomaticEditorContext(),
@@ -5496,7 +5497,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return { providerID: parts[0], modelID: parts.slice(1).join('/') };
     }
 
-    private async postModelQuota(webview: vscode.Webview, reason: string): Promise<void> {
+    private async postModelQuota(webview: vscode.Webview, reason: string, force = false): Promise<void> {
         if (this.modelQuotaInFlight) {
             await this.modelQuotaInFlight;
         }
@@ -5506,7 +5507,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         if (!model) return;
         this.modelQuotaInFlight = (async () => {
             try {
-                const quota = await this.client.fetchModelQuota(model);
+                const quota = await this.client.fetchModelQuota(model, force);
                 webview.postMessage({
                     type: 'ui-debug',
                     payload: [

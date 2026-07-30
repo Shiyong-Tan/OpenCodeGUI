@@ -5002,8 +5002,8 @@ export class OpenCodeClient {
         return false;
     }
 
-    public async fetchModelQuota(model: ModelInfo): Promise<ModelQuota | null> {
-        return this.modelQuotaService.fetch(model);
+    public async fetchModelQuota(model: ModelInfo, force = false): Promise<ModelQuota | null> {
+        return this.modelQuotaService.fetch(model, { force });
     }
 
     private shouldAcceptTurnCompletionFinal(sessionId: string | undefined, info: any): boolean {

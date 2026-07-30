@@ -125,6 +125,7 @@ function createHarness(overrides: Record<string, unknown> = {}) {
             return { resolved: true, sessionId: pending.sessionId };
         },
         refreshModels: jest.fn(async () => undefined),
+        refreshModelQuota: jest.fn(async () => undefined),
         listWorkspaceFiles: jest.fn(async () => []),
         getAutoEditorContext: jest.fn(() => null),
         smartSearch: { run: jest.fn() },
@@ -158,6 +159,7 @@ function createHarness(overrides: Record<string, unknown> = {}) {
         fetchSessionUsage: (sessionId) => host.client.fetchSessionUsage(sessionId),
         postAddResponse: (targetWebview, value, meta) => host.postAddResponse(targetWebview, value, meta),
         refreshModels: (targetWebview) => host.refreshModels(targetWebview),
+        refreshModelQuota: (targetWebview) => host.refreshModelQuota(targetWebview),
         runSmartSearch: (sessionId, query, messages) => host.smartSearch.run(sessionId, query, messages),
         listWorkspaceFiles: (query) => host.listWorkspaceFiles(query),
         getAutoEditorContext: () => host.getAutoEditorContext(),
@@ -236,7 +238,7 @@ describe('utility command family characterization', () => {
 
     test('extracts every utility command while retaining one top-level message registration', () => {
         const commands = [
-            'setModel', 'compactSession', 'setMode', 'setVariant', 'refreshModels',
+            'setModel', 'compactSession', 'setMode', 'setVariant', 'refreshModels', 'refreshModelQuota',
             'smartSessionSearch', 'listWorkspaceFiles', 'ping', 'reloadWindow',
             'getAutoEditorContext',
             'clipboardImage', 'selectAttachments', 'openGitDiff', 'toolResult',
@@ -275,6 +277,15 @@ describe('utility command family characterization', () => {
             ['opencode.variant', 'fast'],
         ]);
         expect(harness.host.postModelQuota).toHaveBeenCalledWith(harness.view.webview, 'model-change');
+    });
+
+    test('refreshes model quota without refreshing the full model catalog', async () => {
+        const harness = createHarness();
+
+        await harness.send({ type: 'refreshModelQuota' });
+
+        expect(harness.host.refreshModelQuota).toHaveBeenCalledWith(harness.view.webview);
+        expect(harness.host.refreshModels).not.toHaveBeenCalled();
     });
 
     test('normalizes Smart Search input and preserves request/session ownership on success and failure', async () => {
