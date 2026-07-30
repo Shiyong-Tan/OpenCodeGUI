@@ -172,7 +172,11 @@ export function createHydrationStateController(options: HydrationStateController
       const preservedText = typeof preservedMessage.text === 'string' ? preservedMessage.text : '';
       const hydratedText = typeof hydratedMessage.text === 'string' ? hydratedMessage.text : '';
       const shouldKeepLiveAssistantMeta = preservedMessage.role === 'assistant';
-      const shouldKeepLiveText = shouldKeepLiveAssistantMeta && preservedText.length >= hydratedText.length;
+      const hasLivePresentationRevision = shouldKeepLiveAssistantMeta
+        && Number.isFinite(preservedMeta.volatilePresentationRevision)
+        && preservedMeta.volatilePresentationRevision > 0;
+      const shouldKeepLiveText = shouldKeepLiveAssistantMeta
+        && (hasLivePresentationRevision || preservedText.length >= hydratedText.length);
       const shouldKeepAppendMeta = preservedMessage.role === 'user' && Array.isArray(preservedMeta.appendedPrompts);
       if (!shouldKeepLiveAssistantMeta && !shouldKeepAppendMeta) return;
       session.messagesById.set(id, {

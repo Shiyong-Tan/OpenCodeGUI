@@ -12611,6 +12611,16 @@ function submitAppendMessage(sessionId, rootUserKey, text) {
     return true;
 }
 
+let volatileAssistantPresentationRevision = 0;
+
+function markVolatileAssistantPresentation(message) {
+    if (!message || message.role !== 'assistant') return;
+    message.meta = {
+        ...(message.meta && typeof message.meta === 'object' ? message.meta : {}),
+        volatilePresentationRevision: ++volatileAssistantPresentationRevision
+    };
+}
+
 function handleAssistantMeta(sessionId, message, options = {}) {
         const session = getSessionState(sessionId, true);
         const backendId = getEventMessageId(message);
@@ -12670,6 +12680,9 @@ function handleAssistantMeta(sessionId, message, options = {}) {
                 meta: { isThinking: true, internalId: backendId, statusText: '' }
             });
             session.thinkingId = thinking.id;
+            if (typeof message.lastText === 'string' && message.lastText.trim().length > 0) {
+                markVolatileAssistantPresentation(thinking);
+            }
             vscode.postMessage({ type: 'ui-debug', payload: ['handleAssistantMeta', 'new-thinking', msgId] });
             assertInvariants(sessionId, 'assistantMeta-create');
             return;
@@ -12744,6 +12757,9 @@ function handleAssistantMeta(sessionId, message, options = {}) {
                     currentSegment: '',
                     textSegments: []
                 };
+                if (hasNonEmptyLastText) {
+                    markVolatileAssistantPresentation(target);
+                }
                 console.log('[ASSIST_META] currentSegment reset on full text replace | no cumulative append logic active');
                 if (isTempFinalTraceEnabled()) {
                     const segmentsLen = Array.isArray(target.meta?.textSegments) ? target.meta.textSegments.length : 0;
@@ -12841,6 +12857,9 @@ function handleChatChunk(sessionId, message) {
             target.text = target.meta.currentSegment || '';
             if (!target.text) target.text = 'Thinking...';
             target.meta = { ...target.meta, isThinking: true };
+            if (typeof chunkText === 'string' && chunkText.length > 0) {
+                markVolatileAssistantPresentation(target);
+            }
             if (target.meta.liveTurnResume === true && session.liveTurnResumeStreamAppendLogged !== targetId) {
                 session.liveTurnResumeStreamAppendLogged = targetId;
                 postLiveTurnResumeReconcileDiagnostic(
@@ -12973,6 +12992,9 @@ function handleChatDone(sessionId, message) {
         session.earlyFinalAssistantId = resolvedFinal;
         stabilizeTimelineAfterFinal(session, resolvedFinal, 'chatDone');
         const finalizedAssistant = session.messagesById.get(resolvedFinal) || null;
+        if (finalizedAssistant?.meta) {
+            delete finalizedAssistant.meta.volatilePresentationRevision;
+        }
         if (finalizedAssistant?.meta?.liveTurnResume === true) {
             finalizedAssistant.meta = { ...finalizedAssistant.meta };
             delete finalizedAssistant.meta.liveTurnResume;
@@ -13025,6 +13047,7 @@ function handleChatDone(sessionId, message) {
 function sanitizeMetaForSnapshot(meta) {
     if (!meta || typeof meta !== 'object') return undefined;
     const out = { ...meta };
+    delete out.volatilePresentationRevision;
     if (Array.isArray(meta.images)) {
         const kept = [];
         let redactedCount = 0;

@@ -110,6 +110,18 @@ describe('cross-session runtime repository audit', () => {
     expect(main).not.toContain("segment.state === 'restorable' && !isBusy");
   });
 
+  test('active assistant hydration uses an ephemeral live-presentation revision', () => {
+    const assistantMeta = extractFunction(main, 'function handleAssistantMeta(');
+    const assistantChunk = extractFunction(main, 'function handleChatChunk(');
+    const assistantDone = extractFunction(main, 'function handleChatDone(');
+    const snapshotSanitizer = extractFunction(main, 'function sanitizeMetaForSnapshot(');
+
+    expect(assistantMeta).toContain('markVolatileAssistantPresentation(');
+    expect(assistantChunk).toContain('markVolatileAssistantPresentation(target);');
+    expect(assistantDone).toContain('delete finalizedAssistant.meta.volatilePresentationRevision;');
+    expect(snapshotSanitizer).toContain('delete out.volatilePresentationRevision;');
+  });
+
   test('question and permission interactions remain owned by their background session', () => {
     const showQuestion = extractFunction(main, 'function showQuestionOverlay(');
     const showPermission = extractFunction(main, 'function showPermissionOverlay(');

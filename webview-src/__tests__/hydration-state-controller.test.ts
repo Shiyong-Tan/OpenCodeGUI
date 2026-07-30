@@ -290,6 +290,46 @@ describe('hydration volatile state controller', () => {
     expect(result.mergedIds).toEqual(['msg_assistant']);
   });
 
+  test('keeps a revision-marked live replacement even when stale hydrated text is longer', () => {
+    const before: any = createSessionState();
+    before.timeline = ['msg_assistant'];
+    before.messagesById.set('msg_assistant', {
+      id: 'msg_assistant',
+      role: 'assistant',
+      text: 'current short presentation',
+      meta: {
+        isThinking: true,
+        volatilePresentationRevision: 7,
+        subagents: [{ sessionId: 'agent-current', state: 'running' }],
+      },
+    });
+    before.currentTurnAssistantKey = 'msg_assistant';
+    before.currentTurnAssistantMsgId = 'msg_assistant';
+    before.backendTurnInFlight = true;
+    before.turnFullyFinalized = false;
+    const preserved = controller.capture(before);
+
+    const hydrated: any = createSessionState();
+    hydrated.timeline = ['msg_assistant'];
+    hydrated.messagesById.set('msg_assistant', {
+      id: 'msg_assistant',
+      role: 'assistant',
+      text: 'a much longer but older temporary presentation from backend history',
+      meta: { parentId: 'msg_root', subagents: [{ sessionId: 'agent-stale', state: 'done' }] },
+    });
+    const result = controller.restore(hydrated, preserved);
+
+    expect(hydrated.messagesById.get('msg_assistant')).toMatchObject({
+      text: 'current short presentation',
+      meta: {
+        parentId: 'msg_root',
+        volatilePresentationRevision: 7,
+        subagents: [{ sessionId: 'agent-current', state: 'running' }],
+      },
+    });
+    expect(result.mergedIds).toEqual(['msg_assistant']);
+  });
+
   test('does not merge colliding volatile records after the turn finalized', () => {
     const before: any = createSessionState();
     before.timeline = ['msg_assistant'];
