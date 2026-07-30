@@ -19,6 +19,7 @@ jest.mock('vscode', () => {
             workspaceFolders: [],
             openTextDocument,
             findFiles: jest.fn(async () => []),
+            getConfiguration: () => ({ get: (_key: string, fallback: unknown) => fallback }),
         },
         Uri: {
             joinPath: (...parts: any[]) => parts.join('/'),
@@ -127,6 +128,7 @@ function createHarness(overrides: Record<string, unknown> = {}) {
         refreshModels: jest.fn(async () => undefined),
         refreshModelQuota: jest.fn(async () => undefined),
         listWorkspaceFiles: jest.fn(async () => []),
+        getWorkspaceCompletionTerms: jest.fn(async () => []),
         getAutoEditorContext: jest.fn(() => null),
         smartSearch: { run: jest.fn() },
         attachmentStorage: {
@@ -162,6 +164,7 @@ function createHarness(overrides: Record<string, unknown> = {}) {
         refreshModelQuota: (targetWebview) => host.refreshModelQuota(targetWebview),
         runSmartSearch: (sessionId, query, messages) => host.smartSearch.run(sessionId, query, messages),
         listWorkspaceFiles: (query) => host.listWorkspaceFiles(query),
+        getWorkspaceCompletionTerms: () => host.getWorkspaceCompletionTerms(),
         getAutoEditorContext: () => host.getAutoEditorContext(),
         saveClipboardImage: (dataUrl, mime) => host.attachmentStorage.saveClipboardImage(dataUrl, mime),
         getImageMimeFromName: (name) => host.attachmentStorage.getImageMimeFromName(name),
@@ -239,7 +242,7 @@ describe('utility command family characterization', () => {
     test('extracts every utility command while retaining one top-level message registration', () => {
         const commands = [
             'setModel', 'compactSession', 'setMode', 'setVariant', 'refreshModels', 'refreshModelQuota',
-            'smartSessionSearch', 'listWorkspaceFiles', 'ping', 'reloadWindow',
+            'smartSessionSearch', 'listWorkspaceFiles', 'getWorkspaceCompletionTerms', 'ping', 'reloadWindow',
             'getAutoEditorContext',
             'clipboardImage', 'selectAttachments', 'openGitDiff', 'toolResult',
             'localQuestionResult', 'permissionResult', 'openFileAtLocation',
@@ -328,8 +331,10 @@ describe('utility command family characterization', () => {
 
     test('routes file listing, ping, and reload without changing session ownership', async () => {
         const listWorkspaceFiles = jest.fn(async () => ['a.ts', 'b.ts']);
-        const harness = createHarness({ listWorkspaceFiles });
+        const getWorkspaceCompletionTerms = jest.fn(async () => ['hydrationState']);
+        const harness = createHarness({ listWorkspaceFiles, getWorkspaceCompletionTerms });
         await harness.send({ type: 'listWorkspaceFiles', requestId: 'files-1', query: 'src' });
+        await harness.send({ type: 'getWorkspaceCompletionTerms', requestId: 'words-1' });
         await harness.send({ type: 'ping', ts: 123 });
         await harness.send({ type: 'reloadWindow' });
 
@@ -339,6 +344,12 @@ describe('utility command family characterization', () => {
             requestId: 'files-1',
             query: 'src',
             files: ['a.ts', 'b.ts'],
+        });
+        expect(harness.posts).toContainEqual({
+            type: 'workspaceCompletionTerms',
+            requestId: 'words-1',
+            enabled: true,
+            terms: ['hydrationState'],
         });
         expect(harness.posts).toContainEqual({ type: 'pong', ts: 123 });
         expect(vscode.commands.executeCommand).toHaveBeenCalledWith('workbench.action.reloadWindow');

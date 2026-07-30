@@ -41,16 +41,29 @@ const continuationOptions = {
   outfile: path.join(root, 'media', 'continuation.bundle.js'),
 };
 
+const completionOptions = {
+  ...options,
+  entryPoints: [path.join(root, 'webview-src', 'completion', 'index.ts')],
+  outfile: path.join(root, 'media', 'word-completion.bundle.js'),
+};
+
 async function run() {
   if (watch) {
-    const [renderingContext, featureContext, undoContext, continuationContext] = await Promise.all([
+    const [renderingContext, featureContext, undoContext, continuationContext, completionContext] = await Promise.all([
       esbuild.context(options),
       esbuild.context(featureOptions),
       esbuild.context(undoOptions),
       esbuild.context(continuationOptions),
+      esbuild.context(completionOptions),
     ]);
-    await Promise.all([renderingContext.watch(), featureContext.watch(), undoContext.watch(), continuationContext.watch()]);
-    console.log('Watching webview rendering, feature, undo, and continuation seams...');
+    await Promise.all([
+      renderingContext.watch(),
+      featureContext.watch(),
+      undoContext.watch(),
+      continuationContext.watch(),
+      completionContext.watch(),
+    ]);
+    console.log('Watching webview rendering, feature, word-completion, undo, and continuation seams...');
     return;
   }
   if (!development) {
@@ -58,8 +71,15 @@ async function run() {
     fs.rmSync(`${featureOptions.outfile}.map`, { force: true });
     fs.rmSync(`${undoOptions.outfile}.map`, { force: true });
     fs.rmSync(`${continuationOptions.outfile}.map`, { force: true });
+    fs.rmSync(`${completionOptions.outfile}.map`, { force: true });
   }
-  await Promise.all([esbuild.build(options), esbuild.build(featureOptions), esbuild.build(undoOptions), esbuild.build(continuationOptions)]);
+  await Promise.all([
+    esbuild.build(options),
+    esbuild.build(featureOptions),
+    esbuild.build(undoOptions),
+    esbuild.build(continuationOptions),
+    esbuild.build(completionOptions),
+  ]);
 }
 
 run().catch((error) => {

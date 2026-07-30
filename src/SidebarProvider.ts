@@ -81,6 +81,7 @@ import {
     getOpenWorkspaceFileUris,
     workspaceFileKey,
 } from './context/EditorContextService';
+import { WorkspaceLexiconService } from './context/WorkspaceLexiconService';
 
 type CanceledTurnRecord = {
     opId?: string;
@@ -294,6 +295,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private readonly subagentDoneRetentionMs = 5000;
     private subagentRetentionTimer?: NodeJS.Timeout;
     private autoEditorContextTimer?: NodeJS.Timeout;
+    private readonly workspaceLexicon = new WorkspaceLexiconService();
     private task1DoneVisibleTotalMs = 0;
     private task1DoneVisibleCount = 0;
     private task1FalseDoneEvents = 0;
@@ -4457,6 +4459,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             refreshModelQuota: (webview) => this.postModelQuota(webview, 'send-button-hover', true),
             runSmartSearch: (sessionId, query, messages) => this.smartSearch.run(sessionId, query, messages),
             listWorkspaceFiles: (query) => this.listWorkspaceFiles(query),
+            getWorkspaceCompletionTerms: () => this.workspaceLexicon.getTerms(),
             getAutoEditorContext: () => captureAutomaticEditorContext(),
             saveClipboardImage: (dataUrl, mime) => this.attachmentStorage.saveClipboardImage(dataUrl, mime),
             getImageMimeFromName: (name) => this.attachmentStorage.getImageMimeFromName(name),
@@ -6671,6 +6674,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const featureScriptUri = webview.asWebviewUri(
             vscode.Uri.joinPath(this._extensionUri, "media", "features.bundle.js")
         );
+        const wordCompletionScriptUri = webview.asWebviewUri(
+            vscode.Uri.joinPath(this._extensionUri, "media", "word-completion.bundle.js")
+        );
         const undoScriptUri = webview.asWebviewUri(
             vscode.Uri.joinPath(this._extensionUri, "media", "undo.bundle.js")
         );
@@ -6795,7 +6801,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 <div class="input-container">
                     <div class="attachment-list" id="attachment-list"></div>
                     <div class="input-token-list" id="input-token-list"></div>
-                    <textarea id="chat-input" placeholder="Ask anything..."></textarea>
+                    <div class="composer-input-layer">
+                        <div class="word-completion-ghost hidden" id="word-completion-ghost" aria-hidden="true">
+                            <span class="word-completion-prefix" id="word-completion-prefix"></span><span class="word-completion-suffix" id="word-completion-suffix"></span>
+                        </div>
+                        <textarea id="chat-input" placeholder="Ask anything..." autocomplete="off" spellcheck="true"></textarea>
+                    </div>
                     <div class="file-mention-list hidden" id="file-mention-list"></div>
 
                     <div class="toolbar">
@@ -6826,6 +6837,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                 <script src="${renderingScriptUri}"></script>
                 <script src="${featureScriptUri}"></script>
+                <script src="${wordCompletionScriptUri}"></script>
                 <script src="${undoScriptUri}"></script>
                 <script src="${continuationScriptUri}"></script>
                 <script src="${scriptUri}"></script>

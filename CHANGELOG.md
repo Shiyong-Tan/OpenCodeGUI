@@ -18,6 +18,10 @@ All notable changes to this project will be documented in this file.
 - Preserved finalized turns when full session export is unavailable and retained valid snapshot history when session repair fails.
 - Restored context-usage display after finalization and added on-hover quota refresh for the send button.
 
+### Composer
+
+- Added fast, fully local English and project-term completion using common words, current-workspace paths and open documents, plus session-isolated conversation vocabulary. Suggestions appear inline and can be accepted with `Tab`, without calling a remote model.
+
 ## 5.0.0
 
 ### Long-session performance and history

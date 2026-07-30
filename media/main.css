@@ -1854,6 +1854,43 @@ textarea {
     box-sizing: border-box;
 }
 
+.composer-input-layer {
+    position: relative;
+    width: 100%;
+    min-height: calc(1.4em * 3 + 8px);
+}
+
+.composer-input-layer textarea {
+    position: relative;
+    z-index: 1;
+    display: block;
+}
+
+.word-completion-ghost {
+    position: absolute;
+    z-index: 0;
+    inset: 0;
+    overflow: hidden;
+    pointer-events: none;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+    color: var(--vscode-input-foreground);
+    line-height: 1.4;
+    padding: 10px;
+    font-size: 0.95em;
+    font-family: inherit;
+    box-sizing: border-box;
+}
+
+.word-completion-prefix {
+    visibility: hidden;
+}
+
+.word-completion-suffix {
+    color: var(--vscode-input-placeholderForeground, var(--vscode-descriptionForeground));
+    opacity: 0.72;
+}
+
 /* --- Toolbar --- */
 .toolbar {
     display: grid;

@@ -33,6 +33,7 @@ export interface UtilityCommandHost {
         messages: SmartSearchMessage[]
     ): Promise<{ messageIds: string[]; modelId?: string }>;
     listWorkspaceFiles(query: string): Promise<Array<{ path: string; name: string; directory: string }>>;
+    getWorkspaceCompletionTerms(): Promise<string[]>;
     getAutoEditorContext(): AutomaticEditorContext | null;
     saveClipboardImage(dataUrl: string, mime: string): Promise<{
         id: string;
@@ -80,6 +81,7 @@ const UTILITY_COMMANDS = new Set([
     'refreshModelQuota',
     'smartSessionSearch',
     'listWorkspaceFiles',
+    'getWorkspaceCompletionTerms',
     'getAutoEditorContext',
     'ping',
     'reloadWindow',
@@ -132,6 +134,9 @@ export class UtilityCommandController {
                 return true;
             case 'listWorkspaceFiles':
                 await this.listWorkspaceFiles(data, activeWebview);
+                return true;
+            case 'getWorkspaceCompletionTerms':
+                await this.getWorkspaceCompletionTerms(data, activeWebview);
                 return true;
             case 'getAutoEditorContext':
                 this.getAutoEditorContext(data, activeWebview);
@@ -264,6 +269,23 @@ export class UtilityCommandController {
             requestId,
             query,
             files,
+        });
+    }
+
+    private async getWorkspaceCompletionTerms(
+        data: UtilityMessage,
+        activeWebview: vscode.Webview
+    ): Promise<void> {
+        const requestId = typeof data.requestId === 'string' ? data.requestId : '';
+        const enabled = vscode.workspace
+            .getConfiguration('opencode.wordCompletion')
+            .get<boolean>('enabled', true);
+        const terms = enabled ? await this.host.getWorkspaceCompletionTerms() : [];
+        this.host.getLiveWebview(activeWebview).postMessage({
+            type: 'workspaceCompletionTerms',
+            requestId,
+            enabled,
+            terms,
         });
     }
 

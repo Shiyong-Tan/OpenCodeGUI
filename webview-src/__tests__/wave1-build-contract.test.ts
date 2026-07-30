@@ -45,6 +45,7 @@ describe('Wave 1 build and package contracts', () => {
     expect(read('.gitignore')).toContain('media/features.bundle.js');
     expect(read('.gitignore')).toContain('media/undo.bundle.js');
     expect(read('.gitignore')).toContain('media/continuation.bundle.js');
+    expect(read('.gitignore')).toContain('media/word-completion.bundle.js');
     const vscodeIgnore = read('.vscodeignore');
     expect(vscodeIgnore).toContain('webview-src/**');
     expect(vscodeIgnore).toContain('*.map');
@@ -55,9 +56,10 @@ describe('Wave 1 build and package contracts', () => {
     const provider = read('src/SidebarProvider.ts');
     expect(provider).toContain('vscode.Uri.joinPath(this._extensionUri, "media", "rendering.bundle.js")');
     expect(provider).toContain('vscode.Uri.joinPath(this._extensionUri, "media", "features.bundle.js")');
+    expect(provider).toContain('vscode.Uri.joinPath(this._extensionUri, "media", "word-completion.bundle.js")');
     expect(provider).toContain('vscode.Uri.joinPath(this._extensionUri, "media", "undo.bundle.js")');
     expect(provider).toContain('vscode.Uri.joinPath(this._extensionUri, "media", "continuation.bundle.js")');
-    expect(provider).toMatch(/<script src="\$\{renderingScriptUri\}"><\/script>\s*<script src="\$\{featureScriptUri\}"><\/script>\s*<script src="\$\{undoScriptUri\}"><\/script>\s*<script src="\$\{continuationScriptUri\}"><\/script>\s*<script src="\$\{scriptUri\}"><\/script>/);
+    expect(provider).toMatch(/<script src="\$\{renderingScriptUri\}"><\/script>\s*<script src="\$\{featureScriptUri\}"><\/script>\s*<script src="\$\{wordCompletionScriptUri\}"><\/script>\s*<script src="\$\{undoScriptUri\}"><\/script>\s*<script src="\$\{continuationScriptUri\}"><\/script>\s*<script src="\$\{scriptUri\}"><\/script>/);
     expect(provider).not.toMatch(/Content-Security-Policy|nonce=/);
   });
 

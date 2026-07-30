@@ -21,6 +21,14 @@ export function createComposerInputController(options: {
     schedule(): void;
     handleKeydown(event: KeyboardEvent): boolean;
   };
+  wordCompletion?: {
+    clear(): void;
+    schedule(): void;
+    handleKeydown(event: KeyboardEvent): boolean;
+    onCompositionStart(): void;
+    onCompositionEnd(): void;
+    syncScroll(): void;
+  };
   clipboard: { handlePaste(event: ClipboardEvent): void };
   isAppendActive(): boolean;
   isAppendDraftActive(): boolean;
@@ -37,21 +45,29 @@ export function createComposerInputController(options: {
       if (options.isAppendDraftActive()) {
         options.onAppendDraft(options.input.value);
         options.fileMention.close();
+        options.wordCompletion?.schedule();
         options.onAppendInputChanged();
         return;
       }
       options.onRegularDraft(options.input.value);
       options.fileMention.schedule();
+      options.wordCompletion?.schedule();
     });
     options.input.addEventListener('click', () => {
       if (options.isAppendActive()) {
         options.fileMention.close();
+        options.wordCompletion?.schedule();
         return;
       }
       options.fileMention.schedule();
+      options.wordCompletion?.schedule();
     });
+    options.input.addEventListener('compositionstart', () => options.wordCompletion?.onCompositionStart());
+    options.input.addEventListener('compositionend', () => options.wordCompletion?.onCompositionEnd());
+    options.input.addEventListener('scroll', () => options.wordCompletion?.syncScroll());
     options.input.addEventListener('keydown', (event) => {
       if (options.fileMention.handleKeydown(event)) return;
+      if (options.wordCompletion?.handleKeydown(event)) return;
       const action = decideComposerInputKeyAction({
         key: event.key,
         shiftKey: event.shiftKey,

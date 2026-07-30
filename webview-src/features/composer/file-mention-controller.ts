@@ -151,6 +151,11 @@ export function createFileMentionController(options: {
       }
       return true;
     }
+    if (event.key === 'Tab') {
+      event.preventDefault();
+      if (items.length > 0) select(selectedIndex);
+      return true;
+    }
     if (event.key === 'Enter' && items.length > 0) {
       event.preventDefault();
       select(selectedIndex);

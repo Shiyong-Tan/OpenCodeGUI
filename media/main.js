@@ -353,6 +353,7 @@ let sendButtonEl = null;
 let sendButtonSendIconHtml = '';
 let sendButtonStopIconHtml = '';
 let inputEl = null;
+let wordCompletionController = null;
 let appendInputMode = null;
 let appendHoverActiveKey = null;
 let appendHoverHideTimer = null;
@@ -930,6 +931,17 @@ function shouldDropHiddenControlAssistant(session, message, source, assistantMsg
 
 function getSessionState(sessionId, create = false) {
     return sessionStore.get(sessionId, create);
+}
+
+function refreshSessionCompletionLexicon(sessionId) {
+    if (!wordCompletionController || !sessionId) return;
+    const session = getSessionState(sessionId, false);
+    if (!session?.messagesById || !Array.isArray(session.timeline)) return;
+    const messages = session.timeline.slice(-400)
+        .map((id) => session.messagesById.get(id))
+        .filter((message) => message && (message.role === 'user' || message.role === 'assistant'))
+        .map((message) => ({ id: message.id, text: message.text || '' }));
+    wordCompletionController.learnSessionMessages(sessionId, messages);
 }
 
 const hydrationStateController = window.__ocContinuation.createHydrationStateController({
@@ -5406,6 +5418,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const attachmentList = document.getElementById('attachment-list');
     const inputTokenList = document.getElementById('input-token-list');
     const fileMentionList = document.getElementById('file-mention-list');
+    const wordCompletionGhost = document.getElementById('word-completion-ghost');
+    const wordCompletionPrefix = document.getElementById('word-completion-prefix');
+    const wordCompletionSuffix = document.getElementById('word-completion-suffix');
     const serverStatusDot = document.getElementById('server-status-dot');
     const panelBackdrop = document.getElementById('panel-backdrop');
     const refreshSessionsBtn = document.getElementById('refresh-sessions');
@@ -5473,6 +5488,43 @@ document.addEventListener('DOMContentLoaded', () => {
         postMessage: (message) => vscode.postMessage(message),
         onContextChanged: () => renderContextTokens()
     });
+    const createWordCompletionController = window.__ocWordCompletion?.createWordCompletionController;
+    if (
+        typeof createWordCompletionController !== 'function'
+        || !wordCompletionGhost
+        || !wordCompletionPrefix
+        || !wordCompletionSuffix
+    ) {
+        throw new Error('Word completion controller is unavailable');
+    }
+    wordCompletionController = createWordCompletionController({
+        input,
+        ghost: wordCompletionGhost,
+        ghostPrefix: wordCompletionPrefix,
+        ghostSuffix: wordCompletionSuffix,
+        window,
+        enabled: false,
+        getSessionId: () => activeSessionId || 'new-session',
+        onAccepted: (value) => {
+            if (appendInputMode && appendInputMode.sessionId === activeSessionId) {
+                const session = getSessionState(activeSessionId);
+                if (session) {
+                    if (!(session.appendComposerDrafts instanceof Map)) session.appendComposerDrafts = new Map();
+                    session.appendComposerDrafts.set(appendInputMode.rootUserKey, value);
+                }
+                updateSendGate();
+            } else {
+                const session = getSessionState(activeSessionId);
+                if (session) session.inputDraft = value;
+                sessionComposerStore.setDraft(activeSessionId, value);
+            }
+            fileMentionController.close();
+        }
+    });
+    vscode.postMessage({
+        type: 'getWorkspaceCompletionTerms',
+        requestId: `workspace-completion-${Date.now()}`
+    });
     const buildComposerSubmission = window.__ocFeatures?.buildComposerSubmission;
     if (typeof buildComposerSubmission !== 'function') {
         throw new Error('Composer submission builder is unavailable');
@@ -5494,6 +5546,7 @@ document.addEventListener('DOMContentLoaded', () => {
         document,
         input,
         fileMention: fileMentionController,
+        wordCompletion: wordCompletionController,
         clipboard: clipboardAttachmentController,
         isAppendActive: () => Boolean(appendInputMode),
         isAppendDraftActive: () => Boolean(appendInputMode && appendInputMode.sessionId === activeSessionId),
@@ -5783,6 +5836,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (input && (!appendInputMode || appendInputMode.sessionId !== nextSessionId)) {
             input.value = composer.draft || nextSession?.inputDraft || '';
         }
+        wordCompletionController?.clear();
+        refreshSessionCompletionLexicon(nextSessionId);
         getAttachmentStateController().replace(composer.attachments);
         renderAttachments();
         const contextState = getComposerContextStateController();
@@ -12682,6 +12737,7 @@ function handleAssistantMeta(sessionId, message, options = {}) {
             session.thinkingId = thinking.id;
             if (typeof message.lastText === 'string' && message.lastText.trim().length > 0) {
                 markVolatileAssistantPresentation(thinking);
+                wordCompletionController?.learnText(sessionId, message.lastText);
             }
             vscode.postMessage({ type: 'ui-debug', payload: ['handleAssistantMeta', 'new-thinking', msgId] });
             assertInvariants(sessionId, 'assistantMeta-create');
@@ -12759,6 +12815,7 @@ function handleAssistantMeta(sessionId, message, options = {}) {
                 };
                 if (hasNonEmptyLastText) {
                     markVolatileAssistantPresentation(target);
+                    wordCompletionController?.learnText(sessionId, message.lastText);
                 }
                 console.log('[ASSIST_META] currentSegment reset on full text replace | no cumulative append logic active');
                 if (isTempFinalTraceEnabled()) {
@@ -12859,6 +12916,7 @@ function handleChatChunk(sessionId, message) {
             target.meta = { ...target.meta, isThinking: true };
             if (typeof chunkText === 'string' && chunkText.length > 0) {
                 markVolatileAssistantPresentation(target);
+                wordCompletionController?.learnText(sessionId, chunkText);
             }
             if (target.meta.liveTurnResume === true && session.liveTurnResumeStreamAppendLogged !== targetId) {
                 session.liveTurnResumeStreamAppendLogged = targetId;
@@ -13240,6 +13298,8 @@ function appendMessageImages(parentEl, message) {
 
     composerInputController.install();
     input.addEventListener('focus', () => {
+        refreshSessionCompletionLexicon(activeSessionId);
+        wordCompletionController?.schedule();
         if (!appendInputMode) void autoEditorContextController.refresh();
     });
     void autoEditorContextController.refresh();
@@ -14584,6 +14644,7 @@ function appendMessageImages(parentEl, message) {
                             })
                         }
                     );
+                    refreshSessionCompletionLexicon(sessionId);
                     if (hydrationApplication.snapshotNoticeId) {
                         vscode.postMessage({
                             type: 'ui-debug',
@@ -14775,6 +14836,13 @@ function appendMessageImages(parentEl, message) {
             case 'workspaceFileResults': {
                 const files = Array.isArray(message.files) ? message.files : [];
                 fileMentionController.handleResults(message.requestId, files);
+                break;
+            }
+            case 'workspaceCompletionTerms': {
+                wordCompletionController?.setEnabled(message.enabled !== false);
+                wordCompletionController?.setWorkspaceWords(
+                    Array.isArray(message.terms) ? message.terms : []
+                );
                 break;
             }
             case 'autoEditorContextResult': {
