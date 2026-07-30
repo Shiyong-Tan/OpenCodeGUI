@@ -9,6 +9,7 @@ All notable changes to this project will be documented in this file.
 - Fixed active assistant content disappearing, reverting to an earlier temporary presentation, or attaching to the wrong bubble after switching between sessions.
 - Stabilized append follow-up ownership and presentation so predecessor and successor assistant states remain separate, subagent progress stays on the correct bubble, and the final response is accepted without duplicate or stale assistant bubbles.
 - Made final assistant text resolve by canonical message identity, preventing temporary text from being merged into or substituted for the final response.
+- Aligned finalized append snapshots with the visible timeline by retaining appended user prompts and only the final assistant response, while keeping older snapshots compatible without allowing predecessor aliases to hide the final message after a session switch.
 - Improved active-turn hydration so genuine live updates take precedence over older backend history without persisting transient presentation markers into snapshots.
 
 ### Long-session reliability and interaction
