@@ -79,6 +79,16 @@ describe('local word completion controller', () => {
     expect(harness.accepted).toEqual(['check reconstruction']);
   });
 
+  it('completes high-frequency English words that are absent from the project', () => {
+    const compare = createHarness('compa');
+    compare.controller.refresh();
+    expect(compare.controller.getSuggestion()?.completion).toBe('compare');
+
+    const comparison = createHarness('compari');
+    comparison.controller.refresh();
+    expect(comparison.controller.getSuggestion()?.completion).toBe('comparison');
+  });
+
   it('suppresses completion while an IME composition is active', () => {
     const harness = createHarness('virtualiz');
     harness.controller.onCompositionStart();

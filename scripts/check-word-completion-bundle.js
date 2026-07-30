@@ -10,7 +10,9 @@ if (!fs.existsSync(file)) throw new Error('Build media/word-completion.bundle.js
 const text = fs.readFileSync(file, 'utf8');
 const minifiedBytes = Buffer.byteLength(text);
 const gzipBytes = zlib.gzipSync(text).length;
-const limits = { minified: 12288, gzip: 6144 };
+// The bundle intentionally embeds a ranked, offline English lexicon. Keep a
+// dedicated ceiling so accidental logic growth remains visible.
+const limits = { minified: 65536, gzip: 24576 };
 if (!text.includes('__ocWordCompletion')) throw new Error('Word completion facade is missing');
 if (minifiedBytes > limits.minified || gzipBytes > limits.gzip) {
   throw new Error(`Word completion bundle exceeds size limit: ${JSON.stringify({ minifiedBytes, gzipBytes, limits })}`);

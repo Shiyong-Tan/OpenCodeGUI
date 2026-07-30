@@ -1,3 +1,5 @@
+import { COMMON_ENGLISH_WORDS } from './common-english-words';
+
 export type CompletionSource = 'common' | 'workspace' | 'session';
 
 type CompletionEntry = {
@@ -7,10 +9,10 @@ type CompletionEntry = {
   sessions: Map<string, number>;
 };
 
-const COMMON_WORDS = `
+const PRODUCT_WORDS = `
 about above accept access action active add after again against agent allow already also always
 another answer any apply approach argument around available avoid back because become before begin
-between both build call cancel change check choose class clear close code command complete completion
+between both build call cancel change check choose class clear close code command compare comparison complete completion
 component configuration context continue controller correct create current data debug default define
 delete description different directory display document during each editor effect enable end ensure
 error event example existing expected explain export extension failure feature file final find first
@@ -29,6 +31,9 @@ finalize hydration identifier incremental initialize interaction keyboard lexico
 module prefix ranking recommendation reference reliable replacement selection subagent suggestion
 temporary timeline virtualization virtualized
 `.trim().split(/\s+/);
+
+const COMMON_WORD_RANK_BAND = 600;
+const COMMON_WORD_MAX_WEIGHT = 8;
 
 const MAX_WORKSPACE_WORDS = 8_000;
 const MAX_SESSION_WORDS = 2_000;
@@ -127,7 +132,16 @@ export function createWordCompletionController(options: {
     }
   };
 
-  for (const word of COMMON_WORDS) addWord(word, 'common');
+  for (const [index, word] of COMMON_ENGLISH_WORDS.entries()) {
+    const frequencyWeight = Math.max(
+      1,
+      COMMON_WORD_MAX_WEIGHT - Math.floor(index / COMMON_WORD_RANK_BAND),
+    );
+    addWord(word, 'common', '', frequencyWeight);
+  }
+  // Product vocabulary wins ties against the general corpus without
+  // outranking terminology learned from the active project or session.
+  for (const word of PRODUCT_WORDS) addWord(word, 'common', '', COMMON_WORD_MAX_WEIGHT + 1);
 
   const clear = () => {
     suggestion = null;
