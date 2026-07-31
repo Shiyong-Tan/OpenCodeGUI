@@ -1585,6 +1585,40 @@ describe('append runtime isolation', () => {
         expect(successor.meta.isThinking).toBe(false);
     });
 
+    it('uses the extension-owned turn timestamps when finalizing the live assistant presentation', () => {
+        const { context, sessions } = loadAppendChatDoneHarness();
+        const assistant: any = {
+            id: 'msg_final',
+            role: 'assistant',
+            text: 'final answer',
+            meta: {
+                isThinking: true,
+                processingStartedAt: 5_000,
+                timeCompleted: 70_000,
+                currentSegment: 'final answer',
+            },
+        };
+        sessions.set('ses_A', {
+            messagesById: new Map<string, any>([['msg_final', assistant]]),
+            timeline: ['msg_final'],
+            thinkingId: 'msg_final',
+            currentTurnAssistantKey: 'msg_final',
+            currentTurnAssistantMsgId: 'msg_final',
+            backendTurnInFlight: true,
+            turnFullyFinalized: false,
+        });
+
+        context.handleChatDone('ses_A', {
+            lastAssistantMsgId: 'msg_final',
+            processingStartedAt: 1_000,
+            completedAt: 76_000,
+        });
+
+        expect(assistant.meta.processingStartedAt).toBe(1_000);
+        expect(assistant.meta.processingCompletedAt).toBe(76_000);
+        expect(assistant.meta.isThinking).toBe(false);
+    });
+
     it('keeps post-handoff subagents on the append successor while excluding predecessor agents', () => {
         const { context } = loadAppendSnapshotMetaHarness();
         const predecessor = {

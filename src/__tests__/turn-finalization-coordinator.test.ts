@@ -6,6 +6,8 @@ describe('TurnFinalizationCoordinator', () => {
         const posted: any[] = [];
         const coordinator = new TurnFinalizationCoordinator({
             getAssistantMessageId: () => 'msg_assistant',
+            getProcessingStartedAt: () => 1_000,
+            getProcessingCompletedAt: () => 76_000,
             emitPhase: (_target, _sessionId, phase) => calls.push(`phase:${phase}`),
             postMessageIndexMap: (_target, sessionId) => calls.push(`index:${sessionId}`),
             buildIdentity: (sessionId, partial) => ({ sessionId, ...partial }),
@@ -26,7 +28,14 @@ describe('TurnFinalizationCoordinator', () => {
         });
         await coordinator.finalize('session-a', { postMessage: (message) => posted.push(message) });
         expect(posted).toEqual([
-            { type: 'chatDone', sessionId: 'session-a', assistantMsgId: 'msg_assistant', lastAssistantMsgId: 'msg_assistant' },
+            {
+                type: 'chatDone',
+                sessionId: 'session-a',
+                assistantMsgId: 'msg_assistant',
+                lastAssistantMsgId: 'msg_assistant',
+                processingStartedAt: 1_000,
+                completedAt: 76_000,
+            },
             { type: 'turnInFlight', sessionId: 'session-a', inFlight: false },
         ]);
         expect(calls).toEqual([

@@ -4441,6 +4441,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         });
         this.turnFinalizationCoordinator = new TurnFinalizationCoordinator({
             getAssistantMessageId: (sessionId) => this.client.getTurnAssistantMsgId(sessionId),
+            getProcessingStartedAt: (sessionId) => this.client.getCurrentTurnStartedAt(sessionId),
+            getProcessingCompletedAt: (sessionId) => this.client.getCurrentTurnCompletedAt(sessionId),
             emitPhase: (target, sessionId, phase) => this.emitTurnFinalizePhase(target as vscode.Webview, sessionId, phase),
             postMessageIndexMap: (target, sessionId) => this.postMessageIndexMap(target as vscode.Webview, sessionId),
             buildIdentity: (sessionId, partial) => this.buildFinalizeTurnIdentity(sessionId, partial),
@@ -4606,6 +4608,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     this.client.waitForSessionIdleGate(sessionId, options),
                 waitForTurnAssistantMsgId: (sessionId, timeoutMs) =>
                     this.client.waitForTurnAssistantMsgId(sessionId, timeoutMs),
+                getCurrentTurnStartedAt: (sessionId) =>
+                    this.client.getCurrentTurnStartedAt(sessionId),
+                getCurrentTurnCompletedAt: (sessionId) =>
+                    this.client.getCurrentTurnCompletedAt(sessionId),
             },
             attachments: {
                 buildAttachmentManifest: (attachments) =>

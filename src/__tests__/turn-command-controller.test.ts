@@ -36,6 +36,8 @@ function createHarness(overrides: Record<string, unknown> = {}) {
             finishTurn: jest.fn(),
             getPendingTurnMessageIds: jest.fn(() => ({})),
             getTurnAssistantMsgId: jest.fn(() => 'msg_assistant_A'),
+            getCurrentTurnStartedAt: jest.fn(() => 1_000),
+            getCurrentTurnCompletedAt: jest.fn(() => 76_000),
             revertPendingTurnChangesToCurrentBase: jest.fn(async () => undefined),
         },
         attachments: {},

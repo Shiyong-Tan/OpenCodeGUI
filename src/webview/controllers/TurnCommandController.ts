@@ -26,6 +26,8 @@ type TurnCommandClient = Pick<
     | 'createInternalMessageId'
     | 'failAppendPrompt'
     | 'finishTurn'
+    | 'getCurrentTurnCompletedAt'
+    | 'getCurrentTurnStartedAt'
     | 'getPendingTurnMessageIds'
     | 'getTurnAssistantMsgId'
     | 'registerMessage'
@@ -354,7 +356,9 @@ ${attachmentLines.join('\n')}`
                         type: 'chatDone',
                         sessionId: targetSessionId,
                         assistantMsgId: doneAssistantMsgId,
-                        lastAssistantMsgId: doneAssistantMsgId
+                        lastAssistantMsgId: doneAssistantMsgId,
+                        processingStartedAt: host.client.getCurrentTurnStartedAt(targetSessionId),
+                        completedAt: host.client.getCurrentTurnCompletedAt(targetSessionId)
                     });
                     host.emitTurnFinalizePhase(liveWebview, targetSessionId, 'stream_done');
                     host.postMessageIndexMap(liveWebview, targetSessionId);

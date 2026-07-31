@@ -13139,12 +13139,18 @@ function handleChatDone(sessionId, message) {
         // agent timeout notice removed
     if (session.thinkingId && session.messagesById.has(session.thinkingId)) {
         const msg = session.messagesById.get(session.thinkingId);
-        if (!Number.isFinite(Number(msg.meta?.processingStartedAt || msg.meta?.timeCreated))) {
+        const authoritativeStartedAt = Number(message?.processingStartedAt);
+        if (Number.isFinite(authoritativeStartedAt) && authoritativeStartedAt > 0) {
+            msg.meta.processingStartedAt = authoritativeStartedAt;
+        } else if (!Number.isFinite(Number(msg.meta?.processingStartedAt || msg.meta?.timeCreated))) {
             msg.meta.processingStartedAt = Date.now();
         }
+        const existingCompletedAt = Number(msg.meta?.processingCompletedAt || msg.meta?.timeCompleted);
         msg.meta.processingCompletedAt = Number.isFinite(Number(message?.completedAt))
             ? Number(message.completedAt)
-            : Date.now();
+            : Number.isFinite(existingCompletedAt) && existingCompletedAt > 0
+                ? existingCompletedAt
+                : Date.now();
         msg.meta.isThinking = false;
         // Clear statusText when streaming finishes.
         msg.meta.statusText = null;
