@@ -3506,6 +3506,29 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         for (const message of immutableRemoteRecords) {
             if (typeof message.id === 'string' && message.id) combinedById.set(message.id, message);
         }
+        // Finalization may revisit an assistant record that was already captured while
+        // the turn was active. Keep the immutable visible content, but allow the
+        // extension-owned processing timestamps to complete that same record.
+        for (const incoming of canonicalIncomingMessages) {
+            if (incoming?.role !== 'assistant' || typeof incoming.id !== 'string' || !incoming.id) continue;
+            const existingMessage = combinedById.get(incoming.id);
+            if (!existingMessage || existingMessage.role !== 'assistant') continue;
+            const processingStartedAt = incoming.meta?.processingStartedAt;
+            const processingCompletedAt = incoming.meta?.processingCompletedAt;
+            const timingMeta: Record<string, unknown> = {
+                ...(typeof processingStartedAt === 'number' && Number.isFinite(processingStartedAt) && processingStartedAt > 0
+                    ? { processingStartedAt }
+                    : {}),
+                ...(typeof processingCompletedAt === 'number' && Number.isFinite(processingCompletedAt) && processingCompletedAt > 0
+                    ? { processingCompletedAt }
+                    : {})
+            };
+            if (!Object.keys(timingMeta).length) continue;
+            combinedById.set(incoming.id, {
+                ...existingMessage,
+                meta: { ...(existingMessage.meta || {}), ...timingMeta }
+            });
+        }
         // Local change-list records are reapplied only after immutable remote construction.
         for (const message of canonicalIncomingMessages) {
             if (message?.role !== 'system' || message.meta?.kind !== 'changeList') continue;
@@ -3607,14 +3630,21 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 });
             }
             if (assistantMessageId && assistantText && !this.isHiddenControlAssistantText(assistantText)) {
+                const processingStartedAt = this.client.getCurrentTurnStartedAt(sessionId);
+                const processingCompletedAt = this.client.getCurrentTurnCompletedAt(sessionId);
+                const assistantMeta: Record<string, unknown> = {
+                    ...(identity.latestAppendUserMessageId
+                        ? { parentID: identity.latestAppendUserMessageId }
+                        : {}),
+                    ...(processingStartedAt !== undefined ? { processingStartedAt } : {}),
+                    ...(processingCompletedAt !== undefined ? { processingCompletedAt } : {})
+                };
                 addPendingMessage({
                     role: 'assistant',
                     id: assistantMessageId,
                     text: assistantText,
                     messageIndex: this.client.getMessageIndex(assistantMessageId, sessionId),
-                    ...(identity.latestAppendUserMessageId
-                        ? { meta: { parentID: identity.latestAppendUserMessageId } }
-                        : {})
+                    ...(Object.keys(assistantMeta).length ? { meta: assistantMeta } : {})
                 });
             }
             if (!pendingMessages.length) {

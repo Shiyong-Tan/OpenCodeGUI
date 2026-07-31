@@ -2387,6 +2387,22 @@ export class OpenCodeClient {
             || this.displayTurnUserMsgIdBySession.get(sessionId);
     }
 
+    public getCurrentTurnStartedAt(sessionId: string | undefined): number | undefined {
+        if (!sessionId) return undefined;
+        const startedAt = this.currentTurnStartedAtBySession.get(sessionId);
+        return typeof startedAt === 'number' && Number.isFinite(startedAt) && startedAt > 0
+            ? startedAt
+            : undefined;
+    }
+
+    public getCurrentTurnCompletedAt(sessionId: string | undefined): number | undefined {
+        if (!sessionId) return undefined;
+        const completedAt = this.turnFinalAtBySession.get(sessionId);
+        return typeof completedAt === 'number' && Number.isFinite(completedAt) && completedAt > 0
+            ? completedAt
+            : undefined;
+    }
+
     private getAppendRootCandidates(sessionId: string): Set<string> {
         const candidates = new Set<string>();
         const appendState = this.appendTurnStateBySession.get(sessionId);

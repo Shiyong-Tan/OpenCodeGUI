@@ -325,6 +325,35 @@ describe('W5A snapshot export and finalize contracts', () => {
         expect(written.messages).toEqual([...base, msg('msg_new_user', 3, 'user', 'new user')]);
     });
 
+    it('adds final processing timestamps to an existing assistant record without replacing its presentation', async () => {
+        const provider = createProvider();
+        const existingAssistant = {
+            ...msg('msg_assistant_existing', 2, 'assistant', 'visible final answer'),
+            meta: { presentation: 'snapshot-owned', processingStartedAt: 1_000 },
+        };
+        provider.readSnapshot = jest.fn().mockResolvedValue(snapshotOf([existingAssistant]));
+        provider.writeSnapshotAtomic = jest.fn().mockResolvedValue(123);
+
+        await provider.appendSnapshotIncremental(
+            'ses_delta',
+            ['msg_assistant_existing'],
+            [{
+                ...msg('msg_assistant_existing', 200, 'assistant', 'stale incoming text'),
+                meta: { presentation: 'incoming', processingStartedAt: 1_000, processingCompletedAt: 76_000 },
+            }],
+        );
+
+        const written = provider.writeSnapshotAtomic.mock.calls[0][1].sessionData;
+        expect(written.messages).toEqual([{
+            ...existingAssistant,
+            meta: {
+                presentation: 'snapshot-owned',
+                processingStartedAt: 1_000,
+                processingCompletedAt: 76_000,
+            },
+        }]);
+    });
+
     it('persists the current visible turn without requesting a canonical export', async () => {
         const provider = createProvider();
         const boundary = msg('msg_boundary', 2, 'assistant', 'snapshot final');
@@ -332,6 +361,8 @@ describe('W5A snapshot export and finalize contracts', () => {
         provider.writeSnapshotAtomic = jest.fn().mockResolvedValue(456);
         provider.client.exportSession = jest.fn();
         provider.client.getMessageIndex = jest.fn((id: string) => id === 'msg_user_new' ? 3 : 4);
+        provider.client.getCurrentTurnStartedAt = jest.fn().mockReturnValue(1_000);
+        provider.client.getCurrentTurnCompletedAt = jest.fn().mockReturnValue(76_000);
         provider.pendingSnapshotUserTextBySession.set('ses_delta', 'reload window 未显示历史记录');
         provider.assistantTextBufferBySession.set('ses_delta', '这是本轮助手回答。');
 
@@ -351,7 +382,13 @@ describe('W5A snapshot export and finalize contracts', () => {
         expect(written.messages).toEqual([
             boundary,
             msg('msg_user_new', 3, 'user', 'reload window 未显示历史记录'),
-            msg('msg_assistant_new', 4, 'assistant', '这是本轮助手回答。'),
+            {
+                ...msg('msg_assistant_new', 4, 'assistant', '这是本轮助手回答。'),
+                meta: {
+                    processingStartedAt: 1_000,
+                    processingCompletedAt: 76_000,
+                },
+            },
         ]);
         expect(provider.uiDebugChannel.appendLine).toHaveBeenCalledWith(
             expect.stringContaining('reason=finalize-incremental-write'),
