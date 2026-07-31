@@ -2631,6 +2631,75 @@ function classifyAppendFollowupTransition(current, incoming) {
     return 'reject';
 }
 
+function cloneAppendPresentationArray(value) {
+    if (!Array.isArray(value)) return undefined;
+    return value.map((item) => (
+        item && typeof item === 'object'
+            ? { ...item }
+            : item
+    ));
+}
+
+function createAppendSuccessorPresentation(predecessor, transition) {
+    const baseMeta = {
+        isThinking: true,
+        statusText: '',
+    };
+    if (transition !== 'advance' || predecessor?.role !== 'assistant') {
+        return { text: '', meta: baseMeta };
+    }
+
+    const predecessorMeta = predecessor.meta || {};
+    const meta = {
+        ...baseMeta,
+        statusText: typeof predecessorMeta.statusText === 'string' ? predecessorMeta.statusText : '',
+    };
+    const presentationArrays = ['textSegments', 'todos', 'subagents', 'images', 'statuses'];
+    for (const key of presentationArrays) {
+        const cloned = cloneAppendPresentationArray(predecessorMeta[key]);
+        if (cloned !== undefined) meta[key] = cloned;
+    }
+    if (typeof predecessorMeta.currentSegment === 'string') meta.currentSegment = predecessorMeta.currentSegment;
+    if (typeof predecessorMeta.status === 'string') meta.status = predecessorMeta.status;
+
+    const text = typeof predecessor.text === 'string' && predecessor.text !== 'Thinking...'
+        ? predecessor.text
+        : '';
+    if (text) meta.appendInheritedText = true;
+    return { text, meta };
+}
+
+function collectAppendTransitionPredecessorSubagentIds(current, predecessor, activeSubagents, transition) {
+    if (transition === 'advance') {
+        return Array.from(new Set(
+            (Array.isArray(current?.predecessorSubagentSessionIds)
+                ? current.predecessorSubagentSessionIds
+                : [])
+                .filter((id) => typeof id === 'string' && id.length)
+        ));
+    }
+    return Array.from(new Set([
+        ...(Array.isArray(predecessor?.meta?.subagents)
+            ? predecessor.meta.subagents.map((agent) => agent?.sessionId)
+            : []),
+        ...(Array.isArray(activeSubagents)
+            ? activeSubagents.map((agent) => agent?.sessionId)
+            : [])
+    ].filter((id) => typeof id === 'string' && id.length)));
+}
+
+function applyAppendSuccessorAssistantText(target, text) {
+    if (!target || typeof text !== 'string' || !text.length) return false;
+    if (target.meta?.appendInheritedText === true) {
+        target.text = text;
+        target.meta = { ...(target.meta || {}) };
+        delete target.meta.appendInheritedText;
+    } else {
+        target.text = `${target.text || ''}${text}`;
+    }
+    return true;
+}
+
 function collectAppendPredecessorSubagentSessionIds(session, followup = session?.appendFollowupIdentity) {
     const ids = new Set(
         Array.isArray(followup?.predecessorSubagentSessionIds)
@@ -12965,6 +13034,9 @@ function handleChatChunk(sessionId, message) {
             target.meta.currentSegment = chunkText;
             target.text = target.meta.currentSegment || '';
             if (!target.text) target.text = 'Thinking...';
+            if (typeof chunkText === 'string' && chunkText.length > 0) {
+                delete target.meta.appendInheritedText;
+            }
             target.meta = { ...target.meta, isThinking: true };
             if (typeof chunkText === 'string' && chunkText.length > 0) {
                 markVolatileAssistantPresentation(target);
@@ -15016,13 +15088,28 @@ function appendMessageImages(parentEl, message) {
                         });
                         break;
                     }
+                    if (transition === 'duplicate') {
+                        const duplicateLifecycle = turnLifecycleController.setBackendInFlight(session, true);
+                        if (duplicateLifecycle.phase === 'active') {
+                            session.snapshotFinalizeReady = false;
+                            session.currentTurnAssistantKey = followup.assistantMsgId;
+                            session.currentTurnAssistantMsgId = followup.assistantMsgId;
+                            session.thinkingId = followup.assistantMsgId;
+                        }
+                        vscode.postMessage({
+                            type: 'ui-debug',
+                            payload: ['append-followup', 'duplicate-generation-noop', `generation=${followup.generation}`, `assistant=${followup.assistantMsgId}`]
+                        });
+                        updateSendGate();
+                        break;
+                    }
+                    const successorPresentation = createAppendSuccessorPresentation(predecessor, transition);
                     const successor = upsertMessage(session, {
                         id: followup.assistantMsgId,
                         role: 'assistant',
-                        text: '',
+                        text: successorPresentation.text,
                         meta: {
-                            isThinking: true,
-                            statusText: '',
+                            ...successorPresentation.meta,
                             // Persist the presentation handoff on the successor.
                             // The transient appendFollowupIdentity is cleared at
                             // chatDone, but final and hydrated renders must still
@@ -15034,15 +15121,12 @@ function appendMessageImages(parentEl, message) {
                     session.timeline = session.timeline.filter((id) => id !== appendUser.id && id !== successor.id);
                     const insertionIndex = session.timeline.indexOf(predecessorPresentationId) + 1;
                     session.timeline.splice(insertionIndex, 0, appendUser.id, successor.id);
-                    const predecessorSubagentSessionIds = Array.from(new Set([
-                        ...(Array.isArray(current?.predecessorSubagentSessionIds) ? current.predecessorSubagentSessionIds : []),
-                        ...(Array.isArray(predecessor.meta?.subagents)
-                            ? predecessor.meta.subagents.map((agent) => agent?.sessionId)
-                            : []),
-                        ...(!current && Array.isArray(session.activeSubagents)
-                            ? session.activeSubagents.map((agent) => agent?.sessionId)
-                            : [])
-                    ].filter((id) => typeof id === 'string' && id.length)));
+                    const predecessorSubagentSessionIds = collectAppendTransitionPredecessorSubagentIds(
+                        current,
+                        predecessor,
+                        session.activeSubagents,
+                        transition
+                    );
                     session.appendFollowupIdentity = {
                         ...followup,
                         predecessorPresentationAssistantId: predecessorPresentationId,
@@ -15266,7 +15350,7 @@ function appendMessageImages(parentEl, message) {
                     );
                     const text = typeof message.lastText === 'string' ? message.lastText : '';
                     if (message.isStatusUpdate) target.meta = { ...(target.meta || {}), isThinking: true, statusText: text };
-                    else if (text) target.text = `${target.text || ''}${text}`;
+                    else applyAppendSuccessorAssistantText(target, text);
                     target.meta = { ...(target.meta || {}), isThinking: true };
                     session.currentTurnAssistantKey = followup.assistantMsgId;
                     session.currentTurnAssistantMsgId = followup.assistantMsgId;

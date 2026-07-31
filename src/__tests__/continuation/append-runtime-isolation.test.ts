@@ -239,6 +239,9 @@ this.normalizeAppendItemsForFinalize = normalizeAppendItemsForFinalize;
 this.getAppendPredecessorPresentationId = getAppendPredecessorPresentationId;
 this.resolveAppendPredecessorPresentation = resolveAppendPredecessorPresentation;
 this.classifyAppendFollowupTransition = classifyAppendFollowupTransition;
+this.createAppendSuccessorPresentation = createAppendSuccessorPresentation;
+this.collectAppendTransitionPredecessorSubagentIds = collectAppendTransitionPredecessorSubagentIds;
+this.applyAppendSuccessorAssistantText = applyAppendSuccessorAssistantText;
 this.collectAppendPredecessorSubagentSessionIds = collectAppendPredecessorSubagentSessionIds;
 this.filterAppendSuccessorSubagents = filterAppendSuccessorSubagents;
 this.restoreAppendHydrationMetadata = restoreAppendHydrationMetadata;`, context);
@@ -351,6 +354,105 @@ describe('append runtime isolation', () => {
         expect(context.classifyAppendFollowupTransition(generationOne, { ...generationTwo, predecessorAssistantMsgId: 'msg_other' })).toBe('reject');
         expect(context.classifyAppendFollowupTransition(generationOne, { ...generationTwo, appendUserMsgId: 'msg_other_user' })).toBe('reject');
         expect(context.classifyAppendFollowupTransition(generationTwo, generationOne)).toBe('reject');
+    });
+
+    it('keeps duplicate append generations on the explicit no-op path', () => {
+        const source = fs.readFileSync(path.join(__dirname, '../../../media/main.js'), 'utf8');
+        const turnInFlightStart = source.indexOf("case 'turnInFlight':");
+        const assistantMetaStart = source.indexOf("case 'assistantMessageMeta':", turnInFlightStart);
+        const turnInFlightBlock = source.slice(turnInFlightStart, assistantMetaStart);
+
+        expect(turnInFlightBlock).toContain("if (transition === 'duplicate')");
+        expect(turnInFlightBlock).toContain("'duplicate-generation-noop'");
+        expect(turnInFlightBlock.indexOf("if (transition === 'duplicate')"))
+            .toBeLessThan(turnInFlightBlock.indexOf('createAppendSuccessorPresentation(predecessor, transition)'));
+    });
+
+    it('keeps the visible assistant presentation across an append generation advance', () => {
+        const { context } = loadAppendSnapshotMetaHarness();
+        const predecessor = {
+            id: 'msg_b',
+            role: 'assistant',
+            text: 'Main agent text',
+            meta: {
+                isThinking: true,
+                statusText: 'Running: task',
+                currentSegment: 'Main agent text',
+                textSegments: ['Earlier text'],
+                todos: [{ content: 'Keep todo', status: 'in_progress' }],
+                subagents: [{ sessionId: 'ses_current', state: 'done' }],
+                identity: { canonicalId: 'msg_b' },
+                internalId: 'msg_b',
+            },
+        };
+
+        const presentation = context.createAppendSuccessorPresentation(predecessor, 'advance');
+
+        expect(presentation.text).toBe('Main agent text');
+        expect(presentation.meta).toEqual(expect.objectContaining({
+            isThinking: true,
+            statusText: 'Running: task',
+            currentSegment: 'Main agent text',
+            appendInheritedText: true,
+            todos: [{ content: 'Keep todo', status: 'in_progress' }],
+            subagents: [{ sessionId: 'ses_current', state: 'done' }],
+        }));
+        expect(presentation.meta.identity).toBeUndefined();
+        expect(presentation.meta.internalId).toBeUndefined();
+        presentation.meta.todos[0].status = 'completed';
+        expect(predecessor.meta.todos[0].status).toBe('in_progress');
+    });
+
+    it('keeps the first append handoff blank instead of copying the completed predecessor', () => {
+        const { context } = loadAppendSnapshotMetaHarness();
+        const presentation = context.createAppendSuccessorPresentation({
+            role: 'assistant',
+            text: 'Completed prior answer',
+            meta: { todos: [{ content: 'old' }] },
+        }, 'initial');
+
+        expect(presentation).toEqual({
+            text: '',
+            meta: { isThinking: true, statusText: '' },
+        });
+    });
+
+    it('replaces inherited main text only when the next main text arrives', () => {
+        const { context } = loadAppendSnapshotMetaHarness();
+        const target: any = {
+            text: 'Previous main text',
+            meta: { isThinking: true, appendInheritedText: true },
+        };
+
+        expect(context.applyAppendSuccessorAssistantText(target, '')).toBe(false);
+        expect(target.text).toBe('Previous main text');
+        expect(context.applyAppendSuccessorAssistantText(target, 'New main text')).toBe(true);
+        expect(target.text).toBe('New main text');
+        expect(target.meta.appendInheritedText).toBeUndefined();
+        context.applyAppendSuccessorAssistantText(target, ' continued');
+        expect(target.text).toBe('New main text continued');
+    });
+
+    it('does not reclassify current-chain subagents as stale on generation advance', () => {
+        const { context } = loadAppendSnapshotMetaHarness();
+        const current = { predecessorSubagentSessionIds: ['ses_before_append'] };
+        const predecessor = {
+            meta: { subagents: [{ sessionId: 'ses_current_chain', state: 'done' }] },
+        };
+        const active = [{ sessionId: 'ses_current_chain', state: 'done' }];
+
+        expect(context.collectAppendTransitionPredecessorSubagentIds(
+            current,
+            predecessor,
+            active,
+            'advance'
+        )).toEqual(['ses_before_append']);
+        expect(context.collectAppendTransitionPredecessorSubagentIds(
+            null,
+            predecessor,
+            active,
+            'initial'
+        )).toEqual(['ses_current_chain']);
     });
 
     it('resolves a canonical append predecessor to its active presentation owner', () => {
