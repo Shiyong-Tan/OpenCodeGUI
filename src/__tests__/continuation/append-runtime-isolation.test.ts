@@ -851,6 +851,21 @@ describe('append runtime isolation', () => {
         expect(client.canceledActiveTurnBySession.has('ses_keep')).toBe(false);
     });
 
+    it('retains the original turn start across a session-switch reset', () => {
+        const client = new OpenCodeClient() as any;
+        createdClients.push(client as OpenCodeClient);
+
+        client.startTurn('ses_keep', 'local-user-keep');
+        client.currentTurnStartedAtBySession.set('ses_keep', 1_785_531_000_000);
+        client.startTurn('ses_drop', 'local-user-drop');
+        client.currentTurnStartedAtBySession.set('ses_drop', 1_785_531_120_000);
+
+        client.resetSessionState({ preserveInFlightSessionIds: new Set(['ses_keep']) });
+
+        expect(client.getCurrentTurnStartedAt('ses_keep')).toBe(1_785_531_000_000);
+        expect(client.getCurrentTurnStartedAt('ses_drop')).toBeUndefined();
+    });
+
     it('retains active assistant text evidence across a session-switch reset', async () => {
         const client = new OpenCodeClient() as any;
         createdClients.push(client as OpenCodeClient);

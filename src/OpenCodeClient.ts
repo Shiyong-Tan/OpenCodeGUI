@@ -631,6 +631,7 @@ export class OpenCodeClient {
         const retainedAssistantTextById = new Map<string, string>();
         const retainedAssistantHasDelta = new Set<string>();
         const retainedAssistantStatusCleared = new Set<string>();
+        const retainedTurnStartedAtBySession = new Map<string, number>();
         if (preserveInFlightSessionIds?.size) {
             for (const sessionId of preserveInFlightSessionIds) {
                 if (typeof sessionId !== 'string' || !sessionId) continue;
@@ -669,6 +670,10 @@ export class OpenCodeClient {
                 const aliasMap = this.messageIdAliasBySession.get(sessionId);
                 if (aliasMap) {
                     retainedMessageIdAliasBySession.set(sessionId, new Map(aliasMap));
+                }
+                const turnStartedAt = this.currentTurnStartedAtBySession.get(sessionId);
+                if (typeof turnStartedAt === 'number' && Number.isFinite(turnStartedAt) && turnStartedAt > 0) {
+                    retainedTurnStartedAtBySession.set(sessionId, turnStartedAt);
                 }
             }
             for (const messageId of retainedAssistantMessageIds) {
@@ -830,6 +835,11 @@ export class OpenCodeClient {
             const aliasMap = retainedMessageIdAliasBySession.get(sessionId);
             if (aliasMap) {
                 this.messageIdAliasBySession.set(sessionId, aliasMap);
+                restored = true;
+            }
+            const turnStartedAt = retainedTurnStartedAtBySession.get(sessionId);
+            if (turnStartedAt !== undefined) {
+                this.currentTurnStartedAtBySession.set(sessionId, turnStartedAt);
                 restored = true;
             }
             if (restored) retainedClientTurnBindingSessions += 1;
