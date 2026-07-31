@@ -370,6 +370,7 @@ type TurnState = {
     resolvedUserMsgId?: string;
     lastResolvedAssistantMsgId?: string;
     turnMessageIds?: Set<string>;
+    assistantMessageIds?: Set<string>;
     continuationMeta?: ContinuationMessageMetadata;
     continuationState?: ContinuationLifecycleState;
     appendFollowupHandoff?: AppendFollowupHandoff;
@@ -638,6 +639,7 @@ export class OpenCodeClient {
                     retainedTurnStateBySession.set(sessionId, {
                         ...turnState,
                         turnMessageIds: turnState.turnMessageIds ? new Set(turnState.turnMessageIds) : undefined,
+                        assistantMessageIds: turnState.assistantMessageIds ? new Set(turnState.assistantMessageIds) : undefined,
                     });
                 }
                 const assistantMessageIds = [
@@ -2301,6 +2303,8 @@ export class OpenCodeClient {
         const existing = this.turnStateBySession.get(sessionId);
         if (existing) {
             existing.assistantMsgId = assistantMsgId;
+            existing.assistantMessageIds = existing.assistantMessageIds || new Set<string>();
+            existing.assistantMessageIds.add(assistantMsgId);
             return;
         }
         this.turnStateBySession.set(sessionId, {
@@ -2311,8 +2315,27 @@ export class OpenCodeClient {
             exportResolved: false,
             resolvedUserMsgId: undefined,
             lastResolvedAssistantMsgId: undefined,
-            turnMessageIds: new Set()
+            turnMessageIds: new Set(),
+            assistantMessageIds: new Set([assistantMsgId])
         });
+    }
+
+    public getCurrentTurnAssistantMessageIds(sessionId: string | undefined): string[] {
+        if (!sessionId) return [];
+        const state = this.turnStateBySession.get(sessionId);
+        const ids = new Set<string>(state?.assistantMessageIds || []);
+        const candidates = [
+            state?.assistantMsgId,
+            state?.lastResolvedAssistantMsgId,
+            this.currentTurnAssistantMsgIdBySession.get(sessionId),
+            this.pendingAssistantMsgIdBySession.get(sessionId),
+            this.finalizingMsgIdBySession.get(sessionId),
+            this.turnFinalMsgIdBySession.get(sessionId),
+        ];
+        for (const candidate of candidates) {
+            if (typeof candidate === 'string' && candidate.startsWith('msg_')) ids.add(candidate);
+        }
+        return Array.from(ids);
     }
 
     private trackTurnMessageId(sessionId: string, messageId: string): void {

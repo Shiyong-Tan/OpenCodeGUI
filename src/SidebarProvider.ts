@@ -3441,7 +3441,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         sessionId: string,
         timelineIds: string[],
         incomingMessages: SessionMessage[],
-        title?: string
+        title?: string,
+        excludeMessageIds: ReadonlySet<string> = new Set<string>()
     ): Promise<number> {
         const ownershipMap = await this.readPersistedSessionMap(sessionId);
         const canonicalIncomingMessages = this.canonicalizeSnapshotMessagesForCurrentOwner(sessionId, incomingMessages, ownershipMap);
@@ -3483,12 +3484,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             snapshotObj.sessionData.title = title;
         }
         const existingMessages: SessionMessage[] = Array.isArray(snapshotObj.sessionData.messages)
-            ? snapshotObj.sessionData.messages
+            ? snapshotObj.sessionData.messages.filter((message: SessionMessage) => (
+                typeof message?.id !== 'string' || !excludeMessageIds.has(message.id)
+            ))
             : [];
         const canonicalExistingMessages = this.canonicalizeSnapshotMessagesForCurrentOwner(sessionId, existingMessages, ownershipMap);
         const normalizedExisting = this.normalizeSnapshotStoredMessages(canonicalExistingMessages);
         const existingTimelineRaw = this.getSnapshotTimelineIds(snapshotObj.sessionData, normalizedExisting);
-        const existingTimeline = Array.from(new Set(existingTimelineRaw.filter((id): id is string => typeof id === 'string' && Boolean(id))));
+        const existingTimeline = Array.from(new Set(existingTimelineRaw.filter((id): id is string => (
+            typeof id === 'string' && Boolean(id) && !excludeMessageIds.has(id)
+        ))));
         const existingIdSet = new Set(existingTimeline);
         const boundaryId = existingTimeline[existingTimeline.length - 1];
         const boundaryIndex = boundaryId ? canonicalTimelineIds.indexOf(boundaryId) : -1;
@@ -3658,14 +3663,24 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 ? existing.obj.sessionData.messages
                 : [];
             const existingTimelineRaw = this.getSnapshotTimelineIds(existing?.obj?.sessionData, existingMessages);
+            const supersededAssistantIds = new Set(
+                this.client.getCurrentTurnAssistantMessageIds(sessionId)
+                    .filter((id) => id !== assistantMessageId)
+            );
             const timelineIds = Array.from(new Set([
                 ...existingTimelineRaw.filter((id: unknown): id is string => typeof id === 'string' && Boolean(id)),
                 ...pendingMessages.map((message) => message.id).filter((id): id is string => typeof id === 'string' && Boolean(id))
-            ]));
-            const bytes = await this.appendSnapshotIncremental(sessionId, timelineIds, pendingMessages, title);
+            ])).filter((id) => !supersededAssistantIds.has(id));
+            const bytes = await this.appendSnapshotIncremental(
+                sessionId,
+                timelineIds,
+                pendingMessages,
+                title,
+                supersededAssistantIds
+            );
             this.uiTimelineBySession.set(sessionId, timelineIds);
             this.uiDebugChannel.appendLine(
-                `[EXT][SNAPSHOT_ROUTE] reason=finalize-incremental-write source=current-turn sessionId=${sessionId} timelineCount=${timelineIds.length} messageCount=${pendingMessages.length} userMessageId=${userMessageId || 'null'} assistantMessageId=${assistantMessageId || 'null'} bytes=${bytes}`
+                `[EXT][SNAPSHOT_ROUTE] reason=finalize-incremental-write source=current-turn sessionId=${sessionId} timelineCount=${timelineIds.length} messageCount=${pendingMessages.length} prunedSupersededAssistants=${supersededAssistantIds.size} userMessageId=${userMessageId || 'null'} assistantMessageId=${assistantMessageId || 'null'} bytes=${bytes}`
             );
         } catch (error) {
             this.uiDebugChannel.appendLine(

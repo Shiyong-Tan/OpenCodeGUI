@@ -76,6 +76,7 @@ describe('append followup same-turn handoff', () => {
         expect(client.turnStateBySession.get('ses')).toBe(state);
         expect(state.assistantMsgId).toBe('msg_b');
         expect(state.turnMessageIds).toEqual(new Set(['msg_a', 'msg_b']));
+        expect(client.getCurrentTurnAssistantMessageIds('ses')).toEqual(['msg_a', 'msg_b']);
         expect(client.turnWriteStateBySession.get('ses')?.turnKey).toBe(beforeTurnKey);
         expect(client.turnFinishedBySession.has('ses')).toBe(false);
     });

@@ -398,6 +398,40 @@ describe('W5A snapshot export and finalize contracts', () => {
         expect(provider.assistantTextBufferBySession.has('ses_delta')).toBe(false);
     });
 
+    it('removes superseded assistants from the same turn when persisting the final presentation', async () => {
+        const provider = createProvider();
+        const user = msg('msg_user_new', 3, 'user', 'send a subagent');
+        const intermediate = {
+            ...msg('msg_assistant_intermediate', 4, 'assistant', 'starting the subagent'),
+            meta: { parentID: 'msg_user_new' },
+        };
+        provider.readSnapshot = jest.fn().mockResolvedValue(snapshotOf([user, intermediate]));
+        provider.writeSnapshotAtomic = jest.fn().mockResolvedValue(456);
+        provider.client.getMessageIndex = jest.fn((id: string) => id === 'msg_user_new' ? 3 : 5);
+        provider.client.getCurrentTurnAssistantMessageIds = jest.fn().mockReturnValue([
+            'msg_assistant_intermediate',
+            'msg_assistant_final',
+        ]);
+        provider.pendingSnapshotUserTextBySession.set('ses_delta', 'send a subagent');
+        provider.assistantTextBufferBySession.set('ses_delta', 'subagent finished');
+
+        await provider.writeFinalizeSnapshotFromCurrentTurn({
+            sessionId: 'ses_delta',
+            userMessageId: 'msg_user_new',
+            assistantMessageId: 'msg_assistant_final',
+        });
+
+        const written = provider.writeSnapshotAtomic.mock.calls[0][1].sessionData;
+        expect(written.meta.timelineMessageIds).toEqual(['msg_user_new', 'msg_assistant_final']);
+        expect(written.messages).toEqual([
+            user,
+            msg('msg_assistant_final', 5, 'assistant', 'subagent finished'),
+        ]);
+        expect(provider.uiDebugChannel.appendLine).toHaveBeenCalledWith(
+            expect.stringContaining('prunedSupersededAssistants=1'),
+        );
+    });
+
     it('persists only the accepted final assistant message when one turn has multiple assistant stages', async () => {
         const provider = createProvider();
         provider.readSnapshot = jest.fn().mockResolvedValue(undefined);
