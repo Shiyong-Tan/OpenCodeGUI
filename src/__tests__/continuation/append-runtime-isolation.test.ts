@@ -413,7 +413,11 @@ describe('append runtime isolation', () => {
 
         expect(presentation).toEqual({
             text: '',
-            meta: { isThinking: true, statusText: '' },
+            meta: {
+                isThinking: true,
+                statusText: '',
+                processingStartedAt: expect.any(Number),
+            },
         });
     });
 

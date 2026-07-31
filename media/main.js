@@ -2641,9 +2641,11 @@ function cloneAppendPresentationArray(value) {
 }
 
 function createAppendSuccessorPresentation(predecessor, transition) {
+    const now = Date.now();
     const baseMeta = {
         isThinking: true,
         statusText: '',
+        processingStartedAt: now,
     };
     if (transition !== 'advance' || predecessor?.role !== 'assistant') {
         return { text: '', meta: baseMeta };
@@ -2661,6 +2663,8 @@ function createAppendSuccessorPresentation(predecessor, transition) {
     }
     if (typeof predecessorMeta.currentSegment === 'string') meta.currentSegment = predecessorMeta.currentSegment;
     if (typeof predecessorMeta.status === 'string') meta.status = predecessorMeta.status;
+    const inheritedStartedAt = Number(predecessorMeta.processingStartedAt || predecessorMeta.timeCreated);
+    if (Number.isFinite(inheritedStartedAt) && inheritedStartedAt > 0) meta.processingStartedAt = inheritedStartedAt;
 
     const text = typeof predecessor.text === 'string' && predecessor.text !== 'Thinking...'
         ? predecessor.text
@@ -4036,6 +4040,17 @@ function attemptAssistantUpgrade(sessionId, payload, source) {
 
     const bound = session.currentTurnAssistantKey === newKey;
     if (bound) {
+        const boundMessage = session.messagesById.get(newKey);
+        if (boundMessage?.role === 'assistant') {
+            const timeCreated = Number(payload?.timeCreated ?? payload?.chosenTimeCreated);
+            const timeCompleted = Number(payload?.completedAt ?? payload?.chosenTimeCompleted);
+            if (Number.isFinite(timeCreated) && timeCreated > 0) {
+                boundMessage.meta = { ...(boundMessage.meta || {}), timeCreated };
+            }
+            if (Number.isFinite(timeCompleted) && timeCompleted > 0) {
+                boundMessage.meta = { ...(boundMessage.meta || {}), timeCompleted };
+            }
+        }
         if (session.pendingAssistantUpgrade && session.pendingAssistantUpgrade.assistantMsgId === newKey) {
             session.pendingAssistantUpgrade = null;
         }
@@ -6490,6 +6505,20 @@ const renderMessageElementHost = Object.freeze({
 function renderMessageElement(message, renderedSet) {
     return window.__ocRendering.renderMessageElement(renderMessageElementHost, message, renderedSet);
 }
+
+function updateLiveAssistantProcessingTimes(now = Date.now()) {
+    const elements = document.querySelectorAll('.message-processing-time[data-completed-at=""]');
+    for (const element of elements) {
+        if (typeof element?._updateProcessingTime === 'function') {
+            element._updateProcessingTime(now);
+        }
+    }
+}
+
+const assistantProcessingTimeTimer = setInterval(() => {
+    updateLiveAssistantProcessingTimes(Date.now());
+}, 1000);
+window.addEventListener('beforeunload', () => clearInterval(assistantProcessingTimeTimer), { once: true });
 
     function getMessageKeyFromChatChild(child) {
         if (!child) return '';
@@ -12722,7 +12751,7 @@ function applyPromptToSession(sessionId, payload) {
                 id: tempId,
                 role: 'assistant',
                 text: 'Thinking...',
-                meta: { isThinking: true, parentClientMessageId: payload.clientMessageId, textSegments: [], currentSegment: '', subagents: [], todos: [] }
+                meta: { isThinking: true, parentClientMessageId: payload.clientMessageId, textSegments: [], currentSegment: '', subagents: [], todos: [], processingStartedAt: Date.now() }
             });
             session.thinkingId = thinkingMsg.id;
             session.currentTurnAssistantKey = thinkingMsg.id;
@@ -12853,7 +12882,14 @@ function handleAssistantMeta(sessionId, message, options = {}) {
                 id: msgId,
                 role: message.role || 'assistant',
                 text: message.lastText || 'Thinking...',
-                meta: { isThinking: true, internalId: backendId, statusText: '' }
+                meta: {
+                    isThinking: true,
+                    internalId: backendId,
+                    statusText: '',
+                    processingStartedAt: Number.isFinite(Number(message?.timeCreated)) ? Number(message.timeCreated) : Date.now(),
+                    ...(Number.isFinite(Number(message?.timeCreated)) ? { timeCreated: Number(message.timeCreated) } : {}),
+                    ...(Number.isFinite(Number(message?.completedAt)) ? { timeCompleted: Number(message.completedAt) } : {})
+                }
             });
             session.thinkingId = thinking.id;
             if (typeof message.lastText === 'string' && message.lastText.trim().length > 0) {
@@ -12872,6 +12908,12 @@ function handleAssistantMeta(sessionId, message, options = {}) {
 
         const target = session.messagesById.get(targetId);
         if (target) {
+            if (Number.isFinite(Number(message?.timeCreated))) {
+                target.meta = { ...(target.meta || {}), timeCreated: Number(message.timeCreated) };
+            }
+            if (Number.isFinite(Number(message?.completedAt))) {
+                target.meta = { ...(target.meta || {}), timeCompleted: Number(message.completedAt) };
+            }
             const activeTargetId = session.currentTurnAssistantKey || session.thinkingId || null;
             const isActiveTarget = Boolean(activeTargetId && targetId === activeTargetId);
             if (!isActiveTarget && target.meta?.isThinking !== true) {
@@ -13078,6 +13120,12 @@ function handleChatDone(sessionId, message) {
         // agent timeout notice removed
     if (session.thinkingId && session.messagesById.has(session.thinkingId)) {
         const msg = session.messagesById.get(session.thinkingId);
+        if (!Number.isFinite(Number(msg.meta?.processingStartedAt || msg.meta?.timeCreated))) {
+            msg.meta.processingStartedAt = Date.now();
+        }
+        msg.meta.processingCompletedAt = Number.isFinite(Number(message?.completedAt))
+            ? Number(message.completedAt)
+            : Date.now();
         msg.meta.isThinking = false;
         // Clear statusText when streaming finishes.
         msg.meta.statusText = null;
@@ -13991,7 +14039,7 @@ function appendMessageImages(parentEl, message) {
             id: assistantKey,
             role: 'assistant',
             text: assistantText,
-            meta: { isThinking: true, statusText: '', liveTurnResume: true, liveTurnResumeAssistantKey: assistantKey }
+            meta: { isThinking: true, statusText: '', liveTurnResume: true, liveTurnResumeAssistantKey: assistantKey, processingStartedAt: Date.now() }
         });
         placeMessageAfterAnchor(session, assistantKey, userKey, 'liveTurnResume');
         ensureTimelineContainsOnce(session, userKey);
@@ -15344,6 +15392,12 @@ function appendMessageImages(parentEl, message) {
                     && followup.assistantMsgId === message.assistantMsgId) {
                     const target = session.messagesById.get(followup.assistantMsgId);
                     if (!target || target.role !== 'assistant') break;
+                    if (Number.isFinite(Number(message?.timeCreated))) {
+                        target.meta = { ...(target.meta || {}), timeCreated: Number(message.timeCreated) };
+                    }
+                    if (Number.isFinite(Number(message?.completedAt))) {
+                        target.meta = { ...(target.meta || {}), timeCompleted: Number(message.completedAt) };
+                    }
                     const hadPresentableContent = Boolean(
                         (typeof target.text === 'string' && target.text.trim())
                         || (typeof target.meta?.statusText === 'string' && target.meta.statusText.trim())

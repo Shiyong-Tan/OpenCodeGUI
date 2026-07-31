@@ -2,6 +2,8 @@ type Message = any;
 type SessionState = any;
 type RenderElement = any;
 
+import { appendAssistantProcessingTime } from './processing-time';
+
 type SubagentTextExpansionState = {
     get(key: string): boolean | undefined;
     set(key: string, expanded: boolean): void;
@@ -638,6 +640,9 @@ export function renderMessageElement(
                 todoCard.appendChild(item);
             }
             div.appendChild(todoCard);
+        }
+        if (message.role === 'assistant') {
+            appendAssistantProcessingTime(div, message);
         }
         if (host.appendMessageToChat(div, message) === true) renderedSet.add(message.id);
     

@@ -411,6 +411,8 @@ export function mapServerEventToChatEvents(
                             assistantMsgId: messageId,
                             messageId,
                             messageIndex,
+                            timeCreated: typeof info?.time?.created === 'number' ? info.time.created : undefined,
+                            completedAt: typeof completedAt === 'number' ? completedAt : undefined,
                             tmpKey: host.getPendingAssistantTmpKey(sessionId),
                             appendFollowup,
                             ...(isSubagentLane ? {

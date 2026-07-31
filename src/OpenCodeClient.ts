@@ -231,6 +231,8 @@ export type ChatEvent = {
     files?: FileSnapshot[];
     messageId?: string;
     messageIndex?: number;
+    timeCreated?: number;
+    completedAt?: number;
     lastText?: string;
     assistantMsgId?: string;
     rootUserMsgId?: string;
