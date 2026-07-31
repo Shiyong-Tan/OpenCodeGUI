@@ -20,7 +20,7 @@ export function mapServerEventToChatEvents(
         const normalized = host.normalizeEvent(type, props, source);
         const sessionId = normalized.sessionId;
         let appendFollowup: any;
-        let appendFollowupStart = false;
+        let appendFollowupTransition = false;
         if (source === 'sse' && type === 'message.updated' && props?.info?.role === 'assistant' && sessionId) {
             const info = props.info;
             const active = host.getActiveAppendFollowup?.(sessionId);
@@ -36,6 +36,7 @@ export function mapServerEventToChatEvents(
                         );
                         if (advanced?.status === 'new' || advanced?.status === 'existing') {
                             appendFollowup = advanced.identity;
+                            appendFollowupTransition = advanced.status === 'new';
                         } else {
                             return events;
                         }
@@ -50,7 +51,7 @@ export function mapServerEventToChatEvents(
                         const result = host.tryBindAppendFollowup?.(sessionId, info.id, info.parentID, normalized.lane);
                         if (result?.status === 'new') {
                             appendFollowup = result.identity;
-                            appendFollowupStart = true;
+                            appendFollowupTransition = true;
                         } else if (result?.status !== 'existing') {
                             return events;
                         } else {
@@ -77,6 +78,7 @@ export function mapServerEventToChatEvents(
                 );
                 if (advanced?.status === 'new' || advanced?.status === 'existing') {
                     appendFollowup = advanced.identity;
+                    appendFollowupTransition = advanced.status === 'new';
                 } else {
                     return events;
                 }
@@ -86,7 +88,7 @@ export function mapServerEventToChatEvents(
             }
             if (!appendFollowup && active?.assistantMsgId === messageId) appendFollowup = active;
         }
-        if (appendFollowupStart) {
+        if (appendFollowupTransition) {
             events.push({ type: 'turnInFlight', sessionId, inFlight: true, ownerMsgId: appendFollowup.assistantMsgId, assistantMsgId: appendFollowup.assistantMsgId, appendFollowup, source });
         }
         if (sessionId) {

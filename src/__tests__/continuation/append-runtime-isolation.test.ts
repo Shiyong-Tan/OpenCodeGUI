@@ -238,6 +238,7 @@ this.syncAppendSnapshotMetadata = syncAppendSnapshotMetadata;
 this.normalizeAppendItemsForFinalize = normalizeAppendItemsForFinalize;
 this.getAppendPredecessorPresentationId = getAppendPredecessorPresentationId;
 this.resolveAppendPredecessorPresentation = resolveAppendPredecessorPresentation;
+this.classifyAppendFollowupTransition = classifyAppendFollowupTransition;
 this.collectAppendPredecessorSubagentSessionIds = collectAppendPredecessorSubagentSessionIds;
 this.filterAppendSuccessorSubagents = filterAppendSuccessorSubagents;
 this.restoreAppendHydrationMetadata = restoreAppendHydrationMetadata;`, context);
@@ -325,6 +326,33 @@ afterEach(async () => {
 });
 
 describe('append runtime isolation', () => {
+    it('accepts only idempotent or strictly consecutive append presentation generations', () => {
+        const { context } = loadAppendSnapshotMetaHarness();
+        const generationOne = {
+            kind: 'append-followup',
+            mode: 'same-turn-handoff',
+            sessionId: 'ses',
+            appendUserMsgId: 'msg_u',
+            predecessorAssistantMsgId: 'msg_a',
+            assistantMsgId: 'msg_b',
+            generation: 1,
+        };
+        const generationTwo = {
+            ...generationOne,
+            predecessorAssistantMsgId: 'msg_b',
+            assistantMsgId: 'msg_c',
+            generation: 2,
+        };
+
+        expect(context.classifyAppendFollowupTransition(null, generationOne)).toBe('initial');
+        expect(context.classifyAppendFollowupTransition(generationOne, { ...generationOne })).toBe('duplicate');
+        expect(context.classifyAppendFollowupTransition(generationOne, generationTwo)).toBe('advance');
+        expect(context.classifyAppendFollowupTransition(generationOne, { ...generationTwo, generation: 3 })).toBe('reject');
+        expect(context.classifyAppendFollowupTransition(generationOne, { ...generationTwo, predecessorAssistantMsgId: 'msg_other' })).toBe('reject');
+        expect(context.classifyAppendFollowupTransition(generationOne, { ...generationTwo, appendUserMsgId: 'msg_other_user' })).toBe('reject');
+        expect(context.classifyAppendFollowupTransition(generationTwo, generationOne)).toBe('reject');
+    });
+
     it('resolves a canonical append predecessor to its active presentation owner', () => {
         const { context } = loadAppendSnapshotMetaHarness();
         const presentation = { id: 'msg_presentation', role: 'assistant', text: 'Working' };

@@ -2592,6 +2592,45 @@ function resolveAppendPredecessorPresentation(session, followup) {
     return null;
 }
 
+function classifyAppendFollowupTransition(current, incoming) {
+    if (
+        incoming?.kind !== 'append-followup'
+        || incoming.mode !== 'same-turn-handoff'
+        || typeof incoming.sessionId !== 'string'
+        || typeof incoming.appendUserMsgId !== 'string'
+        || typeof incoming.predecessorAssistantMsgId !== 'string'
+        || typeof incoming.assistantMsgId !== 'string'
+        || !Number.isInteger(incoming.generation)
+        || incoming.generation < 1
+        || incoming.predecessorAssistantMsgId === incoming.assistantMsgId
+    ) {
+        return 'reject';
+    }
+    if (!current) return 'initial';
+    if (
+        current.kind === incoming.kind
+        && current.mode === incoming.mode
+        && current.sessionId === incoming.sessionId
+        && current.appendUserMsgId === incoming.appendUserMsgId
+        && current.predecessorAssistantMsgId === incoming.predecessorAssistantMsgId
+        && current.assistantMsgId === incoming.assistantMsgId
+        && current.generation === incoming.generation
+    ) {
+        return 'duplicate';
+    }
+    if (
+        current.kind === 'append-followup'
+        && current.mode === 'same-turn-handoff'
+        && current.sessionId === incoming.sessionId
+        && current.appendUserMsgId === incoming.appendUserMsgId
+        && incoming.generation === current.generation + 1
+        && incoming.predecessorAssistantMsgId === current.assistantMsgId
+    ) {
+        return 'advance';
+    }
+    return 'reject';
+}
+
 function collectAppendPredecessorSubagentSessionIds(session, followup = session?.appendFollowupIdentity) {
     const ids = new Set(
         Array.isArray(followup?.predecessorSubagentSessionIds)
@@ -14964,7 +15003,19 @@ function appendMessageImages(parentEl, message) {
                         break;
                     }
                     const current = session.appendFollowupIdentity;
-                    if (current && (current.generation !== followup.generation || current.assistantMsgId !== followup.assistantMsgId)) break;
+                    const transition = classifyAppendFollowupTransition(current, followup);
+                    if (transition === 'reject') {
+                        vscode.postMessage({
+                            type: 'ui-debug',
+                            payload: ['append-followup', 'drop-invalid-generation-transition',
+                                `currentGeneration=${current?.generation ?? 'null'}`,
+                                `incomingGeneration=${followup.generation}`,
+                                `currentAssistant=${current?.assistantMsgId || 'null'}`,
+                                `incomingPredecessor=${followup.predecessorAssistantMsgId}`,
+                                `incomingAssistant=${followup.assistantMsgId}`]
+                        });
+                        break;
+                    }
                     const successor = upsertMessage(session, {
                         id: followup.assistantMsgId,
                         role: 'assistant',

@@ -109,6 +109,16 @@ describe('append followup same-turn handoff', () => {
         }, 'sse');
         expect(textEvents).toEqual(expect.arrayContaining([
             expect.objectContaining({
+                type: 'turnInFlight',
+                ownerMsgId: 'msg_c',
+                assistantMsgId: 'msg_c',
+                appendFollowup: expect.objectContaining({
+                    predecessorAssistantMsgId: 'msg_b',
+                    assistantMsgId: 'msg_c',
+                    generation: 2
+                })
+            }),
+            expect.objectContaining({
                 type: 'text',
                 assistantMsgId: 'msg_c',
                 text: 'final answer',
@@ -128,6 +138,47 @@ describe('append followup same-turn handoff', () => {
             expect.objectContaining({ type: 'assistantMessageMeta', assistantMsgId: 'msg_c' }),
         ]));
         expect(client.getFinalizingMsgId('ses')).toBe('msg_c');
+    });
+
+    it('emits one handoff for each new append successor generation and not for duplicate SSE', () => {
+        const client = createSameTurnFixture();
+        client.mapServerEventToChatEvents('message.updated', {
+            info: { id: 'msg_a', sessionID: 'ses', role: 'assistant', parentID: 'msg_root', finish: 'tool-calls' },
+        }, 'sse');
+        client.mapServerEventToChatEvents('message.updated', {
+            info: { id: 'msg_b', sessionID: 'ses', role: 'assistant', parentID: 'msg_u' },
+        }, 'sse');
+        client.mapServerEventToChatEvents('message.updated', {
+            info: { id: 'msg_b', sessionID: 'ses', role: 'assistant', parentID: 'msg_u', finish: 'tool-calls' },
+        }, 'sse');
+
+        const generationTwo = client.mapServerEventToChatEvents('message.updated', {
+            info: { id: 'msg_c', sessionID: 'ses', role: 'assistant', parentID: 'msg_u' },
+        }, 'sse');
+        expect(generationTwo.filter((event: any) => event.type === 'turnInFlight')).toEqual([
+            expect.objectContaining({
+                ownerMsgId: 'msg_c',
+                appendFollowup: expect.objectContaining({ generation: 2, predecessorAssistantMsgId: 'msg_b' }),
+            }),
+        ]);
+
+        const duplicate = client.mapServerEventToChatEvents('message.updated', {
+            info: { id: 'msg_c', sessionID: 'ses', role: 'assistant', parentID: 'msg_u' },
+        }, 'sse');
+        expect(duplicate.some((event: any) => event.type === 'turnInFlight')).toBe(false);
+
+        client.mapServerEventToChatEvents('message.updated', {
+            info: { id: 'msg_c', sessionID: 'ses', role: 'assistant', parentID: 'msg_u', finish: 'tool-calls' },
+        }, 'sse');
+        const generationThree = client.mapServerEventToChatEvents('message.part.updated', {
+            part: { sessionID: 'ses', messageID: 'msg_d', type: 'text', text: 'final generation' },
+        }, 'sse');
+        expect(generationThree.filter((event: any) => event.type === 'turnInFlight')).toEqual([
+            expect.objectContaining({
+                ownerMsgId: 'msg_d',
+                appendFollowup: expect.objectContaining({ generation: 3, predecessorAssistantMsgId: 'msg_c' }),
+            }),
+        ]);
     });
 
     it('finalizes an inactive session latest delta-only successor when idle is the terminal signal', async () => {
