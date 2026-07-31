@@ -2642,16 +2642,23 @@ function cloneAppendPresentationArray(value) {
 
 function createAppendSuccessorPresentation(predecessor, transition) {
     const now = Date.now();
+    const predecessorMeta = predecessor?.role === 'assistant' && predecessor.meta
+        ? predecessor.meta
+        : {};
+    const inheritedStartedAt = Number(predecessorMeta.processingStartedAt || predecessorMeta.timeCreated);
     const baseMeta = {
         isThinking: true,
         statusText: '',
-        processingStartedAt: now,
+        // An append handoff changes the presentation identity, not the active
+        // turn. Keep one cumulative timer even for the first (blank) successor.
+        processingStartedAt: Number.isFinite(inheritedStartedAt) && inheritedStartedAt > 0
+            ? inheritedStartedAt
+            : now,
     };
     if (transition !== 'advance' || predecessor?.role !== 'assistant') {
         return { text: '', meta: baseMeta };
     }
 
-    const predecessorMeta = predecessor.meta || {};
     const meta = {
         ...baseMeta,
         statusText: typeof predecessorMeta.statusText === 'string' ? predecessorMeta.statusText : '',
@@ -2663,9 +2670,6 @@ function createAppendSuccessorPresentation(predecessor, transition) {
     }
     if (typeof predecessorMeta.currentSegment === 'string') meta.currentSegment = predecessorMeta.currentSegment;
     if (typeof predecessorMeta.status === 'string') meta.status = predecessorMeta.status;
-    const inheritedStartedAt = Number(predecessorMeta.processingStartedAt || predecessorMeta.timeCreated);
-    if (Number.isFinite(inheritedStartedAt) && inheritedStartedAt > 0) meta.processingStartedAt = inheritedStartedAt;
-
     const text = typeof predecessor.text === 'string' && predecessor.text !== 'Thinking...'
         ? predecessor.text
         : '';

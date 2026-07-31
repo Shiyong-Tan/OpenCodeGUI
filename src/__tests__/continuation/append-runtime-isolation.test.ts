@@ -408,7 +408,7 @@ describe('append runtime isolation', () => {
         const presentation = context.createAppendSuccessorPresentation({
             role: 'assistant',
             text: 'Completed prior answer',
-            meta: { todos: [{ content: 'old' }] },
+            meta: { todos: [{ content: 'old' }], processingStartedAt: 1_000 },
         }, 'initial');
 
         expect(presentation).toEqual({
@@ -416,9 +416,26 @@ describe('append runtime isolation', () => {
             meta: {
                 isThinking: true,
                 statusText: '',
-                processingStartedAt: expect.any(Number),
+                processingStartedAt: 1_000,
             },
         });
+    });
+
+    it('keeps one cumulative processing timer across every append presentation generation', () => {
+        const { context } = loadAppendSnapshotMetaHarness();
+        const initial = context.createAppendSuccessorPresentation({
+            role: 'assistant',
+            text: 'First assistant stage',
+            meta: { processingStartedAt: 1_000 },
+        }, 'initial');
+        const advanced = context.createAppendSuccessorPresentation({
+            role: 'assistant',
+            text: 'Second assistant stage',
+            meta: initial.meta,
+        }, 'advance');
+
+        expect(initial.meta.processingStartedAt).toBe(1_000);
+        expect(advanced.meta.processingStartedAt).toBe(1_000);
     });
 
     it('replaces inherited main text only when the next main text arrives', () => {
