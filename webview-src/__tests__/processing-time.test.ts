@@ -4,8 +4,22 @@ import {
   resolveAssistantProcessingTime,
   updateAssistantProcessingTimeElements,
 } from '../rendering/processing-time';
+import fs from 'fs';
+import path from 'path';
 
 describe('assistant processing time', () => {
+  test('places the timer beside the assistant bubble and bottom-aligns the row', () => {
+    const css = fs.readFileSync(path.join(process.cwd(), 'media', 'main.css'), 'utf8');
+    const main = fs.readFileSync(path.join(process.cwd(), 'media', 'main.js'), 'utf8');
+    const timerRule = css.slice(css.indexOf('.message-processing-time {'), css.indexOf('}', css.indexOf('.message-processing-time {')) + 1);
+    expect(timerRule).toContain('position: static');
+    expect(timerRule).toContain('margin: 0 0 2px 7px');
+    expect(css).toContain('.message-row.bot:has(> .message-processing-time)');
+    expect(css).toMatch(/\.message-row\.bot:has\([^)]*message-processing-time\)[^{]*\{[^}]*align-items:\s*flex-end/s);
+    expect(main).toContain("messageElement.querySelector?.(':scope > .message-processing-time')");
+    expect(main).toContain('if (processingTimeElement) row.appendChild(processingTimeElement);');
+  });
+
   test.each([
     [0, '0s'],
     [18_999, '18s'],

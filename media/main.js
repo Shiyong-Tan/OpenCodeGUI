@@ -6373,7 +6373,11 @@ document.addEventListener('DOMContentLoaded', () => {
             divider.className = 'turn-divider';
             row.appendChild(divider);
         }
+        const processingTimeElement = message.role === 'assistant'
+            ? messageElement.querySelector?.(':scope > .message-processing-time')
+            : null;
         row.appendChild(messageElement);
+        if (processingTimeElement) row.appendChild(processingTimeElement);
         return appendChatRenderRoot(row);
     }
 
