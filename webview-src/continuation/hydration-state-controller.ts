@@ -163,6 +163,14 @@ export function createHydrationStateController(options: HydrationStateController
       preserved.appendFollowupIdentity?.appendUserMsgId,
       preserved.appendFollowupIdentity?.assistantMsgId,
     ].filter((id) => typeof id === 'string' && id.length));
+    const activeProcessingStartedAt = preservedTurnIsActive
+      ? [...activeMessageIds]
+        .map((id) => preserved.messagesById.get(id))
+        .filter((message) => message?.role === 'assistant')
+        .map((message) => Number(message?.meta?.processingStartedAt || message?.meta?.timeCreated))
+        .filter((value) => Number.isFinite(value) && value > 0)
+        .reduce<number | null>((earliest, value) => earliest === null ? value : Math.min(earliest, value), null)
+      : null;
     const mergeCollidingActiveMessage = (id: string, preservedMessage: any) => {
       if (!preservedTurnIsActive || !activeMessageIds.has(id) || !preservedMessage) return;
       const hydratedMessage = session.messagesById.get(id);
@@ -291,6 +299,26 @@ export function createHydrationStateController(options: HydrationStateController
     preserveField('backgroundSubagentIndicatorVisible', preserved.backgroundSubagentIndicatorVisible === true);
     preserveField('backgroundSubagentIndicatorUntil', typeof preserved.backgroundSubagentIndicatorUntil === 'number' && preserved.backgroundSubagentIndicatorUntil > (options.now?.() ?? Date.now()));
     preserveField('backgroundSubagentIndicatorAnchorId', Boolean(preserved.backgroundSubagentIndicatorAnchorId));
+    if (activeProcessingStartedAt !== null) {
+      const activePresentationId = session.appendFollowupIdentity?.assistantMsgId
+        || session.currentTurnAssistantKey
+        || session.currentTurnAssistantMsgId
+        || session.thinkingId;
+      const activePresentation = typeof activePresentationId === 'string'
+        ? session.messagesById.get(activePresentationId)
+        : null;
+      if (activePresentation?.role === 'assistant') {
+        const presentationStartedAt = Number(
+          activePresentation.meta?.processingStartedAt || activePresentation.meta?.timeCreated,
+        );
+        activePresentation.meta = {
+          ...(activePresentation.meta || {}),
+          processingStartedAt: Number.isFinite(presentationStartedAt) && presentationStartedAt > 0
+            ? Math.min(presentationStartedAt, activeProcessingStartedAt)
+            : activeProcessingStartedAt,
+        };
+      }
+    }
     if (preservedTurnIsActive && Array.isArray(preserved.activeSubagents) && preserved.activeSubagents.length
       && !Array.isArray(session.activeSubagents)) {
       session.activeSubagents = cloneActiveSubagents(preserved.activeSubagents);

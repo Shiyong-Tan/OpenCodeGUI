@@ -265,6 +265,38 @@ describe('hydration volatile state controller', () => {
     expect(result.mergedIds).toEqual(['msg_root', 'msg_assistant']);
   });
 
+  test('restores the earliest active-turn timer onto the current append presentation', () => {
+    const before: any = createSessionState();
+    before.timeline = ['msg_old', 'msg_current'];
+    before.messagesById.set('msg_old', {
+      id: 'msg_old', role: 'assistant', text: 'old stage',
+      meta: { isThinking: true, processingStartedAt: 1_000 },
+    });
+    before.messagesById.set('msg_current', {
+      id: 'msg_current', role: 'assistant', text: 'current stage',
+      meta: { isThinking: true, processingStartedAt: 5_000 },
+    });
+    before.currentTurnAssistantKey = 'msg_current';
+    before.currentTurnAssistantMsgId = 'msg_current';
+    before.thinkingId = 'msg_current';
+    before.backendTurnInFlight = true;
+    before.turnFullyFinalized = false;
+    before.appendFollowupIdentity = {
+      kind: 'append-followup', mode: 'same-turn-handoff',
+      predecessorAssistantMsgId: 'msg_old', assistantMsgId: 'msg_current',
+    };
+    const preserved = controller.capture(before);
+
+    const hydrated: any = createSessionState();
+    hydrated.timeline = ['msg_current'];
+    hydrated.messagesById.set('msg_current', {
+      id: 'msg_current', role: 'assistant', text: 'current stage', meta: { isThinking: true },
+    });
+    controller.restore(hydrated, preserved);
+
+    expect(hydrated.messagesById.get('msg_current').meta.processingStartedAt).toBe(1_000);
+  });
+
   test('does not let active metadata shorten newer hydrated assistant text', () => {
     const before: any = createSessionState();
     before.timeline = ['msg_assistant'];

@@ -1367,6 +1367,57 @@ describe('append runtime isolation', () => {
         )).toBe(false);
     });
 
+    it('does not resurrect an older append generation through a hydrated pending upgrade alias', () => {
+        const { context } = loadAppendPresentationHarness();
+        const messagesById = new Map<string, any>([
+            ['msg_root', {
+                id: 'msg_root', role: 'user', text: 'root', meta: {
+                    appendedPrompts: [
+                        { appendUserMsgId: 'msg_append_1', text: 'one' },
+                        { appendUserMsgId: 'msg_append_2', text: 'two' },
+                    ],
+                },
+            }],
+            ['msg_old', { id: 'msg_old', role: 'assistant', text: 'old generation', parentId: 'msg_root', meta: {} }],
+            ['msg_append_1', { id: 'msg_append_1', role: 'user', text: 'one', meta: {} }],
+            ['msg_middle', { id: 'msg_middle', role: 'assistant', text: 'middle generation', parentId: 'msg_append_1', meta: {} }],
+            ['msg_append_2', { id: 'msg_append_2', role: 'user', text: 'two', meta: {} }],
+            ['msg_current', { id: 'msg_current', role: 'assistant', text: 'current generation', parentId: 'msg_append_2', meta: { isThinking: true } }],
+        ]);
+        const session = {
+            messagesById,
+            timeline: [...messagesById.keys()],
+            clientKeyToServerId: new Map<string, string>([['tmp-old', 'msg_old']]),
+            serverIdToClientKey: new Map<string, string>([['msg_old', 'tmp-old']]),
+            backendTurnInFlight: true,
+            turnFullyFinalized: false,
+            canceledActiveTurn: false,
+            currentTurnAssistantKey: 'msg_current',
+            currentTurnAssistantMsgId: 'msg_current',
+            thinkingId: 'msg_current',
+            pendingAssistantUpgrade: { tmpKey: 'tmp-old', assistantMsgId: 'msg_old' },
+            appendFollowupIdentity: {
+                kind: 'append-followup',
+                mode: 'same-turn-handoff',
+                predecessorAssistantMsgId: 'msg_middle',
+                predecessorPresentationAssistantId: 'msg_middle',
+                appendUserMsgId: 'msg_append_2',
+                assistantMsgId: 'msg_current',
+            },
+        };
+        const appendIndex = context.buildAppendChildPresentationIndex(session);
+
+        expect(context.isAppendChainTopLevelAssistantHidden(
+            session, messagesById.get('msg_old'), 'msg_old', appendIndex,
+        )).toBe(true);
+        expect(context.isAppendChainTopLevelAssistantHidden(
+            session, messagesById.get('msg_middle'), 'msg_middle', appendIndex,
+        )).toBe(true);
+        expect(context.isAppendChainTopLevelAssistantHidden(
+            session, messagesById.get('msg_current'), 'msg_current', appendIndex,
+        )).toBe(false);
+    });
+
     it('keeps the predecessor hidden after the transient append handoff is cleared', () => {
         const { context } = loadAppendPresentationHarness();
         const session = {

@@ -25,8 +25,8 @@ describe('assistant processing time', () => {
     [18_999, '18s'],
     [60_000, '1min 0s'],
     [138_000, '2min 18s'],
-    [5_418_000, '1h 30min 18s'],
-    [93_784_000, '1d 2h 3min 4s'],
+    [5_418_000, '1h 30min'],
+    [93_784_000, '1d 2h'],
   ])('formats %i milliseconds as %s', (durationMs, expected) => {
     expect(formatProcessingDuration(durationMs)).toBe(expected);
   });

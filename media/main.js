@@ -2959,12 +2959,23 @@ function isAppendChainTopLevelAssistantHidden(session, msg, id, appendChildPrese
         if (matchesFollowupKey(getAppendPredecessorPresentationId(followup))) return true;
     }
     if (session.backendTurnInFlight === true && session.turnFullyFinalized !== true && session.canceledActiveTurn !== true) {
+        const hasActiveAppendHandoff = Boolean(
+            followup?.kind === 'append-followup'
+            && followup.mode === 'same-turn-handoff'
+            && followup.assistantMsgId
+        );
         const activeAssistantKeys = [
             session.currentTurnAssistantKey,
             session.currentTurnAssistantMsgId,
             session.thinkingId,
-            session.pendingAssistantUpgrade?.tmpKey,
-            session.pendingAssistantUpgrade?.assistantMsgId,
+            // During an append handoff pendingAssistantUpgrade can still point
+            // at an older generation restored by session hydration. The
+            // explicit handoff owner above is authoritative; allowing the
+            // stale alias here resurrects a second assistant bubble.
+            ...(hasActiveAppendHandoff ? [] : [
+                session.pendingAssistantUpgrade?.tmpKey,
+                session.pendingAssistantUpgrade?.assistantMsgId,
+            ]),
             session.appendFollowupIdentity?.assistantMsgId,
         ];
         for (const activeKey of activeAssistantKeys) {
