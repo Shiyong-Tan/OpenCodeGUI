@@ -1445,7 +1445,11 @@ describe('append runtime isolation', () => {
             messagesById,
             timeline: [...messagesById.keys()],
             clientKeyToServerId: new Map(),
-            serverIdToClientKey: new Map(),
+            serverIdToClientKey: new Map<string, string>([
+                ['msg_old', 'msg_current'],
+                ['msg_middle', 'msg_current'],
+                ['msg_current', 'msg_current'],
+            ]),
             backendTurnInFlight: true,
             turnFullyFinalized: false,
             canceledActiveTurn: false,

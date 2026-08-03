@@ -2955,7 +2955,11 @@ function isAppendChainTopLevelAssistantHidden(session, msg, id, appendChildPrese
         // owner for this handoff. Stale active-turn aliases (especially a
         // pending tmp-key upgrade) must not keep the predecessor mounted as a
         // second assistant bubble.
-        if (matchesFollowupKey(followup.assistantMsgId)) return false;
+        // Do not use alias-aware matching for the successor once it owns a
+        // visible presentation. Canonical handoff aliases deliberately point
+        // older generations at this ID, but those older messages must still
+        // reach the collapse checks below.
+        if (id === followup.assistantMsgId || msg.id === followup.assistantMsgId) return false;
         if (matchesFollowupKey(getAppendPredecessorPresentationId(followup))) return true;
     }
     if (
@@ -2965,7 +2969,12 @@ function isAppendChainTopLevelAssistantHidden(session, msg, id, appendChildPrese
         && session.backendTurnInFlight === true
         && session.turnFullyFinalized !== true
         && session.canceledActiveTurn !== true
-        && !matchesFollowupKey(followup.assistantMsgId)
+        // Protect only the exact canonical successor here. Canonical handoff
+        // aliases may intentionally map every older msg_* generation to the
+        // current ID; treating those aliases as presentation equivalence would
+        // exempt the stale bubbles from the same-parent collapse below.
+        && id !== followup.assistantMsgId
+        && msg.id !== followup.assistantMsgId
     ) {
         // Hydration keeps the backend parent identity but does not necessarily
         // retain appendPresentationPredecessorId on every older tool-call
