@@ -14270,6 +14270,12 @@ function appendMessageImages(parentEl, message) {
                     ]
                 });
                 updateSendQuotaVisual();
+                // The send button remains the quota affordance while its icon
+                // represents Stop. Refresh an already-open tooltip with the
+                // just-fetched values without restoring the quota ring.
+                if (sendBtn?.matches?.(':hover')) {
+                    showQuotaTooltip();
+                }
                 break;
             }
             case 'init': {

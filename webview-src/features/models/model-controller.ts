@@ -294,7 +294,6 @@ export function createModelUiController(options: ModelUiControllerOptions) {
   };
   const showQuotaTooltip = () => {
     const tooltip = ensureQuotaTooltip();
-    if (isBusy()) return;
     const rows = state.getQuota()?.rows || [];
     tooltip.innerHTML = `<div class="quota-tooltip-header"><span class="quota-tooltip-title"><span class="quota-title-icon">\u25D4</span>Rate limits remaining</span></div>${rows.length
       ? rows.map((row) => `<div class="quota-tooltip-row"><span class="quota-col-label">${row.label}</span><span class="quota-col-pct">${row.remainingPercent}%</span><span class="quota-col-reset">${normalizeResetText(row.resetText)}</span></div>`).join('')

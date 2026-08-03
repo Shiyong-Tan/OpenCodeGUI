@@ -36,6 +36,22 @@ describe('model state production ownership', () => {
     expect(source).toContain("vscode.postMessage({ type: 'refreshModelQuota' });");
   });
 
+  it('refreshes the visible quota tooltip when hover results arrive for send or stop', () => {
+    const quotaStart = source.indexOf("case 'modelQuota': {");
+    const quotaEnd = source.indexOf("case 'init': {", quotaStart);
+    const quotaHandler = source.slice(quotaStart, quotaEnd);
+    expect(quotaHandler).toContain("sendBtn?.matches?.(':hover')");
+    expect(quotaHandler).toContain('showQuotaTooltip();');
+
+    const controllerSource = fs.readFileSync(
+      path.join(process.cwd(), 'webview-src', 'features', 'models', 'model-controller.ts'),
+      'utf8',
+    );
+    const tooltipStart = controllerSource.indexOf('const showQuotaTooltip = () => {');
+    const tooltipEnd = controllerSource.indexOf('const hideQuotaTooltip', tooltipStart);
+    expect(controllerSource.slice(tooltipStart, tooltipEnd)).not.toContain('if (isBusy()) return;');
+  });
+
   it('redraws quota after the session lifecycle is fully finalized', () => {
     const phaseStart = source.indexOf("case 'turnFinalizePhase': {");
     const phaseEnd = source.indexOf("case 'chatDone': {", phaseStart);
