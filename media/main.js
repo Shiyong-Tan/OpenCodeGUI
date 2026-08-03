@@ -2958,6 +2958,37 @@ function isAppendChainTopLevelAssistantHidden(session, msg, id, appendChildPrese
         if (matchesFollowupKey(followup.assistantMsgId)) return false;
         if (matchesFollowupKey(getAppendPredecessorPresentationId(followup))) return true;
     }
+    if (
+        successor
+        && followup?.kind === 'append-followup'
+        && followup.mode === 'same-turn-handoff'
+        && session.backendTurnInFlight === true
+        && session.turnFullyFinalized !== true
+        && session.canceledActiveTurn !== true
+        && !matchesFollowupKey(followup.assistantMsgId)
+    ) {
+        // Hydration keeps the backend parent identity but does not necessarily
+        // retain appendPresentationPredecessorId on every older tool-call
+        // generation. All assistant stages with the active successor's parent
+        // belong to the same turn presentation, so only the current successor
+        // may remain mounted while that turn is active.
+        const successorParentId = getAppendPresentationParentId(successor);
+        const messageParentId = getAppendPresentationParentId(msg);
+        if (
+            typeof successorParentId === 'string'
+            && successorParentId.length
+            && typeof messageParentId === 'string'
+            && messageParentId.length
+        ) {
+            const successorParentKeys = getPresentationMessageKeyVariants(session, successorParentId);
+            successorParentKeys.add(successorParentId);
+            const messageParentKeys = getPresentationMessageKeyVariants(session, messageParentId);
+            messageParentKeys.add(messageParentId);
+            for (const parentKey of messageParentKeys) {
+                if (successorParentKeys.has(parentKey)) return true;
+            }
+        }
+    }
     if (session.backendTurnInFlight === true && session.turnFullyFinalized !== true && session.canceledActiveTurn !== true) {
         const hasActiveAppendHandoff = Boolean(
             followup?.kind === 'append-followup'
