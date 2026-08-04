@@ -4180,6 +4180,8 @@ const FILE_REF_CODE_RE = /([A-Za-z0-9_./-]+\.[A-Za-z0-9]+):(\d{1,6})(?::(\d{1,6}
 const FILE_REF_QUICK_RE = /([A-Za-z0-9_./-]+\.[A-Za-z0-9]+):(\d{1,6})(?::(\d{1,6}))?/;
 const FILE_ONLY_RE = /(?<![A-Za-z0-9_.\\/-])((?:(?:[A-Za-z]:[\\/]|\.{1,3}[\\/])(?:[A-Za-z0-9_-]+[\\/])*|(?:[A-Za-z0-9_-]+[\\/])+)[A-Za-z0-9_-]+\.[A-Za-z][A-Za-z0-9]{0,9})(?![A-Za-z0-9_.\\/-])/g;
 const FILE_ONLY_QUICK_RE = /(?<![A-Za-z0-9_.\\/-])((?:(?:[A-Za-z]:[\\/]|\.{1,3}[\\/])(?:[A-Za-z0-9_-]+[\\/])*|(?:[A-Za-z0-9_-]+[\\/])+)[A-Za-z0-9_-]+\.[A-Za-z][A-Za-z0-9]{0,9})(?![A-Za-z0-9_.\\/-])/;
+const INLINE_FILE_NAME_RE = /(?<![A-Za-z0-9_.-])([A-Za-z0-9_-]+\.[A-Za-z][A-Za-z0-9]{0,9})(?![A-Za-z0-9_.-])/g;
+const INLINE_FILE_NAME_QUICK_RE = /(?<![A-Za-z0-9_.-])([A-Za-z0-9_-]+\.[A-Za-z][A-Za-z0-9]{0,9})(?![A-Za-z0-9_.-])/;
 const ALLOWED_EXTS = null;
 
 function isAllowedFileExt(filePath) {
@@ -4259,7 +4261,13 @@ function linkifyFileRefs(rootEl) {
         const inCode = isInsideCodeTag(textNode, rootEl);
         const shouldMatchLineRefs = FILE_REF_QUICK_RE.test(source);
         const shouldMatchFileOnly = FILE_ONLY_QUICK_RE.test(source);
-        if (!shouldMatchLineRefs && !shouldMatchFileOnly) continue;
+        // A bare filename such as `package.json` is ambiguous in prose but is
+        // an intentional file reference when the assistant formats it as
+        // inline code. PRE blocks remain excluded by isInsideNoLinkifyTags.
+        const shouldMatchInlineFileName = inCode
+            && !shouldMatchFileOnly
+            && INLINE_FILE_NAME_QUICK_RE.test(source);
+        if (!shouldMatchLineRefs && !shouldMatchFileOnly && !shouldMatchInlineFileName) continue;
 
         const frag = document.createDocumentFragment();
         let changed = false;
@@ -4314,6 +4322,10 @@ function linkifyFileRefs(rootEl) {
             }
         } else if (shouldMatchFileOnly) {
             const fileCount = appendLinkifiedText(frag, source, FILE_ONLY_RE, linkFileOnly);
+            matches += fileCount;
+            changed = changed || fileCount > 0;
+        } else if (shouldMatchInlineFileName) {
+            const fileCount = appendLinkifiedText(frag, source, INLINE_FILE_NAME_RE, linkFileOnly);
             matches += fileCount;
             changed = changed || fileCount > 0;
         }
