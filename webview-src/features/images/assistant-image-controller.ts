@@ -99,7 +99,18 @@ export function createAssistantImageController(
       const abbreviated = /^\.{3}[\\/]/.test(localPath);
       const referenceContext = abbreviated && contextPath ? contextPath : undefined;
       if (!abbreviated) contextPath = localPath;
-      if (!imagePath || element.dataset.ocImageRequested === '1') continue;
+      if (!imagePath) {
+        // Markdown can already contain a relative workspace link. The generic
+        // text linkifier intentionally skips existing anchors, so normalize
+        // those links here as well; otherwise they look clickable but attempt
+        // an unsupported webview navigation instead of opening in the editor.
+        if (element instanceof HTMLAnchorElement) {
+          element.href = openHref(localPath, referenceContext);
+          element.classList.add('oc-file-link');
+        }
+        continue;
+      }
+      if (element.dataset.ocImageRequested === '1') continue;
 
       const id = `image-${references.length + 1}`;
       element.dataset.ocImageRequested = '1';

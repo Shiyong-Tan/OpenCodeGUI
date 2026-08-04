@@ -5852,6 +5852,16 @@ document.addEventListener('DOMContentLoaded', () => {
                 const contextPath = url.searchParams.get('contextPath') || undefined;
                 if (!filePath) return;
                 vscode.postMessage({
+                    type: 'ui-debug',
+                    payload: [
+                        'WV: openFileAtLocation.request',
+                        `path=${filePath}`,
+                        `line=${line}`,
+                        `col=${col}`,
+                        `sessionId=${activeSessionId || 'null'}`
+                    ]
+                });
+                vscode.postMessage({
                     type: 'openFileAtLocation',
                     path: filePath,
                     line,

@@ -163,4 +163,22 @@ describe('assistant image controller', () => {
       path: 'data/results/case-a/eta_kappa.png',
     });
   });
+
+  test('normalizes existing markdown workspace links for editor navigation', () => {
+    const root = new FakeElement('div');
+    const codeLink = root.appendChild(new FakeAnchor()) as FakeAnchor;
+    codeLink.href = 'data/results/case-a/analysis.py';
+    const externalLink = root.appendChild(new FakeAnchor()) as FakeAnchor;
+    externalLink.href = 'https://example.com/analysis.py';
+    const controller = createAssistantImageController({
+      document: { createElement: () => new FakeAnchor() } as unknown as Document,
+      postMessage: () => undefined,
+    });
+
+    controller.enhance(root as unknown as HTMLElement);
+
+    expect(codeLink.href).toBe('ocfile://open?path=data%2Fresults%2Fcase-a%2Fanalysis.py');
+    expect(codeLink.classList.contains('oc-file-link')).toBe(true);
+    expect(externalLink.href).toBe('https://example.com/analysis.py');
+  });
 });
