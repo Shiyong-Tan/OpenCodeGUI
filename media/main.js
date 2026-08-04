@@ -5844,12 +5844,35 @@ document.addEventListener('DOMContentLoaded', () => {
         hideQuoteSelectionButton();
     }
 
+    // Element scroll does not bubble, but it participates in capture. During
+    // lazy image layout, stop the passive browser-generated scroll before it
+    // reaches the frozen user-scroll owner on the chat element. Direct wheel,
+    // pointer, and keyboard input remains authoritative.
+    document.addEventListener('scroll', (event) => {
+        if (event.target !== chatContainer) return;
+        if (!isAssistantImageLayoutStabilizing() || isDirectChatScrollInputActive()) return;
+        event.stopPropagation();
+        updateChatJumpBottomButton();
+        hideQuoteSelectionButton();
+    }, { capture: true, passive: true });
+
     if (chatContainer) {
         if (typeof installChatRenderMetrics === 'function') installChatRenderMetrics(chatContainer);
         autoScrollPinnedToBottom = isNearBottom(chatContainer);
         chatContainer.addEventListener('wheel', (event) => {
             handleChatContainerWheel(event);
         }, { passive: true });
+        chatContainer.addEventListener('pointerdown', () => {
+            chatWindowState.directScrollInputUntil = Date.now() + 5000;
+        }, { passive: true });
+        window.addEventListener('pointerup', () => {
+            chatWindowState.directScrollInputUntil = Date.now() + 250;
+        }, { passive: true });
+        chatContainer.addEventListener('keydown', (event) => {
+            if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) {
+                chatWindowState.directScrollInputUntil = Date.now() + 400;
+            }
+        });
         chatContainer.addEventListener('scroll', () => {
             handleChatContainerScroll();
         }, { passive: true });
@@ -7726,7 +7749,9 @@ function shouldHideDcpUiMessage(message) {
     const chatWindowState = {
         sessionId: '', adapter: null, snapshot: null, allUnits: [], mountedKeys: new Set(),
         topSpacer: null, bottomSpacer: null, anchorKey: '', visualOffset: 0,
+        visualAnchorElement: null, visualAnchorTop: 0, visualAnchorKey: '',
         programmaticScroll: false, userScrollActiveUntil: 0, activityBelow: false, rendering: false,
+        directScrollInputUntil: 0, imageLayoutStabilizingUntil: 0, pendingImageLayouts: 0,
         pendingRangeRender: false, failedSessionId: '', localOlderSurface: null,
         localOlderObserver: null, localOlderObserverArmed: true, pendingScrollKey: '',
         pendingScrollAttempts: 0, localHistoryPresentation: null, acknowledgedRawSnapshot: null
@@ -10121,7 +10146,13 @@ function shouldHideDcpUiMessage(message) {
         chatWindowState.pendingScrollAttempts = 0;
         chatWindowState.anchorKey = '';
         chatWindowState.visualOffset = 0;
+        chatWindowState.visualAnchorElement = null;
+        chatWindowState.visualAnchorTop = 0;
+        chatWindowState.visualAnchorKey = '';
         chatWindowState.userScrollActiveUntil = 0;
+        chatWindowState.directScrollInputUntil = 0;
+        chatWindowState.imageLayoutStabilizingUntil = 0;
+        chatWindowState.pendingImageLayouts = 0;
         chatWindowState.activityBelow = false;
         autoScrollPinnedToBottom = true;
         chatWindowState.programmaticScroll = true;
@@ -10327,11 +10358,63 @@ function shouldHideDcpUiMessage(message) {
         if (!anchor?.dataset?.renderUnitKey) return;
         chatWindowState.anchorKey = anchor.dataset.renderUnitKey;
         chatWindowState.visualOffset = anchor.offsetTop - chatContainer.scrollTop;
+        const priorFineAnchor = chatWindowState.visualAnchorElement;
+        const preserveFineAnchor = isAssistantImageLayoutStabilizing()
+            && !isDirectChatScrollInputActive()
+            && priorFineAnchor?.isConnected
+            && chatContainer.contains(priorFineAnchor);
+        if (preserveFineAnchor) return;
+        const bounds = chatContainer.getBoundingClientRect?.();
+        if (!bounds || bounds.width <= 0 || bounds.height <= 0) return;
+        const y = Math.min(bounds.bottom - 1, bounds.top + 8);
+        const xCandidates = [
+            bounds.left + (bounds.width / 2),
+            bounds.left + Math.min(32, bounds.width / 4),
+            bounds.right - Math.min(32, bounds.width / 4)
+        ];
+        let fineAnchor = null;
+        for (const x of xCandidates) {
+            const stack = typeof document.elementsFromPoint === 'function'
+                ? document.elementsFromPoint(x, y)
+                : [document.elementFromPoint?.(x, y)].filter(Boolean);
+            fineAnchor = stack.find((element) => {
+                if (!(element instanceof Element) || element === chatContainer || !chatContainer.contains(element)) return false;
+                const root = element.closest('[data-render-unit-key]');
+                return Boolean(root && chatContainer.contains(root));
+            }) || null;
+            if (fineAnchor) break;
+        }
+        if (!fineAnchor) return;
+        const fineRoot = fineAnchor.closest('[data-render-unit-key]');
+        const fineTop = fineAnchor.getBoundingClientRect?.().top;
+        if (!fineRoot?.dataset?.renderUnitKey || !Number.isFinite(fineTop)) return;
+        chatWindowState.visualAnchorElement = fineAnchor;
+        chatWindowState.visualAnchorTop = fineTop;
+        chatWindowState.visualAnchorKey = fineRoot.dataset.renderUnitKey;
     }
 
     function restoreChatWindowAnchor() {
         if (!chatWindowState.anchorKey || autoScrollPinnedToBottom || !chatWindowState.snapshot
             || Date.now() < chatWindowState.userScrollActiveUntil) return;
+        const fineAnchor = chatWindowState.visualAnchorElement;
+        if (fineAnchor?.isConnected && chatContainer.contains(fineAnchor)) {
+            const fineRoot = fineAnchor.closest('[data-render-unit-key]');
+            const currentTop = fineAnchor.getBoundingClientRect?.().top;
+            if (fineRoot?.dataset?.renderUnitKey === chatWindowState.visualAnchorKey
+                && Number.isFinite(currentTop) && Number.isFinite(chatWindowState.visualAnchorTop)) {
+                const delta = currentTop - chatWindowState.visualAnchorTop;
+                if (Math.abs(delta) >= 0.5) {
+                    chatWindowState.programmaticScroll = true;
+                    chatContainer.scrollTop += delta;
+                    vscode.postMessage({
+                        type: 'ui-debug',
+                        payload: ['[WV][CHAT_WINDOW_FINE_ANCHOR]', `delta=${delta}`, `key=${chatWindowState.visualAnchorKey}`]
+                    });
+                    requestAnimationFrame(() => { chatWindowState.programmaticScroll = false; });
+                }
+                return;
+            }
+        }
         const item = chatWindowState.snapshot.items.find((entry) => entry.key === chatWindowState.anchorKey);
         if (!item) return;
         const rendering = window.__ocRendering;
@@ -12584,7 +12667,11 @@ function shouldHideDcpUiMessage(message) {
 
     function handleChatContainerWheel(event) {
         const deltaY = Number(event?.deltaY);
-        if (!Number.isFinite(deltaY) || deltaY >= 0) return;
+        if (!Number.isFinite(deltaY)) return;
+        if ('directScrollInputUntil' in chatWindowState) {
+            chatWindowState.directScrollInputUntil = Date.now() + 400;
+        }
+        if (deltaY >= 0) return;
         if (!autoScrollPinnedToBottom && !chatWindowState.programmaticScroll) return;
         // A deliberate upward wheel gesture owns the viewport immediately.
         // Invalidate both queued bottom-alignment frames and prevent virtual
@@ -12594,6 +12681,53 @@ function shouldHideDcpUiMessage(message) {
         chatWindowState.programmaticScroll = false;
         chatWindowState.userScrollActiveUntil = Date.now() + 180;
         chatWindowState.activityBelow = true;
+    }
+
+    function isDirectChatScrollInputActive() {
+        return Date.now() < chatWindowState.directScrollInputUntil;
+    }
+
+    function isAssistantImageLayoutStabilizing() {
+        return chatWindowState.pendingImageLayouts > 0
+            || Date.now() < chatWindowState.imageLayoutStabilizingUntil;
+    }
+
+    function scheduleAssistantImageAnchorRestore(reason) {
+        const sessionId = activeSessionId;
+        const generation = chatWindowGeneration;
+        requestAnimationFrame(() => {
+            if (activeSessionId !== sessionId || chatWindowGeneration !== generation) return;
+            restoreChatWindowAnchor();
+            requestAnimationFrame(() => {
+                if (activeSessionId !== sessionId || chatWindowGeneration !== generation) return;
+                restoreChatWindowAnchor();
+                vscode.postMessage({ type: 'ui-debug', payload: ['[WV][IMAGE_ANCHOR_SETTLE]', `reason=${reason}`, `pending=${chatWindowState.pendingImageLayouts}`] });
+            });
+        });
+    }
+
+    function trackAssistantImageLayoutLoads() {
+        const sessionId = activeSessionId;
+        const generation = chatWindowGeneration;
+        const images = chatContainer.querySelectorAll('.assistant-image-thumbnail img, img.assistant-image-inline');
+        for (const image of images) {
+            if (!(image instanceof HTMLImageElement) || image.complete || image.dataset.ocViewportTracked === '1') continue;
+            image.dataset.ocViewportTracked = '1';
+            chatWindowState.pendingImageLayouts += 1;
+            let settled = false;
+            const settle = (reason) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timeout);
+                if (activeSessionId !== sessionId || chatWindowGeneration !== generation) return;
+                chatWindowState.pendingImageLayouts = Math.max(0, chatWindowState.pendingImageLayouts - 1);
+                chatWindowState.imageLayoutStabilizingUntil = Date.now() + 300;
+                scheduleAssistantImageAnchorRestore(reason);
+            };
+            image.addEventListener('load', () => settle('load'), { once: true });
+            image.addEventListener('error', () => settle('error'), { once: true });
+            const timeout = setTimeout(() => settle('timeout'), 30000);
+        }
     }
 
     function scrollVirtualizedChatToBottom() {
@@ -14238,7 +14372,15 @@ function appendMessageImages(parentEl, message) {
 
         switch (message.type) {
             case 'assistantImageReferencesResolved': {
-                getAssistantImageController().acceptResponse(message);
+                if (!autoScrollPinnedToBottom && !chatWindowState.programmaticScroll) {
+                    captureChatWindowAnchor();
+                    chatWindowState.imageLayoutStabilizingUntil = Date.now() + 500;
+                }
+                const accepted = getAssistantImageController().acceptResponse(message);
+                if (accepted && !autoScrollPinnedToBottom) {
+                    trackAssistantImageLayoutLoads();
+                    scheduleAssistantImageAnchorRestore('resolved');
+                }
                 break;
             }
             case 'smartSessionSearchResult': {
