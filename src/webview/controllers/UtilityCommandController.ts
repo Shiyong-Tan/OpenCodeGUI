@@ -623,6 +623,14 @@ export class UtilityCommandController {
             return;
         }
         try {
+            const stat = await fs.promises.stat(absPath);
+            if (stat.isDirectory()) {
+                await vscode.commands.executeCommand('revealInExplorer', vscode.Uri.file(absPath));
+                this.host.log(
+                    `EXT: openFileAtLocation | path=${rawPath} | resolvedAbs=${absPath} | revealed=directory`
+                );
+                return;
+            }
             if (this.isAssistantImagePath(absPath)) {
                 await vscode.commands.executeCommand(
                     'vscode.open',

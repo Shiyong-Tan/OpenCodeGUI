@@ -423,6 +423,32 @@ describe('utility command family characterization', () => {
         }
     });
 
+    test('reveals assistant directory paths in the VS Code explorer', async () => {
+        const os = require('os') as typeof import('os');
+        const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'opencode-assistant-directory-'));
+        const artifactDir = path.join(tempRoot, 'data', 'results', 'artifact-run');
+        fs.mkdirSync(artifactDir, { recursive: true });
+        const executeCommand = vscode.commands.executeCommand as jest.Mock;
+        executeCommand.mockClear();
+        try {
+            const harness = createHarness({ getWorkspaceRootPath: jest.fn(() => tempRoot) });
+            await harness.send({
+                type: 'openFileAtLocation',
+                path: 'data/results/artifact-run',
+            });
+
+            expect(executeCommand).toHaveBeenCalledWith(
+                'revealInExplorer',
+                { fsPath: artifactDir },
+            );
+            expect(harness.host.uiDebugChannel.appendLine).toHaveBeenCalledWith(
+                expect.stringContaining('revealed=directory'),
+            );
+        } finally {
+            fs.rmSync(tempRoot, { recursive: true, force: true });
+        }
+    });
+
     test('keeps clipboard attachment responses bound to the payload session', async () => {
         const saveClipboardImage = jest.fn()
             .mockResolvedValueOnce({ id: 'attachment-1', name: 'image.png', filePath: 'saved/image.png' })

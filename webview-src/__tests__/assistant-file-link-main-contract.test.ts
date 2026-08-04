@@ -12,6 +12,13 @@ describe('assistant file link production contract', () => {
     expect(source).toContain('appendLinkifiedText(frag, source, INLINE_FILE_NAME_RE, linkFileOnly)');
   });
 
+  it('linkifies extensionless workspace paths when rendered as inline code', () => {
+    expect(source).toContain('const INLINE_WORKSPACE_PATH_RE =');
+    expect(source).toContain('const shouldMatchInlineWorkspacePath = inCode');
+    expect(source).toContain('INLINE_WORKSPACE_PATH_QUICK_RE.test(source)');
+    expect(source).toContain('appendLinkifiedText(frag, source, INLINE_WORKSPACE_PATH_RE, linkFileOnly)');
+  });
+
   it('continues to exclude fenced PRE blocks from file linkification', () => {
     const guardStart = source.indexOf('function isInsideNoLinkifyTags(');
     const guardEnd = source.indexOf('function isInsideCodeTag(', guardStart);
