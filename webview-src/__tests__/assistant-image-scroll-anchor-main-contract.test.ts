@@ -9,6 +9,9 @@ describe('assistant image scroll anchor production contract', () => {
     expect(source).toContain("element.closest('[data-render-unit-key]')");
     expect(source).toContain('const delta = currentTop - chatWindowState.visualAnchorTop;');
     expect(source).toContain('chatContainer.scrollTop += delta;');
+    expect(source).toContain('function scheduleFineChatWindowAnchorRestore');
+    expect(source).toContain('Math.abs(delta) < 2');
+    expect(source).toContain('[WV][CHAT_WINDOW_FINE_ANCHOR_BATCH]');
   });
 
   it('tracks asynchronous image settlement without overriding direct user scroll input', () => {
@@ -18,6 +21,7 @@ describe('assistant image scroll anchor production contract', () => {
     expect(source).toContain("image.addEventListener('error'");
     expect(source).toContain('activeSessionId !== sessionId || chatWindowGeneration !== generation');
     expect(source).toContain('&& !isDirectChatScrollInputActive()');
+    expect(source).toContain('Math.abs(currentTop - firstTop) >= 0.75');
   });
 
   it('captures before applying resolved image DOM and restores after it', () => {

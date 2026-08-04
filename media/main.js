@@ -7750,6 +7750,7 @@ function shouldHideDcpUiMessage(message) {
         sessionId: '', adapter: null, snapshot: null, allUnits: [], mountedKeys: new Set(),
         topSpacer: null, bottomSpacer: null, anchorKey: '', visualOffset: 0,
         visualAnchorElement: null, visualAnchorTop: 0, visualAnchorKey: '',
+        fineAnchorRestoreToken: 0,
         programmaticScroll: false, userScrollActiveUntil: 0, activityBelow: false, rendering: false,
         directScrollInputUntil: 0, imageLayoutStabilizingUntil: 0, pendingImageLayouts: 0,
         pendingRangeRender: false, failedSessionId: '', localOlderSurface: null,
@@ -10149,6 +10150,7 @@ function shouldHideDcpUiMessage(message) {
         chatWindowState.visualAnchorElement = null;
         chatWindowState.visualAnchorTop = 0;
         chatWindowState.visualAnchorKey = '';
+        chatWindowState.fineAnchorRestoreToken += 1;
         chatWindowState.userScrollActiveUntil = 0;
         chatWindowState.directScrollInputUntil = 0;
         chatWindowState.imageLayoutStabilizingUntil = 0;
@@ -10391,27 +10393,68 @@ function shouldHideDcpUiMessage(message) {
         chatWindowState.visualAnchorElement = fineAnchor;
         chatWindowState.visualAnchorTop = fineTop;
         chatWindowState.visualAnchorKey = fineRoot.dataset.renderUnitKey;
+        chatWindowState.fineAnchorRestoreToken += 1;
+    }
+
+    function scheduleFineChatWindowAnchorRestore(reason = 'layout-settle') {
+        const token = chatWindowState.fineAnchorRestoreToken + 1;
+        chatWindowState.fineAnchorRestoreToken = token;
+        const sessionId = activeSessionId;
+        const generation = chatWindowGeneration;
+        // Multiple virtual measurements often arrive in adjacent frames. Give
+        // that batch a short quiet window, then require two stable layout reads
+        // so opposite corrections are applied once instead of visibly oscillating.
+        setTimeout(() => {
+            if (chatWindowState.fineAnchorRestoreToken !== token
+                || activeSessionId !== sessionId || chatWindowGeneration !== generation
+                || isDirectChatScrollInputActive() || Date.now() < chatWindowState.userScrollActiveUntil) return;
+            requestAnimationFrame(() => {
+                if (chatWindowState.fineAnchorRestoreToken !== token
+                    || activeSessionId !== sessionId || chatWindowGeneration !== generation
+                    || isDirectChatScrollInputActive() || Date.now() < chatWindowState.userScrollActiveUntil) return;
+                const fineAnchor = chatWindowState.visualAnchorElement;
+                const fineRoot = fineAnchor?.isConnected && chatContainer.contains(fineAnchor)
+                    ? fineAnchor.closest('[data-render-unit-key]')
+                    : null;
+                const firstTop = fineAnchor?.getBoundingClientRect?.().top;
+                if (fineRoot?.dataset?.renderUnitKey !== chatWindowState.visualAnchorKey
+                    || !Number.isFinite(firstTop)) return;
+                requestAnimationFrame(() => {
+                    if (chatWindowState.fineAnchorRestoreToken !== token
+                        || activeSessionId !== sessionId || chatWindowGeneration !== generation
+                        || isDirectChatScrollInputActive() || Date.now() < chatWindowState.userScrollActiveUntil) return;
+                    if (!fineAnchor.isConnected || !chatContainer.contains(fineAnchor)) return;
+                    const currentRoot = fineAnchor.closest('[data-render-unit-key]');
+                    const currentTop = fineAnchor.getBoundingClientRect?.().top;
+                    if (currentRoot?.dataset?.renderUnitKey !== chatWindowState.visualAnchorKey
+                        || !Number.isFinite(currentTop) || Math.abs(currentTop - firstTop) >= 0.75) {
+                        scheduleFineChatWindowAnchorRestore('layout-unsettled');
+                        return;
+                    }
+                    const delta = currentTop - chatWindowState.visualAnchorTop;
+                    if (Math.abs(delta) < 2) return;
+                    chatWindowState.programmaticScroll = true;
+                    chatContainer.scrollTop += delta;
+                    vscode.postMessage({
+                        type: 'ui-debug',
+                        payload: ['[WV][CHAT_WINDOW_FINE_ANCHOR_BATCH]', `reason=${reason}`, `delta=${delta}`, `key=${chatWindowState.visualAnchorKey}`]
+                    });
+                    requestAnimationFrame(() => { chatWindowState.programmaticScroll = false; });
+                });
+            });
+        }, 32);
     }
 
     function restoreChatWindowAnchor() {
         if (!chatWindowState.anchorKey || autoScrollPinnedToBottom || !chatWindowState.snapshot
-            || Date.now() < chatWindowState.userScrollActiveUntil) return;
+            || Date.now() < chatWindowState.userScrollActiveUntil || isDirectChatScrollInputActive()) return;
         const fineAnchor = chatWindowState.visualAnchorElement;
         if (fineAnchor?.isConnected && chatContainer.contains(fineAnchor)) {
             const fineRoot = fineAnchor.closest('[data-render-unit-key]');
             const currentTop = fineAnchor.getBoundingClientRect?.().top;
             if (fineRoot?.dataset?.renderUnitKey === chatWindowState.visualAnchorKey
                 && Number.isFinite(currentTop) && Number.isFinite(chatWindowState.visualAnchorTop)) {
-                const delta = currentTop - chatWindowState.visualAnchorTop;
-                if (Math.abs(delta) >= 0.5) {
-                    chatWindowState.programmaticScroll = true;
-                    chatContainer.scrollTop += delta;
-                    vscode.postMessage({
-                        type: 'ui-debug',
-                        payload: ['[WV][CHAT_WINDOW_FINE_ANCHOR]', `delta=${delta}`, `key=${chatWindowState.visualAnchorKey}`]
-                    });
-                    requestAnimationFrame(() => { chatWindowState.programmaticScroll = false; });
-                }
+                scheduleFineChatWindowAnchorRestore();
                 return;
             }
         }
