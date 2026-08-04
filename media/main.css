@@ -572,6 +572,10 @@ body {
     min-width: 0;
     padding: 10px;
     overflow-y: auto;
+    /* Dynamic images and measured virtual rows are anchored explicitly by the
+       chat window controller. Native Chromium anchoring would apply a second
+       scrollTop correction when those rows change height. */
+    overflow-anchor: none;
     display: flex;
     flex-direction: column;
     gap: 12px;

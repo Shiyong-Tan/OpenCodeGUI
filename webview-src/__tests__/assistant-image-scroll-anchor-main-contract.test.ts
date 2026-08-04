@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 
 const source = fs.readFileSync(path.join(process.cwd(), 'media', 'main.js'), 'utf8');
+const styles = fs.readFileSync(path.join(process.cwd(), 'media', 'main.css'), 'utf8');
 
 describe('assistant image scroll anchor production contract', () => {
   it('uses a fine-grained descendant anchor while image layout is changing', () => {
@@ -12,6 +13,7 @@ describe('assistant image scroll anchor production contract', () => {
     expect(source).toContain('function scheduleFineChatWindowAnchorRestore');
     expect(source).toContain('Math.abs(delta) < 2');
     expect(source).toContain('[WV][CHAT_WINDOW_FINE_ANCHOR_BATCH]');
+    expect(styles).toMatch(/\.chat-area\s*\{[^}]*overflow-anchor:\s*none;/s);
   });
 
   it('tracks asynchronous image settlement without overriding direct user scroll input', () => {
@@ -22,6 +24,9 @@ describe('assistant image scroll anchor production contract', () => {
     expect(source).toContain('activeSessionId !== sessionId || chatWindowGeneration !== generation');
     expect(source).toContain('&& !isDirectChatScrollInputActive()');
     expect(source).toContain('Math.abs(currentTop - firstTop) >= 0.75');
+    expect(source).toContain("retryAfterDirectInput('direct-input-settle')");
+    expect(source).toContain('inputUntil - now + 16');
+    expect(source).toContain('Re-arm from the latest');
   });
 
   it('captures before applying resolved image DOM and restores after it', () => {

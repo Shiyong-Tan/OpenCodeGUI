@@ -5867,6 +5867,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }, { passive: true });
         window.addEventListener('pointerup', () => {
             chatWindowState.directScrollInputUntil = Date.now() + 250;
+            // A scrollbar drag may have deferred an image/layout correction
+            // using the longer pointer-down window. Re-arm from the latest
+            // user-owned anchor so it settles shortly after release.
+            restoreChatWindowAnchor();
         }, { passive: true });
         chatContainer.addEventListener('keydown', (event) => {
             if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) {
@@ -10401,17 +10405,30 @@ function shouldHideDcpUiMessage(message) {
         chatWindowState.fineAnchorRestoreToken = token;
         const sessionId = activeSessionId;
         const generation = chatWindowGeneration;
+        const retryAfterDirectInput = (nextReason) => {
+            if (chatWindowState.fineAnchorRestoreToken !== token
+                || activeSessionId !== sessionId || chatWindowGeneration !== generation) return false;
+            const now = Date.now();
+            const inputUntil = Math.max(chatWindowState.directScrollInputUntil, chatWindowState.userScrollActiveUntil);
+            if (inputUntil <= now) return false;
+            setTimeout(() => {
+                if (chatWindowState.fineAnchorRestoreToken !== token
+                    || activeSessionId !== sessionId || chatWindowGeneration !== generation) return;
+                scheduleFineChatWindowAnchorRestore(nextReason);
+            }, Math.max(16, inputUntil - now + 16));
+            return true;
+        };
         // Multiple virtual measurements often arrive in adjacent frames. Give
         // that batch a short quiet window, then require two stable layout reads
         // so opposite corrections are applied once instead of visibly oscillating.
         setTimeout(() => {
             if (chatWindowState.fineAnchorRestoreToken !== token
-                || activeSessionId !== sessionId || chatWindowGeneration !== generation
-                || isDirectChatScrollInputActive() || Date.now() < chatWindowState.userScrollActiveUntil) return;
+                || activeSessionId !== sessionId || chatWindowGeneration !== generation) return;
+            if (retryAfterDirectInput('direct-input-settle')) return;
             requestAnimationFrame(() => {
                 if (chatWindowState.fineAnchorRestoreToken !== token
-                    || activeSessionId !== sessionId || chatWindowGeneration !== generation
-                    || isDirectChatScrollInputActive() || Date.now() < chatWindowState.userScrollActiveUntil) return;
+                    || activeSessionId !== sessionId || chatWindowGeneration !== generation) return;
+                if (retryAfterDirectInput('direct-input-settle')) return;
                 const fineAnchor = chatWindowState.visualAnchorElement;
                 const fineRoot = fineAnchor?.isConnected && chatContainer.contains(fineAnchor)
                     ? fineAnchor.closest('[data-render-unit-key]')
@@ -10421,8 +10438,8 @@ function shouldHideDcpUiMessage(message) {
                     || !Number.isFinite(firstTop)) return;
                 requestAnimationFrame(() => {
                     if (chatWindowState.fineAnchorRestoreToken !== token
-                        || activeSessionId !== sessionId || chatWindowGeneration !== generation
-                        || isDirectChatScrollInputActive() || Date.now() < chatWindowState.userScrollActiveUntil) return;
+                        || activeSessionId !== sessionId || chatWindowGeneration !== generation) return;
+                    if (retryAfterDirectInput('direct-input-settle')) return;
                     if (!fineAnchor.isConnected || !chatContainer.contains(fineAnchor)) return;
                     const currentRoot = fineAnchor.closest('[data-render-unit-key]');
                     const currentTop = fineAnchor.getBoundingClientRect?.().top;
@@ -10446,8 +10463,7 @@ function shouldHideDcpUiMessage(message) {
     }
 
     function restoreChatWindowAnchor() {
-        if (!chatWindowState.anchorKey || autoScrollPinnedToBottom || !chatWindowState.snapshot
-            || Date.now() < chatWindowState.userScrollActiveUntil || isDirectChatScrollInputActive()) return;
+        if (!chatWindowState.anchorKey || autoScrollPinnedToBottom || !chatWindowState.snapshot) return;
         const fineAnchor = chatWindowState.visualAnchorElement;
         if (fineAnchor?.isConnected && chatContainer.contains(fineAnchor)) {
             const fineRoot = fineAnchor.closest('[data-render-unit-key]');
@@ -10458,6 +10474,7 @@ function shouldHideDcpUiMessage(message) {
                 return;
             }
         }
+        if (Date.now() < chatWindowState.userScrollActiveUntil || isDirectChatScrollInputActive()) return;
         const item = chatWindowState.snapshot.items.find((entry) => entry.key === chatWindowState.anchorKey);
         if (!item) return;
         const rendering = window.__ocRendering;
