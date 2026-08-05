@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 
 const source = fs.readFileSync(path.join(process.cwd(), 'media', 'main.js'), 'utf8');
+const styles = fs.readFileSync(path.join(process.cwd(), 'media', 'main.css'), 'utf8');
 
 describe('composer attachment production ownership', () => {
   it('does not retain a parallel mutable attachment array in main.js', () => {
@@ -39,5 +40,16 @@ describe('composer attachment production ownership', () => {
     expect(source).toContain('images,');
     expect(source).toContain("renderIfActive(sessionId, 'messageAttachmentsPersisted'");
     expect(source).toContain('getAssistantImageController().enhance(imageWrap);');
+  });
+
+  it('sizes user images consistently with assistant image previews', () => {
+    const userImageRule = styles.match(/\.message-images img\s*\{([\s\S]*?)\}/)?.[1] || '';
+    const assistantImageRules = Array.from(styles.matchAll(/(?:^|\n)\.assistant-image-inline\s*\{([\s\S]*?)\}/g));
+    const assistantImageRule = assistantImageRules[assistantImageRules.length - 1]?.[1] || '';
+    for (const declaration of ['width: 80%', 'max-width: 80%', 'margin: 10px auto', 'border-radius: 8px']) {
+      expect(userImageRule).toContain(declaration);
+      expect(assistantImageRule).toContain(declaration);
+    }
+    expect(userImageRule).toContain('object-fit: contain');
   });
 });

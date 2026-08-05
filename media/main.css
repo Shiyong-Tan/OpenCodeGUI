@@ -818,15 +818,18 @@ body {
 }
 
 .message-images {
-    margin-top: 6px;
-    display: grid;
-    gap: 6px;
+    display: block;
 }
 
 .message-images img {
-    max-width: 100%;
+    width: 80%;
+    max-width: 80%;
     height: auto;
-    border-radius: 6px;
+    max-height: none;
+    margin: 10px auto;
+    border: 1px solid var(--vscode-panel-border);
+    border-radius: 8px;
+    object-fit: contain;
     display: block;
 }
 
