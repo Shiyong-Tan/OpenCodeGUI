@@ -35,14 +35,27 @@ describe('assistant processing time', () => {
     expect(resolveAssistantProcessingTime({
       role: 'assistant',
       meta: { isThinking: true, processingStartedAt: 1_000, processingCompletedAt: 2_000 },
-    }, 4_500)).toEqual({ startedAt: 1_000, completedAt: null, durationMs: 3_500 });
+    }, 4_500)).toEqual({ startedAt: 1_000, completedAt: null, pausedAt: null, pausedMs: 0, durationMs: 3_500 });
   });
 
   test('freezes completed messages and supports exported history timestamps', () => {
     expect(resolveAssistantProcessingTime({
       role: 'assistant',
       meta: { isThinking: false, timeCreated: 10_000, timeCompleted: 75_000 },
-    }, 999_999)).toEqual({ startedAt: 10_000, completedAt: 75_000, durationMs: 65_000 });
+    }, 999_999)).toEqual({ startedAt: 10_000, completedAt: 75_000, pausedAt: null, pausedMs: 0, durationMs: 65_000 });
+  });
+
+  test('keeps an open wait excluded when the assistant finalizes', () => {
+    expect(resolveAssistantProcessingTime({
+      role: 'assistant',
+      meta: {
+        isThinking: false,
+        processingStartedAt: 1_000,
+        processingCompletedAt: 20_000,
+        processingPausedAt: 8_000,
+        processingPausedMs: 2_000,
+      },
+    }, 99_000)?.durationMs).toBe(5_000);
   });
 
   test('does not add timing to messages without a known start', () => {

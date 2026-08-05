@@ -9,6 +9,7 @@ All notable changes to this project will be documented in this file.
 - Fixed append and multi-generation assistant handoff so temporary, intermediate, and final responses keep the correct identity instead of merging, disappearing, flashing stale content, or producing duplicate bubbles after session switches.
 - Preserved the visible finalized assistant presentation across hydration and pruned superseded assistant stages from snapshots, keeping reloads and session switches aligned with the UI timeline.
 - Added cumulative assistant processing time beside the bubble and preserved its final value across finalization, hydration, and session switches.
+- Paused assistant processing time while Question and Permission cards await user input, including overlapping prompts and cross-session finalization.
 
 ### Files, notebooks, images, and attachments
 

@@ -9,6 +9,8 @@ export class TurnFinalizationCoordinator {
         getAssistantMessageId(sessionId: string): string | undefined;
         getProcessingStartedAt(sessionId: string): number | undefined;
         getProcessingCompletedAt(sessionId: string): number | undefined;
+        getProcessingPausedAt(sessionId: string): number | undefined;
+        getProcessingPausedMs(sessionId: string): number;
         emitPhase(target: TurnFinalizationTarget, sessionId: string, phase: 'stream_done' | 'commit_done' | 'upgrade_done' | 'finalize_done'): void;
         postMessageIndexMap(target: TurnFinalizationTarget, sessionId: string): void;
         buildIdentity(sessionId: string, partial: Partial<FinalizeTurnIdentity>): FinalizeTurnIdentity;
@@ -35,6 +37,8 @@ export class TurnFinalizationCoordinator {
             lastAssistantMsgId: resolvedAssistantMessageId,
             processingStartedAt: this.options.getProcessingStartedAt(sessionId),
             completedAt: this.options.getProcessingCompletedAt(sessionId),
+            processingPausedAt: this.options.getProcessingPausedAt(sessionId),
+            processingPausedMs: this.options.getProcessingPausedMs(sessionId),
         });
         this.options.emitPhase(target, sessionId, 'stream_done');
         this.options.postMessageIndexMap(target, sessionId);

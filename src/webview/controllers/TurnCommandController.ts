@@ -27,6 +27,8 @@ type TurnCommandClient = Pick<
     | 'failAppendPrompt'
     | 'finishTurn'
     | 'getCurrentTurnCompletedAt'
+    | 'getCurrentTurnProcessingPausedAt'
+    | 'getCurrentTurnProcessingPausedMs'
     | 'getCurrentTurnStartedAt'
     | 'getPendingTurnMessageIds'
     | 'getTurnAssistantMsgId'
@@ -379,7 +381,9 @@ ${attachmentLines.join('\n')}`
                         assistantMsgId: doneAssistantMsgId,
                         lastAssistantMsgId: doneAssistantMsgId,
                         processingStartedAt: host.client.getCurrentTurnStartedAt(targetSessionId),
-                        completedAt: host.client.getCurrentTurnCompletedAt(targetSessionId)
+                        completedAt: host.client.getCurrentTurnCompletedAt(targetSessionId),
+                        processingPausedAt: host.client.getCurrentTurnProcessingPausedAt(targetSessionId),
+                        processingPausedMs: host.client.getCurrentTurnProcessingPausedMs(targetSessionId)
                     });
                     host.emitTurnFinalizePhase(liveWebview, targetSessionId, 'stream_done');
                     host.postMessageIndexMap(liveWebview, targetSessionId);

@@ -3521,12 +3521,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             if (!existingMessage || existingMessage.role !== 'assistant') continue;
             const processingStartedAt = incoming.meta?.processingStartedAt;
             const processingCompletedAt = incoming.meta?.processingCompletedAt;
+            const processingPausedAt = incoming.meta?.processingPausedAt;
+            const processingPausedMs = incoming.meta?.processingPausedMs;
             const timingMeta: Record<string, unknown> = {
                 ...(typeof processingStartedAt === 'number' && Number.isFinite(processingStartedAt) && processingStartedAt > 0
                     ? { processingStartedAt }
                     : {}),
                 ...(typeof processingCompletedAt === 'number' && Number.isFinite(processingCompletedAt) && processingCompletedAt > 0
                     ? { processingCompletedAt }
+                    : {}),
+                ...(typeof processingPausedAt === 'number' && Number.isFinite(processingPausedAt) && processingPausedAt > 0
+                    ? { processingPausedAt }
+                    : {}),
+                ...(typeof processingPausedMs === 'number' && Number.isFinite(processingPausedMs) && processingPausedMs >= 0
+                    ? { processingPausedMs }
                     : {})
             };
             if (!Object.keys(timingMeta).length) continue;
@@ -3652,12 +3660,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             if (assistantMessageId && assistantText && !this.isHiddenControlAssistantText(assistantText)) {
                 const processingStartedAt = this.client.getCurrentTurnStartedAt(sessionId);
                 const processingCompletedAt = this.client.getCurrentTurnCompletedAt(sessionId);
+                const processingPausedAt = this.client.getCurrentTurnProcessingPausedAt(sessionId);
+                const processingPausedMs = this.client.getCurrentTurnProcessingPausedMs(sessionId);
                 const assistantMeta: Record<string, unknown> = {
                     ...(identity.latestAppendUserMessageId
                         ? { parentID: identity.latestAppendUserMessageId }
                         : {}),
                     ...(processingStartedAt !== undefined ? { processingStartedAt } : {}),
-                    ...(processingCompletedAt !== undefined ? { processingCompletedAt } : {})
+                    ...(processingCompletedAt !== undefined ? { processingCompletedAt } : {}),
+                    ...(processingPausedAt !== undefined ? { processingPausedAt } : {}),
+                    ...(processingPausedMs > 0 ? { processingPausedMs } : {})
                 };
                 addPendingMessage({
                     role: 'assistant',
@@ -4480,6 +4492,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             getAssistantMessageId: (sessionId) => this.client.getTurnAssistantMsgId(sessionId),
             getProcessingStartedAt: (sessionId) => this.client.getCurrentTurnStartedAt(sessionId),
             getProcessingCompletedAt: (sessionId) => this.client.getCurrentTurnCompletedAt(sessionId),
+            getProcessingPausedAt: (sessionId) => this.client.getCurrentTurnProcessingPausedAt(sessionId),
+            getProcessingPausedMs: (sessionId) => this.client.getCurrentTurnProcessingPausedMs(sessionId),
             emitPhase: (target, sessionId, phase) => this.emitTurnFinalizePhase(target as vscode.Webview, sessionId, phase),
             postMessageIndexMap: (target, sessionId) => this.postMessageIndexMap(target as vscode.Webview, sessionId),
             buildIdentity: (sessionId, partial) => this.buildFinalizeTurnIdentity(sessionId, partial),
@@ -4649,6 +4663,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     this.client.getCurrentTurnStartedAt(sessionId),
                 getCurrentTurnCompletedAt: (sessionId) =>
                     this.client.getCurrentTurnCompletedAt(sessionId),
+                getCurrentTurnProcessingPausedAt: (sessionId) =>
+                    this.client.getCurrentTurnProcessingPausedAt(sessionId),
+                getCurrentTurnProcessingPausedMs: (sessionId) =>
+                    this.client.getCurrentTurnProcessingPausedMs(sessionId),
             },
             attachments: {
                 buildAttachmentManifest: (attachments) =>

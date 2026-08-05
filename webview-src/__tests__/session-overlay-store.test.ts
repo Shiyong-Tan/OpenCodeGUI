@@ -70,4 +70,21 @@ describe('session overlay store', () => {
     expect(store.getQuestion('A')).toBeNull();
     expect(store.getQuestion('B')?.callId).toBe('b1');
   });
+
+  test('pauses assistant processing while any interactive card is active', () => {
+    const store = createStore();
+    const assistant: any = {
+      role: 'assistant',
+      meta: { isThinking: true, processingStartedAt: 1_000 },
+    };
+    store.enqueueQuestion('A', { callId: 'a1', value: 'question' });
+    expect(store.syncProcessingPause('A', assistant, 4_000)).toEqual({ changed: true, paused: true });
+    store.setPermission('A', { permissionId: 'p1', pending: false, error: '' });
+    store.clearQuestion('A');
+    expect(store.syncProcessingPause('A', assistant, 8_000)).toEqual({ changed: false, paused: true });
+    store.clearPermission('A');
+    expect(store.syncProcessingPause('A', assistant, 10_000)).toEqual({ changed: true, paused: false });
+    expect(assistant.meta.processingPausedMs).toBe(6_000);
+    expect(assistant.meta.processingPausedAt).toBeUndefined();
+  });
 });

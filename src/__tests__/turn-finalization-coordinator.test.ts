@@ -8,6 +8,8 @@ describe('TurnFinalizationCoordinator', () => {
             getAssistantMessageId: () => 'msg_assistant',
             getProcessingStartedAt: () => 1_000,
             getProcessingCompletedAt: () => 76_000,
+            getProcessingPausedAt: () => undefined,
+            getProcessingPausedMs: () => 12_000,
             emitPhase: (_target, _sessionId, phase) => calls.push(`phase:${phase}`),
             postMessageIndexMap: (_target, sessionId) => calls.push(`index:${sessionId}`),
             buildIdentity: (sessionId, partial) => ({ sessionId, ...partial }),
@@ -35,6 +37,8 @@ describe('TurnFinalizationCoordinator', () => {
                 lastAssistantMsgId: 'msg_assistant',
                 processingStartedAt: 1_000,
                 completedAt: 76_000,
+                processingPausedAt: undefined,
+                processingPausedMs: 12_000,
             },
             { type: 'turnInFlight', sessionId: 'session-a', inFlight: false },
         ]);

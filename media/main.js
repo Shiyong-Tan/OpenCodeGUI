@@ -2654,6 +2654,12 @@ function createAppendSuccessorPresentation(predecessor, transition) {
         processingStartedAt: Number.isFinite(inheritedStartedAt) && inheritedStartedAt > 0
             ? inheritedStartedAt
             : now,
+        ...(Number.isFinite(Number(predecessorMeta.processingPausedMs)) && Number(predecessorMeta.processingPausedMs) > 0
+            ? { processingPausedMs: Number(predecessorMeta.processingPausedMs) }
+            : {}),
+        ...(Number.isFinite(Number(predecessorMeta.processingPausedAt)) && Number(predecessorMeta.processingPausedAt) > 0
+            ? { processingPausedAt: Number(predecessorMeta.processingPausedAt) }
+            : {}),
     };
     if (transition !== 'advance' || predecessor?.role !== 'assistant') {
         return { text: '', meta: baseMeta };
@@ -6628,6 +6634,28 @@ const renderMessageElementHost = Object.freeze({
 
 function renderMessageElement(message, renderedSet) {
     return window.__ocRendering.renderMessageElement(renderMessageElementHost, message, renderedSet);
+}
+
+function syncInteractiveProcessingPause(sessionId, reason, now = Date.now()) {
+    if (!sessionId) return false;
+    const session = getSessionState(sessionId, false);
+    if (!session) return false;
+    const assistantKey = session.currentTurnAssistantKey || session.thinkingId || '';
+    const assistant = assistantKey ? session.messagesById?.get?.(assistantKey) : null;
+    if (assistant?.role !== 'assistant' || assistant.meta?.isThinking !== true) return false;
+    const result = sessionOverlayStore.syncProcessingPause(sessionId, assistant, now);
+    const shouldPause = result.paused;
+    const changed = result.changed;
+    if (!changed) return false;
+    for (const element of document.querySelectorAll('.message-processing-time')) {
+        if (element?.dataset?.messageId !== assistantKey) continue;
+        element._syncProcessingPause?.(assistant.meta || {}, now);
+    }
+    vscode.postMessage({
+        type: 'ui-debug',
+        payload: ['processing-time', shouldPause ? 'paused' : 'resumed', `sessionId=${sessionId}`, `assistantKey=${assistantKey}`, `reason=${reason}`]
+    });
+    return true;
 }
 
 function updateLiveAssistantProcessingTimes(now = Date.now()) {
@@ -13189,6 +13217,7 @@ function handleAssistantMeta(sessionId, message, options = {}) {
                 }
             });
             session.thinkingId = thinking.id;
+            syncInteractiveProcessingPause(sessionId, 'assistant-created-during-interactive-wait');
             if (typeof message.lastText === 'string' && message.lastText.trim().length > 0) {
                 markVolatileAssistantPresentation(thinking);
                 wordCompletionController?.learnText(sessionId, message.lastText);
@@ -13429,6 +13458,20 @@ function handleChatDone(sessionId, message) {
             : Number.isFinite(existingCompletedAt) && existingCompletedAt > 0
                 ? existingCompletedAt
                 : Date.now();
+        const existingPausedMs = Number.isFinite(Number(msg.meta?.processingPausedMs))
+            ? Math.max(0, Number(msg.meta.processingPausedMs))
+            : 0;
+        const authoritativePausedMs = Number(message?.processingPausedMs);
+        if (Number.isFinite(authoritativePausedMs)) {
+            msg.meta.processingPausedMs = Math.max(existingPausedMs, authoritativePausedMs);
+        }
+        if (Object.prototype.hasOwnProperty.call(message || {}, 'processingPausedAt')) {
+            if (Number.isFinite(Number(message?.processingPausedAt)) && Number(message.processingPausedAt) > 0) {
+                msg.meta.processingPausedAt = Number(message.processingPausedAt);
+            } else if (!Number.isFinite(Number(msg.meta?.processingPausedAt)) || authoritativePausedMs > 0) {
+                delete msg.meta.processingPausedAt;
+            }
+        }
         msg.meta.isThinking = false;
         // Clear statusText when streaming finishes.
         msg.meta.statusText = null;
@@ -18088,6 +18131,7 @@ function clearQuestionOverlay(reason, advanceQueue = false, sessionId = activeSe
         advanceQueue,
         clearQueue: reason === 'session-deleted'
     });
+    syncInteractiveProcessingPause(sessionId, `question-clear:${reason}`);
     if (sessionId === activeSessionId && sessionOverlayStore.getQuestion(sessionId)) {
         renderQuestionOverlayModal();
     }
@@ -18101,6 +18145,7 @@ function clearPermissionOverlay(reason, sessionId = activeSessionId) {
         permissionOverlayEl = null;
     }
     sessionOverlayStore.clearPermission(sessionId);
+    syncInteractiveProcessingPause(sessionId, `permission-clear:${reason}`);
 }
 
 function activateSessionOverlays(sessionId) {
@@ -18115,6 +18160,7 @@ function activateSessionOverlays(sessionId) {
     if (!sessionId) return;
     renderQuestionOverlayModal();
     renderPermissionOverlayModal();
+    syncInteractiveProcessingPause(sessionId, 'session-overlay-activation');
 }
 
 function logQuestionDebug(...parts) {
@@ -18194,6 +18240,7 @@ function showQuestionOverlay(payload) {
         return;
     }
     shownQuestionCallIds.add(dedupeKey);
+    syncInteractiveProcessingPause(sessionId, `question-${result}`);
     if (result === 'queued') {
         logQuestionDebug('show.queued', `callId=${callId}`, `queueSize=${sessionOverlayStore.getQuestionQueueLength(sessionId)}`);
         return;
@@ -18229,6 +18276,7 @@ function showPermissionOverlay(payload) {
         error: ''
     });
     if (result === 'duplicate') return;
+    syncInteractiveProcessingPause(sessionId, 'permission-active');
     if (sessionId === activeSessionId) {
         renderPermissionOverlayModal();
     }

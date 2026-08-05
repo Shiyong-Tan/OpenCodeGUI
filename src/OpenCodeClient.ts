@@ -165,6 +165,8 @@ export const CONTINUATION_STATE_SLOT_MANIFEST: ReadonlyArray<ContinuationStateSl
     { slot: 'pendingStopContinuationUserBySession', clearedBy: 'finishTurn', disposition: 'stay cleared', note: 'auto stop is not revived in continuation v1' },
     { slot: 'currentTurnAssistantMsgIdBySession', clearedBy: 'finishTurn', disposition: 'different key', note: 'fresh continuation assistant message id' },
     { slot: 'currentTurnStartedAtBySession', clearedBy: 'finishTurn', disposition: 're-init in continuation', note: 'new continuation turn start timestamp' },
+    { slot: 'turnProcessingPausedAtBySession', clearedBy: 'finishTurn', disposition: 're-init in continuation', note: 'new continuation interactive-wait interval' },
+    { slot: 'turnProcessingPausedMsBySession', clearedBy: 'finishTurn', disposition: 're-init in continuation', note: 'new continuation accumulated wait duration' },
     { slot: 'lastSseAtBySession', clearedBy: 'finishTurn', disposition: 're-init in continuation', note: 'resume SSE liveness for continuation turn' },
     { slot: 'silenceTimerBySession', clearedBy: 'clearSilenceTimer', disposition: 're-init in continuation', note: 'new silence timer schedule per continuation turn' },
     { slot: 'turnFinalAtBySession', clearedBy: 'clearFinalizeSessionState', disposition: 're-init in continuation', note: 'new final candidate timestamp for continuation terminal phase' },
@@ -507,6 +509,8 @@ export class OpenCodeClient {
     private pendingStopContinuationUserBySession = new Map<string, number>();
     private currentTurnAssistantMsgIdBySession = new Map<string, string>();
     private currentTurnStartedAtBySession = new Map<string, number>();
+    private turnProcessingPausedAtBySession = new Map<string, number>();
+    private turnProcessingPausedMsBySession = new Map<string, number>();
     private lastSseAtBySession = new Map<string, number>();
     private lastObservedMsgIdBySession = new Map<string, string>();
     private lastProgressAtBySession = new Map<string, number>();
@@ -632,6 +636,8 @@ export class OpenCodeClient {
         const retainedAssistantHasDelta = new Set<string>();
         const retainedAssistantStatusCleared = new Set<string>();
         const retainedTurnStartedAtBySession = new Map<string, number>();
+        const retainedTurnProcessingPausedAtBySession = new Map<string, number>();
+        const retainedTurnProcessingPausedMsBySession = new Map<string, number>();
         if (preserveInFlightSessionIds?.size) {
             for (const sessionId of preserveInFlightSessionIds) {
                 if (typeof sessionId !== 'string' || !sessionId) continue;
@@ -674,6 +680,14 @@ export class OpenCodeClient {
                 const turnStartedAt = this.currentTurnStartedAtBySession.get(sessionId);
                 if (typeof turnStartedAt === 'number' && Number.isFinite(turnStartedAt) && turnStartedAt > 0) {
                     retainedTurnStartedAtBySession.set(sessionId, turnStartedAt);
+                }
+                const pausedAt = this.turnProcessingPausedAtBySession.get(sessionId);
+                if (typeof pausedAt === 'number' && Number.isFinite(pausedAt) && pausedAt > 0) {
+                    retainedTurnProcessingPausedAtBySession.set(sessionId, pausedAt);
+                }
+                const pausedMs = this.turnProcessingPausedMsBySession.get(sessionId);
+                if (typeof pausedMs === 'number' && Number.isFinite(pausedMs) && pausedMs >= 0) {
+                    retainedTurnProcessingPausedMsBySession.set(sessionId, pausedMs);
                 }
             }
             for (const messageId of retainedAssistantMessageIds) {
@@ -744,6 +758,8 @@ export class OpenCodeClient {
         this.pendingStopContinuationUserBySession.clear();
         this.currentTurnAssistantMsgIdBySession.clear();
         this.currentTurnStartedAtBySession.clear();
+        this.turnProcessingPausedAtBySession.clear();
+        this.turnProcessingPausedMsBySession.clear();
         this.lastSseAtBySession.clear();
         this.lastObservedMsgIdBySession.clear();
         this.lastProgressAtBySession.clear();
@@ -840,6 +856,16 @@ export class OpenCodeClient {
             const turnStartedAt = retainedTurnStartedAtBySession.get(sessionId);
             if (turnStartedAt !== undefined) {
                 this.currentTurnStartedAtBySession.set(sessionId, turnStartedAt);
+                restored = true;
+            }
+            const pausedAt = retainedTurnProcessingPausedAtBySession.get(sessionId);
+            if (pausedAt !== undefined) {
+                this.turnProcessingPausedAtBySession.set(sessionId, pausedAt);
+                restored = true;
+            }
+            const pausedMs = retainedTurnProcessingPausedMsBySession.get(sessionId);
+            if (pausedMs !== undefined) {
+                this.turnProcessingPausedMsBySession.set(sessionId, pausedMs);
                 restored = true;
             }
             if (restored) retainedClientTurnBindingSessions += 1;
@@ -1443,6 +1469,8 @@ export class OpenCodeClient {
         this.clearFinalizeSessionState(sessionId, 'turn-start');
 
         const now = Date.now();
+        this.turnProcessingPausedAtBySession.delete(sessionId);
+        this.turnProcessingPausedMsBySession.delete(sessionId);
         this.currentTurnStartedAtBySession.set(sessionId, now);
         this.lastSseAtBySession.set(sessionId, now);
         this.lastProgressAtBySession.set(sessionId, now);
@@ -1506,6 +1534,8 @@ export class OpenCodeClient {
         this.pendingStopContinuationUserBySession.delete(sessionId);
         this.currentTurnAssistantMsgIdBySession.delete(sessionId);
         this.currentTurnStartedAtBySession.delete(sessionId);
+        this.turnProcessingPausedAtBySession.delete(sessionId);
+        this.turnProcessingPausedMsBySession.delete(sessionId);
         this.lastSseAtBySession.delete(sessionId);
         this.turnFinishedBySession.delete(sessionId);
         this.clearSilenceTimer(sessionId);
@@ -1825,6 +1855,8 @@ export class OpenCodeClient {
         this.currentTurnAssistantMsgIdBySession.delete(sessionId);
         this.clearFinalizeSessionState(sessionId, 'turn-start');
         const now = Date.now();
+        this.turnProcessingPausedAtBySession.delete(sessionId);
+        this.turnProcessingPausedMsBySession.delete(sessionId);
         this.currentTurnStartedAtBySession.set(sessionId, now);
         this.lastSseAtBySession.set(sessionId, now);
         this.lastProgressAtBySession.set(sessionId, now);
@@ -1988,6 +2020,8 @@ export class OpenCodeClient {
         this.pendingStopContinuationUserBySession.delete(sessionId);
         this.currentTurnAssistantMsgIdBySession.delete(sessionId);
         this.currentTurnStartedAtBySession.delete(sessionId);
+        this.turnProcessingPausedAtBySession.delete(sessionId);
+        this.turnProcessingPausedMsBySession.delete(sessionId);
         this.lastSseAtBySession.delete(sessionId);
         this.clearSilenceTimer(sessionId);
         this.clearFinalizeSessionState(sessionId, 'turn-finish');
@@ -2384,6 +2418,8 @@ export class OpenCodeClient {
         }
         this.currentTurnUserMsgIdBySession.set(sessionId, userMsgId);
         if (!this.currentTurnStartedAtBySession.has(sessionId)) {
+            this.turnProcessingPausedAtBySession.delete(sessionId);
+            this.turnProcessingPausedMsBySession.delete(sessionId);
             this.currentTurnStartedAtBySession.set(sessionId, now);
         }
         this.logUiDebug(`EXT: turn.anchor.user | sessionId=${sessionId} | userMsgId=${userMsgId} | reason=${reason}`);
@@ -2434,6 +2470,22 @@ export class OpenCodeClient {
         return typeof completedAt === 'number' && Number.isFinite(completedAt) && completedAt > 0
             ? completedAt
             : undefined;
+    }
+
+    public getCurrentTurnProcessingPausedAt(sessionId: string | undefined): number | undefined {
+        if (!sessionId) return undefined;
+        const pausedAt = this.turnProcessingPausedAtBySession.get(sessionId);
+        return typeof pausedAt === 'number' && Number.isFinite(pausedAt) && pausedAt > 0
+            ? pausedAt
+            : undefined;
+    }
+
+    public getCurrentTurnProcessingPausedMs(sessionId: string | undefined): number {
+        if (!sessionId) return 0;
+        const pausedMs = this.turnProcessingPausedMsBySession.get(sessionId);
+        return typeof pausedMs === 'number' && Number.isFinite(pausedMs) && pausedMs >= 0
+            ? pausedMs
+            : 0;
     }
 
     private getAppendRootCandidates(sessionId: string): Set<string> {
@@ -5489,6 +5541,7 @@ export class OpenCodeClient {
         const pendingIds = this.pendingQuestionCallIdsBySession.get(sessionId) || new Set<string>();
         pendingIds.add(payload.callId);
         this.pendingQuestionCallIdsBySession.set(sessionId, pendingIds);
+        this.syncInteractiveProcessingPause(sessionId, 'question-added');
         if (this.isNonFinalResyncTakeover(sessionId)) {
             this.logUiDebug(`EXT: resync.loop.pause | sessionId=${sessionId} | reason=interactive-question`);
             this.stopNonFinalResyncLoop(sessionId, 'interactive-question');
@@ -5523,6 +5576,7 @@ export class OpenCodeClient {
         if (removed && hadBlocker && !this.hasInteractiveBlocker(sessionId)) {
             this.resumeRescueIfInteractiveCleared(sessionId, 'question-cleared');
         }
+        this.syncInteractiveProcessingPause(sessionId, 'question-cleared');
     }
 
     private rememberPendingPermission(sessionId: string, permissionId: string): void {
@@ -5530,6 +5584,7 @@ export class OpenCodeClient {
         const pending = this.pendingPermissionIdsBySession.get(sessionId) || new Set<string>();
         pending.add(permissionId);
         this.pendingPermissionIdsBySession.set(sessionId, pending);
+        this.syncInteractiveProcessingPause(sessionId, 'permission-added');
         if (this.isNonFinalResyncTakeover(sessionId)) {
             this.logUiDebug(`EXT: resync.loop.pause | sessionId=${sessionId} | reason=interactive-permission`);
             this.stopNonFinalResyncLoop(sessionId, 'interactive-permission');
@@ -5544,7 +5599,10 @@ export class OpenCodeClient {
         if (!sessionId || !permissionId) return;
         const hadBlocker = this.hasInteractiveBlocker(sessionId);
         const pending = this.pendingPermissionIdsBySession.get(sessionId);
-        if (!pending) return;
+        if (!pending) {
+            this.syncInteractiveProcessingPause(sessionId, 'permission-cleared-missing-state');
+            return;
+        }
         const removed = pending.delete(permissionId);
         if (!pending.size) {
             this.pendingPermissionIdsBySession.delete(sessionId);
@@ -5552,6 +5610,7 @@ export class OpenCodeClient {
         if (removed && hadBlocker && !this.hasInteractiveBlocker(sessionId)) {
             this.resumeRescueIfInteractiveCleared(sessionId, 'permission-cleared');
         }
+        this.syncInteractiveProcessingPause(sessionId, 'permission-cleared');
     }
 
     private hasInteractiveBlocker(sessionId: string): boolean {
@@ -5559,6 +5618,23 @@ export class OpenCodeClient {
         const questionCount = this.pendingQuestionCallIdsBySession.get(sessionId)?.size || 0;
         const permissionCount = this.pendingPermissionIdsBySession.get(sessionId)?.size || 0;
         return questionCount > 0 || permissionCount > 0;
+    }
+
+    private syncInteractiveProcessingPause(sessionId: string, reason: string, now = Date.now()): void {
+        if (!sessionId || !this.currentTurnStartedAtBySession.has(sessionId)) return;
+        if (this.hasInteractiveBlocker(sessionId)) {
+            if (!this.turnProcessingPausedAtBySession.has(sessionId)) {
+                this.turnProcessingPausedAtBySession.set(sessionId, now);
+                this.logUiDebug(`EXT: processing-time.pause | sessionId=${sessionId} | reason=${reason}`);
+            }
+            return;
+        }
+        const pausedAt = this.turnProcessingPausedAtBySession.get(sessionId);
+        if (typeof pausedAt !== 'number') return;
+        const accumulated = this.getCurrentTurnProcessingPausedMs(sessionId) + Math.max(0, now - pausedAt);
+        this.turnProcessingPausedMsBySession.set(sessionId, accumulated);
+        this.turnProcessingPausedAtBySession.delete(sessionId);
+        this.logUiDebug(`EXT: processing-time.resume | sessionId=${sessionId} | reason=${reason} | pausedMs=${accumulated}`);
     }
 
     private resumeRescueIfInteractiveCleared(sessionId: string, reason: string): void {

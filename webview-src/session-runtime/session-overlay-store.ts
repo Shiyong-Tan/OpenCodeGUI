@@ -107,6 +107,38 @@ export function createSessionOverlayStore<TQuestion, TPermission>(
       entry.permission = null;
       prune(sessionId, entry);
     },
+    syncProcessingPause(
+      sessionId: string,
+      message: { role?: string; meta?: Record<string, any> } | null | undefined,
+      now = Date.now(),
+    ): Readonly<{ changed: boolean; paused: boolean }> {
+      const entry = entries.get(sessionId);
+      const paused = Boolean(entry?.question || entry?.permission);
+      if (message?.role !== 'assistant' || message.meta?.isThinking !== true) {
+        return { changed: false, paused };
+      }
+      const meta = message.meta || (message.meta = {});
+      const existingPausedAt = Number(meta.processingPausedAt);
+      const hasPausedAt = Number.isFinite(existingPausedAt) && existingPausedAt > 0;
+      if (paused) {
+        if (hasPausedAt) return { changed: false, paused };
+        const startedAt = Number(meta.processingStartedAt || meta.timeCreated);
+        meta.processingPausedAt = Number.isFinite(startedAt) && startedAt > 0
+          ? Math.max(startedAt, now)
+          : now;
+        if (!Number.isFinite(Number(meta.processingPausedMs)) || Number(meta.processingPausedMs) < 0) {
+          meta.processingPausedMs = 0;
+        }
+        return { changed: true, paused };
+      }
+      if (!hasPausedAt) return { changed: false, paused };
+      const accumulated = Number.isFinite(Number(meta.processingPausedMs)) && Number(meta.processingPausedMs) >= 0
+        ? Number(meta.processingPausedMs)
+        : 0;
+      meta.processingPausedMs = accumulated + Math.max(0, now - existingPausedAt);
+      delete meta.processingPausedAt;
+      return { changed: true, paused };
+    },
     deleteSession(sessionId: string): void {
       entries.delete(sessionId);
     },
