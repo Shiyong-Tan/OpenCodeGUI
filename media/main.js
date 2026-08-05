@@ -5837,7 +5837,12 @@ document.addEventListener('DOMContentLoaded', () => {
     function handleChatContainerScroll() {
         if (!chatWindowState.programmaticScroll) {
             chatWindowState.userScrollActiveUntil = Date.now() + 180;
-            autoScrollPinnedToBottom = isNearBottom(chatContainer);
+            // The first upward wheel tick often remains inside the generous
+            // near-bottom threshold. Do not let that native scroll event
+            // immediately re-arm forced bottom alignment and undo the user's
+            // attempt to leave the tail.
+            const upwardIntentActive = Date.now() < Number(chatWindowState.upwardScrollIntentUntil || 0);
+            autoScrollPinnedToBottom = !upwardIntentActive && isNearBottom(chatContainer);
             if (!autoScrollPinnedToBottom) captureChatWindowAnchor();
         }
         updateChatJumpBottomButton();
@@ -7756,7 +7761,8 @@ function shouldHideDcpUiMessage(message) {
         visualAnchorElement: null, visualAnchorTop: 0, visualAnchorKey: '',
         fineAnchorRestoreToken: 0,
         programmaticScroll: false, userScrollActiveUntil: 0, activityBelow: false, rendering: false,
-        directScrollInputUntil: 0, imageLayoutStabilizingUntil: 0, pendingImageLayouts: 0,
+        directScrollInputUntil: 0, upwardScrollIntentUntil: 0,
+        imageLayoutStabilizingUntil: 0, pendingImageLayouts: 0,
         pendingRangeRender: false, failedSessionId: '', localOlderSurface: null,
         localOlderObserver: null, localOlderObserverArmed: true, pendingScrollKey: '',
         pendingScrollAttempts: 0, localHistoryPresentation: null, acknowledgedRawSnapshot: null
@@ -12731,7 +12737,11 @@ function shouldHideDcpUiMessage(message) {
         if ('directScrollInputUntil' in chatWindowState) {
             chatWindowState.directScrollInputUntil = Date.now() + 400;
         }
-        if (deltaY >= 0) return;
+        if (deltaY >= 0) {
+            chatWindowState.upwardScrollIntentUntil = 0;
+            return;
+        }
+        chatWindowState.upwardScrollIntentUntil = Date.now() + 400;
         if (!autoScrollPinnedToBottom && !chatWindowState.programmaticScroll) return;
         // A deliberate upward wheel gesture owns the viewport immediately.
         // Invalidate both queued bottom-alignment frames and prevent virtual

@@ -270,6 +270,7 @@ describe('session-switch virtual bottom alignment', () => {
         activityBelow: false,
         programmaticScroll: true,
         userScrollActiveUntil: 0,
+        upwardScrollIntentUntil: 0,
       },
       Date: { now: () => 1000 },
       Number,
@@ -288,6 +289,7 @@ describe('session-switch virtual bottom alignment', () => {
       activityBelow: true,
       programmaticScroll: false,
       userScrollActiveUntil: 1180,
+      upwardScrollIntentUntil: 1400,
     });
   });
 
@@ -299,6 +301,7 @@ describe('session-switch virtual bottom alignment', () => {
         activityBelow: false,
         programmaticScroll: true,
         userScrollActiveUntil: 0,
+        upwardScrollIntentUntil: 1400,
       },
       Date: { now: () => 1000 },
       Number,
@@ -314,6 +317,7 @@ describe('session-switch virtual bottom alignment', () => {
     expect((context as any).scrollToBottomGeneration).toBe(7);
     expect((context as any).autoScrollPinnedToBottom).toBe(true);
     expect((context as any).chatWindowState.programmaticScroll).toBe(true);
+    expect((context as any).chatWindowState.upwardScrollIntentUntil).toBe(0);
   });
 
   test('forced bottom scroll aligns the virtual active assistant before the hydrated DOM clamp', () => {
@@ -900,10 +904,11 @@ describe('B4S-R3 self-contained owner behavior matrices', () => {
 
   test('scroll matrix preserves programmatic, pinned, and unpinned ordered effects', () => {
     const body = extractOwnedBlock('function handleChatContainerScroll()').body;
-    const run = (programmaticScroll: boolean, nearBottom: boolean) => {
+    const run = (programmaticScroll: boolean, nearBottom: boolean, upwardIntentUntil = 0) => {
       const trace: string[] = [];
       const context = executeRecoveredFunction('owner', '', body, {
-        chatWindowState: { programmaticScroll }, autoScrollPinnedToBottom: false, chatContainer: {},
+        chatWindowState: { programmaticScroll, upwardScrollIntentUntil: upwardIntentUntil }, autoScrollPinnedToBottom: false, chatContainer: {},
+        Date: { now: () => 1000 }, Number,
         isNearBottom: () => { trace.push('isNearBottom'); return nearBottom; },
         captureChatWindowAnchor: () => trace.push('captureAnchor'),
         updateChatJumpBottomButton: () => trace.push('updateJumpBottom'),
@@ -915,6 +920,7 @@ describe('B4S-R3 self-contained owner behavior matrices', () => {
     expect(run(true, false)).toEqual({ trace: ['updateJumpBottom', 'hideQuote'], returned: undefined, pinned: false });
     expect(run(false, true)).toEqual({ trace: ['isNearBottom', 'updateJumpBottom', 'hideQuote'], returned: undefined, pinned: true });
     expect(run(false, false)).toEqual({ trace: ['isNearBottom', 'captureAnchor', 'updateJumpBottom', 'hideQuote'], returned: undefined, pinned: false });
+    expect(run(false, true, 1400)).toEqual({ trace: ['captureAnchor', 'updateJumpBottom', 'hideQuote'], returned: undefined, pinned: false });
     expect(source.match(/chatContainer\.addEventListener\('scroll'[\s\S]*?\}, \{ passive: true \}\);/g) || []).toHaveLength(1);
     expect(extractOwnedBlock('function handleChatContainerScroll()').slice).not.toContain('scheduleRenderFromState');
   });
@@ -1159,7 +1165,7 @@ describe('B4S-E4 named owner mutation rejection', () => {
     if (!/rekeyKeyedChatPresentation = \(oldKey, newKey, sessionId\) => \{\s*return applyKeyedChatPresentationAliasMigration\(oldKey, newKey, sessionId\);\s*\};/.test(candidate)) errors.push('assignment:alias-boolean');
     const frozen = [
       ['body:primary', 'function handlePrimarySendClick()', '593a063a9ce63154f162635856a652a6fde6e9ae898ef97ab05c67a26a4c711f'],
-      ['body:scroll', 'function handleChatContainerScroll()', '1f0f8b57e4dd9c38d549b10ae98ed9341f0c8b2cae99ee2077914eecf0bbda4f'],
+      ['body:scroll', 'function handleChatContainerScroll()', '37199bab4bed5022e619960dd29f95f5b1ebffa4c64ff567005e6fa4bee93e85'],
       ['body:alias', 'function applyKeyedChatPresentationAliasMigration(', '013e6cad3d3bf432449d48b1488d9f95c9f636caee5dd82cb362bb81bf8741a1'],
     ];
     for (const [label, marker, hash] of frozen) if (sourceHash(extractCandidateBlock(candidate, marker)) !== hash) errors.push(label);
