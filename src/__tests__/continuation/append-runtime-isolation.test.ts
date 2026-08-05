@@ -364,6 +364,7 @@ describe('append runtime isolation', () => {
 
         expect(turnInFlightBlock).toContain("if (transition === 'duplicate')");
         expect(turnInFlightBlock).toContain("'duplicate-generation-noop'");
+        expect(turnInFlightBlock).toContain('parentID: followup.appendUserMsgId');
         expect(turnInFlightBlock.indexOf("if (transition === 'duplicate')"))
             .toBeLessThan(turnInFlightBlock.indexOf('createAppendSuccessorPresentation(predecessor, transition)'));
     });

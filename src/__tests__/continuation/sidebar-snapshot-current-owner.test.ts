@@ -60,6 +60,56 @@ afterEach(async () => {
 });
 
 describe('SidebarProvider Task 8 snapshot/reload current-owner semantics', () => {
+    it('selects the newest tool-call assistant generation using OpenCode info.time timestamps', () => {
+        const provider = createProvider();
+        const formatted = provider.formatSession({
+            session: { id: 'ses_task8', title: 'Active append' },
+            messages: [
+                { info: { id: 'msg_user', role: 'user' }, parts: [{ type: 'text', text: 'continue' }] },
+                {
+                    info: {
+                        id: 'msg_old', role: 'assistant', parentID: 'msg_user', finish: 'tool-calls',
+                        time: { created: 100, completed: 200 },
+                    },
+                    parts: [{ type: 'text', text: 'old stage' }],
+                },
+                {
+                    info: {
+                        id: 'msg_current', role: 'assistant', parentID: 'msg_user', finish: 'tool-calls',
+                        time: { created: 300 },
+                    },
+                    parts: [{ type: 'text', text: 'current stage' }],
+                },
+            ],
+        });
+
+        expect(formatted.messages.map((message: any) => message.id)).toEqual(['msg_user', 'msg_current']);
+        expect(formatted.messages[1]).toEqual(expect.objectContaining({
+            text: 'current stage',
+            meta: expect.objectContaining({ parentID: 'msg_user', timeCreated: 300 }),
+        }));
+    });
+
+    it('uses the last OpenCode assistant generation when timestamps are unavailable', () => {
+        const provider = createProvider();
+        const formatted = provider.formatSession({
+            session: { id: 'ses_task8', title: 'Timestamp fallback' },
+            messages: [
+                { info: { id: 'msg_user', role: 'user' }, parts: [{ type: 'text', text: 'continue' }] },
+                {
+                    info: { id: 'msg_old', role: 'assistant', parentID: 'msg_user', finish: 'tool-calls' },
+                    parts: [{ type: 'text', text: 'old stage' }],
+                },
+                {
+                    info: { id: 'msg_current', role: 'assistant', parentID: 'msg_user', finish: 'tool-calls' },
+                    parts: [{ type: 'text', text: 'current stage' }],
+                },
+            ],
+        });
+
+        expect(formatted.messages.map((message: any) => message.id)).toEqual(['msg_user', 'msg_current']);
+    });
+
     it('does not collapse assistant messages from separate ordinary turns', async () => {
         const provider = createProvider();
         provider.readPersistedSessionMap = jest.fn().mockResolvedValue({

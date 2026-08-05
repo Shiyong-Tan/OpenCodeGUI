@@ -6366,12 +6366,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
 
         const getTimeCreated = (message: any): number => {
-            const v = message?.time?.created;
+            const v = message?.info?.time?.created ?? message?.time?.created;
             return typeof v === 'number' ? v : -Infinity;
         };
 
         const getTimeCompleted = (message: any): number => {
-            const v = message?.time?.completed;
+            const v = message?.info?.time?.completed ?? message?.time?.completed;
             return typeof v === 'number' ? v : -Infinity;
         };
 
@@ -6384,7 +6384,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             for (let i = 1; i < pickFrom.length; i++) {
                 const candidate = pickFrom[i];
                 const score = Math.max(getTimeCompleted(candidate), getTimeCreated(candidate));
-                if (score > bestScore) {
+                // OpenCode returns assistant generations in chronological order.
+                // Prefer the later entry on equal or missing timestamps so an
+                // active multi-generation tool turn cannot fall back to its
+                // oldest assistant stage during full-history hydration.
+                if (score >= bestScore) {
                     best = candidate;
                     bestScore = score;
                 }

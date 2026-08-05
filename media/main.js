@@ -15543,6 +15543,11 @@ function appendMessageImages(parentEl, message) {
                         text: successorPresentation.text,
                         meta: {
                             ...successorPresentation.meta,
+                            // OpenCode assigns every assistant generation to the
+                            // append user message. Retain that relationship on
+                            // the client-created successor so hydration can
+                            // collapse older same-parent generations safely.
+                            parentID: followup.appendUserMsgId,
                             // Persist the presentation handoff on the successor.
                             // The transient appendFollowupIdentity is cleared at
                             // chatDone, but final and hydrated renders must still
