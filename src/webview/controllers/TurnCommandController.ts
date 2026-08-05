@@ -89,6 +89,7 @@ export interface TurnCommandHost {
     bindMessageIdentity(sourceId: string, targetId: string): void;
     buildContextBlock(contextItems: TurnContextItem[]): string;
     setTurnPendingSnapshotUserText(sessionId: string, displayText: string): void;
+    setTurnPendingSnapshotAttachments(sessionId: string, attachments: SavedAttachment[]): void;
     bindTurnAssistantMessage(sessionId: string, assistantMessageId: string): void;
     emitTurnFinalizePhase(
         webview: vscode.Webview,
@@ -285,6 +286,9 @@ ${attachmentLines.join('\n')}`
                             : attachmentLines.join('\n'))
                         : userText;
                     host.setTurnPendingSnapshotUserText(targetSessionId, displayText);
+                    // Reset turn-scoped metadata before asynchronous saves so a
+                    // prior failed turn can never donate attachments to this one.
+                    host.setTurnPendingSnapshotAttachments(targetSessionId, []);
                     const pendingUserMessage: SessionMessage = {
                         role: 'user',
                         text: displayText,
@@ -320,6 +324,23 @@ ${attachmentLines.join('\n')}`
                             catch (error) {
                                 host.log(`EXT: attach.save.fail | reqId=${reqId} | filename=${attachment?.filename || 'unknown'} | mime=${attachment?.mime || 'unknown'} | err=${String(error)}`);
                             }
+                        }
+                        host.setTurnPendingSnapshotAttachments(targetSessionId, savedAttachments);
+                        if (savedAttachments.length) {
+                            liveWebview.postMessage({
+                                type: 'messageAttachmentsPersisted',
+                                sessionId: targetSessionId,
+                                messageId: clientMessageId,
+                                attachments: savedAttachments.map((saved) => ({
+                                    filename: saved.filename,
+                                    mime: saved.mime,
+                                    sizeBytes: saved.sizeBytes,
+                                    path: saved.relPath,
+                                })),
+                                images: savedAttachments
+                                    .filter((saved) => host.attachments.isImageFileName(saved.filename))
+                                    .map((saved) => saved.relPath),
+                            });
                         }
                         if (savedAttachments.length) {
                             const manifest = host.attachments.buildAttachmentManifest(savedAttachments);

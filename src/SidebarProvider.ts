@@ -691,6 +691,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private assistantTextBufferBySession = new Map<string, string>();
     private assistantTextBufferByMessageIdBySession = new Map<string, Map<string, string>>();
     private pendingSnapshotUserTextBySession = new Map<string, string>();
+    private pendingSnapshotAttachmentsBySession = new Map<string, SavedAttachment[]>();
     private appendSnapshotTurnStateBySession = new Map<string, AppendSnapshotTurnState>();
     private lastKnownModels: ModelInfo[] = [];
     private modelQuotaInFlight?: Promise<void>;
@@ -3579,6 +3580,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             await this.writeFinalizeSnapshotFromCurrentTurnIncremental(identity, title);
         } finally {
             this.pendingSnapshotUserTextBySession.delete(sessionId);
+            this.pendingSnapshotAttachmentsBySession.delete(sessionId);
             this.clearAssistantTextBuffers(sessionId);
             this.appendSnapshotTurnStateBySession.delete(sessionId);
         }
@@ -3609,6 +3611,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 ?? (pendingLocalKey ? this.draftByLocalKey.get(pendingLocalKey)?.text : undefined)
                 ?? '';
             const userText = this.normalizeUserTextForSnapshot(rawUserText);
+            const persistedAttachments = this.pendingSnapshotAttachmentsBySession.get(sessionId) || [];
+            const userAttachmentMeta = persistedAttachments.length > 0 ? {
+                attachments: persistedAttachments.map((attachment) => ({
+                    filename: attachment.filename,
+                    mime: attachment.mime,
+                    sizeBytes: attachment.sizeBytes,
+                    path: attachment.relPath,
+                })),
+                images: persistedAttachments
+                    .filter((attachment) => this.attachmentStorage.isImageFileName(attachment.filename))
+                    .map((attachment) => attachment.relPath),
+            } : undefined;
             const assistantText = this.getAssistantTextBuffer(sessionId, assistantMessageId) || '';
             const appendState = this.appendSnapshotTurnStateBySession.get(sessionId);
             const pendingMessages: SessionMessage[] = [];
@@ -3631,7 +3645,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     role: 'user',
                     id: userMessageId,
                     text: userText,
-                    messageIndex: this.client.getMessageIndex(userMessageId, sessionId)
+                    messageIndex: this.client.getMessageIndex(userMessageId, sessionId),
+                    ...(userAttachmentMeta ? { meta: userAttachmentMeta } : {})
                 });
             }
             if (assistantMessageId && assistantText && !this.isHiddenControlAssistantText(assistantText)) {
@@ -3993,6 +4008,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     private setTurnPendingSnapshotUserText(sessionId: string, displayText: string): void {
         this.pendingSnapshotUserTextBySession.set(sessionId, displayText);
+    }
+
+    private setTurnPendingSnapshotAttachments(sessionId: string, attachments: SavedAttachment[]): void {
+        this.pendingSnapshotAttachmentsBySession.set(
+            sessionId,
+            attachments.map((attachment) => ({ ...attachment }))
+        );
     }
 
     private bindTurnAssistantMessage(sessionId: string, assistantMessageId: string): void {
@@ -4674,6 +4696,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             buildContextBlock: (contextItems) => this.buildContextBlock(contextItems),
             setTurnPendingSnapshotUserText: (sessionId, displayText) =>
                 this.setTurnPendingSnapshotUserText(sessionId, displayText),
+            setTurnPendingSnapshotAttachments: (sessionId, attachments) =>
+                this.setTurnPendingSnapshotAttachments(sessionId, attachments),
             bindTurnAssistantMessage: (sessionId, assistantMessageId) =>
                 this.bindTurnAssistantMessage(sessionId, assistantMessageId),
             emitTurnFinalizePhase: (webview, sessionId, phase) =>
@@ -6508,6 +6532,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const retainedAssistantTextBufferBySession = new Map<string, string>();
         const retainedAssistantTextBufferByMessageIdBySession = new Map<string, Map<string, string>>();
         const retainedPendingSnapshotUserTextBySession = new Map<string, string>();
+        const retainedPendingSnapshotAttachmentsBySession = new Map<string, SavedAttachment[]>();
         const retainedAppendSnapshotTurnStateBySession = new Map<string, AppendSnapshotTurnState>();
         const retainedRawUserTextByLocalKey = new Map<string, string>();
         const retainedPendingAssistantTmpKeyByLocalKey = new Map<string, string>();
@@ -6546,6 +6571,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             if (pendingSnapshotUserText !== undefined) {
                 retainedPendingSnapshotUserTextBySession.set(sessionId, pendingSnapshotUserText);
             }
+            const pendingSnapshotAttachments = this.pendingSnapshotAttachmentsBySession.get(sessionId);
+            if (pendingSnapshotAttachments) {
+                retainedPendingSnapshotAttachmentsBySession.set(
+                    sessionId,
+                    pendingSnapshotAttachments.map((attachment) => ({ ...attachment }))
+                );
+            }
             const appendSnapshotTurnState = this.appendSnapshotTurnStateBySession.get(sessionId);
             if (appendSnapshotTurnState) {
                 retainedAppendSnapshotTurnStateBySession.set(sessionId, appendSnapshotTurnState);
@@ -6565,6 +6597,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.assistantTextBufferBySession.clear();
         this.assistantTextBufferByMessageIdBySession.clear();
         this.pendingSnapshotUserTextBySession.clear();
+        this.pendingSnapshotAttachmentsBySession.clear();
         this.appendSnapshotTurnStateBySession.clear();
         this.pendingAssistantTmpKeyBySession.clear();
         this.pendingAssistantTmpKeyByLocalKey.clear();
@@ -6608,6 +6641,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const pendingSnapshotUserText = retainedPendingSnapshotUserTextBySession.get(sessionId);
             if (pendingSnapshotUserText !== undefined) {
                 this.pendingSnapshotUserTextBySession.set(sessionId, pendingSnapshotUserText);
+                restored = true;
+            }
+            const pendingSnapshotAttachments = retainedPendingSnapshotAttachmentsBySession.get(sessionId);
+            if (pendingSnapshotAttachments) {
+                this.pendingSnapshotAttachmentsBySession.set(
+                    sessionId,
+                    pendingSnapshotAttachments.map((attachment) => ({ ...attachment }))
+                );
                 restored = true;
             }
             const appendSnapshotTurnState = retainedAppendSnapshotTurnStateBySession.get(sessionId);

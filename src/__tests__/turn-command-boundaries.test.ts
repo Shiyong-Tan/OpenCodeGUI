@@ -270,6 +270,7 @@ describe('turn command family characterization', () => {
             'pendingAssistantMessageIdBySession',
             'assistantTextBufferBySession',
             'pendingSnapshotUserTextBySession',
+            'pendingSnapshotAttachmentsBySession',
             'rawUserTextByLocalKey',
             'appendSubmitInFlightBySession',
         ]) {

@@ -31,4 +31,13 @@ describe('composer attachment production ownership', () => {
     expect(source).toContain('attachmentUiController.render();');
     expect(source).not.toContain("entry.className = 'attachment-image-item';");
   });
+
+  it('replaces volatile image data with persisted attachment references', () => {
+    expect(source).toContain("case 'messageAttachmentsPersisted': {");
+    expect(source).toContain('target.meta = {');
+    expect(source).toContain('attachments,');
+    expect(source).toContain('images,');
+    expect(source).toContain("renderIfActive(sessionId, 'messageAttachmentsPersisted'");
+    expect(source).toContain('getAssistantImageController().enhance(imageWrap);');
+  });
 });

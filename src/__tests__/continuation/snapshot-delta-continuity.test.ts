@@ -607,6 +607,52 @@ describe('W5A snapshot export and finalize contracts', () => {
         expect(provider.client.exportSession).not.toHaveBeenCalled();
     });
 
+    it('persists saved attachment paths and image references without snapshot base64', async () => {
+        const provider = createProvider();
+        provider.readSnapshot = jest.fn().mockResolvedValue(undefined);
+        provider.writeSnapshotAtomic = jest.fn().mockResolvedValue(101);
+        provider.client.exportSession = jest.fn();
+        provider.client.getMessageIndex = jest.fn().mockReturnValue(1);
+        provider.pendingSnapshotUserTextBySession.set('ses_delta', 'review these files');
+        provider.pendingSnapshotAttachmentsBySession.set('ses_delta', [
+            {
+                token: 'image-token', filename: 'scan.png', mime: 'image/png', sizeBytes: 42,
+                relPath: '.opencode/attachments/ses_delta/image-token/scan.png',
+            },
+            {
+                token: 'file-token', filename: 'notes.pdf', mime: 'application/pdf', sizeBytes: 84,
+                relPath: '.opencode/attachments/ses_delta/file-token/notes.pdf',
+            },
+        ]);
+
+        await provider.writeFinalizeSnapshotFromCurrentTurn({
+            sessionId: 'ses_delta',
+            userMessageId: 'msg_attachment_user',
+        });
+
+        const written = provider.writeSnapshotAtomic.mock.calls[0][1].sessionData;
+        expect(written.messages[0]).toMatchObject({
+            id: 'msg_attachment_user',
+            role: 'user',
+            meta: {
+                images: ['.opencode/attachments/ses_delta/image-token/scan.png'],
+                attachments: [
+                    {
+                        filename: 'scan.png', mime: 'image/png', sizeBytes: 42,
+                        path: '.opencode/attachments/ses_delta/image-token/scan.png',
+                    },
+                    {
+                        filename: 'notes.pdf', mime: 'application/pdf', sizeBytes: 84,
+                        path: '.opencode/attachments/ses_delta/file-token/notes.pdf',
+                    },
+                ],
+            },
+        });
+        expect(JSON.stringify(written)).not.toContain('data:image/');
+        expect(provider.pendingSnapshotAttachmentsBySession.has('ses_delta')).toBe(false);
+        expect(provider.client.exportSession).not.toHaveBeenCalled();
+    });
+
     it('releases finalize buffers when an incremental snapshot write fails', async () => {
         const provider = createProvider();
         provider.readSnapshot = jest.fn().mockResolvedValue(undefined);

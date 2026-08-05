@@ -5324,6 +5324,8 @@ function getAssistantImageController() {
     });
     return assistantImageController;
 }
+window.__oc = window.__oc || {};
+window.__oc.enhanceImageReferences = (root) => getAssistantImageController().enhance(root);
 
 function getMarkdownController() {
     if (markdownController) return markdownController;
@@ -8761,6 +8763,7 @@ function shouldHideDcpUiMessage(message) {
                 }));
             }
             root.replaceChildren(heading, status, viewerRegion, actions);
+            if (open) window.__oc?.enhanceImageReferences?.(viewerRegion);
         };
 
         render();
@@ -13620,6 +13623,7 @@ function appendMessageImages(parentEl, message) {
     }
     if (imageWrap.children.length > 0) {
         parentEl.appendChild(imageWrap);
+        getAssistantImageController().enhance(imageWrap);
     }
 }
 
@@ -16193,6 +16197,27 @@ function appendMessageImages(parentEl, message) {
                     getAttachmentStateController().add(attachment);
                     renderAttachments();
                 }
+                break;
+            }
+            case 'messageAttachmentsPersisted': {
+                const sessionId = typeof message.sessionId === 'string' ? message.sessionId : '';
+                const messageId = typeof message.messageId === 'string' ? message.messageId : '';
+                const session = sessionId ? getSessionState(sessionId, false) : null;
+                const target = messageId ? session?.messagesById?.get(messageId) : null;
+                if (!session || !target || target.role !== 'user') break;
+                const attachments = Array.isArray(message.attachments)
+                    ? message.attachments.filter((attachment) => attachment && typeof attachment.path === 'string' && attachment.path)
+                    : [];
+                const images = Array.isArray(message.images)
+                    ? message.images.filter((image) => typeof image === 'string' && image)
+                    : [];
+                target.meta = {
+                    ...(target.meta || {}),
+                    attachments,
+                    images,
+                };
+                delete target.meta.imagesRedactedInSnapshot;
+                renderIfActive(sessionId, 'messageAttachmentsPersisted', { scroll: true });
                 break;
             }
             case 'attachmentError': {
