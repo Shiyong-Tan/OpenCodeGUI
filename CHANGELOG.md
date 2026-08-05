@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## 5.0.2 - 2026-08-05
+
+### Session continuity and assistant presentation
+
+- Fixed append and multi-generation assistant handoff so temporary, intermediate, and final responses keep the correct identity instead of merging, disappearing, flashing stale content, or producing duplicate bubbles after session switches.
+- Preserved the visible finalized assistant presentation across hydration and pruned superseded assistant stages from snapshots, keeping reloads and session switches aligned with the UI timeline.
+- Added cumulative assistant processing time beside the bubble and preserved its final value across finalization, hydration, and session switches.
+
+### Files, notebooks, images, and attachments
+
+- Made finalized assistant file references clickable in Markdown links, plain text, and inline code; files open in the editor, directories are revealed in Explorer, and line references remain supported.
+- Opened `.ipynb` links with VS Code's rendered Jupyter Notebook editor instead of the raw JSON text editor.
+- Persisted user-sent images and file attachments across session switches and window reloads without embedding large base64 payloads in snapshots.
+- Matched user image previews to the centered sizing used by assistant image previews.
+
+### Long-session scrolling and rendering
+
+- Stabilized virtualized scrolling while images load by preserving anchors through late layout changes and batching fine-grained anchor corrections.
+- Prevented background completion and near-tail recovery from pulling the viewport back to the bottom after the user intentionally scrolls upward.
+
+### Composer and quota feedback
+
+- Improved local word completion positioning and expanded the offline high-frequency English vocabulary while retaining workspace- and session-aware suggestions.
+- Added the same live rate-limit and token-quota refresh tooltip to the active stop button that is available on the send button.
+
 ## 5.0.1
 
 ### Cross-session active turns and append
