@@ -133,6 +133,7 @@ export function createHydrationStateController(options: HydrationStateController
     const empty = {
       missingIds: [],
       mergedIds: [],
+      canonicalizedGenerationIds: [],
       fieldNames: [],
       skippedArtifacts: { timeline: 0, backing: 0 },
       skippedCanonicalizedVolatile: { timeline: 0, backing: 0, fields: 0 },
@@ -163,6 +164,83 @@ export function createHydrationStateController(options: HydrationStateController
       preserved.appendFollowupIdentity?.appendUserMsgId,
       preserved.appendFollowupIdentity?.assistantMsgId,
     ].filter((id) => typeof id === 'string' && id.length));
+    const messageParentId = (message: any): string | null => {
+      const parentId = message?.parentId
+        || message?.parentID
+        || message?.meta?.parentId
+        || message?.meta?.parentID;
+      return typeof parentId === 'string' && parentId.length ? parentId : null;
+    };
+    const activePresentationId = [
+      preserved.currentTurnAssistantKey,
+      preserved.thinkingId,
+    ].find((id) => typeof id === 'string' && preserved.messagesById.get(id)?.role === 'assistant') || null;
+    const activeRootIds = new Set<string>();
+    for (const id of [preserved.lastTurnUserId, preserved.appendRootUserKey]) {
+      if (typeof id !== 'string' || !id.length) continue;
+      activeRootIds.add(id);
+      const canonicalId = resolveCanonicalId(session, preserved, id, preserved.messagesById.get(id));
+      if (canonicalId) activeRootIds.add(canonicalId);
+    }
+
+    // OpenCode may create several assistant records with the same user parent while a
+    // single turn moves through tool-call generations. The live UI deliberately keeps
+    // those records in one presentation bubble (`currentTurnAssistantKey`) and routes
+    // later text/meta into it. Hydration, however, contains only the newest backend
+    // record. Without this server-id-to-server-id reconciliation, restoring the live
+    // presentation adds the old rich bubble beside the newly hydrated plain bubble.
+    // Append follow-ups have their own explicit predecessor/successor contract, so keep
+    // this reconciliation limited to ordinary same-turn generations.
+    const canonicalizedGenerationIds: string[] = [];
+    if (preservedTurnIsActive && activePresentationId && !preserved.appendFollowupIdentity) {
+      const preservedPresentation = preserved.messagesById.get(activePresentationId);
+      const generationIds: string[] = (Array.isArray(session.timeline) ? session.timeline : []).filter((id: unknown): id is string => {
+        if (typeof id !== 'string' || id === activePresentationId) return false;
+        const message = session.messagesById.get(id);
+        if (message?.role !== 'assistant') return false;
+        if (id === preserved.currentTurnAssistantMsgId) return true;
+        const parentId = messageParentId(message);
+        return Boolean(parentId && activeRootIds.has(parentId));
+      });
+      if (generationIds.length) {
+        const generationIndexes = generationIds.map((id: string) => session.timeline.indexOf(id)).filter((index: number) => index >= 0);
+        const presentationIndex = generationIndexes.length ? Math.min(...generationIndexes) : session.timeline.length;
+        const hydratedGenerations = generationIds
+          .map((id: string) => session.messagesById.get(id))
+          .filter(Boolean);
+        const newestGeneration = hydratedGenerations[hydratedGenerations.length - 1];
+        const hydratedMeta = newestGeneration?.meta && typeof newestGeneration.meta === 'object'
+          ? newestGeneration.meta
+          : {};
+        const preservedMeta = preservedPresentation?.meta && typeof preservedPresentation.meta === 'object'
+          ? preservedPresentation.meta
+          : {};
+        const preservedText = typeof preservedPresentation?.text === 'string' ? preservedPresentation.text : '';
+        const hydratedText = typeof newestGeneration?.text === 'string' ? newestGeneration.text : '';
+        const keepLiveText = (Number.isFinite(preservedMeta.volatilePresentationRevision)
+          && preservedMeta.volatilePresentationRevision > 0)
+          || preservedText.length >= hydratedText.length;
+        session.messagesById.set(activePresentationId, {
+          ...(newestGeneration || {}),
+          ...cloneMessage(preservedPresentation),
+          id: activePresentationId,
+          text: keepLiveText ? preservedText : hydratedText,
+          meta: { ...hydratedMeta, ...preservedMeta },
+        });
+        session.timeline = session.timeline.filter((id: unknown) => typeof id === 'string' && !generationIds.includes(id) && id !== activePresentationId);
+        session.timeline.splice(Number.isFinite(presentationIndex) ? presentationIndex : session.timeline.length, 0, activePresentationId);
+        hydratedIds.add(activePresentationId);
+        hydratedBackingIds.add(activePresentationId);
+        for (const id of generationIds) {
+          session.messagesById.delete(id);
+          hydratedIds.delete(id);
+          hydratedBackingIds.delete(id);
+          session.serverIdToKey.set(id, activePresentationId);
+          canonicalizedGenerationIds.push(id);
+        }
+        activeMessageIds.add(activePresentationId);
+      }
+    }
     const activeProcessingStartedAt = preservedTurnIsActive
       ? [...activeMessageIds]
         .map((id) => preserved.messagesById.get(id))
@@ -349,6 +427,7 @@ export function createHydrationStateController(options: HydrationStateController
     return {
       missingIds,
       mergedIds: Array.from(new Set(mergedIds)),
+      canonicalizedGenerationIds,
       fieldNames: Array.from(new Set(fieldNames)),
       skippedArtifacts,
       skippedCanonicalizedVolatile,

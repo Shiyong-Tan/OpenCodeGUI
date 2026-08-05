@@ -15241,6 +15241,9 @@ function appendMessageImages(parentEl, message) {
                     const skippedCanonicalTimeline = preservedLive.skippedCanonicalizedVolatile?.timeline || 0;
                     const skippedCanonicalBacking = preservedLive.skippedCanonicalizedVolatile?.backing || 0;
                     const skippedCanonicalFields = preservedLive.skippedCanonicalizedVolatile?.fields || 0;
+                    const canonicalizedGenerationIds = Array.isArray(preservedLive.canonicalizedGenerationIds)
+                        ? preservedLive.canonicalizedGenerationIds
+                        : [];
                     const preservedLiveTurnResumeState = Boolean(
                         preservedHydrationState?.pendingAssistantUpgrade?.source === 'liveTurnResume' ||
                         Array.from(preservedHydrationState?.messagesById?.values?.() || []).some((item) => item?.meta?.liveTurnResume === true)
@@ -15260,13 +15263,15 @@ function appendMessageImages(parentEl, message) {
                             ]
                         );
                     }
-                    if (preservedLive.missingIds.length || preservedLive.mergedIds?.length || preservedLive.fieldNames.length || skippedTimelineArtifacts || skippedBackingArtifacts || skippedCanonicalTimeline || skippedCanonicalBacking || skippedCanonicalFields) {
+                    if (preservedLive.missingIds.length || preservedLive.mergedIds?.length || canonicalizedGenerationIds.length || preservedLive.fieldNames.length || skippedTimelineArtifacts || skippedBackingArtifacts || skippedCanonicalTimeline || skippedCanonicalBacking || skippedCanonicalFields) {
                         vscode.postMessage({
                             type: 'ui-debug',
                             payload: ['[WV][HYDRATE_PRESERVE_VOLATILE]',
                                 `sessionId=${sessionId}`,
                                 `preservedIds=${preservedLive.missingIds.length}`,
                                 `mergedIds=${preservedLive.mergedIds?.length || 0}`,
+                                `canonicalizedGenerations=${canonicalizedGenerationIds.length}`,
+                                `canonicalizedGenerationIds=[${formatTail(canonicalizedGenerationIds, 6)}]`,
                                 `skippedArtifacts=${skippedTimelineArtifacts + skippedBackingArtifacts}`,
                                 `skippedSnapshotChangeListTimeline=${skippedTimelineArtifacts}`,
                                 `skippedSnapshotChangeListBacking=${skippedBackingArtifacts}`,

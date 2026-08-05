@@ -265,6 +265,61 @@ describe('hydration volatile state controller', () => {
     expect(result.mergedIds).toEqual(['msg_root', 'msg_assistant']);
   });
 
+  test('canonicalizes a newer same-parent backend generation into the live rich presentation', () => {
+    const before: any = createSessionState();
+    before.timeline = ['msg_root', 'msg_live_owner'];
+    before.messagesById.set('msg_root', {
+      id: 'msg_root', role: 'user', text: 'continue', meta: {},
+    });
+    before.messagesById.set('msg_live_owner', {
+      id: 'msg_live_owner',
+      role: 'assistant',
+      text: 'same visible text',
+      meta: {
+        parentID: 'msg_root',
+        isThinking: true,
+        volatilePresentationRevision: 3,
+        subagents: [{ sessionId: 'agent-a', state: 'running' }],
+      },
+    });
+    before.lastTurnUserId = 'msg_root';
+    before.currentTurnAssistantKey = 'msg_live_owner';
+    before.currentTurnAssistantMsgId = 'msg_new_generation';
+    before.thinkingId = 'msg_live_owner';
+    before.backendTurnInFlight = true;
+    before.turnFullyFinalized = false;
+    const preserved = controller.capture(before);
+
+    const hydrated: any = createSessionState();
+    hydrated.timeline = ['msg_root', 'msg_new_generation'];
+    hydrated.messagesById.set('msg_root', {
+      id: 'msg_root', role: 'user', text: 'continue', meta: {},
+    });
+    hydrated.messagesById.set('msg_new_generation', {
+      id: 'msg_new_generation',
+      role: 'assistant',
+      text: 'same visible text',
+      meta: { parentID: 'msg_root', timeCompleted: 2_000 },
+    });
+
+    const result = controller.restore(hydrated, preserved);
+
+    expect(hydrated.timeline).toEqual(['msg_root', 'msg_live_owner']);
+    expect(hydrated.messagesById.has('msg_new_generation')).toBe(false);
+    expect(hydrated.messagesById.get('msg_live_owner')).toMatchObject({
+      text: 'same visible text',
+      meta: {
+        parentID: 'msg_root',
+        isThinking: true,
+        volatilePresentationRevision: 3,
+        subagents: [{ sessionId: 'agent-a', state: 'running' }],
+        timeCompleted: 2_000,
+      },
+    });
+    expect(hydrated.serverIdToKey.get('msg_new_generation')).toBe('msg_live_owner');
+    expect(result.canonicalizedGenerationIds).toEqual(['msg_new_generation']);
+  });
+
   test('restores the earliest active-turn timer onto the current append presentation', () => {
     const before: any = createSessionState();
     before.timeline = ['msg_old', 'msg_current'];
