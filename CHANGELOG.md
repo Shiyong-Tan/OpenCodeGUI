@@ -27,6 +27,7 @@ All notable changes to this project will be documented in this file.
 
 - Improved local word completion positioning and expanded the offline high-frequency English vocabulary while retaining workspace- and session-aware suggestions.
 - Added the same live rate-limit and token-quota refresh tooltip to the active stop button that is available on the send button.
+- Preserved paragraph boundaries when quoting mixed prose and display math so quoted formulas continue to render through KaTeX.
 
 ## 5.0.1
 

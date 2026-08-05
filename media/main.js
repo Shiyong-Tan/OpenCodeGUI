@@ -121,6 +121,37 @@ if (window.texmath && window.katex) {
     });
 }
 
+function formatQuoteMarkdown(text) {
+    const normalized = String(text || '').replace(/\r\n?/g, '\n').trim();
+    if (!normalized) return '';
+    const hasMarkdownMath = /\$\$[\s\S]*?\$\$|\$[^$\n]+\$|\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\]/.test(normalized);
+    const prepared = hasMarkdownMath
+        ? normalized.replace(
+            /[ \t]*(\$\$[\s\S]*?\$\$|\\\[[\s\S]*?\\\])[ \t]*/g,
+            (_match, formula) => {
+                const display = String(formula).trim();
+                const usesDollars = display.startsWith('$$');
+                const body = display.slice(2, -2).trim().replace(/\s*\n\s*/g, ' ');
+                return `\n\n${usesDollars ? '$$' : '\\['}${body}${usesDollars ? '$$' : '\\]'}\n\n`;
+            }
+        )
+        : normalized;
+    const quoted = [];
+    let previousBlank = false;
+    for (const rawLine of prepared.split('\n')) {
+        const line = rawLine.trim();
+        if (!line) {
+            if (quoted.length > 0 && !previousBlank) quoted.push('>');
+            previousBlank = true;
+            continue;
+        }
+        quoted.push(hasMarkdownMath ? `> ${line}` : `> *${line.replace(/\*/g, '\\*')}*`);
+        previousBlank = false;
+    }
+    while (quoted[quoted.length - 1] === '>') quoted.pop();
+    return quoted.join('\n');
+}
+
 md.renderer.rules.table_open = function (tokens, idx, options, env, self) {
     return '<div class="md-table-wrap"><table' + self.renderAttrs(tokens[idx]) + '>';
 };
@@ -6265,14 +6296,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function getQuoteMarkdownFromSelection(selection) {
         const text = getSelectionMarkdownText(selection);
-        if (!text) return '';
-        const looksLikeMarkdownMath = /\$[^$]+\$|\\\(|\\\[/.test(text);
-        return text
-            .split(/\r?\n/)
-            .map((line) => line.trim())
-            .filter(Boolean)
-            .map((line) => looksLikeMarkdownMath ? `> ${line}` : `> *${line.replace(/\*/g, '\\*')}*`)
-            .join('\n');
+        return formatQuoteMarkdown(text);
     }
 
     function showQuoteSelectionButton() {
