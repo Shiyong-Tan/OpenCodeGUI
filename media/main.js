@@ -325,6 +325,28 @@ const sessionOverlayStore = createSessionOverlayStore({
     questionIdentity: (question) => question?.callId || '',
     permissionIdentity: (permission) => permission?.permissionId || permission?.requestId || ''
 });
+
+function syncInteractiveProcessingPause(sessionId, reason, now = Date.now()) {
+    if (!sessionId) return false;
+    const session = getSessionState(sessionId, false);
+    if (!session) return false;
+    const assistantKey = session.currentTurnAssistantKey || session.thinkingId || '';
+    const assistant = assistantKey ? session.messagesById?.get?.(assistantKey) : null;
+    if (assistant?.role !== 'assistant' || assistant.meta?.isThinking !== true) return false;
+    const result = sessionOverlayStore.syncProcessingPause(sessionId, assistant, now);
+    const shouldPause = result.paused;
+    const changed = result.changed;
+    if (!changed) return false;
+    for (const element of document.querySelectorAll('.message-processing-time')) {
+        if (element?.dataset?.messageId !== assistantKey) continue;
+        element._syncProcessingPause?.(assistant.meta || {}, now);
+    }
+    vscode.postMessage({
+        type: 'ui-debug',
+        payload: ['processing-time', shouldPause ? 'paused' : 'resumed', `sessionId=${sessionId}`, `assistantKey=${assistantKey}`, `reason=${reason}`]
+    });
+    return true;
+}
 const createSessionConflictStore = window.__ocContinuation?.createSessionConflictStore;
 if (typeof createSessionConflictStore !== 'function') {
     throw new Error('Session conflict store is unavailable');
@@ -6634,28 +6656,6 @@ const renderMessageElementHost = Object.freeze({
 
 function renderMessageElement(message, renderedSet) {
     return window.__ocRendering.renderMessageElement(renderMessageElementHost, message, renderedSet);
-}
-
-function syncInteractiveProcessingPause(sessionId, reason, now = Date.now()) {
-    if (!sessionId) return false;
-    const session = getSessionState(sessionId, false);
-    if (!session) return false;
-    const assistantKey = session.currentTurnAssistantKey || session.thinkingId || '';
-    const assistant = assistantKey ? session.messagesById?.get?.(assistantKey) : null;
-    if (assistant?.role !== 'assistant' || assistant.meta?.isThinking !== true) return false;
-    const result = sessionOverlayStore.syncProcessingPause(sessionId, assistant, now);
-    const shouldPause = result.paused;
-    const changed = result.changed;
-    if (!changed) return false;
-    for (const element of document.querySelectorAll('.message-processing-time')) {
-        if (element?.dataset?.messageId !== assistantKey) continue;
-        element._syncProcessingPause?.(assistant.meta || {}, now);
-    }
-    vscode.postMessage({
-        type: 'ui-debug',
-        payload: ['processing-time', shouldPause ? 'paused' : 'resumed', `sessionId=${sessionId}`, `assistantKey=${assistantKey}`, `reason=${reason}`]
-    });
-    return true;
 }
 
 function updateLiveAssistantProcessingTimes(now = Date.now()) {

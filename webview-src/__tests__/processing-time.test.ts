@@ -6,6 +6,7 @@ import {
 } from '../rendering/processing-time';
 import fs from 'fs';
 import path from 'path';
+import * as ts from 'typescript';
 
 describe('assistant processing time', () => {
   test('places the timer beside the assistant bubble and bottom-aligns the row', () => {
@@ -18,6 +19,15 @@ describe('assistant processing time', () => {
     expect(css).toMatch(/\.message-row\.bot:has\([^)]*message-processing-time\)[^{]*\{[^}]*align-items:\s*flex-end/s);
     expect(main).toContain("messageElement.querySelector?.(':scope > .message-processing-time')");
     expect(main).toContain('if (processingTimeElement) row.appendChild(processingTimeElement);');
+  });
+
+  test('keeps interactive pause synchronization callable by global card handlers', () => {
+    const main = fs.readFileSync(path.join(process.cwd(), 'media', 'main.js'), 'utf8');
+    const source = ts.createSourceFile('main.js', main, ts.ScriptTarget.ES2020, true, ts.ScriptKind.JS);
+    const topLevelFunctions = source.statements
+      .filter(ts.isFunctionDeclaration)
+      .map((statement) => statement.name?.text);
+    expect(topLevelFunctions).toContain('syncInteractiveProcessingPause');
   });
 
   test.each([
