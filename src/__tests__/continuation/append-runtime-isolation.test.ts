@@ -319,7 +319,8 @@ function loadAppendPresentationHarness() {
     vm.runInContext(`${source.slice(stableStart, stableEnd)}
 this.buildAppendChildPresentationIndex = buildAppendChildPresentationIndex;
 this.isAppendChildTopLevelUser = isAppendChildTopLevelUser;
-this.isAppendChainTopLevelAssistantHidden = isAppendChainTopLevelAssistantHidden;`, context);
+this.isAppendChainTopLevelAssistantHidden = isAppendChainTopLevelAssistantHidden;
+this.collectAppendPresentationRetiredIds = collectAppendPresentationRetiredIds;`, context);
     return { context, posts };
 }
 
@@ -1551,6 +1552,107 @@ describe('append runtime isolation', () => {
         expect(context.isAppendChainTopLevelAssistantHidden(
             session, session.messagesById.get('msg_predecessor'), 'msg_predecessor', appendIndex,
         )).toBe(true);
+    });
+
+    it('keeps every retired append presentation hidden across three assistant generations', () => {
+        const { context } = loadAppendPresentationHarness();
+        const generationOne = {
+            id: 'msg_generation_one',
+            role: 'assistant',
+            text: 'first temporary presentation',
+            meta: {},
+        };
+        const generationTwo = {
+            id: 'msg_generation_two',
+            role: 'assistant',
+            text: 'second temporary presentation',
+            meta: {
+                appendPresentationPredecessorId: generationOne.id,
+                appendPresentationRetiredIds: [generationOne.id],
+            },
+        };
+        const generationThree = {
+            id: 'msg_generation_three',
+            role: 'assistant',
+            text: 'third temporary presentation',
+            meta: {
+                appendPresentationPredecessorId: generationTwo.id,
+                appendPresentationRetiredIds: context.collectAppendPresentationRetiredIds(
+                    generationTwo,
+                    generationTwo.id,
+                    'msg_current',
+                ),
+            },
+        };
+        const current = {
+            id: 'msg_current',
+            role: 'assistant',
+            text: 'current presentation',
+            parentId: 'msg_append',
+            meta: {
+                appendPresentationPredecessorId: generationThree.id,
+                appendPresentationRetiredIds: context.collectAppendPresentationRetiredIds(
+                    generationThree,
+                    generationThree.id,
+                    'msg_current',
+                ),
+            },
+        };
+        const session = {
+            messagesById: new Map<string, any>([
+                ['msg_root', {
+                    id: 'msg_root',
+                    role: 'user',
+                    text: 'root prompt',
+                    meta: {
+                        appendedPrompts: [{
+                            clientMessageId: 'append-client',
+                            appendUserMsgId: 'msg_append',
+                            text: 'follow up',
+                            status: 'received',
+                        }],
+                    },
+                }],
+                [generationOne.id, generationOne],
+                [generationTwo.id, generationTwo],
+                [generationThree.id, generationThree],
+                ['msg_append', { id: 'msg_append', role: 'user', text: 'follow up', meta: {} }],
+                [current.id, current],
+            ]),
+            timeline: [
+                'msg_root', generationOne.id, generationTwo.id, generationThree.id, 'msg_append', current.id,
+            ],
+            clientKeyToServerId: new Map<string, string>(),
+            serverIdToClientKey: new Map<string, string>(),
+            backendTurnInFlight: true,
+            turnFullyFinalized: false,
+            canceledActiveTurn: false,
+            currentTurnAssistantKey: current.id,
+            currentTurnAssistantMsgId: current.id,
+            thinkingId: current.id,
+            pendingAssistantUpgrade: null,
+            appendFollowupIdentity: null,
+        };
+        const appendIndex = context.buildAppendChildPresentationIndex(session);
+
+        for (const retired of [generationOne, generationTwo, generationThree]) {
+            expect(context.isAppendChainTopLevelAssistantHidden(
+                session, retired, retired.id, appendIndex,
+            )).toBe(true);
+        }
+        expect(context.isAppendChainTopLevelAssistantHidden(
+            session, current, current.id, appendIndex,
+        )).toBe(false);
+
+        // The retirement metadata is durable presentation state. It must still
+        // suppress old generations after finalization or a virtual-window rebuild.
+        session.backendTurnInFlight = false;
+        session.turnFullyFinalized = true;
+        for (const retired of [generationOne, generationTwo, generationThree]) {
+            expect(context.isAppendChainTopLevelAssistantHidden(
+                session, retired, retired.id, appendIndex,
+            )).toBe(true);
+        }
     });
 
     it('does not hide a final successor through a preserved canonical predecessor alias', () => {

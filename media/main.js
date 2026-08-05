@@ -2881,6 +2881,29 @@ function addAppendPredecessorHiddenKey(session, targetSet, key) {
     }
 }
 
+function getAppendPresentationRetiredIds(message) {
+    if (!message || message.role !== 'assistant') return [];
+    const retired = Array.isArray(message.meta?.appendPresentationRetiredIds)
+        ? message.meta.appendPresentationRetiredIds
+        : [];
+    const predecessorId = message.meta?.appendPresentationPredecessorId;
+    const ids = new Set();
+    for (const id of retired) {
+        if (typeof id === 'string' && id.length) ids.add(id);
+    }
+    if (typeof predecessorId === 'string' && predecessorId.length) ids.add(predecessorId);
+    return Array.from(ids);
+}
+
+function collectAppendPresentationRetiredIds(predecessor, predecessorPresentationId, successorId = '') {
+    const ids = new Set(getAppendPresentationRetiredIds(predecessor));
+    if (typeof predecessorPresentationId === 'string' && predecessorPresentationId.length) {
+        ids.add(predecessorPresentationId);
+    }
+    if (typeof successorId === 'string' && successorId.length) ids.delete(successorId);
+    return Array.from(ids);
+}
+
 function buildAppendChainAssistantHiddenKeys(session, hiddenParentKeys) {
     const hiddenAssistantKeys = new Set();
     if (!session || !(session.messagesById instanceof Map) || !(hiddenParentKeys instanceof Set) || hiddenParentKeys.size === 0) {
@@ -2946,9 +2969,9 @@ function buildAppendChildPresentationIndex(session) {
     const hiddenAssistantKeys = buildAppendChainAssistantHiddenKeys(session, hiddenAssistantParentKeys);
     for (const message of session.messagesById.values()) {
         if (!message || message.role !== 'assistant') continue;
-        const predecessorPresentationId = message.meta?.appendPresentationPredecessorId;
-        if (typeof predecessorPresentationId !== 'string' || !predecessorPresentationId.length) continue;
-        addAppendPredecessorHiddenKey(session, hiddenAssistantKeys, predecessorPresentationId);
+        for (const retiredPresentationId of getAppendPresentationRetiredIds(message)) {
+            addAppendPredecessorHiddenKey(session, hiddenAssistantKeys, retiredPresentationId);
+        }
     }
     index.appendChainAssistantHiddenKeys = hiddenAssistantKeys;
 
@@ -15553,6 +15576,16 @@ function appendMessageImages(parentEl, message) {
                             // chatDone, but final and hydrated renders must still
                             // know that this predecessor is not a second bubble.
                             appendPresentationPredecessorId: predecessorPresentationId,
+                            // Every assistant generation remains in the backing
+                            // timeline so virtualization can remount it later.
+                            // Carry the complete retirement chain forward; a
+                            // one-hop predecessor pointer cannot keep generation
+                            // one hidden after generation three takes ownership.
+                            appendPresentationRetiredIds: collectAppendPresentationRetiredIds(
+                                predecessor,
+                                predecessorPresentationId,
+                                followup.assistantMsgId
+                            ),
                             appendPresentationGeneration: followup.generation
                         }
                     });
