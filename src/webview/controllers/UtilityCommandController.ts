@@ -642,6 +642,24 @@ export class UtilityCommandController {
                 );
                 return;
             }
+            if (pathModule.extname(absPath).toLowerCase() === '.ipynb') {
+                const notebookUri = vscode.Uri.file(absPath);
+                try {
+                    await vscode.commands.executeCommand(
+                        'vscode.openWith',
+                        notebookUri,
+                        'jupyter-notebook'
+                    );
+                } catch {
+                    // Preserve usability when the Jupyter notebook editor is
+                    // unavailable and let VS Code choose another registered editor.
+                    await vscode.commands.executeCommand('vscode.open', notebookUri, { preview: true });
+                }
+                this.host.log(
+                    `EXT: openFileAtLocation | path=${rawPath} | resolvedAbs=${absPath} | opened=notebook`
+                );
+                return;
+            }
             if (absPath.endsWith('.md')) {
                 await vscode.commands.executeCommand('markdown.showPreview', vscode.Uri.file(absPath));
                 this.host.log(
