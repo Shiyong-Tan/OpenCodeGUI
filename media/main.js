@@ -3694,6 +3694,48 @@ function replaceKeyEverywhere(oldId, newId, sessionId, options = {}) {
 
 // Removed obsolete freezeSegments function - new system uses segmentsByNoticeKey
 
+function resolveActiveThinkingOwner(session) {
+    const turnIsActive = Boolean(
+        session
+        && session.cancelledTurn !== true
+        && session.canceledActiveTurn !== true
+        && (session.turnLifecycle?.phase === 'active'
+            || (!session.turnLifecycle?.phase
+                && session.backendTurnInFlight === true
+                && session.turnFullyFinalized === false))
+    );
+    if (!turnIsActive) return null;
+
+    const followup = session.appendFollowupIdentity;
+    if (followup?.kind === 'append-followup' && followup.mode === 'same-turn-handoff') {
+        const successor = session.messagesById.get(followup.assistantMsgId);
+        const successorHasPresentation = Boolean(
+            successor?.role === 'assistant'
+            && ((typeof successor.text === 'string' && successor.text.trim() && successor.text !== 'Thinking...')
+                || (typeof successor.meta?.statusText === 'string' && successor.meta.statusText.trim())
+                || (Array.isArray(successor.meta?.subagents) && successor.meta.subagents.length)
+                || (Array.isArray(successor.meta?.todos) && successor.meta.todos.length))
+        );
+        if (successorHasPresentation) return successor;
+
+        const predecessorId = followup.predecessorPresentationAssistantId
+            || followup.predecessorAssistantMsgId;
+        const predecessor = session.messagesById.get(predecessorId);
+        if (predecessor?.role === 'assistant') return predecessor;
+        if (successor?.role === 'assistant') return successor;
+    }
+
+    for (const id of [
+        session.currentTurnAssistantKey,
+        session.currentTurnAssistantMsgId,
+        session.thinkingId
+    ]) {
+        const message = typeof id === 'string' ? session.messagesById.get(id) : null;
+        if (message?.role === 'assistant') return message;
+    }
+    return null;
+}
+
 function ensureThinkingUnique(session, source) {
     const thinkingMessages = [];
     for (const msg of session.messagesById.values()) {
@@ -3702,18 +3744,29 @@ function ensureThinkingUnique(session, source) {
         }
     }
 
+    // Message creation order is not a reliable ownership signal after an
+    // append handoff or hydration. The active turn's explicit presentation
+    // owner is authoritative and may need to be re-armed from a stale
+    // snapshot before duplicate thinking flags are cleared.
+    const explicitOwner = resolveActiveThinkingOwner(session);
+    if (explicitOwner) {
+        explicitOwner.meta = { ...(explicitOwner.meta || {}), isThinking: true };
+        if (!thinkingMessages.includes(explicitOwner)) thinkingMessages.push(explicitOwner);
+    }
+
     if (!thinkingMessages.length) {
         session.thinkingId = null;
         return;
     }
 
-    thinkingMessages.sort((a, b) => b.order - a.order);
-    const winner = thinkingMessages[0];
-    for (let i = 1; i < thinkingMessages.length; i++) {
-        thinkingMessages[i].meta.isThinking = false;
+    const winner = explicitOwner || thinkingMessages.sort((a, b) => b.order - a.order)[0];
+    for (const message of thinkingMessages) {
+        if (message !== winner) message.meta.isThinking = false;
     }
     session.thinkingId = winner.id;
-    console.warn(`[Thinking] invariant fix (${source}): kept=${winner.id} cleared=${thinkingMessages.length - 1}`);
+    if (thinkingMessages.length > 1) {
+        console.warn(`[Thinking] invariant fix (${source}): kept=${winner.id} cleared=${thinkingMessages.length - 1}`);
+    }
 }
 
 // Removed obsolete repairSegmentOverlap function - new system uses segmentsByNoticeKey
@@ -15224,6 +15277,7 @@ function appendMessageImages(parentEl, message) {
                             })
                         }
                     );
+                    assertInvariants(sessionId, 'sessionData-hydrate');
                     refreshSessionCompletionLexicon(sessionId);
                     if (hydrationApplication.snapshotNoticeId) {
                         vscode.postMessage({
