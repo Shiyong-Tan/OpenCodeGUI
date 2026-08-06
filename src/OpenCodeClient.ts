@@ -638,6 +638,11 @@ export class OpenCodeClient {
         const retainedTurnStartedAtBySession = new Map<string, number>();
         const retainedTurnProcessingPausedAtBySession = new Map<string, number>();
         const retainedTurnProcessingPausedMsBySession = new Map<string, number>();
+        const retainedFinalizingMsgIdBySession = new Map<string, string>();
+        const retainedTurnFinalMsgIdBySession = new Map<string, string>();
+        const retainedTurnFinalAtBySession = new Map<string, number>();
+        const retainedTurnFinalSourceBySession = new Map<string, EventSource>();
+        const retainedTurnFinalResolvedBySession = new Set<string>();
         if (preserveInFlightSessionIds?.size) {
             for (const sessionId of preserveInFlightSessionIds) {
                 if (typeof sessionId !== 'string' || !sessionId) continue;
@@ -688,6 +693,25 @@ export class OpenCodeClient {
                 const pausedMs = this.turnProcessingPausedMsBySession.get(sessionId);
                 if (typeof pausedMs === 'number' && Number.isFinite(pausedMs) && pausedMs >= 0) {
                     retainedTurnProcessingPausedMsBySession.set(sessionId, pausedMs);
+                }
+                const finalizingMsgId = this.finalizingMsgIdBySession.get(sessionId);
+                if (finalizingMsgId) {
+                    retainedFinalizingMsgIdBySession.set(sessionId, finalizingMsgId);
+                }
+                const turnFinalMsgId = this.turnFinalMsgIdBySession.get(sessionId);
+                if (turnFinalMsgId) {
+                    retainedTurnFinalMsgIdBySession.set(sessionId, turnFinalMsgId);
+                }
+                const turnFinalAt = this.turnFinalAtBySession.get(sessionId);
+                if (typeof turnFinalAt === 'number' && Number.isFinite(turnFinalAt) && turnFinalAt > 0) {
+                    retainedTurnFinalAtBySession.set(sessionId, turnFinalAt);
+                }
+                const turnFinalSource = this.turnFinalSourceBySession.get(sessionId);
+                if (turnFinalSource) {
+                    retainedTurnFinalSourceBySession.set(sessionId, turnFinalSource);
+                }
+                if (this.turnFinalResolvedBySession.has(sessionId)) {
+                    retainedTurnFinalResolvedBySession.add(sessionId);
                 }
             }
             for (const messageId of retainedAssistantMessageIds) {
@@ -867,6 +891,35 @@ export class OpenCodeClient {
             if (pausedMs !== undefined) {
                 this.turnProcessingPausedMsBySession.set(sessionId, pausedMs);
                 restored = true;
+            }
+            const finalizingMsgId = retainedFinalizingMsgIdBySession.get(sessionId);
+            if (finalizingMsgId) {
+                this.finalizingMsgIdBySession.set(sessionId, finalizingMsgId);
+                restored = true;
+            }
+            const turnFinalMsgId = retainedTurnFinalMsgIdBySession.get(sessionId);
+            if (turnFinalMsgId) {
+                this.turnFinalMsgIdBySession.set(sessionId, turnFinalMsgId);
+                restored = true;
+            }
+            const turnFinalAt = retainedTurnFinalAtBySession.get(sessionId);
+            if (turnFinalAt !== undefined) {
+                this.turnFinalAtBySession.set(sessionId, turnFinalAt);
+                restored = true;
+            }
+            const turnFinalSource = retainedTurnFinalSourceBySession.get(sessionId);
+            if (turnFinalSource) {
+                this.turnFinalSourceBySession.set(sessionId, turnFinalSource);
+                restored = true;
+            }
+            if (retainedTurnFinalResolvedBySession.has(sessionId)) {
+                this.turnFinalResolvedBySession.add(sessionId);
+                restored = true;
+            } else if (finalizingMsgId && turnFinalAt !== undefined) {
+                // Session selection resets all settle timers. Re-arm the accepted
+                // final so a switch during the quiet window cannot strand the
+                // turn after the one-shot finish=stop event has already passed.
+                this.scheduleTurnFinalQuiet(sessionId);
             }
             if (restored) retainedClientTurnBindingSessions += 1;
         }

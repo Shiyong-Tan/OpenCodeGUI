@@ -905,6 +905,31 @@ describe('append runtime isolation', () => {
         expect(client.turnFinalResolvedBySession.has('ses_keep')).toBe(true);
     });
 
+    it('retains and resumes an accepted final across a session-switch reset', async () => {
+        const client = new OpenCodeClient() as any;
+        createdClients.push(client as OpenCodeClient);
+
+        client.startTurn('ses_keep', 'local-user-keep');
+        client.turnStateBySession.get('ses_keep').assistantMsgId = 'msg_final_keep';
+        client.currentTurnAssistantMsgIdBySession.set('ses_keep', 'msg_final_keep');
+        client.assistantTextLengths.set('msg_final_keep', 2);
+        client.markTurnFinal('ses_keep', 'msg_final_keep', 'sse');
+
+        expect(client.finalizingMsgIdBySession.get('ses_keep')).toBe('msg_final_keep');
+        expect(client.turnFinalAtBySession.has('ses_keep')).toBe(true);
+
+        client.resetSessionState({ preserveInFlightSessionIds: new Set(['ses_keep']) });
+
+        expect(client.finalizingMsgIdBySession.get('ses_keep')).toBe('msg_final_keep');
+        expect(client.turnFinalMsgIdBySession.get('ses_keep')).toBe('msg_final_keep');
+        expect(client.turnFinalSourceBySession.get('ses_keep')).toBe('sse');
+        expect(client.turnFinalAtBySession.has('ses_keep')).toBe(true);
+        expect(client.turnFinalQuietTimersBySession.has('ses_keep')).toBe(true);
+
+        await client.runResyncSettleCheck('ses_keep', 'sse-drain');
+        expect(client.turnFinalResolvedBySession.has('ses_keep')).toBe(true);
+    });
+
     it('retains only allowlisted provider bindings for pre-reset send-in-flight sessions', () => {
         const provider = createProvider();
         provider.client.resetSessionState = jest.fn();
