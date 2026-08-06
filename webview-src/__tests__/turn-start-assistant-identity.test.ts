@@ -5,10 +5,14 @@ import * as vm from 'vm';
 const main = fs.readFileSync(path.resolve(__dirname, '../../media/main.js'), 'utf8');
 
 function extractApplyPromptToSession(): string {
+  const clearStart = main.indexOf('function clearTransientAppendFollowupIdentity(');
+  const clearEnd = main.indexOf('function resolveAppendPredecessorPresentation(', clearStart);
   const start = main.indexOf('function applyPromptToSession(');
   const end = main.indexOf('function canAppendToMessage(', start);
-  if (start < 0 || end < 0) throw new Error('applyPromptToSession boundary not found');
-  return main.slice(start, end);
+  if (clearStart < 0 || clearEnd < 0 || start < 0 || end < 0) {
+    throw new Error('applyPromptToSession boundary not found');
+  }
+  return `${main.slice(clearStart, clearEnd)}\n${main.slice(start, end)}`;
 }
 
 describe('new turn assistant identity', () => {
@@ -24,6 +28,12 @@ describe('new turn assistant identity', () => {
       thinkingId: staleAssistant.id,
       currentTurnAssistantKey: null,
       currentTurnAssistantMsgId: null,
+      appendFollowupIdentity: {
+        kind: 'append-followup',
+        mode: 'same-turn-handoff',
+        generation: 4,
+        assistantMsgId: 'msg_previous_final',
+      },
       seenDiffKeys: new Set(),
       assistantUpgradeSeen: new Set(),
     };
@@ -57,6 +67,7 @@ describe('new turn assistant identity', () => {
 
     expect(session.thinkingId).toBe('tmp:new-turn');
     expect(session.currentTurnAssistantKey).toBe('tmp:new-turn');
+    expect(session.appendFollowupIdentity).toBeNull();
     expect(session.messagesById.get('tmp:new-turn')).toEqual(expect.objectContaining({
       role: 'assistant',
       meta: expect.objectContaining({ parentClientMessageId: 'local-new-user' }),

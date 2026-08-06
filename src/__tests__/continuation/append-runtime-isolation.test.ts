@@ -1781,6 +1781,53 @@ describe('append runtime isolation', () => {
         expect(successor.meta.isThinking).toBe(false);
     });
 
+    it('clears a transient append owner when chatDone resolves to a later assistant generation', () => {
+        const { context, sessions } = loadAppendChatDoneHarness();
+        const terminal = {
+            id: 'msg_terminal',
+            role: 'assistant',
+            text: 'final answer',
+            meta: { isThinking: true, statusText: '' },
+        };
+        const session = {
+            messagesById: new Map<string, any>([['msg_terminal', terminal]]),
+            timeline: ['msg_terminal'],
+            thinkingId: 'msg_terminal',
+            currentTurnAssistantKey: 'msg_terminal',
+            currentTurnAssistantMsgId: 'msg_terminal',
+            appendFollowupIdentity: {
+                kind: 'append-followup',
+                mode: 'same-turn-handoff',
+                generation: 6,
+                assistantMsgId: 'msg_append_successor',
+                predecessorAssistantMsgId: 'msg_append_predecessor',
+            },
+            backendTurnInFlight: true,
+            turnFullyFinalized: false,
+        };
+        sessions.set('ses_A', session);
+
+        context.handleChatDone('ses_A', { lastAssistantMsgId: 'msg_terminal' });
+
+        expect(session.appendFollowupIdentity).toBeNull();
+        expect(terminal.meta.isThinking).toBe(false);
+    });
+
+    it('clears a stale append owner before a normal prompt starts its thinking presentation', () => {
+        const source = fs.readFileSync(path.join(__dirname, '../../../media/main.js'), 'utf8');
+        const promptStart = source.indexOf('function applyPromptToSession');
+        const promptEnd = source.indexOf('function canAppendToMessage', promptStart);
+        const promptBlock = source.slice(promptStart, promptEnd);
+
+        const clearIndex = promptBlock.indexOf("clearTransientAppendFollowupIdentity(sessionId, session, 'new-normal-turn')");
+        const lifecycleIndex = promptBlock.indexOf('turnLifecycleController.start(session)');
+        const invariantIndex = promptBlock.indexOf("assertInvariants(sessionId, 'sendPrompt')");
+
+        expect(clearIndex).toBeGreaterThanOrEqual(0);
+        expect(clearIndex).toBeLessThan(lifecycleIndex);
+        expect(clearIndex).toBeLessThan(invariantIndex);
+    });
+
     it('uses the extension-owned turn timestamps when finalizing the live assistant presentation', () => {
         const { context, sessions } = loadAppendChatDoneHarness();
         const assistant: any = {

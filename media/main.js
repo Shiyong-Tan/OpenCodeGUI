@@ -2584,6 +2584,23 @@ function getAppendPredecessorPresentationId(followup) {
         : '';
 }
 
+function clearTransientAppendFollowupIdentity(sessionId, session, reason) {
+    const followup = session?.appendFollowupIdentity;
+    if (!followup || followup.kind !== 'append-followup') return false;
+    session.appendFollowupIdentity = null;
+    vscode.postMessage({
+        type: 'ui-debug',
+        payload: [
+            '[WV][APPEND_IDENTITY_CLEAR]',
+            `sessionId=${sessionId || 'null'}`,
+            `reason=${reason || 'unknown'}`,
+            `generation=${followup.generation ?? 'null'}`,
+            `assistantMsgId=${followup.assistantMsgId || 'null'}`
+        ]
+    });
+    return true;
+}
+
 function resolveAppendPredecessorPresentation(session, followup) {
     const requestedId = typeof followup?.predecessorAssistantMsgId === 'string'
         ? followup.predecessorAssistantMsgId
@@ -13123,6 +13140,12 @@ function shouldHideDcpUiMessage(message) {
 
 function applyPromptToSession(sessionId, payload) {
     const session = getSessionState(sessionId, true);
+    // A normal prompt starts a new turn and cannot be owned by an append
+    // handoff from the preceding turn. Clear that transient owner before the
+    // new thinking presentation is created; otherwise ensureThinkingUnique()
+    // can re-arm the retired append assistant and demote the new bubble to a
+    // final-looking presentation.
+    clearTransientAppendFollowupIdentity(sessionId, session, 'new-normal-turn');
     session.cancelledTurn = false;
     session.canceledActiveTurn = false;
     session.activeTurnOpId = payload.opId || null;
@@ -13695,8 +13718,11 @@ function handleChatDone(sessionId, message) {
         }
     }
     const appendItemsChanged = normalizeSessionAppendItemsForFinalize(session);
-    if (followup && followup.assistantMsgId === resolvedFinal) {
-        session.appendFollowupIdentity = null;
+    if (resolvedFinal && followup) {
+        // The terminal assistant can be a later OpenCode generation than the
+        // assistant that initiated the append handoff. A terminal chatDone
+        // closes the whole handoff, not only an exact assistant-id match.
+        clearTransientAppendFollowupIdentity(sessionId, session, 'chatDone-terminal');
     }
     if (appendItemsChanged) {
         syncAppendSnapshotMetadata(sessionId, 'chatDone-finalize');
