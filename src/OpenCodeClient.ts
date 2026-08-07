@@ -1150,15 +1150,20 @@ export class OpenCodeClient {
         await new Promise((resolve) => setTimeout(resolve, ms));
     }
 
-    public async waitForTurnAssistantMsgId(sessionId: string, pollEveryMs = 500): Promise<string> {
-        const pollMs = Math.max(100, Number.isFinite(pollEveryMs) ? pollEveryMs : 500);
-        while (true) {
+    public async waitForTurnAssistantMsgId(sessionId: string, timeoutMs = 500): Promise<string | undefined> {
+        const timeout = Math.max(0, Number.isFinite(timeoutMs) ? timeoutMs : 500);
+        const deadline = Date.now() + timeout;
+        do {
             const assistantMsgId = this.getTurnAssistantMsgId(sessionId);
             if (typeof assistantMsgId === 'string' && assistantMsgId.startsWith('msg_')) {
                 return assistantMsgId;
             }
-            await this.delay(pollMs);
-        }
+            const remaining = deadline - Date.now();
+            if (remaining <= 0) break;
+            await this.delay(Math.min(50, remaining));
+        } while (Date.now() <= deadline);
+        this.logUiDebug(`EXT: chatdone.guard.timeout | sessionId=${sessionId} | timeoutMs=${timeout}`);
+        return undefined;
     }
 
     public async waitForSessionIdleGate(

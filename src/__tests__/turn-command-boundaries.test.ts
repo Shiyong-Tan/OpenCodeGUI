@@ -98,6 +98,10 @@ describe('turn command family characterization', () => {
         expect(block).toContain('sessionId: targetSessionId');
         expect(block).toContain('host.client.waitForSessionIdleGate(targetSessionId');
         expect(block).toContain('host.client.finishTurn(targetSessionId)');
+        expect(block).toContain('host.isTurnCommandOwner(targetSessionId, clientMessageId)');
+        expect(block).toContain('reason=stale-command-after-chat');
+        expect(block).toContain('reason=stale-command-after-idle-gate');
+        expect(block).toContain('reason=stale-command-after-assistant-wait');
         expect(block).not.toContain('host.currentSessionId');
     });
 
@@ -172,17 +176,20 @@ describe('turn command family characterization', () => {
             'host.client.finishTurn(targetSessionId)',
             "host.emitTurnFinalizePhase(liveWebview, targetSessionId, 'finalize_done')",
             'finally {',
-            'host.finishTurnCommandState(activeSendSessionId)',
+            'host.finishTurnCommandState(activeSendSessionId, turnClientMessageId)',
             "host.syncTurnInFlightAfterFinalize(activeSendSessionId, liveWebview, 'sendMessage.finally')",
         ]);
 
         const finishState = extractProviderMethod('private finishTurnCommandState(');
         expectOrder(finishState, [
             'this.pendingLocalKeyBySession.get(sessionId)',
+            '!this.sendInFlightBySession.has(sessionId)',
+            'pendingLocalKey !== undefined && pendingLocalKey !== clientMessageId',
             'this.rawUserTextByLocalKey.delete(pendingLocalKey)',
             'this.sendInFlightBySession.delete(sessionId)',
             'this.pendingLocalKeyBySession.delete(sessionId)',
             'this.pendingAssistantTmpKeyBySession.delete(sessionId)',
+            'return true',
         ]);
     });
 

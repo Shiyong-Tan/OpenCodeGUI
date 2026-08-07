@@ -79,6 +79,7 @@ export interface TurnCommandHost {
         operationId?: string;
     }): void;
     isTurnCommandInFlight(sessionId: string): boolean;
+    isTurnCommandOwner(sessionId: string, clientMessageId: string): boolean;
     startTurnCommandState(
         sessionId: string,
         clientMessageId: string,
@@ -125,7 +126,7 @@ export interface TurnCommandHost {
     discardRevertedSegmentAfterBuild(sessionId: string): Promise<void>;
     getTurnPendingLocalKey(sessionId: string): string | undefined;
     clearFailedTurnCommandState(sessionId: string): string | undefined;
-    finishTurnCommandState(sessionId: string): void;
+    finishTurnCommandState(sessionId: string, clientMessageId: string): boolean;
     syncTurnInFlightAfterFinalize(
         sessionId: string,
         webview: vscode.Webview,
@@ -361,11 +362,19 @@ ${attachmentLines.join('\n')}`
                         mode: targetMode,
                         files: referencedFiles
                     });
+                    if (!host.isTurnCommandOwner(targetSessionId, clientMessageId)) {
+                        host.log(`EXT: send.finalize.skip | reqId=${reqId} | sessionId=${targetSessionId} | clientMessageId=${clientMessageId} | reason=stale-command-after-chat`);
+                        return true;
+                    }
                     await host.client.waitForSessionIdleGate(targetSessionId, {
                         sseWaitMs: 2000,
                         pollEveryMs: 2000,
                         maxPolls: 3
                     });
+                    if (!host.isTurnCommandOwner(targetSessionId, clientMessageId)) {
+                        host.log(`EXT: send.finalize.skip | reqId=${reqId} | sessionId=${targetSessionId} | clientMessageId=${clientMessageId} | reason=stale-command-after-idle-gate`);
+                        return true;
+                    }
                     host.logBridge('[BRIDGE] Chat done');
                     host.log(`[EXT][SESSION_ROUTE] event=sendMessage phase=stream_done reqId=${reqId} payloadSessionId=${payloadSessionId || 'none'} currentSessionId=${currentSessionIdAtSend || 'none'} targetSessionId=${targetSessionId} routeSource=${routeSource}`);
                     let doneAssistantMsgId = host.client.getTurnAssistantMsgId(targetSessionId) || undefined;
@@ -373,6 +382,13 @@ ${attachmentLines.join('\n')}`
                         host.log(`EXT: chatdone.guard.wait-final | sessionId=${targetSessionId} | reason=missing-assistant-msg-id`);
                         doneAssistantMsgId = await host.client.waitForTurnAssistantMsgId(targetSessionId, 500);
                         host.log(`EXT: chatdone.guard.resolved | sessionId=${targetSessionId} | assistantMsgId=${doneAssistantMsgId}`);
+                    }
+                    if (!host.isTurnCommandOwner(targetSessionId, clientMessageId)) {
+                        host.log(`EXT: send.finalize.skip | reqId=${reqId} | sessionId=${targetSessionId} | clientMessageId=${clientMessageId} | reason=stale-command-after-assistant-wait`);
+                        return true;
+                    }
+                    if (!doneAssistantMsgId) {
+                        throw new Error(`Turn resolved without an assistant message (${targetSessionId}).`);
                     }
                     host.log(`[EXT][TURN_BIND] phase=stream_done reqId=${reqId} payloadSessionId=${payloadSessionId || 'none'} currentSessionId=${currentSessionIdAtSend || 'none'} targetSessionId=${targetSessionId} routeSource=${routeSource} clientMessageId=${clientMessageId} assistantMsgId=${doneAssistantMsgId || 'none'} tmpAssistantKey=${tmpAssistantKey || 'none'}`);
                     liveWebview.postMessage({
@@ -437,6 +453,10 @@ ${attachmentLines.join('\n')}`
                 }
                 catch (error) {
                     const sessionId = activeSendSessionId;
+                    if (sessionId && turnClientMessageId && !host.isTurnCommandOwner(sessionId, turnClientMessageId)) {
+                        host.log(`EXT: send.error.skip | reqId=${reqId} | sessionId=${sessionId} | clientMessageId=${turnClientMessageId} | reason=stale-command-owner | err=${String(error)}`);
+                        return true;
+                    }
                     host.log(`[EXT][SESSION_ROUTE] event=sendMessage phase=error reqId=${reqId} payloadSessionId=${payloadSessionId || 'none'} currentSessionId=${currentSessionIdAtSend || 'none'} targetSessionId=${sessionId || 'none'} routeSource=${routeSource}`);
                     host.log(`[EXT][TURN_BIND] phase=error reqId=${reqId} payloadSessionId=${payloadSessionId || 'none'} currentSessionId=${currentSessionIdAtSend || 'none'} targetSessionId=${sessionId || 'none'} routeSource=${routeSource} clientMessageId=${turnClientMessageId || 'none'} tmpAssistantKey=${turnTmpAssistantKey || 'none'}`);
                     host.log(`EXT: send.abort | reqId=${reqId} | reason=${String(error)}`);
@@ -481,12 +501,16 @@ ${attachmentLines.join('\n')}`
                     await host.postModelQuota(activeWebview, 'chat-error');
                 }
                 finally {
-                    if (activeSendSessionId) {
-                        host.finishTurnCommandState(activeSendSessionId);
-                        const liveWebview = host.getLiveWebview(activeWebview);
-                        liveWebview.postMessage({ type: 'turnInFlight', sessionId: activeSendSessionId, inFlight: false });
-                        host.syncTurnInFlightAfterFinalize(activeSendSessionId, liveWebview, 'sendMessage.finally');
-                        await host.runPendingSendInitGuardCompensation(activeSendSessionId, liveWebview, 'sendMessage.finally');
+                    if (activeSendSessionId && turnClientMessageId) {
+                        const finishedOwnedCommand = host.finishTurnCommandState(activeSendSessionId, turnClientMessageId);
+                        if (!finishedOwnedCommand) {
+                            host.log(`EXT: send.cleanup.skip | sessionId=${activeSendSessionId} | clientMessageId=${turnClientMessageId} | reason=stale-command-owner`);
+                        } else {
+                            const liveWebview = host.getLiveWebview(activeWebview);
+                            liveWebview.postMessage({ type: 'turnInFlight', sessionId: activeSendSessionId, inFlight: false });
+                            host.syncTurnInFlightAfterFinalize(activeSendSessionId, liveWebview, 'sendMessage.finally');
+                            await host.runPendingSendInitGuardCompensation(activeSendSessionId, liveWebview, 'sendMessage.finally');
+                        }
                     }
                 }
                 break;

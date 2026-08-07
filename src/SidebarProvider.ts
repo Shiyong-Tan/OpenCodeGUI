@@ -3975,6 +3975,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return this.sendInFlightBySession.has(sessionId);
     }
 
+    private isTurnCommandOwner(sessionId: string, clientMessageId: string): boolean {
+        return Boolean(sessionId && clientMessageId)
+            && this.sendInFlightBySession.has(sessionId)
+            && this.pendingLocalKeyBySession.get(sessionId) === clientMessageId;
+    }
+
     private async createTurnSession(): Promise<string> {
         const sessionInfo = await this.client.createSession();
         this.currentSessionId = sessionInfo.id;
@@ -4061,14 +4067,22 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return pendingLocalKey;
     }
 
-    private finishTurnCommandState(sessionId: string): void {
+    private finishTurnCommandState(sessionId: string, clientMessageId: string): boolean {
         const pendingLocalKey = this.pendingLocalKeyBySession.get(sessionId);
+        if (
+            !clientMessageId
+            || !this.sendInFlightBySession.has(sessionId)
+            || (pendingLocalKey !== undefined && pendingLocalKey !== clientMessageId)
+        ) {
+            return false;
+        }
         if (pendingLocalKey) {
             this.rawUserTextByLocalKey.delete(pendingLocalKey);
         }
         this.sendInFlightBySession.delete(sessionId);
         this.pendingLocalKeyBySession.delete(sessionId);
         this.pendingAssistantTmpKeyBySession.delete(sessionId);
+        return true;
     }
 
     private isAppendSubmissionInFlight(sessionId: string): boolean {
@@ -4692,6 +4706,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             postAddResponse: (webview, value, meta) =>
                 this.postAddResponse(webview, value, meta),
             isTurnCommandInFlight: (sessionId) => this.isTurnCommandInFlight(sessionId),
+            isTurnCommandOwner: (sessionId, clientMessageId) =>
+                this.isTurnCommandOwner(sessionId, clientMessageId),
             startTurnCommandState: (
                 sessionId,
                 clientMessageId,
@@ -4753,8 +4769,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 this.getTurnPendingLocalKey(sessionId),
             clearFailedTurnCommandState: (sessionId) =>
                 this.clearFailedTurnCommandState(sessionId),
-            finishTurnCommandState: (sessionId) =>
-                this.finishTurnCommandState(sessionId),
+            finishTurnCommandState: (sessionId, clientMessageId) =>
+                this.finishTurnCommandState(sessionId, clientMessageId),
             syncTurnInFlightAfterFinalize: (sessionId, webview, reason) =>
                 this.syncTurnInFlightAfterFinalize(sessionId, webview, reason),
             runPendingSendInitGuardCompensation: (sessionId, webview, reason) =>
