@@ -2720,7 +2720,7 @@ function createAppendSuccessorPresentation(predecessor, transition) {
         isThinking: true,
         statusText: '',
         // An append handoff changes the presentation identity, not the active
-        // turn. Keep one cumulative timer even for the first (blank) successor.
+        // turn. Keep one cumulative timer even for the first successor.
         processingStartedAt: Number.isFinite(inheritedStartedAt) && inheritedStartedAt > 0
             ? inheritedStartedAt
             : now,
@@ -2731,7 +2731,10 @@ function createAppendSuccessorPresentation(predecessor, transition) {
             ? { processingPausedAt: Number(predecessorMeta.processingPausedAt) }
             : {}),
     };
-    if (transition !== 'advance' || predecessor?.role !== 'assistant') {
+    const inheritsActivePredecessor = transition === 'initial'
+        && predecessor?.role === 'assistant'
+        && predecessorMeta.isThinking === true;
+    if ((transition !== 'advance' && !inheritsActivePredecessor) || predecessor?.role !== 'assistant') {
         return { text: '', meta: baseMeta };
     }
 

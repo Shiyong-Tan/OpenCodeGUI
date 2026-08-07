@@ -423,6 +423,57 @@ describe('append runtime isolation', () => {
         });
     });
 
+    it('keeps active main text and rich state across the first append handoff', () => {
+        const { context } = loadAppendSnapshotMetaHarness();
+        const predecessor = {
+            id: 'msg_active',
+            role: 'assistant',
+            text: 'Existing active answer',
+            meta: {
+                isThinking: true,
+                statusText: 'Reading: prior.json',
+                currentSegment: 'Existing active answer',
+                textSegments: ['Earlier active text'],
+                todos: [{ content: 'Keep active todo', status: 'in_progress' }],
+                subagents: [{ sessionId: 'ses_active_child', state: 'running' }],
+                processingStartedAt: 1_000,
+            },
+        };
+
+        const presentation = context.createAppendSuccessorPresentation(predecessor, 'initial');
+
+        expect(presentation.text).toBe('Existing active answer');
+        expect(presentation.meta).toEqual(expect.objectContaining({
+            isThinking: true,
+            statusText: 'Reading: prior.json',
+            currentSegment: 'Existing active answer',
+            textSegments: ['Earlier active text'],
+            appendInheritedText: true,
+            todos: [{ content: 'Keep active todo', status: 'in_progress' }],
+            subagents: [{ sessionId: 'ses_active_child', state: 'running' }],
+            processingStartedAt: 1_000,
+        }));
+    });
+
+    it('keeps inherited active text when the first append successor only changes tool status', () => {
+        const { context } = loadAppendSnapshotMetaHarness();
+        const presentation = context.createAppendSuccessorPresentation({
+            role: 'assistant',
+            text: 'Text that must remain visible',
+            meta: { isThinking: true, statusText: 'Searching...' },
+        }, 'initial');
+
+        presentation.meta = {
+            ...presentation.meta,
+            isThinking: true,
+            statusText: 'Reading: phase_b_freeze.json',
+        };
+
+        expect(presentation.text).toBe('Text that must remain visible');
+        expect(presentation.meta.statusText).toBe('Reading: phase_b_freeze.json');
+        expect(presentation.meta.appendInheritedText).toBe(true);
+    });
+
     it('keeps one cumulative processing timer across every append presentation generation', () => {
         const { context } = loadAppendSnapshotMetaHarness();
         const initial = context.createAppendSuccessorPresentation({
