@@ -346,11 +346,41 @@ export function planHydrationIntegration(
     items: readonly any[];
     finalized: boolean;
   }>> = [];
+  const claimedAppendUserIds = new Set<string>();
+  for (const message of messagesById.values()) {
+    if (message?.role !== 'user' || !Array.isArray(message.meta?.appendedPrompts)) continue;
+    for (const item of message.meta.appendedPrompts) {
+      if (typeof item?.appendUserMsgId === 'string' && item.appendUserMsgId.startsWith('msg_')) {
+        claimedAppendUserIds.add(item.appendUserMsgId);
+      }
+    }
+  }
   for (const [id, message] of messagesById) {
     if (message?.role !== 'user' || !Array.isArray(message.meta?.appendedPrompts)) continue;
-    const normalizedItems = options.normalizeAppendItems
+    let normalizedItems = options.normalizeAppendItems
       ? options.normalizeAppendItems(id, message.meta.appendedPrompts)
       : message.meta.appendedPrompts;
+    if (input.turnFullyFinalized !== true) {
+      normalizedItems = normalizedItems.map((item: any) => {
+        if (typeof item?.appendUserMsgId === 'string' && item.appendUserMsgId.startsWith('msg_')) {
+          return item;
+        }
+        const appendText = typeof item?.text === 'string' ? item.text.trim() : '';
+        if (!appendText) return item;
+        const candidates = plannedTimeline.filter((candidateId) => {
+          if (candidateId === id || claimedAppendUserIds.has(candidateId)) return false;
+          const candidate = messagesById.get(candidateId);
+          return candidate?.role === 'user'
+            && typeof candidate.text === 'string'
+            && candidate.text.trim() === appendText;
+        });
+        // Repair only an exact, unique active-turn match. Ambiguous repeated
+        // prompts remain unbound rather than risking a false append owner.
+        if (candidates.length !== 1) return item;
+        claimedAppendUserIds.add(candidates[0]);
+        return Object.freeze({ ...item, appendUserMsgId: candidates[0] });
+      });
+    }
     const finalized = input.turnFullyFinalized === true;
     const appendPlan = finalized
       ? planFinalizedItems(normalizedItems)

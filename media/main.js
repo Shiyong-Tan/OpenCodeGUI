@@ -2971,7 +2971,23 @@ function buildAppendChildPresentationIndex(session) {
 
         const rootId = typeof root.id === 'string' ? root.id : '';
         addPresentationKeyVariants(session, hiddenAssistantParentKeys, rootId);
-        for (let i = 0; i < appendUserIds.length - 1; i++) {
+        const hasActiveAppendPresentationOwner = Boolean(
+            session.backendTurnInFlight === true
+            && session.turnFullyFinalized !== true
+            && session.canceledActiveTurn !== true
+            && session.appendFollowupIdentity?.kind === 'append-followup'
+            && session.appendFollowupIdentity?.mode === 'same-turn-handoff'
+            && session.appendFollowupIdentity?.assistantMsgId
+        );
+        // While an append turn is active, appendFollowupIdentity owns the sole
+        // top-level assistant presentation. A newly acknowledged append may
+        // already have a backend assistant record before its handoff event is
+        // observed (or hydration may discover it first); keep that record
+        // folded until the explicit owner advances/finalizes.
+        const hiddenParentCount = hasActiveAppendPresentationOwner
+            ? appendUserIds.length
+            : Math.max(0, appendUserIds.length - 1);
+        for (let i = 0; i < hiddenParentCount; i++) {
             addPresentationKeyVariants(session, hiddenAssistantParentKeys, appendUserIds[i]);
         }
         for (const appendUserMsgId of appendUserIds) {

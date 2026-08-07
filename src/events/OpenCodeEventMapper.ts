@@ -254,6 +254,22 @@ export function mapServerEventToChatEvents(
                     if (rootUserMsgId) {
                         host.setCurrentTurnUserMsgId(sessionId, rootUserMsgId, 'append-root-user-message');
                     }
+                    // OpenCode does not guarantee a later text-part event for an
+                    // appended user message. Publish the canonical server ID as
+                    // soon as message.updated acknowledges it; the once gate
+                    // keeps a later text part idempotent.
+                    if (host.shouldEmitAppendUserMessage(sessionId, messageId)) {
+                        events.push({
+                            type: 'appendUserMessage',
+                            text: appendPrompt.text || '',
+                            sessionId,
+                            messageId,
+                            appendUserMsgId: messageId,
+                            rootUserMsgId,
+                            clientMessageId: appendPrompt.clientMessageId,
+                            source
+                        });
+                    }
                     shouldEmitUserMessageEvent = false;
                 }
                 if (host.shouldSuppressPendingStopControlUser(sessionId)) {

@@ -1218,6 +1218,44 @@ describe('append runtime isolation', () => {
         )).toBe(true);
     });
 
+    it('keeps a hydrated later append assistant folded under the active presentation owner', () => {
+        const { context } = loadAppendPresentationHarness();
+        const session = {
+            messagesById: new Map<string, any>([
+                ['msg_root', {
+                    id: 'msg_root', role: 'user', text: 'root', meta: {
+                        appendedPrompts: [
+                            { clientMessageId: 'append-1', appendUserMsgId: 'msg_append_1', text: 'first', status: 'queued' },
+                            { clientMessageId: 'append-2', appendUserMsgId: 'msg_append_2', text: 'second', status: 'queued' },
+                        ],
+                    },
+                }],
+                ['msg_append_1', { id: 'msg_append_1', role: 'user', text: 'first', meta: {} }],
+                ['msg_owner', { id: 'msg_owner', role: 'assistant', parentId: 'msg_append_1', text: 'working', meta: {} }],
+                ['msg_append_2', { id: 'msg_append_2', role: 'user', text: 'second', meta: {} }],
+                ['msg_hydrated_later', { id: 'msg_hydrated_later', role: 'assistant', parentId: 'msg_append_2', text: 'working', meta: {} }],
+            ]),
+            timeline: ['msg_root', 'msg_append_1', 'msg_owner', 'msg_append_2', 'msg_hydrated_later'],
+            clientKeyToServerId: new Map<string, string>(),
+            serverIdToClientKey: new Map<string, string>(),
+            backendTurnInFlight: true,
+            turnFullyFinalized: false,
+            canceledActiveTurn: false,
+            currentTurnAssistantKey: 'msg_owner',
+            currentTurnAssistantMsgId: 'msg_owner',
+            thinkingId: 'msg_owner',
+            appendFollowupIdentity: {
+                kind: 'append-followup', mode: 'same-turn-handoff', generation: 1,
+                predecessorAssistantMsgId: 'msg_before', appendUserMsgId: 'msg_append_1', assistantMsgId: 'msg_owner',
+            },
+        };
+        const appendIndex = context.buildAppendChildPresentationIndex(session);
+
+        expect(context.isAppendChildTopLevelUser(session, session.messagesById.get('msg_append_2'), 'msg_append_2', appendIndex)).toBe(true);
+        expect(context.isAppendChainTopLevelAssistantHidden(session, session.messagesById.get('msg_owner'), 'msg_owner', appendIndex)).toBe(false);
+        expect(context.isAppendChainTopLevelAssistantHidden(session, session.messagesById.get('msg_hydrated_later'), 'msg_hydrated_later', appendIndex)).toBe(true);
+    });
+
     it('keeps an aliased current in-flight assistant visible without exposing other append-chain assistants', () => {
         const { context } = loadAppendPresentationHarness();
         const session = {

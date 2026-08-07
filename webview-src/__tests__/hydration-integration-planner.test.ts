@@ -175,6 +175,45 @@ describe('hydration integration planner', () => {
     }]);
   });
 
+  test('repairs a uniquely matching active append user when only its server message was hydrated', () => {
+    const result = plan({
+      turnFullyFinalized: false,
+      meta: { timelineMessageIds: ['msg_root', 'msg_append', 'msg_assistant'] },
+      messages: [
+        message('msg_root', 'user', 'root', {
+          appendedPrompts: [{ clientMessageId: 'append-client', text: 'still running?', status: 'queued' }],
+        }),
+        message('msg_append', 'user', 'still running?'),
+        { ...message('msg_assistant', 'assistant', 'working'), parentId: 'msg_append' } as any,
+      ],
+    });
+
+    expect(result.appendRoots).toEqual([expect.objectContaining({
+      rootMessageId: 'msg_root',
+      finalized: false,
+      items: [expect.objectContaining({
+        clientMessageId: 'append-client',
+        appendUserMsgId: 'msg_append',
+      })],
+    })]);
+  });
+
+  test('does not guess an append user when repeated text makes hydration ambiguous', () => {
+    const result = plan({
+      turnFullyFinalized: false,
+      meta: { timelineMessageIds: ['msg_root', 'msg_append_1', 'msg_append_2'] },
+      messages: [
+        message('msg_root', 'user', 'root', {
+          appendedPrompts: [{ clientMessageId: 'append-client', text: 'continue', status: 'queued' }],
+        }),
+        message('msg_append_1', 'user', 'continue'),
+        message('msg_append_2', 'user', 'continue'),
+      ],
+    });
+
+    expect(result.appendRoots[0].items[0].appendUserMsgId).toBeUndefined();
+  });
+
   test('keeps background hydration selection-neutral while retaining render ownership', () => {
     expect(plan({
       activeSessionId: 'session-b',

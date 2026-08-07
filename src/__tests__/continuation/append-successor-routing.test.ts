@@ -24,6 +24,37 @@ function createSameTurnFixture(): any {
 }
 
 describe('append followup same-turn handoff', () => {
+    it('publishes the canonical append user from message.updated without waiting for a text part', () => {
+        const client: any = new OpenCodeClient();
+        clients.push(client);
+        client.startTurn('ses', 'local-root');
+        client.setCurrentTurnUserMsgId('ses', 'msg_root', 'test');
+        client.displayTurnUserMsgIdBySession.set('ses', 'msg_root');
+        client.beginAppendPrompt('ses', 'append-client', 'follow up', 'msg_root');
+
+        const updatedEvents = client.mapServerEventToChatEvents('message.updated', {
+            info: { id: 'msg_append', sessionID: 'ses', role: 'user' },
+        }, 'sse');
+
+        expect(updatedEvents).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                type: 'appendUserMessage',
+                sessionId: 'ses',
+                rootUserMsgId: 'msg_root',
+                appendUserMsgId: 'msg_append',
+                clientMessageId: 'append-client',
+                text: 'follow up',
+            }),
+        ]));
+
+        const laterTextEvents = client.mapServerEventToChatEvents('message.part.updated', {
+            part: { sessionID: 'ses', messageID: 'msg_append', type: 'text', text: 'follow up' },
+        }, 'sse');
+        expect(laterTextEvents).not.toEqual(expect.arrayContaining([
+            expect.objectContaining({ type: 'appendUserMessage', appendUserMsgId: 'msg_append' }),
+        ]));
+    });
+
     it('keeps the followup protocol in the lexical message dispatcher, not a detached helper', () => {
         const scope = inspectAppendFollowupInlineDispatcher();
         expect(scope.dispatcher).toBeGreaterThanOrEqual(0);
