@@ -145,6 +145,7 @@ describe('turn command family characterization', () => {
         expectOrder(startState, [
             'this.rawUserTextByLocalKey.set(clientMessageId, userText)',
             'this.sendInFlightBySession.add(sessionId)',
+            'this.turnCommandOwnerBySession.set(sessionId, clientMessageId)',
             "this.markWebviewActiveTurnUpdated(sessionId, 'send:start')",
             'this.pendingLocalKeyBySession.set(sessionId, clientMessageId)',
             'this.pendingAssistantTmpKeyBySession.delete(sessionId)',
@@ -184,13 +185,28 @@ describe('turn command family characterization', () => {
         expectOrder(finishState, [
             'this.pendingLocalKeyBySession.get(sessionId)',
             '!this.sendInFlightBySession.has(sessionId)',
-            'pendingLocalKey !== undefined && pendingLocalKey !== clientMessageId',
+            'this.turnCommandOwnerBySession.get(sessionId) !== clientMessageId',
             'this.rawUserTextByLocalKey.delete(pendingLocalKey)',
             'this.sendInFlightBySession.delete(sessionId)',
+            'this.turnCommandOwnerBySession.delete(sessionId)',
             'this.pendingLocalKeyBySession.delete(sessionId)',
             'this.pendingAssistantTmpKeyBySession.delete(sessionId)',
             'return true',
         ]);
+    });
+
+    test('keeps command ownership independent from transient user acknowledgement identity', () => {
+        const ownerCheck = extractProviderMethod('private isTurnCommandOwner(');
+        expect(ownerCheck).toContain('this.turnCommandOwnerBySession.get(sessionId) === clientMessageId');
+        expect(ownerCheck).not.toContain('pendingLocalKeyBySession');
+
+        const resetState = extractProviderMethod('private resetSessionState(');
+        expect(resetState).toContain('retainedTurnCommandOwnerBySession');
+        expect(resetState).toContain('this.turnCommandOwnerBySession.clear()');
+        expect(resetState).toContain('this.turnCommandOwnerBySession.set(sessionId, commandOwner)');
+
+        const cancelState = extractProviderMethod('private clearCanceledTurnCommandState(');
+        expect(cancelState).toContain('this.turnCommandOwnerBySession.delete(sessionId)');
     });
 
     test('routes append by payload owner and serializes append submission', () => {
@@ -272,6 +288,7 @@ describe('turn command family characterization', () => {
         for (const registry of [
             'sendInFlightBySession',
             'pendingLocalKeyBySession',
+            'turnCommandOwnerBySession',
             'pendingAssistantTmpKeyBySession',
             'pendingAssistantTmpKeyByLocalKey',
             'pendingAssistantMessageIdBySession',

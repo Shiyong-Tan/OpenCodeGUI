@@ -661,6 +661,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private pendingAssistantTmpKeyBySession = new Map<string, string>();
     private pendingAssistantTmpKeyByLocalKey = new Map<string, string>();
     private pendingLocalKeyBySession = new Map<string, string>();
+    private turnCommandOwnerBySession = new Map<string, string>();
     private rawUserTextByLocalKey = new Map<string, string>();
     private rawUserTextByMsgId = new Map<string, string>();
     private pendingAssistantMessageIdBySession = new Map<string, string>();
@@ -1140,10 +1141,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         if (!sessionId) return;
         const before = this.getWebviewLivenessActiveTurnFlags(sessionId);
         if (!before.active) {
+            this.turnCommandOwnerBySession.delete(sessionId);
             this.logWebviewAutoRescueActiveTurnCleanup('activeTurnCleanupSkipped', sessionId, before, 'already-inactive');
             return;
         }
         this.sendInFlightBySession.delete(sessionId);
+        this.turnCommandOwnerBySession.delete(sessionId);
         this.pendingAssistantMessageIdBySession.delete(sessionId);
         this.pendingAssistantTmpKeyBySession.delete(sessionId);
         this.pendingLocalKeyBySession.delete(sessionId);
@@ -3978,7 +3981,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private isTurnCommandOwner(sessionId: string, clientMessageId: string): boolean {
         return Boolean(sessionId && clientMessageId)
             && this.sendInFlightBySession.has(sessionId)
-            && this.pendingLocalKeyBySession.get(sessionId) === clientMessageId;
+            && this.turnCommandOwnerBySession.get(sessionId) === clientMessageId;
     }
 
     private async createTurnSession(): Promise<string> {
@@ -4010,6 +4013,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     ): void {
         this.rawUserTextByLocalKey.set(clientMessageId, userText);
         this.sendInFlightBySession.add(sessionId);
+        this.turnCommandOwnerBySession.set(sessionId, clientMessageId);
         this.markWebviewActiveTurnUpdated(sessionId, 'send:start');
         this.pendingLocalKeyBySession.set(sessionId, clientMessageId);
         this.pendingAssistantTmpKeyBySession.delete(sessionId);
@@ -4072,7 +4076,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         if (
             !clientMessageId
             || !this.sendInFlightBySession.has(sessionId)
-            || (pendingLocalKey !== undefined && pendingLocalKey !== clientMessageId)
+            || this.turnCommandOwnerBySession.get(sessionId) !== clientMessageId
         ) {
             return false;
         }
@@ -4080,6 +4084,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             this.rawUserTextByLocalKey.delete(pendingLocalKey);
         }
         this.sendInFlightBySession.delete(sessionId);
+        this.turnCommandOwnerBySession.delete(sessionId);
         this.pendingLocalKeyBySession.delete(sessionId);
         this.pendingAssistantTmpKeyBySession.delete(sessionId);
         return true;
@@ -4117,6 +4122,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     private clearCanceledTurnCommandState(sessionId: string): void {
         this.sendInFlightBySession.delete(sessionId);
+        this.turnCommandOwnerBySession.delete(sessionId);
         this.pendingLocalKeyBySession.delete(sessionId);
         this.pendingAssistantTmpKeyBySession.delete(sessionId);
     }
@@ -6564,6 +6570,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     private resetSessionState(): void {
         const retainedSendInFlightBySession = new Set(this.sendInFlightBySession);
+        const retainedTurnCommandOwnerBySession = new Map<string, string>();
         const retainedPendingLocalKeyBySession = new Map<string, string>();
         const retainedPendingAssistantTmpKeyBySession = new Map<string, string>();
         const retainedPendingAssistantMessageIdBySession = new Map<string, string>();
@@ -6577,6 +6584,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const isRetainableTmpKey = (value: string | undefined): value is string => Boolean(value && (value.startsWith('tmp:') || value.startsWith('local-')));
         for (const sessionId of retainedSendInFlightBySession) {
             if (typeof sessionId !== 'string' || !sessionId) continue;
+            const commandOwner = this.turnCommandOwnerBySession.get(sessionId);
+            if (commandOwner) {
+                retainedTurnCommandOwnerBySession.set(sessionId, commandOwner);
+            }
             const pendingLocalKey = this.pendingLocalKeyBySession.get(sessionId);
             if (pendingLocalKey) {
                 retainedPendingLocalKeyBySession.set(sessionId, pendingLocalKey);
@@ -6644,8 +6655,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.rawUserTextByLocalKey.clear();
         this.rawUserTextByMsgId.clear();
         this.sendInFlightBySession.clear();
+        this.turnCommandOwnerBySession.clear();
         for (const sessionId of retainedSendInFlightBySession) {
             this.sendInFlightBySession.add(sessionId);
+            const commandOwner = retainedTurnCommandOwnerBySession.get(sessionId);
+            if (commandOwner) {
+                this.turnCommandOwnerBySession.set(sessionId, commandOwner);
+            }
         }
         let retainedProviderTurnBindingSessions = 0;
         for (const sessionId of retainedSendInFlightBySession) {
