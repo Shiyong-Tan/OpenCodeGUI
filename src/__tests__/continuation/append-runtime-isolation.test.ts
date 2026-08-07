@@ -1307,6 +1307,65 @@ describe('append runtime isolation', () => {
         expect(context.isAppendChainTopLevelAssistantHidden(session, session.messagesById.get('msg_hydrated_later'), 'msg_hydrated_later', appendIndex)).toBe(true);
     });
 
+    it('does not hide a finalized historical append root while another root has an active append handoff', () => {
+        const { context } = loadAppendPresentationHarness();
+        const session = {
+            messagesById: new Map<string, any>([
+                ['msg_old_root', {
+                    id: 'msg_old_root', role: 'user', text: 'old root', meta: {
+                        appendedPrompts: [
+                            { clientMessageId: 'old-append', appendUserMsgId: 'msg_old_append', text: 'old follow-up', status: 'received' },
+                        ],
+                    },
+                }],
+                ['msg_old_append', { id: 'msg_old_append', role: 'user', text: 'old follow-up', meta: {} }],
+                ['msg_old_final', {
+                    id: 'msg_old_final', role: 'assistant', parentId: 'msg_old_append', text: 'historical final',
+                    meta: { isThinking: false },
+                }],
+                ['msg_active_root', {
+                    id: 'msg_active_root', role: 'user', text: 'active root', meta: {
+                        appendedPrompts: [
+                            { clientMessageId: 'active-append', appendUserMsgId: 'msg_active_append', text: 'active follow-up', status: 'received' },
+                        ],
+                    },
+                }],
+                ['msg_active_append', { id: 'msg_active_append', role: 'user', text: 'active follow-up', meta: {} }],
+                ['msg_active_owner', {
+                    id: 'msg_active_owner', role: 'assistant', parentId: 'msg_active_append', text: 'working',
+                    meta: { isThinking: true },
+                }],
+            ]),
+            timeline: [
+                'msg_old_root', 'msg_old_append', 'msg_old_final',
+                'msg_active_root', 'msg_active_append', 'msg_active_owner',
+            ],
+            clientKeyToServerId: new Map<string, string>(),
+            serverIdToClientKey: new Map<string, string>(),
+            backendTurnInFlight: true,
+            turnFullyFinalized: false,
+            canceledActiveTurn: false,
+            currentTurnAssistantKey: 'msg_active_owner',
+            currentTurnAssistantMsgId: 'msg_active_owner',
+            thinkingId: 'msg_active_owner',
+            appendFollowupIdentity: {
+                kind: 'append-followup', mode: 'same-turn-handoff', generation: 1,
+                predecessorAssistantMsgId: 'msg_active_before',
+                appendUserMsgId: 'msg_active_append',
+                assistantMsgId: 'msg_active_owner',
+            },
+        };
+
+        const appendIndex = context.buildAppendChildPresentationIndex(session);
+
+        expect(context.isAppendChainTopLevelAssistantHidden(
+            session, session.messagesById.get('msg_old_final'), 'msg_old_final', appendIndex,
+        )).toBe(false);
+        expect(context.isAppendChainTopLevelAssistantHidden(
+            session, session.messagesById.get('msg_active_owner'), 'msg_active_owner', appendIndex,
+        )).toBe(false);
+    });
+
     it('keeps an aliased current in-flight assistant visible without exposing other append-chain assistants', () => {
         const { context } = loadAppendPresentationHarness();
         const session = {

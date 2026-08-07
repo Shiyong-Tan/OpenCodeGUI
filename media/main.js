@@ -2981,6 +2981,7 @@ function buildAppendChildPresentationIndex(session) {
             && session.appendFollowupIdentity?.kind === 'append-followup'
             && session.appendFollowupIdentity?.mode === 'same-turn-handoff'
             && session.appendFollowupIdentity?.assistantMsgId
+            && appendUserIds.includes(session.appendFollowupIdentity.appendUserMsgId)
         );
         // While an append turn is active, appendFollowupIdentity owns the sole
         // top-level assistant presentation. A newly acknowledged append may
