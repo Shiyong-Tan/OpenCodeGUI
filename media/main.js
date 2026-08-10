@@ -2788,11 +2788,19 @@ function applyAppendSuccessorAssistantText(target, text) {
 }
 
 function collectAppendPredecessorSubagentSessionIds(session, followup = session?.appendFollowupIdentity) {
-    const ids = new Set(
-        Array.isArray(followup?.predecessorSubagentSessionIds)
-            ? followup.predecessorSubagentSessionIds.filter((id) => typeof id === 'string' && id.length)
-            : []
-    );
+    // The explicit list is captured at the initial append boundary and carried
+    // unchanged across later assistant generations. Once it exists it is the
+    // authoritative ownership boundary: the immediately preceding generation
+    // may contain current-chain subagents that must remain visible.
+    if (Array.isArray(followup?.predecessorSubagentSessionIds)) {
+        return new Set(
+            followup.predecessorSubagentSessionIds
+                .filter((id) => typeof id === 'string' && id.length)
+        );
+    }
+    // Compatibility fallback for hydrated state written before the explicit
+    // predecessor ownership list was persisted.
+    const ids = new Set();
     const predecessorPresentationId = getAppendPredecessorPresentationId(followup);
     const predecessor = predecessorPresentationId
         ? session?.messagesById?.get?.(predecessorPresentationId)

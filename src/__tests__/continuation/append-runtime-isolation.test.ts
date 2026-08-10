@@ -529,6 +529,45 @@ describe('append runtime isolation', () => {
         )).toEqual(['ses_current_chain']);
     });
 
+    it('keeps current-chain subagents visible when filtering an advanced append generation', () => {
+        const { context } = loadAppendSnapshotMetaHarness();
+        const predecessor = {
+            id: 'msg_generation_one',
+            role: 'assistant',
+            meta: { subagents: [{ sessionId: 'ses_current_chain', state: 'running' }] },
+        };
+        const successor = {
+            id: 'msg_generation_two',
+            role: 'assistant',
+            meta: { isThinking: true },
+        };
+        const followup = {
+            kind: 'append-followup',
+            mode: 'same-turn-handoff',
+            generation: 2,
+            predecessorAssistantMsgId: predecessor.id,
+            predecessorPresentationAssistantId: predecessor.id,
+            assistantMsgId: successor.id,
+            predecessorSubagentSessionIds: ['ses_before_append'],
+        };
+        const session = {
+            messagesById: new Map<string, any>([
+                [predecessor.id, predecessor],
+                [successor.id, successor],
+            ]),
+            appendFollowupIdentity: followup,
+        };
+
+        const visible = context.filterAppendSuccessorSubagents(session, successor, [
+            { sessionId: 'ses_before_append', state: 'done' },
+            { sessionId: 'ses_current_chain', state: 'running' },
+        ]);
+
+        expect(visible).toEqual([
+            expect.objectContaining({ sessionId: 'ses_current_chain', state: 'running' }),
+        ]);
+    });
+
     it('resolves a canonical append predecessor to its active presentation owner', () => {
         const { context } = loadAppendSnapshotMetaHarness();
         const presentation = { id: 'msg_presentation', role: 'assistant', text: 'Working' };
