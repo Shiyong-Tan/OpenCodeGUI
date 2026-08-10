@@ -1928,8 +1928,37 @@ describe('append runtime isolation', () => {
                         appendPresentationGeneration: 1,
                     },
                 }],
+                ['msg_other_root', {
+                    id: 'msg_other_root',
+                    role: 'user',
+                    text: 'new turn',
+                    meta: {
+                        appendedPrompts: [{
+                            clientMessageId: 'other-append-client',
+                            appendUserMsgId: 'msg_other_append',
+                            text: 'continue active turn',
+                            status: 'received',
+                        }],
+                    },
+                }],
+                ['msg_other_append', {
+                    id: 'msg_other_append',
+                    role: 'user',
+                    text: 'continue active turn',
+                    meta: {},
+                }],
+                ['msg_other_turn', {
+                    id: 'msg_other_turn',
+                    role: 'assistant',
+                    text: 'current active answer',
+                    parentId: 'msg_other_append',
+                    meta: { isThinking: true },
+                }],
             ]),
-            timeline: ['msg_root', 'tmp:assistant', 'msg_append', 'msg_final'],
+            timeline: [
+                'msg_root', 'tmp:assistant', 'msg_append', 'msg_final',
+                'msg_other_root', 'msg_other_append', 'msg_other_turn',
+            ],
             clientKeyToServerId: new Map<string, string>([['tmp:assistant', 'msg_final']]),
             serverIdToClientKey: new Map<string, string>([['msg_final', 'tmp:assistant']]),
             backendTurnInFlight: true,
@@ -1953,6 +1982,9 @@ describe('append runtime isolation', () => {
         )).toBe(true);
         expect(context.isAppendChainTopLevelAssistantHidden(
             session, session.messagesById.get('msg_final'), 'msg_final', appendIndex,
+        )).toBe(false);
+        expect(context.isAppendChainTopLevelAssistantHidden(
+            session, session.messagesById.get('msg_other_turn'), 'msg_other_turn', appendIndex,
         )).toBe(false);
     });
 
