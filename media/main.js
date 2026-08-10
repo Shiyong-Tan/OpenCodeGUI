@@ -2891,10 +2891,20 @@ function addPresentationKeyVariants(session, targetSet, key) {
 function addAppendPredecessorHiddenKey(session, targetSet, key) {
     if (!(targetSet instanceof Set) || typeof key !== 'string' || !key.length) return;
     targetSet.add(key);
-    // Canonical-to-canonical handoff aliases describe identity succession, not
-    // presentation equivalence. Expanding a persisted predecessor msg_* through
-    // that alias can hide its final successor after session hydration. Transient
-    // keys still need expansion while the live DOM handoff is in progress.
+    // Retirement is an exact presentation-key relation. In particular, a tmp
+    // predecessor commonly maps to the durable msg_* successor that replaced
+    // its DOM node. Expanding either side through that identity alias would put
+    // the successor itself in the hidden set when a later turn renders.
+}
+
+function addAppendHiddenMatchCandidate(session, targetSet, key) {
+    if (!(targetSet instanceof Set) || typeof key !== 'string' || !key.length) return;
+    targetSet.add(key);
+    // A persisted assistant can still map back to the tmp key that originally
+    // owned its live DOM bubble. That mapping is useful for an in-flight key
+    // upgrade, but it must not make the finalized msg_* presentation inherit
+    // the tmp key's retired/hidden state on a later turn. Only transient keys
+    // need alias expansion when matching the durable hidden set.
     if (!key.startsWith('tmp:') && !key.startsWith('local-')) return;
     for (const candidate of getPresentationMessageKeyVariants(session, key)) {
         targetSet.add(candidate);
@@ -3154,10 +3164,10 @@ function isAppendChainTopLevelAssistantHidden(session, msg, id, appendChildPrese
 
     const candidates = new Set();
     if (typeof id === 'string' && id.length) {
-        addPresentationKeyVariants(session, candidates, id);
+        addAppendHiddenMatchCandidate(session, candidates, id);
     }
     if (typeof msg.id === 'string' && msg.id.length) {
-        addPresentationKeyVariants(session, candidates, msg.id);
+        addAppendHiddenMatchCandidate(session, candidates, msg.id);
     }
 
     for (const candidate of candidates) {

@@ -1891,6 +1891,71 @@ describe('append runtime isolation', () => {
         )).toBe(false);
     });
 
+    it('does not hide a finalized successor through its retired temporary DOM alias', () => {
+        const { context } = loadAppendPresentationHarness();
+        const session = {
+            messagesById: new Map<string, any>([
+                ['msg_root', {
+                    id: 'msg_root',
+                    role: 'user',
+                    text: 'root prompt',
+                    meta: {
+                        appendedPrompts: [{
+                            clientMessageId: 'append-client',
+                            appendUserMsgId: 'msg_append',
+                            text: 'follow up',
+                            status: 'received',
+                        }],
+                    },
+                }],
+                ['tmp:assistant', {
+                    id: 'tmp:assistant',
+                    role: 'assistant',
+                    text: 'temporary predecessor',
+                    parentId: 'msg_root',
+                    meta: {},
+                }],
+                ['msg_append', { id: 'msg_append', role: 'user', text: 'follow up', meta: {} }],
+                ['msg_final', {
+                    id: 'msg_final',
+                    role: 'assistant',
+                    text: 'durable final answer',
+                    parentId: 'msg_append',
+                    meta: {
+                        isThinking: false,
+                        appendPresentationPredecessorId: 'tmp:assistant',
+                        appendPresentationRetiredIds: ['tmp:assistant'],
+                        appendPresentationGeneration: 1,
+                    },
+                }],
+            ]),
+            timeline: ['msg_root', 'tmp:assistant', 'msg_append', 'msg_final'],
+            clientKeyToServerId: new Map<string, string>([['tmp:assistant', 'msg_final']]),
+            serverIdToClientKey: new Map<string, string>([['msg_final', 'tmp:assistant']]),
+            backendTurnInFlight: true,
+            turnFullyFinalized: false,
+            canceledActiveTurn: false,
+            currentTurnAssistantKey: 'msg_other_turn',
+            currentTurnAssistantMsgId: 'msg_other_turn',
+            thinkingId: 'msg_other_turn',
+            pendingAssistantUpgrade: null,
+            appendFollowupIdentity: {
+                kind: 'append-followup',
+                mode: 'same-turn-handoff',
+                appendUserMsgId: 'msg_other_append',
+                assistantMsgId: 'msg_other_turn',
+            },
+        };
+        const appendIndex = context.buildAppendChildPresentationIndex(session);
+
+        expect(context.isAppendChainTopLevelAssistantHidden(
+            session, session.messagesById.get('tmp:assistant'), 'tmp:assistant', appendIndex,
+        )).toBe(true);
+        expect(context.isAppendChainTopLevelAssistantHidden(
+            session, session.messagesById.get('msg_final'), 'msg_final', appendIndex,
+        )).toBe(false);
+    });
+
     it('does not reattach predecessor subagent state while finalizing an append successor', () => {
         const { context, sessions } = loadAppendChatDoneHarness();
         const successor = {
