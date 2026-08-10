@@ -1,9 +1,31 @@
 import { createMarkdownController, normalizeMarkdownText } from '../rendering/markdown-controller';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as vm from 'vm';
+
+function renderWithProductionMath(markdown: string): string {
+  const sandbox: any = { module: { exports: {} }, exports: {}, require };
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(path.join(process.cwd(), 'media', 'katex.min.js'), 'utf8'), sandbox);
+  const katex = sandbox.module.exports;
+  sandbox.module = { exports: {} };
+  vm.runInContext(fs.readFileSync(path.join(process.cwd(), 'media', 'texmath.min.js'), 'utf8'), sandbox);
+  const texmath = sandbox.module.exports;
+  const MarkdownIt = require('markdown-it');
+  const markdownIt = new MarkdownIt({ breaks: true });
+  markdownIt.use(texmath, {
+    engine: katex,
+    delimiters: ['dollars', 'brackets'],
+    outerSpace: true,
+    katexOptions: { throwOnError: false },
+  });
+  return markdownIt.render(normalizeMarkdownText(markdown));
+}
 
 describe('markdown text normalization', () => {
   test('preserves the production reminder, math, newline, and nested-list transformations', () => {
     expect(normalizeMarkdownText('<system-reminder source="x">keep</system-reminder>\r\n\\[x + y\\]\r\n$  x_1  $'))
-      .toBe('&lt;system-reminder&gt;keep&lt;/system-reminder&gt;\n\n\n\\[x + y\\]\n\n\n$x_1$');
+      .toBe('&lt;system-reminder&gt;keep&lt;/system-reminder&gt;\n\n\n\\[x + y\\]\n\n\n\\(x_1\\)');
     expect(normalizeMarkdownText('1. parent\n- child\n+ child two\n2. next'))
       .toBe('1. parent\n    - child\n    + child two\n2. next');
   });
@@ -27,16 +49,71 @@ describe('markdown text normalization', () => {
     ].join('\n');
 
     expect(normalizeMarkdownText(input)).toBe([
-      '2. speed $v_{\\mathrm{HF}}^{(1)}$;',
+      '2. speed \\(v_{\\mathrm{HF}}^{(1)}\\);',
       '3. target',
-      '$$',
-      'v_{\\mathrm{target},\\alpha} = \\alpha v_{\\mathrm{HF}}^{(1)};',
-      '$$',
+      '$$v_{\\mathrm{target},\\alpha} = \\alpha v_{\\mathrm{HF}}^{(1)};$$',
       'Price \\$12.50 and `\\$x_1\\$`.',
       '```text',
       '\\$\\$not_math_1\\$\\$',
       '```',
     ].join('\n'));
+  });
+
+  test('prevents list-contained display math from becoming a setext heading', () => {
+    const input = [
+      '2. HF speed $v_{\\mathrm{HF}}^{(1)}$；',
+      '3. target speed',
+      '   $$',
+      '   v_{\\mathrm{target},\\alpha}',
+      '   =',
+      '   \\alpha v_{\\mathrm{HF}}^{(1)};',
+      '   $$',
+      '4. fixed $\\alpha\\in\\{1,1.25,1.5,\\ldots\\}$，continue',
+      '5. objective',
+      '   $$',
+      '   \\Phi_\\alpha(x_0,x_{\\mathrm{HF}})',
+      '   =',
+      '   L_{D,0}(x_0)',
+      '   +',
+      '   L_{D,\\mathrm{HF}}(x_{\\mathrm{HF}}).',
+      '   $$',
+    ].join('\n');
+
+    expect(normalizeMarkdownText(input)).toBe([
+      '2. HF speed \\(v_{\\mathrm{HF}}^{(1)}\\)；',
+      '3. target speed',
+      '   $$v_{\\mathrm{target},\\alpha} = \\alpha v_{\\mathrm{HF}}^{(1)};$$',
+      '4. fixed \\(\\alpha\\in\\{1,1.25,1.5,\\ldots\\}\\)，continue',
+      '5. objective',
+      '   $$\\Phi_\\alpha(x_0,x_{\\mathrm{HF}}) = L_{D,0}(x_0) + L_{D,\\mathrm{HF}}(x_{\\mathrm{HF}}).$$',
+    ].join('\n'));
+  });
+
+  test('renders every formula in the reported ordered-list structure', () => {
+    const markdown = [
+      '1. fixed images;',
+      '2. HF speed $v_{\\mathrm{HF}}^{(1)}$；',
+      '3. target speed',
+      '   $$',
+      '   v_{\\mathrm{target},\\alpha}',
+      '   =',
+      '   \\alpha v_{\\mathrm{HF}}^{(1)};',
+      '   $$',
+      '4. fixed $\\alpha\\in\\{1,1.25,1.5,\\ldots\\}$，continue;',
+      '5. objective',
+      '   $$',
+      '   \\Phi_\\alpha(x_0,x_{\\mathrm{HF}})',
+      '   =',
+      '   L_{D,0}(x_0)',
+      '   +',
+      '   L_{D,\\mathrm{HF}}(x_{\\mathrm{HF}}).',
+      '   $$',
+    ].join('\n');
+
+    const html = renderWithProductionMath(markdown);
+    expect(html.match(/class="katex"/g)).toHaveLength(4);
+    expect(html).not.toContain('<h1>');
+    expect(html).not.toContain('$$<br>');
   });
 });
 

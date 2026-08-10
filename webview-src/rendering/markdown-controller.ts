@@ -68,6 +68,28 @@ function normalizeEscapedDollarMath(value: string): string {
   ));
 }
 
+function normalizeMultilineDollarMath(value: string): string {
+  const protectedMarkdown: string[] = [];
+  const protectedText = value.replace(/```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`/g, (segment) => {
+    const index = protectedMarkdown.push(segment) - 1;
+    return `\u0000OC_CODE_${index}\u0000`;
+  });
+  const normalized = protectedText.replace(
+    /^([ \t]*)\$\$[ \t]*\n([\s\S]*?)\n[ \t]*\$\$[ \t]*$/gm,
+    (_match, indentation: string, inner: string) => {
+      const body = inner
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0)
+        .join(' ');
+      return body ? `${indentation}$$${body}$$` : _match;
+    },
+  );
+  return normalized.replace(/\u0000OC_CODE_(\d+)\u0000/g, (_match, rawIndex: string) => (
+    protectedMarkdown[Number(rawIndex)] || ''
+  ));
+}
+
 export function normalizeMarkdownText(value: string): string {
   let text = typeof value === 'string' ? value : '';
   text = text
@@ -75,10 +97,11 @@ export function normalizeMarkdownText(value: string): string {
     .replace(/<\/system-reminder>/gi, '&lt;/system-reminder&gt;')
     .replace(/\r\n/g, '\n');
   text = normalizeEscapedDollarMath(text);
+  text = normalizeMultilineDollarMath(text);
   text = text.replace(/\\\[(.*?)\\\]/gs, (_match, inner: string) => `\n\n\\[${inner}\\]\n\n`);
   text = text.replace(/\$([^$\n]*?)\$/g, (match, inner: string) => {
     if (!/\\[a-zA-Z]+|\^|_/.test(inner)) return match;
-    return `$${inner.trim()}$`;
+    return `\\(${inner.trim()}\\)`;
   });
 
   const lines = text.split('\n');
