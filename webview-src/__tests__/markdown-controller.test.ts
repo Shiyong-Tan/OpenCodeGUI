@@ -12,6 +12,32 @@ describe('markdown text normalization', () => {
     expect(normalizeMarkdownText('$12.50\n```\n1. code\n- unchanged\n```\n1. item\n# heading\n- top'))
       .toBe('$12.50\n```\n1. code\n- unchanged\n```\n1. item\n# heading\n- top');
   });
+
+  test('restores escaped inline and display math without rewriting code or currency', () => {
+    const input = [
+      '2. speed \\$v_{\\mathrm{HF}}^{(1)}\\$;',
+      '3. target',
+      '\\$\\$',
+      'v_{\\mathrm{target},\\alpha} = \\alpha v_{\\mathrm{HF}}^{(1)};',
+      '\\$\\$',
+      'Price \\$12.50 and `\\$x_1\\$`.',
+      '```text',
+      '\\$\\$not_math_1\\$\\$',
+      '```',
+    ].join('\n');
+
+    expect(normalizeMarkdownText(input)).toBe([
+      '2. speed $v_{\\mathrm{HF}}^{(1)}$;',
+      '3. target',
+      '$$',
+      'v_{\\mathrm{target},\\alpha} = \\alpha v_{\\mathrm{HF}}^{(1)};',
+      '$$',
+      'Price \\$12.50 and `\\$x_1\\$`.',
+      '```text',
+      '\\$\\$not_math_1\\$\\$',
+      '```',
+    ].join('\n'));
+  });
 });
 
 type Listener = (event: { stopPropagation(): void }) => unknown;

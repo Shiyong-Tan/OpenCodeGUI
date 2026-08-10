@@ -49,12 +49,32 @@ const ALLOWED_ATTR = Object.freeze([
   'mathvariant', 'display', 'xmlns', 'encoding',
 ]);
 
+function normalizeEscapedDollarMath(value: string): string {
+  const protectedMarkdown: string[] = [];
+  const protectedText = value.replace(/```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`/g, (segment) => {
+    const index = protectedMarkdown.push(segment) - 1;
+    return `\u0000OC_CODE_${index}\u0000`;
+  });
+  const looksLikeLatex = (inner: string): boolean => /\\[a-zA-Z]+|[_^]|\\[{}]/.test(inner);
+  const normalized = protectedText
+    .replace(/\\\$\\\$([\s\S]*?)\\\$\\\$/g, (match, inner: string) => (
+      looksLikeLatex(inner) ? `$$${inner}$$` : match
+    ))
+    .replace(/\\\$([^$\n]*?)\\\$/g, (match, inner: string) => (
+      looksLikeLatex(inner) ? `$${inner.trim()}$` : match
+    ));
+  return normalized.replace(/\u0000OC_CODE_(\d+)\u0000/g, (_match, rawIndex: string) => (
+    protectedMarkdown[Number(rawIndex)] || ''
+  ));
+}
+
 export function normalizeMarkdownText(value: string): string {
   let text = typeof value === 'string' ? value : '';
   text = text
     .replace(/<system-reminder\b[^>]*>/gi, '&lt;system-reminder&gt;')
     .replace(/<\/system-reminder>/gi, '&lt;/system-reminder&gt;')
     .replace(/\r\n/g, '\n');
+  text = normalizeEscapedDollarMath(text);
   text = text.replace(/\\\[(.*?)\\\]/gs, (_match, inner: string) => `\n\n\\[${inner}\\]\n\n`);
   text = text.replace(/\$([^$\n]*?)\$/g, (match, inner: string) => {
     if (!/\\[a-zA-Z]+|\^|_/.test(inner)) return match;
