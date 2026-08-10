@@ -88,6 +88,8 @@ type CanceledTurnRecord = {
     localKey?: string;
     userMsgId?: string;
     assistantMsgId?: string;
+    userMessageIds?: string[];
+    assistantMessageIds?: string[];
     textHash?: string;
     canceledAt: number;
 };
@@ -3098,8 +3100,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private async injectChangeLists(sessionId: string, formatted: { title: string; messages: SessionMessage[] }): Promise<{ title: string; messages: SessionMessage[] }> {
         if (!sessionId) return formatted;
         const canceled = await this.readCanceledTurns(sessionId);
-        const canceledUserIds = new Set(canceled.map((item) => item.userMsgId).filter((id): id is string => typeof id === 'string' && id.length > 0));
-        const canceledAssistantIds = new Set(canceled.map((item) => item.assistantMsgId).filter((id): id is string => typeof id === 'string' && id.length > 0));
+        const canceledUserIds = new Set(canceled.flatMap((item) => [
+            item.userMsgId,
+            ...(Array.isArray(item.userMessageIds) ? item.userMessageIds : []),
+        ]).filter((id): id is string => typeof id === 'string' && id.length > 0));
+        const canceledAssistantIds = new Set(canceled.flatMap((item) => [
+            item.assistantMsgId,
+            ...(Array.isArray(item.assistantMessageIds) ? item.assistantMessageIds : []),
+        ]).filter((id): id is string => typeof id === 'string' && id.length > 0));
         const filteredMessages = (formatted.messages || []).filter((message) => {
             if (!message?.id) return true;
             if (canceledUserIds.has(message.id) || canceledAssistantIds.has(message.id)) return false;
@@ -4112,12 +4120,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private captureTurnCancelOwner(payload: unknown): CapturedCancelTurnOwner {
-        return captureCancelTurnOwner(payload, {
+        const owner = captureCancelTurnOwner(payload, {
             currentSessionId: this.currentSessionId,
             pendingLocalKeyBySession: this.pendingLocalKeyBySession,
             pendingAssistantTmpKeyBySession: this.pendingAssistantTmpKeyBySession,
             pendingAssistantMessageIdBySession: this.pendingAssistantMessageIdBySession,
         });
+        const turnIds = typeof this.client.getCurrentTurnMessageIds === 'function'
+            ? this.client.getCurrentTurnMessageIds(owner.sessionId)
+            : { userMessageIds: [], assistantMessageIds: [] };
+        return {
+            ...owner,
+            userMessageIds: turnIds.userMessageIds,
+            assistantMessageIds: turnIds.assistantMessageIds,
+        };
     }
 
     private clearCanceledTurnCommandState(sessionId: string): void {

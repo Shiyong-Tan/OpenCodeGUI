@@ -293,6 +293,25 @@ this.normalizeSessionAppendItemsForFinalize = normalizeSessionAppendItemsForFina
     return { context, posts, sessions, syncAppendSnapshotMetadata };
 }
 
+function loadCanceledTurnFamilyHarness() {
+    const mainPath = path.join(__dirname, '../../../media/main.js');
+    const source = fs.readFileSync(mainPath, 'utf8');
+    const start = source.indexOf('function collectCanceledTurnMessageIds');
+    const end = source.indexOf('function disposeSessionMetadataRenderStates', start);
+    if (start < 0 || end <= start) {
+        throw new Error('Could not locate canceled turn family helper in media/main.js');
+    }
+    const context: any = {
+        Map,
+        Set,
+        Array,
+        getAppendPresentationParentId: (message: any) => message?.meta?.parentID || null,
+    };
+    vm.createContext(context);
+    vm.runInContext(`${source.slice(start, end)}\nthis.collectCanceledTurnMessageIds = collectCanceledTurnMessageIds;`, context);
+    return context;
+}
+
 function loadAppendPresentationHarness() {
     const mainPath = path.join(__dirname, '../../../media/main.js');
     const source = fs.readFileSync(mainPath, 'utf8');
@@ -330,6 +349,70 @@ afterEach(async () => {
 });
 
 describe('append runtime isolation', () => {
+    it('collects the complete appended turn family without touching older messages', () => {
+        const context = loadCanceledTurnFamilyHarness();
+        const session = {
+            messagesById: new Map<string, any>([
+                ['msg_old_user', { id: 'msg_old_user', role: 'user', text: 'older prompt' }],
+                ['msg_old_assistant', { id: 'msg_old_assistant', role: 'assistant', text: 'older final' }],
+                ['alias_root', {
+                    id: 'msg_root',
+                    role: 'user',
+                    text: 'original prompt',
+                    meta: {
+                        appendedPrompts: [
+                            { appendUserMsgId: 'msg_append_1' },
+                            { appendUserMsgId: 'msg_append_2' },
+                        ],
+                    },
+                }],
+                ['msg_append_1', { id: 'msg_append_1', role: 'user', meta: { appendRootUserMsgId: 'msg_root' } }],
+                ['msg_append_2', { id: 'msg_append_2', role: 'user', meta: { appendRootUserMsgId: 'msg_root' } }],
+                ['msg_assistant_0', { id: 'msg_assistant_0', role: 'assistant', meta: { parentID: 'msg_root' } }],
+                ['msg_assistant_1', { id: 'msg_assistant_1', role: 'assistant', meta: { parentID: 'msg_append_1' } }],
+                ['msg_assistant_2', { id: 'msg_assistant_2', role: 'assistant', meta: { parentID: 'msg_append_2' } }],
+            ]),
+            lastTurnUserId: 'msg_root',
+            appendRootUserKey: 'msg_root',
+            lastTurnAssistantId: 'msg_assistant_2',
+            thinkingId: 'msg_assistant_2',
+            currentTurnAssistantKey: 'msg_assistant_2',
+            currentTurnAssistantMsgId: 'msg_assistant_2',
+            appendFollowupIdentity: {
+                appendUserMsgId: 'msg_append_2',
+                predecessorAssistantMsgId: 'msg_assistant_1',
+                predecessorPresentationAssistantId: 'msg_assistant_1',
+                assistantMsgId: 'msg_assistant_2',
+            },
+        };
+
+        expect(Array.from(context.collectCanceledTurnMessageIds(session)).sort()).toEqual([
+            'alias_root',
+            'msg_append_1',
+            'msg_append_2',
+            'msg_assistant_0',
+            'msg_assistant_1',
+            'msg_assistant_2',
+            'msg_root',
+        ]);
+    });
+
+    it('reports every current append user and assistant generation for cancellation persistence', () => {
+        const client = createClientWithAppendTurn('ses_cancel', 'msg_root');
+        client.beginAppendPrompt('ses_cancel', 'append-client-1', 'first follow-up', 'msg_root');
+        client.beginAppendPrompt('ses_cancel', 'append-client-2', 'second follow-up', 'msg_root');
+        client.appendTurnStateBySession.get('ses_cancel').appendUserMsgIds.add('msg_append_1');
+        client.appendTurnStateBySession.get('ses_cancel').appendUserMsgIds.add('msg_append_2');
+        client.recordAssistantMsgId('ses_cancel', 'msg_assistant_0');
+        client.recordAssistantMsgId('ses_cancel', 'msg_assistant_1');
+        client.recordAssistantMsgId('ses_cancel', 'msg_assistant_2');
+
+        expect(client.getCurrentTurnMessageIds('ses_cancel')).toEqual({
+            userMessageIds: ['msg_root', 'msg_append_1', 'msg_append_2'],
+            assistantMessageIds: ['msg_assistant_0', 'msg_assistant_1', 'msg_assistant_2'],
+        });
+    });
+
     it('accepts only idempotent or strictly consecutive append presentation generations', () => {
         const { context } = loadAppendSnapshotMetaHarness();
         const generationOne = {

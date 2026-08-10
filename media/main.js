@@ -2048,19 +2048,13 @@ function clearBackgroundSubagentIndicator(session) {
         const session = getSessionState(sessionId);
         if (!session) return;
     clearBackgroundSubagentIndicator(session);
-    const userId = session.lastTurnUserId;
-    const assistantId = session.lastTurnAssistantId;
-    if (userId) {
-        removeMessageFromSession(session, userId);
-    }
-    if (assistantId) {
-        removeMessageFromSession(session, assistantId);
-    }
-    if (session.thinkingId && session.thinkingId !== assistantId) {
-        removeMessageFromSession(session, session.thinkingId);
-    }
+    const canceledMessageIds = collectCanceledTurnMessageIds(session);
+    for (const messageId of canceledMessageIds) removeMessageFromSession(session, messageId);
     session.lastTurnUserId = null;
     session.lastTurnAssistantId = null;
+    session.appendRootUserKey = null;
+    session.appendFollowupIdentity = null;
+    session.activeSubagents = [];
     session.cancelledTurn = true;
     session.canceledActiveTurn = true;
     session.pendingAssistantUpgrade = null;
@@ -2165,6 +2159,67 @@ function richContentStateFingerprint(value) {
     } catch {
         return '';
     }
+}
+
+function collectCanceledTurnMessageIds(session) {
+    const ids = new Set();
+    const userIds = new Set();
+    const addKnownId = (value, target = ids) => {
+        if (typeof value !== 'string' || !value.length) return;
+        target.add(value);
+        ids.add(value);
+        const direct = session?.messagesById?.get?.(value);
+        if (typeof direct?.id === 'string' && direct.id.length) {
+            target.add(direct.id);
+            ids.add(direct.id);
+        }
+        if (session?.messagesById instanceof Map) {
+            for (const [key, message] of session.messagesById.entries()) {
+                if (message?.id !== value || typeof key !== 'string' || !key.length) continue;
+                target.add(key);
+                ids.add(key);
+            }
+        }
+    };
+
+    addKnownId(session?.lastTurnUserId, userIds);
+    addKnownId(session?.appendRootUserKey, userIds);
+    for (const rootId of Array.from(userIds)) {
+        const root = session?.messagesById?.get?.(rootId)
+            || (session?.messagesById instanceof Map
+                ? Array.from(session.messagesById.values()).find((message) => message?.id === rootId)
+                : null);
+        const appendedPrompts = Array.isArray(root?.meta?.appendedPrompts)
+            ? root.meta.appendedPrompts
+            : [];
+        for (const item of appendedPrompts) addKnownId(item?.appendUserMsgId, userIds);
+    }
+
+    const followup = session?.appendFollowupIdentity;
+    addKnownId(followup?.appendUserMsgId, userIds);
+    addKnownId(followup?.predecessorAssistantMsgId);
+    addKnownId(followup?.predecessorPresentationAssistantId);
+    addKnownId(followup?.assistantMsgId);
+
+    if (session?.messagesById instanceof Map) {
+        for (const [key, message] of session.messagesById.entries()) {
+            if (message?.role !== 'user' || !userIds.has(message?.meta?.appendRootUserMsgId)) continue;
+            addKnownId(key, userIds);
+            addKnownId(message.id, userIds);
+        }
+        for (const [key, message] of session.messagesById.entries()) {
+            if (message?.role !== 'assistant') continue;
+            if (!userIds.has(getAppendPresentationParentId(message))) continue;
+            addKnownId(key);
+            addKnownId(message.id);
+        }
+    }
+
+    addKnownId(session?.lastTurnAssistantId);
+    addKnownId(session?.thinkingId);
+    addKnownId(session?.currentTurnAssistantKey);
+    addKnownId(session?.currentTurnAssistantMsgId);
+    return ids;
 }
 
 function disposeSessionMetadataRenderStates() {

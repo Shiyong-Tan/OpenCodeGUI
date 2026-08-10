@@ -149,6 +149,8 @@ export interface TurnCommandHost {
         localKey?: string;
         userMsgId?: string;
         assistantMsgId?: string;
+        userMessageIds?: string[];
+        assistantMessageIds?: string[];
         canceledAt: number;
     }): Promise<void>;
     clearTurnRawUserText(pendingLocalKey: string | undefined): void;
@@ -636,31 +638,59 @@ ${attachmentLines.join('\n')}`
                 const pendingLocalKey = cancelOwner.localKey;
                 const pendingTmpKey = cancelOwner.temporaryAssistantKey;
                 const pendingAssistant = cancelOwner.assistantMessageId;
+                // Consume the draft before the first await. The send finalizer
+                // can otherwise win the cancellation race and clear it while
+                // the rollback decision overlay is open.
+                const draftToRestore = host.consumeDraft(pendingLocalKey);
                 const shouldRollback = cancelSessionId
                     ? await host.promptCancelRollbackDecision(activeWebview, cancelSessionId)
                     : true;
-                const restoreLocalKey = pendingLocalKey;
-                if (cancelSessionId && shouldRollback) {
-                    await host.client.revertPendingTurnChangesToCurrentBase(cancelSessionId);
-                    const canceledAt = Date.now();
-                    const { userMsgId, assistantMsgId } = host.client.getPendingTurnMessageIds(cancelSessionId);
-                    await host.upsertCanceledTurn(cancelSessionId, {
-                        opId: cancelOwner.operationId,
-                        localKey: pendingLocalKey,
-                        userMsgId,
-                        assistantMsgId,
-                        canceledAt
-                    });
-                }
-                if (cancelSessionId) {
-                    await host.client.abortSession(cancelSessionId);
-                }
+                // Invalidate the normal send finalizer before any rollback or
+                // abort await can release an idle event. This makes every
+                // ownership guard in the send path observe cancellation.
                 const cancelOpId = cancelOwner.operationId;
                 if (cancelSessionId) {
                     host.clearTurnRawUserText(pendingLocalKey);
                     host.client.cancelTurn(cancelSessionId, cancelOpId);
                     host.clearCanceledTurnCommandState(cancelSessionId);
                     activeWebview.postMessage({ type: 'turnInFlight', sessionId: cancelSessionId, inFlight: false });
+                }
+                if (draftToRestore) {
+                    activeWebview.postMessage({
+                        type: 'restoreDraft',
+                        sessionId: cancelSessionId,
+                        payload: draftToRestore
+                    });
+                }
+
+                const pendingIds = cancelSessionId
+                    ? host.client.getPendingTurnMessageIds(cancelSessionId)
+                    : {};
+                const canceledUserMessageIds = Array.from(new Set([
+                    ...(cancelOwner.userMessageIds || []),
+                    pendingIds.userMsgId,
+                ].filter((id): id is string => typeof id === 'string' && id.length > 0)));
+                const canceledAssistantMessageIds = Array.from(new Set([
+                    ...(cancelOwner.assistantMessageIds || []),
+                    pendingIds.assistantMsgId,
+                    pendingAssistant,
+                ].filter((id): id is string => typeof id === 'string' && id.length > 0)));
+                if (cancelSessionId && shouldRollback) {
+                    await host.client.revertPendingTurnChangesToCurrentBase(cancelSessionId);
+                }
+                if (cancelSessionId) {
+                    await host.upsertCanceledTurn(cancelSessionId, {
+                        opId: cancelOwner.operationId,
+                        localKey: pendingLocalKey,
+                        userMsgId: pendingIds.userMsgId,
+                        assistantMsgId: pendingIds.assistantMsgId,
+                        userMessageIds: canceledUserMessageIds,
+                        assistantMessageIds: canceledAssistantMessageIds,
+                        canceledAt: Date.now()
+                    });
+                }
+                if (cancelSessionId) {
+                    await host.client.abortSession(cancelSessionId);
                 }
                 if (cancelSessionId && pendingLocalKey) {
                     await host.handleAbortedMessage(cancelSessionId, pendingLocalKey, activeWebview);
@@ -680,15 +710,13 @@ ${attachmentLines.join('\n')}`
                     if (mappedAssistant && mappedAssistant !== pendingTmpKey) {
                         await host.handleAbortedMessage(cancelSessionId, mappedAssistant, activeWebview);
                     }
+                    for (const messageId of new Set([
+                        ...canceledUserMessageIds,
+                        ...canceledAssistantMessageIds,
+                    ])) {
+                        await host.handleAbortedMessage(cancelSessionId, messageId, activeWebview);
+                    }
                     host.clearCanceledTurnAssistantState(cancelSessionId);
-                }
-                const draftToRestore = host.consumeDraft(restoreLocalKey);
-                if (draftToRestore) {
-                    activeWebview.postMessage({
-                        type: 'restoreDraft',
-                        sessionId: cancelSessionId,
-                        payload: draftToRestore
-                    });
                 }
                 // Cleanup before chatDone
                 if (cancelSessionId) {

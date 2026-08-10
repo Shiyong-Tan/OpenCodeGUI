@@ -45,7 +45,8 @@ describe('cancel turn ownership', () => {
     const block = controller.slice(start, end);
     expect(block).toContain('const cancelOwner = host.captureTurnCancelOwner(data);');
     expect(block).toContain('await host.client.abortSession(cancelSessionId);');
-    expect(block).toContain('const restoreLocalKey = pendingLocalKey;');
+    expect(block).toContain('const draftToRestore = host.consumeDraft(pendingLocalKey);');
+    expect(block).toContain('host.client.cancelTurn(cancelSessionId, cancelOpId);');
     expect(block).toContain('localKey: pendingLocalKey');
     expect(block).not.toContain('host.client.cancel();');
     expect(block).not.toContain('host.pendingClientMessageId ||');

@@ -11,6 +11,8 @@ export type CapturedCancelTurnOwner = Readonly<{
     localKey?: string;
     temporaryAssistantKey?: string;
     assistantMessageId?: string;
+    userMessageIds?: readonly string[];
+    assistantMessageIds?: readonly string[];
 }>;
 
 export function captureCancelTurnOwner(

@@ -67,6 +67,9 @@ function createHarness(overrides: Record<string, unknown> = {}) {
         clearCanceledTurnCommandState: jest.fn(),
         clearCanceledTurnAssistantState: jest.fn(),
         consumeDraft: jest.fn(() => undefined),
+        upsertCanceledTurn: jest.fn(async () => undefined),
+        handleAbortedMessage: jest.fn(async () => undefined),
+        resolveMessageIdentity: jest.fn(() => undefined),
         commitPendingTurnChangesFromAuthoritativeFiles: jest.fn(async () => ({})),
         buildFinalizeTurnIdentity: jest.fn((sessionId: string, partial: unknown) => ({
             sessionId,
@@ -167,6 +170,7 @@ describe('TurnCommandController runtime protocol', () => {
             }),
             clearTurnRawUserText: jest.fn(() => order.push('clear-raw')),
             clearCanceledTurnCommandState: jest.fn(() => order.push('clear-turn')),
+            upsertCanceledTurn: jest.fn(async () => order.push('record-canceled')),
             commitPendingTurnChangesFromAuthoritativeFiles: jest.fn(async () => {
                 order.push('commit');
                 return {};
@@ -196,14 +200,63 @@ describe('TurnCommandController runtime protocol', () => {
         }));
         expect(order).toEqual([
             'decision',
-            'abort',
             'clear-raw',
             'cancel',
             'clear-turn',
+            'record-canceled',
+            'abort',
             'commit',
             'finish',
             'sync',
             'compensate',
         ]);
+    });
+
+    test('captures the draft and every append generation before cancellation awaits', async () => {
+        const draft = { text: 'original request', attachments: [] };
+        const harness = createHarness({
+            captureTurnCancelOwner: jest.fn(() => ({
+                sessionId: 'session-A',
+                operationId: 'op-A',
+                localKey: 'local-A',
+                temporaryAssistantKey: 'tmp:A',
+                assistantMessageId: 'msg_assistant_latest',
+                userMessageIds: ['msg_root', 'msg_append'],
+                assistantMessageIds: ['msg_assistant_1', 'msg_assistant_latest'],
+            })),
+            consumeDraft: jest.fn(() => draft),
+        });
+        harness.host.client.getPendingTurnMessageIds.mockReturnValue({
+            userMsgId: 'msg_append',
+            assistantMsgId: 'msg_assistant_latest',
+        });
+
+        await harness.handler(
+            { type: 'cancel', sessionId: 'session-A', opId: 'op-A' },
+            harness.activeWebview,
+            harness.activeWebview,
+        );
+
+        expect(harness.host.consumeDraft).toHaveBeenCalledWith('local-A');
+        expect(harness.posts).toContainEqual({
+            type: 'restoreDraft',
+            sessionId: 'session-A',
+            payload: draft,
+        });
+        expect(harness.host.upsertCanceledTurn).toHaveBeenCalledWith(
+            'session-A',
+            expect.objectContaining({
+                userMessageIds: ['msg_root', 'msg_append'],
+                assistantMessageIds: ['msg_assistant_1', 'msg_assistant_latest'],
+            }),
+        );
+        for (const messageId of [
+            'local-A', 'tmp:A', 'msg_root', 'msg_append',
+            'msg_assistant_1', 'msg_assistant_latest',
+        ]) {
+            expect(harness.host.handleAbortedMessage).toHaveBeenCalledWith(
+                'session-A', messageId, harness.activeWebview,
+            );
+        }
     });
 });

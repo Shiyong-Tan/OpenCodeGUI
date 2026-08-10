@@ -2440,6 +2440,29 @@ export class OpenCodeClient {
         return Array.from(ids);
     }
 
+    public getCurrentTurnMessageIds(sessionId: string | undefined): {
+        userMessageIds: string[];
+        assistantMessageIds: string[];
+    } {
+        if (!sessionId) return { userMessageIds: [], assistantMessageIds: [] };
+        const state = this.turnStateBySession.get(sessionId);
+        const append = this.appendTurnStateBySession.get(sessionId);
+        const userIds = new Set<string>();
+        const addUser = (value: string | undefined) => {
+            if (typeof value === 'string' && value.startsWith('msg_')) userIds.add(value);
+        };
+        addUser(append?.rootUserMsgId);
+        for (const appendUserId of append?.appendUserMsgIds || []) addUser(appendUserId);
+        addUser(this.displayTurnUserMsgIdBySession.get(sessionId));
+        addUser(this.currentTurnUserMsgIdBySession.get(sessionId));
+        addUser(this.pendingUserMsgIdBySession.get(sessionId));
+        addUser(state?.resolvedUserMsgId);
+        return {
+            userMessageIds: Array.from(userIds),
+            assistantMessageIds: this.getCurrentTurnAssistantMessageIds(sessionId),
+        };
+    }
+
     private trackTurnMessageId(sessionId: string, messageId: string): void {
         if (!sessionId || !messageId || !messageId.startsWith('msg_')) return;
         const state = this.turnStateBySession.get(sessionId);
