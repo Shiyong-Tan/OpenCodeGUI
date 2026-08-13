@@ -340,6 +340,12 @@ describe('session-switch virtual bottom alignment', () => {
         allUnits: [{ key: 'history' }, { key: 'active-assistant' }],
         activityBelow: true,
         programmaticScroll: false,
+        fineAnchorRestoreToken: 9,
+        anchorKey: 'old-anchor',
+        visualOffset: 37,
+        visualAnchorElement: { isConnected: true },
+        visualAnchorTop: 120,
+        visualAnchorKey: 'old-anchor',
       },
       getSessionState: () => ({
         currentTurnAssistantKey: 'active-assistant',
@@ -364,6 +370,14 @@ describe('session-switch virtual bottom alignment', () => {
     ]);
     expect((context as any).autoScrollPinnedToBottom).toBe(true);
     expect((context as any).chatWindowState.programmaticScroll).toBe(true);
+    expect((context as any).chatWindowState).toEqual(expect.objectContaining({
+      fineAnchorRestoreToken: 10,
+      anchorKey: '',
+      visualOffset: 0,
+      visualAnchorElement: null,
+      visualAnchorTop: 0,
+      visualAnchorKey: '',
+    }));
 
     chatContainer.scrollHeight = 9000;
     raf.shift()?.();

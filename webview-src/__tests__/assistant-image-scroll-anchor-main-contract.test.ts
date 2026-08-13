@@ -26,7 +26,19 @@ describe('assistant image scroll anchor production contract', () => {
     expect(source).toContain('Math.abs(currentTop - firstTop) >= 0.75');
     expect(source).toContain("retryAfterDirectInput('direct-input-settle')");
     expect(source).toContain('inputUntil - now + 16');
+    expect(source).toContain('|| autoScrollPinnedToBottom) return;');
     expect(source).toContain('Re-arm from the latest');
+  });
+
+  it('invalidates stale anchors when forced bottom navigation takes ownership', () => {
+    const start = source.indexOf('function scrollToBottom(force = false)');
+    const end = source.indexOf('window.__oc = window.__oc || {};', start);
+    const block = source.slice(start, end);
+    expect(block).toContain('chatWindowState.fineAnchorRestoreToken += 1;');
+    expect(block).toContain("chatWindowState.anchorKey = '';");
+    expect(block).toContain('chatWindowState.visualAnchorElement = null;');
+    expect(block.indexOf('chatWindowState.fineAnchorRestoreToken += 1;'))
+      .toBeLessThan(block.indexOf('autoScrollPinnedToBottom = true;'));
   });
 
   it('captures before applying resolved image DOM and restores after it', () => {

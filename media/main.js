@@ -10670,11 +10670,13 @@ function shouldHideDcpUiMessage(message) {
         // so opposite corrections are applied once instead of visibly oscillating.
         setTimeout(() => {
             if (chatWindowState.fineAnchorRestoreToken !== token
-                || activeSessionId !== sessionId || chatWindowGeneration !== generation) return;
+                || activeSessionId !== sessionId || chatWindowGeneration !== generation
+                || autoScrollPinnedToBottom) return;
             if (retryAfterDirectInput('direct-input-settle')) return;
             requestAnimationFrame(() => {
                 if (chatWindowState.fineAnchorRestoreToken !== token
-                    || activeSessionId !== sessionId || chatWindowGeneration !== generation) return;
+                    || activeSessionId !== sessionId || chatWindowGeneration !== generation
+                    || autoScrollPinnedToBottom) return;
                 if (retryAfterDirectInput('direct-input-settle')) return;
                 const fineAnchor = chatWindowState.visualAnchorElement;
                 const fineRoot = fineAnchor?.isConnected && chatContainer.contains(fineAnchor)
@@ -10685,7 +10687,8 @@ function shouldHideDcpUiMessage(message) {
                     || !Number.isFinite(firstTop)) return;
                 requestAnimationFrame(() => {
                     if (chatWindowState.fineAnchorRestoreToken !== token
-                        || activeSessionId !== sessionId || chatWindowGeneration !== generation) return;
+                        || activeSessionId !== sessionId || chatWindowGeneration !== generation
+                        || autoScrollPinnedToBottom) return;
                     if (retryAfterDirectInput('direct-input-settle')) return;
                     if (!fineAnchor.isConnected || !chatContainer.contains(fineAnchor)) return;
                     const currentRoot = fineAnchor.closest('[data-render-unit-key]');
@@ -13061,6 +13064,15 @@ function shouldHideDcpUiMessage(message) {
         if (!chatContainer) return;
         if (!force && !autoScrollPinnedToBottom) return;
         const generation = ++scrollToBottomGeneration;
+        // Bottom navigation takes exclusive viewport ownership. Invalidate
+        // delayed virtual/image anchor restoration captured at the old
+        // position so it cannot pull the viewport back after this jump.
+        chatWindowState.fineAnchorRestoreToken += 1;
+        chatWindowState.anchorKey = '';
+        chatWindowState.visualOffset = 0;
+        chatWindowState.visualAnchorElement = null;
+        chatWindowState.visualAnchorTop = 0;
+        chatWindowState.visualAnchorKey = '';
         autoScrollPinnedToBottom = true;
         chatWindowState.activityBelow = false;
         chatWindowState.programmaticScroll = true;
