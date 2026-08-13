@@ -11014,6 +11014,20 @@ function shouldHideDcpUiMessage(message) {
                         chatWindowState.snapshot = acknowledged;
                         return;
                     }
+                    const pinnedSingleBoundaryExpansion = autoScrollPinnedToBottom
+                        && acknowledged
+                        && snapshot.totalSize === acknowledged.totalSize
+                        && snapshot.items.length === acknowledged.items.length + 1
+                        && acknowledged.items.every((item) => snapshot.items.some((candidate) => candidate.key === item.key));
+                    if (pinnedSingleBoundaryExpansion) {
+                        // Finalizing an assistant can move the top overscan boundary by one item
+                        // while the accepted bottom range and total geometry remain unchanged.
+                        // Re-rendering that extra boundary item makes the adapter alternate between
+                        // N and N+1 forever. Retain the last committed range until geometry or keys
+                        // actually change.
+                        chatWindowState.snapshot = acknowledged;
+                        return;
+                    }
                     const priorObservations = typeof chatWindowAdaptiveShadow !== 'undefined'
                         ? chatWindowAdaptiveShadow?.observations : null;
                     const rangeObservations = typeof createChatWindowAdaptiveObservations === 'function' ? createChatWindowAdaptiveObservations(

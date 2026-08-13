@@ -4833,6 +4833,62 @@ describe('A2.4D journaled keyed and structural transaction', () => {
     expect(harness.chatWindowState.snapshot).toBe(acknowledged);
   });
 
+  test('CF3 pinned bottom ignores one-item boundary expansion after final geometry settles', () => {
+    const harness = candidateStagingHarness();
+    harness.context.prepareUnpublishedChatWindowTransaction({}, harness.units, [], null);
+    const acknowledgedItems = Array.from({ length: 5 }, (_, index) => ({
+      key: `unit-${index + 1}`, index: index + 1, start: index * 50, end: (index + 1) * 50, size: 50,
+    }));
+    const acknowledged = Object.freeze({
+      items: Object.freeze(acknowledgedItems.map((item) => Object.freeze({ ...item }))),
+      totalSize: 18822.3959274292,
+    });
+    harness.chatWindowState.mountedKeys = new Set(acknowledgedItems.map((item) => item.key));
+    harness.chatWindowState.acknowledgedRawSnapshot = acknowledged;
+    harness.chatWindowState.pendingRangeRender = false;
+    harness.context.autoScrollPinnedToBottom = true;
+    const schedulesBefore = harness.calls.filter((entry: string) => entry === 'schedule').length;
+
+    harness.callbacks.onRangeChange({
+      items: [
+        { key: 'unit-0', index: 0, start: -50, end: 0, size: 50 },
+        ...acknowledgedItems.map((item) => ({ ...item })),
+      ],
+      totalSize: 18822.3959274292,
+    });
+
+    expect(harness.calls.filter((entry: string) => entry === 'schedule')).toHaveLength(schedulesBefore);
+    expect(harness.chatWindowState.pendingRangeRender).toBe(false);
+    expect(harness.chatWindowState.snapshot).toBe(acknowledged);
+  });
+
+  test('CF3 pinned bottom still renders a real range change instead of masking it as boundary drift', () => {
+    const harness = candidateStagingHarness();
+    harness.context.prepareUnpublishedChatWindowTransaction({}, harness.units, [], null);
+    const acknowledgedItems = [
+      { key: 'unit-1', index: 1, start: 0, end: 50, size: 50 },
+      { key: 'unit-2', index: 2, start: 50, end: 100, size: 50 },
+    ];
+    harness.chatWindowState.mountedKeys = new Set(acknowledgedItems.map((item) => item.key));
+    harness.chatWindowState.acknowledgedRawSnapshot = {
+      items: acknowledgedItems.map((item) => ({ ...item })), totalSize: 100,
+    };
+    harness.chatWindowState.pendingRangeRender = false;
+    harness.context.autoScrollPinnedToBottom = true;
+    const schedulesBefore = harness.calls.filter((entry: string) => entry === 'schedule').length;
+
+    harness.callbacks.onRangeChange({
+      items: [
+        { key: 'unit-0', index: 0, start: 0, end: 40, size: 40 },
+        ...acknowledgedItems.map((item) => ({ ...item })),
+      ],
+      totalSize: 140,
+    });
+
+    expect(harness.calls.filter((entry: string) => entry === 'schedule')).toHaveLength(schedulesBefore + 1);
+    expect(harness.chatWindowState.pendingRangeRender).toBe(true);
+  });
+
   test('CF3 same mounted range re-pins after spacer growth changes the scroll height', () => {
     const harness = candidateStagingHarness();
     harness.context.prepareUnpublishedChatWindowTransaction({}, harness.units, [], null);
