@@ -8009,6 +8009,7 @@ function shouldHideDcpUiMessage(message) {
         localOlderObserver: null, localOlderObserverArmed: true, pendingScrollKey: '',
         pendingScrollAttempts: 0, localHistoryPresentation: null, acknowledgedRawSnapshot: null
     };
+    let chatWindowViewportDiagnosticSequence = 0;
     const chatWindowMeasurementCache = window.__ocFeatures?.createVirtualMeasurementCache?.({
         read: () => sessionStorage.getItem('opencode.chatWindow.measurements.v1'),
         write: (value) => sessionStorage.setItem('opencode.chatWindow.measurements.v1', value),
@@ -10651,6 +10652,58 @@ function shouldHideDcpUiMessage(message) {
         chatWindowState.fineAnchorRestoreToken += 1;
     }
 
+    function recordChatWindowViewportDiagnostic(stage, details = {}) {
+        const roots = keyedRoots();
+        const containerRect = chatContainer.getBoundingClientRect?.();
+        const visibleRoot = containerRect ? roots.find((root) => {
+            const rect = root.getBoundingClientRect?.();
+            return rect && rect.bottom > containerRect.top && rect.top < containerRect.bottom;
+        }) : null;
+        const visibleRect = visibleRoot?.getBoundingClientRect?.();
+        const anchorRoot = chatWindowState.anchorKey ? keyedRootForKey(chatWindowState.anchorKey) : null;
+        const anchorRect = anchorRoot?.getBoundingClientRect?.();
+        const fineAnchor = chatWindowState.visualAnchorElement;
+        const fineRoot = fineAnchor?.isConnected && chatContainer.contains(fineAnchor)
+            ? fineAnchor.closest('[data-render-unit-key]')
+            : null;
+        const fineRect = fineAnchor?.isConnected ? fineAnchor.getBoundingClientRect?.() : null;
+        const snapshotItems = Array.isArray(chatWindowState.snapshot?.items) ? chatWindowState.snapshot.items : [];
+        const payload = {
+            sequence: ++chatWindowViewportDiagnosticSequence,
+            stage,
+            sessionId: activeSessionId || '',
+            generation: chatWindowGeneration,
+            scrollTop: Number(chatContainer.scrollTop || 0),
+            scrollHeight: Number(chatContainer.scrollHeight || 0),
+            clientHeight: Number(chatContainer.clientHeight || 0),
+            topSpacerHeight: Number(chatWindowState.topSpacer?.getBoundingClientRect?.().height || 0),
+            rootCount: roots.length,
+            firstRootKey: roots[0]?.dataset?.renderUnitKey || '',
+            lastRootKey: roots.at(-1)?.dataset?.renderUnitKey || '',
+            visibleKey: visibleRoot?.dataset?.renderUnitKey || '',
+            visibleTop: Number.isFinite(visibleRect?.top) ? Number(visibleRect.top) : null,
+            anchorKey: chatWindowState.anchorKey || '',
+            anchorTop: Number.isFinite(anchorRect?.top) ? Number(anchorRect.top) : null,
+            visualOffset: Number(chatWindowState.visualOffset || 0),
+            fineKey: fineRoot?.dataset?.renderUnitKey || '',
+            fineTopSaved: Number.isFinite(chatWindowState.visualAnchorTop) ? Number(chatWindowState.visualAnchorTop) : null,
+            fineTopCurrent: Number.isFinite(fineRect?.top) ? Number(fineRect.top) : null,
+            snapshotCount: snapshotItems.length,
+            snapshotTotalSize: Number(chatWindowState.snapshot?.totalSize || 0),
+            snapshotFirstIndex: snapshotItems[0]?.index ?? null,
+            snapshotLastIndex: snapshotItems.at(-1)?.index ?? null,
+            directInput: isDirectChatScrollInputActive(),
+            userScrollActive: Date.now() < Number(chatWindowState.userScrollActiveUntil || 0),
+            programmaticScroll: chatWindowState.programmaticScroll === true,
+            ...details
+        };
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: ['[WV][CHAT_WINDOW_VIEWPORT_DIAG]', JSON.stringify(payload)]
+        });
+        return payload;
+    }
+
     function scheduleFineChatWindowAnchorRestore(reason = 'layout-settle') {
         const token = chatWindowState.fineAnchorRestoreToken + 1;
         chatWindowState.fineAnchorRestoreToken = token;
@@ -10762,7 +10815,9 @@ function shouldHideDcpUiMessage(message) {
         // pre-transaction visual anchor immediately, even while a wheel
         // gesture is active; waiting for ResizeObserver is already one paint
         // too late and produces the periodic upward-scroll jump.
+        const scrollTopBefore = Number(chatContainer.scrollTop || 0);
         let delta = NaN;
+        let method = 'none';
         const fineAnchor = chatWindowState.visualAnchorElement;
         if (fineAnchor?.isConnected && chatContainer.contains(fineAnchor)) {
             const fineRoot = fineAnchor.closest('[data-render-unit-key]');
@@ -10770,16 +10825,27 @@ function shouldHideDcpUiMessage(message) {
             if (fineRoot?.dataset?.renderUnitKey === chatWindowState.visualAnchorKey
                 && Number.isFinite(currentTop) && Number.isFinite(chatWindowState.visualAnchorTop)) {
                 delta = currentTop - chatWindowState.visualAnchorTop;
+                method = 'fine-dom';
             }
         }
         if (!Number.isFinite(delta)) {
             const anchorRoot = keyedRootForKey(chatWindowState.anchorKey);
             if (!anchorRoot) return false;
             delta = (anchorRoot.offsetTop - chatContainer.scrollTop) - chatWindowState.visualOffset;
+            method = 'root-offset';
         }
         if (!Number.isFinite(delta) || Math.abs(delta) < 0.5) return false;
         chatWindowState.programmaticScroll = true;
         chatContainer.scrollTop += delta;
+        if (typeof recordChatWindowViewportDiagnostic === 'function') {
+            recordChatWindowViewportDiagnostic('structural-anchor-applied', {
+                method,
+                delta,
+                scrollTopBefore,
+                scrollTopAfter: Number(chatContainer.scrollTop || 0),
+                coarseFineKeyMatch: chatWindowState.anchorKey === chatWindowState.visualAnchorKey
+            });
+        }
         vscode.postMessage({
             type: 'ui-debug',
             payload: ['[WV][CHAT_WINDOW_STRUCTURAL_ANCHOR]', `delta=${delta}`, `key=${chatWindowState.anchorKey}`]
@@ -11107,6 +11173,20 @@ function shouldHideDcpUiMessage(message) {
                         return;
                     }
                     if (!chatWindowState.rendering && !chatWindowState.pendingRangeRender) {
+                        if (typeof recordChatWindowViewportDiagnostic === 'function') {
+                            recordChatWindowViewportDiagnostic('range-change-request', {
+                                rawCount: snapshot.items.length,
+                                rawTotalSize: snapshot.totalSize,
+                                rawFirstIndex: snapshot.items[0]?.index ?? null,
+                                rawLastIndex: snapshot.items.at(-1)?.index ?? null,
+                                acknowledgedCount: acknowledged?.items?.length || 0,
+                                acknowledgedTotalSize: Number(acknowledged?.totalSize || 0),
+                                acknowledgedFirstIndex: acknowledged?.items?.[0]?.index ?? null,
+                                acknowledgedLastIndex: Array.isArray(acknowledged?.items) && acknowledged.items.length
+                                    ? acknowledged.items[acknowledged.items.length - 1]?.index ?? null
+                                    : null
+                            });
+                        }
                         chatWindowState.pendingRangeRender = true;
                         scheduleRenderFromState('window-range-change');
                     }
@@ -11137,6 +11217,17 @@ function shouldHideDcpUiMessage(message) {
                     ), { kind: 'self', decisionGeneration: typeof chatWindowAdaptiveShadow !== 'undefined'
                         ? chatWindowAdaptiveShadow?.state?.decisionGeneration : 0 });
                     vscode.postMessage({ type: 'ui-debug', payload: ['[WV][CHAT_WINDOW_MEASURE]', `changed=${batch.changedKeys.length}`, `totalSize=${batch.totalSize}`] });
+                    if (typeof recordChatWindowViewportDiagnostic === 'function') {
+                        const measurements = Array.isArray(batch.measurements) ? batch.measurements : [];
+                        const samples = measurements.length <= 12
+                            ? measurements
+                            : [...measurements.slice(0, 6), ...measurements.slice(-6)];
+                        recordChatWindowViewportDiagnostic('measurement-batch', {
+                            changedCount: batch.changedKeys.length,
+                            measuredTotalSize: batch.totalSize,
+                            measurementSamples: samples.map((entry) => ({ key: entry.key, size: entry.size }))
+                        });
+                    }
                     if (autoScrollPinnedToBottom) scrollToBottom(true);
                     else {
                         // resizeItem has already preserved the viewport for
@@ -11639,6 +11730,12 @@ function shouldHideDcpUiMessage(message) {
                 ? beginChatPresentationJournal(acceptedState, reconcileSessionId)
                 : null;
             captureChatWindowAnchor();
+            if (typeof recordChatWindowViewportDiagnostic === 'function') {
+                recordChatWindowViewportDiagnostic('transaction-anchor-captured', {
+                    transactionOwnerSessionId,
+                    transactionOwnerGeneration
+                });
+            }
             chatWindowState.rendering = true;
             chatWindowState.pendingRangeRender = false;
             chatWindowState.allUnits = units;

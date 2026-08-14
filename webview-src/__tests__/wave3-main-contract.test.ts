@@ -598,6 +598,10 @@ describe('Wave 3 main-script window contract', () => {
     expect(source).toContain('chatWindowState.adapter?.invalidateMeasurement?.(targetId);');
     expect(source).toContain('chatWindowState.adapter.setPresentationRevision(targetId');
     expect(source).toContain('const sameMountedRange = snapshot.items.length === chatWindowState.mountedKeys.size');
+    expect(source).toContain('[WV][CHAT_WINDOW_VIEWPORT_DIAG]');
+    expect(source).toContain("recordChatWindowViewportDiagnostic('transaction-anchor-captured'");
+    expect(source).toContain("recordChatWindowViewportDiagnostic('measurement-batch'");
+    expect(source).toContain("recordChatWindowViewportDiagnostic('structural-anchor-applied'");
     expect(source).toContain('window.__ocChatWindowDomBudgetAudit');
     expect(source).toContain('if (budget.descendants > 4000) descendantsAdvisory = true;');
     expect(source).not.toContain('session.virtual');
