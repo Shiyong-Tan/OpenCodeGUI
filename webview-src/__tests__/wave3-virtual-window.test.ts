@@ -1366,13 +1366,18 @@ describe('Wave 3 TanStack adapter contract', () => {
       .toEqual([72, 160, 96, 96, 96, 112]);
   });
 
-  test('does not replay measurement deltas while scrolling upward', () => {
+  test('preserves first-measurement anchors but does not replay later deltas while scrolling upward', () => {
     const aboveViewport = { start: 120 };
     expect(shouldAdjustMeasuredItemScrollPosition(aboveViewport, {
       scrollDirection: 'backward',
       scrollAdjustments: 20,
       getScrollOffset: () => 500,
-    })).toBe(false);
+    }, 'first')).toBe(true);
+    expect(shouldAdjustMeasuredItemScrollPosition(aboveViewport, {
+      scrollDirection: 'backward',
+      scrollAdjustments: 20,
+      getScrollOffset: () => 500,
+    }, 'remeasure')).toBe(false);
     expect(shouldAdjustMeasuredItemScrollPosition(aboveViewport, {
       scrollDirection: 'forward',
       scrollAdjustments: 20,
