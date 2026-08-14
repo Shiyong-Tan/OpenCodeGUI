@@ -74,11 +74,19 @@ export interface VirtualAdapterOptions {
 }
 
 interface CoreVirtualizer {
+  scrollDirection?: 'forward' | 'backward' | null;
+  scrollAdjustments?: number;
   getVirtualItems(): Array<{ key: string | number | bigint; index: number; start: number; end: number; size: number }>;
   getTotalSize(): number;
+  getScrollOffset?(): number;
   setOptions?(options: unknown): void;
   scrollToIndex?(index: number, options?: unknown): void;
   resizeItem?(index: number, size: number): void;
+  shouldAdjustScrollPositionOnItemSizeChange?: (
+    item: { key: string | number | bigint; index: number; start: number; end: number; size: number },
+    delta: number,
+    instance: CoreVirtualizer,
+  ) => boolean;
   _didMount?(): () => void;
   _willUpdate?(): void;
 }
@@ -228,6 +236,23 @@ export function estimateRenderUnitSize(kind: RenderUnitEstimateKind): number {
   if (kind === 'assistant') return 160;
   if (kind === 'system' || kind === 'change-list' || kind === 'segment') return 96;
   return 112;
+}
+
+/**
+ * Preserve TanStack's normal above-viewport correction except while the user
+ * is scrolling backward (upward). Applying an estimate-to-measurement delta
+ * during backward scrolling is the source of the visible image-row jump.
+ */
+export function shouldAdjustMeasuredItemScrollPosition(
+  item: { readonly start: number },
+  instance: Pick<CoreVirtualizer, 'scrollDirection' | 'scrollAdjustments' | 'getScrollOffset'>,
+): boolean {
+  if (instance.scrollDirection === 'backward') return false;
+  const offset = typeof instance.getScrollOffset === 'function'
+    ? Number(instance.getScrollOffset())
+    : 0;
+  const adjustments = Number(instance.scrollAdjustments || 0);
+  return item.start < offset + adjustments;
 }
 
 function isWave3Options(options: VirtualAdapterOptions | VirtualizerOptions<Element, Element>): options is VirtualAdapterOptions {
@@ -645,6 +670,8 @@ function createSingleAdapter(
     onChange: () => publishRange(),
   });
   virtualizer = new VirtualizerClass(coreOptions());
+  virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) =>
+    shouldAdjustMeasuredItemScrollPosition(item, instance);
   let unmount: () => void = () => undefined;
   const activate = () => {
     if (destroyed || mounted) return;

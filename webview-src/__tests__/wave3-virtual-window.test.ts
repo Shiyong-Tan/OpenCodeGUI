@@ -1,6 +1,7 @@
 import {
   createTanStackVirtualAdapter,
   estimateRenderUnitSize,
+  shouldAdjustMeasuredItemScrollPosition,
   type VirtualAdapterRangePolicy,
   type VirtualizerConstructor,
 } from '../rendering/tanstack-virtual-adapter';
@@ -1363,6 +1364,28 @@ describe('Wave 3 TanStack adapter contract', () => {
   test('uses typed estimates without clamping real sizes', () => {
     expect(['user', 'assistant', 'system', 'change-list', 'segment', 'unknown'].map(estimateRenderUnitSize))
       .toEqual([72, 160, 96, 96, 96, 112]);
+  });
+
+  test('does not replay measurement deltas while scrolling upward', () => {
+    const aboveViewport = { start: 120 };
+    expect(shouldAdjustMeasuredItemScrollPosition(aboveViewport, {
+      scrollDirection: 'backward',
+      scrollAdjustments: 20,
+      getScrollOffset: () => 500,
+    })).toBe(false);
+    expect(shouldAdjustMeasuredItemScrollPosition(aboveViewport, {
+      scrollDirection: 'forward',
+      scrollAdjustments: 20,
+      getScrollOffset: () => 500,
+    })).toBe(true);
+    expect(shouldAdjustMeasuredItemScrollPosition({ start: 700 }, {
+      scrollDirection: null,
+      scrollAdjustments: 20,
+      getScrollOffset: () => 500,
+    })).toBe(false);
+
+    const { constructions } = createHarness(4);
+    expect(typeof (constructions[0] as any).shouldAdjustScrollPositionOnItemSizeChange).toBe('function');
   });
 
   test('returns plain keyed offsets, initial 80-tail range, total size, and forced tail once', () => {
