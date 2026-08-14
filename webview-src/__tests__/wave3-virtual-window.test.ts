@@ -47,6 +47,7 @@ function createHarness(
   count = 1001,
   initialOwnerMode: 'active' | 'deferred-transaction' = 'active',
   initialMeasurements: readonly { key: string; revision: string; size: number }[] = [],
+  rangeHysteresis = 0,
 ) {
   FakeResizeObserver.instance = undefined;
   FakeResizeObserver.instances = [];
@@ -122,6 +123,7 @@ function createHarness(
     overscan: 20,
     initialTailCount: 80,
     maxMounted: 140,
+    rangeHysteresis,
     keepMountedKeys: [keys[count - 1]],
     onRangeChange: (snapshot) => {
       if (failRangeCallbackCount > 0) { failRangeCallbackCount -= 1; throw new Error('injected range callback failure'); }
@@ -230,6 +232,28 @@ function createCF4OffsetContinuityHarness() {
 }
 
 describe('Wave 3 TanStack adapter contract', () => {
+  test('retains a wider range until the viewport reaches its hysteresis guard', () => {
+    const harness = createHarness(200, 'active', [], 16);
+    const virtualizer = harness.constructions[0];
+    harness.adapter.getRange();
+
+    const retainedTail = virtualizer.options.rangeExtractor({
+      startIndex: 150, endIndex: 156, overscan: 20, count: 200,
+    });
+    expect(retainedTail).toEqual(Array.from({ length: 80 }, (_, index) => 120 + index));
+
+    const shifted = virtualizer.options.rangeExtractor({
+      startIndex: 123, endIndex: 129, overscan: 20, count: 200,
+    });
+    expect(shifted[0]).toBe(87);
+    expect(shifted.at(-1)).toBe(199);
+
+    const stable = virtualizer.options.rangeExtractor({
+      startIndex: 120, endIndex: 126, overscan: 20, count: 200,
+    });
+    expect(stable).toEqual(shifted);
+  });
+
   test('CF4 retains live 33455 through preflight and two activations, then publishes one genuine range change', () => {
     const harness = createCF4OffsetContinuityHarness();
     expect(harness.constructions[0].sizes.get(0)).toBe(10531);

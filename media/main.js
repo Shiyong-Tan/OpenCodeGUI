@@ -7865,6 +7865,7 @@ function shouldHideDcpUiMessage(message) {
     const CHAT_LOCAL_OLDER_BATCH = 40;
     const CHAT_PENDING_SCROLL_MAX_ATTEMPTS = 4;
     const CHAT_WINDOW_OVERSCAN = 20;
+    const CHAT_WINDOW_RANGE_HYSTERESIS = 16;
     const CHAT_WINDOW_MOUNT_LIMIT = 140;
     const CHAT_WINDOW_DIRECT_CHILD_LIMIT = 146;
     const CHAT_WINDOW_ADAPTIVE_RANGE_ENABLED = window.__ocChatWindowAdaptiveRangeEnabled !== false;
@@ -10976,6 +10977,9 @@ function shouldHideDcpUiMessage(message) {
                 overscan: CHAT_WINDOW_OVERSCAN,
                 initialTailCount: CHAT_WINDOW_INITIAL_TAIL,
                 maxMounted: CHAT_WINDOW_MOUNT_LIMIT,
+                rangeHysteresis: typeof CHAT_WINDOW_RANGE_HYSTERESIS !== 'undefined'
+                    ? CHAT_WINDOW_RANGE_HYSTERESIS
+                    : 0,
                 gap: 8,
                 initialOwnerMode: 'deferred-transaction',
                 onRangeChange(snapshot) {
@@ -11178,7 +11182,17 @@ function shouldHideDcpUiMessage(message) {
         if (chatWindowState.sessionId !== sessionId) return CHAT_WINDOW_CANDIDATE_STALE_RESULT;
         const keys = units.map((unit) => unit.key);
         const kinds = units.map(getChatWindowUnitKind);
-        const presentationRevisions = units.map((unit) => rendering.presentationFingerprint(getKeyedUnitPresentation(session, unit)));
+        const presentationRevisions = units.map((unit) => {
+            const presentation = getKeyedUnitPresentation(session, unit);
+            const presentationSelection = typeof keyedChatReconcileState !== 'undefined'
+                ? keyedChatReconcileState.items.find((item) => item.key === unit.key)?.presentationSelection
+                : undefined;
+            return rendering.presentationFingerprint(
+                typeof getKeyedPresentationIdentity === 'function'
+                    ? getKeyedPresentationIdentity(presentation, presentationSelection)
+                    : presentation
+            );
+        });
         const keepMountedKeys = getChatWindowKeepMountedKeys(session, units);
         chatWindowState.adapter.update({ keys, kinds, presentationRevisions, keepMountedKeys });
         return chatWindowState.adapter;
@@ -11598,10 +11612,20 @@ function shouldHideDcpUiMessage(message) {
             if (stagedAttempt) chatWindowState.localHistoryPresentation = localWindow.presentation;
             reserveChatWindowStructuralRoots(localWindow.presentation);
             const renderingFacade = globalThis.window?.__ocRendering;
+            const currentPresentationSelections = typeof keyedChatReconcileState !== 'undefined'
+                ? new Map(keyedChatReconcileState.items.map((item) => [item.key, item.presentationSelection]))
+                : null;
             const adapterUpdate = stagedAttempt?.adapterUpdate || {
                 keys: localWindow.visibleUnits.map((unit) => unit.key),
                 kinds: localWindow.visibleUnits.map(getChatWindowUnitKind),
-                presentationRevisions: localWindow.visibleUnits.map((unit) => renderingFacade.presentationFingerprint(getKeyedUnitPresentation(session, unit))),
+                presentationRevisions: localWindow.visibleUnits.map((unit) => {
+                    const presentation = getKeyedUnitPresentation(session, unit);
+                    return renderingFacade.presentationFingerprint(
+                        typeof getKeyedPresentationIdentity === 'function'
+                            ? getKeyedPresentationIdentity(presentation, currentPresentationSelections?.get(unit.key))
+                            : presentation
+                    );
+                }),
                 keepMountedKeys: getChatWindowKeepMountedKeys(session, localWindow.visibleUnits),
                 ...(rangePolicy ? { rangePolicy } : {})
             };

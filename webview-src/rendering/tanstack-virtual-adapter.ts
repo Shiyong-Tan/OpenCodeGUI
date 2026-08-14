@@ -60,6 +60,8 @@ export interface VirtualAdapterOptions {
   readonly overscan?: number;
   readonly initialTailCount?: number;
   readonly maxMounted?: number;
+  /** Extra records retained on each side of the active range to avoid one-row window churn. */
+  readonly rangeHysteresis?: number;
   readonly gap?: number;
   readonly keepMountedKeys?: readonly string[];
   readonly initialMeasurements?: readonly VirtualAdapterMeasurement[];
@@ -128,6 +130,7 @@ interface AdapterStateSeed {
   readonly measured: Map<string, { revision: string; size: number }>;
   readonly elements: Map<string, Element>;
   readonly pendingMeasurementKeys: Set<string>;
+  readonly retainedWindow?: { readonly startKey: string; readonly endKey: string };
 }
 
 interface ResolvedRangePolicy {
@@ -534,6 +537,7 @@ function createSingleAdapter(
   const overscan = rangePolicy.overscanTier;
   const initialTailCount = rangePolicy.initialTail;
   const maxMounted = current.maxMounted ?? 140;
+  const rangeHysteresis = Math.max(0, Math.floor(current.rangeHysteresis ?? 0));
   const gap = current.gap ?? 0;
   const inheritedScrollOffset = Number.isFinite(control.seed?.scrollOffset) && Number(control.seed?.scrollOffset) >= 0
     ? Number(control.seed?.scrollOffset) : undefined;
@@ -547,6 +551,9 @@ function createSingleAdapter(
   let observer: ResizeObserverLike | null = null;
   let callbacksSuppressed = Boolean(control.deferred);
   let suppressedMeasurementBatch: MeasurementBatch | null = null;
+  let retainedWindow = control.seed?.retainedWindow
+    ? { ...control.seed.retainedWindow }
+    : null;
 
   const indexForKey = (key: string) => keys.indexOf(key);
   const estimateAt = (index: number) => {
@@ -559,10 +566,25 @@ function createSingleAdapter(
     if (range.count <= 0) return [];
     if (initialTailPending) {
       const start = Math.max(0, range.count - initialTailCount);
+      if (rangeHysteresis > 0 && keys[start] && keys[range.count - 1]) {
+        retainedWindow = { startKey: keys[start], endKey: keys[range.count - 1] };
+      }
       return Array.from({ length: range.count - start }, (_, offset) => start + offset);
     }
-    const start = Math.max(0, range.startIndex - rangePolicy.beforeReserve);
-    const end = Math.min(range.count - 1, range.endIndex + rangePolicy.afterReserve);
+    const desiredStart = Math.max(0, range.startIndex - rangePolicy.beforeReserve);
+    const desiredEnd = Math.min(range.count - 1, range.endIndex + rangePolicy.afterReserve);
+    if (rangeHysteresis > 0 && retainedWindow) {
+      const retainedStart = indexForKey(retainedWindow.startKey);
+      const retainedEnd = indexForKey(retainedWindow.endKey);
+      const edgeGuard = Math.max(2, Math.floor(rangeHysteresis / 3));
+      if (retainedStart >= 0 && retainedEnd >= retainedStart
+        && range.startIndex >= retainedStart + edgeGuard
+        && range.endIndex <= retainedEnd - edgeGuard) {
+        return Array.from({ length: retainedEnd - retainedStart + 1 }, (_, offset) => retainedStart + offset);
+      }
+    }
+    const start = Math.max(0, desiredStart - rangeHysteresis);
+    const end = Math.min(range.count - 1, desiredEnd + rangeHysteresis);
     const center = Math.floor((range.startIndex + range.endIndex) / 2);
     let windowStart = start;
     let windowEnd = end;
@@ -584,6 +606,9 @@ function createSingleAdapter(
       if (expandedEnd - expandedStart + 1 > maxMounted) continue;
       windowStart = expandedStart;
       windowEnd = expandedEnd;
+    }
+    if (rangeHysteresis > 0 && keys[windowStart] && keys[windowEnd]) {
+      retainedWindow = { startKey: keys[windowStart], endKey: keys[windowEnd] };
     }
     return Array.from({ length: windowEnd - windowStart + 1 }, (_, offset) => windowStart + offset);
   };
@@ -839,6 +864,7 @@ function createSingleAdapter(
         measured: new Map(measured),
         elements: new Map(elementByKey),
         pendingMeasurementKeys: new Set(pendingMeasurementKeys),
+        retainedWindow: retainedWindow ? { ...retainedWindow } : undefined,
       };
     },
     _publish(snapshot) {

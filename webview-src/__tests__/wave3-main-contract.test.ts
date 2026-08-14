@@ -4699,7 +4699,11 @@ describe('A2.4D journaled keyed and structural transaction', () => {
     expect(beginUpdates[0]).toEqual(expect.objectContaining({
       keys: units.map((unit) => unit.key),
       kinds: units.map(() => 'system'),
-      presentationRevisions: units.map((unit) => JSON.stringify({ key: unit.key, revision: unit.revision })),
+      presentationRevisions: units.map((unit) => JSON.stringify({
+        presentation: { key: unit.key, revision: unit.revision },
+        mode: 'normal-rich',
+        family: '',
+      })),
       keepMountedKeys: ['keep'],
     }));
     expect(harness.calls).toEqual(expect.arrayContaining(['begin', 'prepare', 'adapter-finalize']));
