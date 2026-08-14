@@ -189,4 +189,50 @@ describe('assistant image controller', () => {
     expect(codeLink.classList.contains('oc-file-link')).toBe(true);
     expect(externalLink.href).toBe('https://example.com/analysis.py');
   });
+
+  test('reuses a resolved preview synchronously when a virtualized row remounts', () => {
+    const posts: any[] = [];
+    const document = {
+      createElement: (tag: string) => tag === 'a' ? new FakeAnchor() : new FakeImage(),
+    } as unknown as Document;
+    let requestSequence = 0;
+    const controller = createAssistantImageController({
+      document,
+      postMessage: (message) => posts.push(message),
+      createRequestId: () => `request-${++requestSequence}`,
+    });
+    const firstRoot = new FakeElement('div');
+    const firstLink = firstRoot.appendChild(new FakeAnchor()) as FakeAnchor;
+    firstLink.href = 'results/plot.svg';
+    firstLink.textContent = 'results/plot.svg';
+
+    controller.enhance(firstRoot as unknown as HTMLElement);
+    firstLink.isConnected = false;
+    expect(controller.acceptResponse({
+      type: 'assistantImageReferencesResolved',
+      requestId: 'request-1',
+      items: [{
+        id: 'image-1',
+        path: 'results/plot.svg',
+        resolvedPath: 'D:/workspace/results/plot.svg',
+        uri: 'webview://plot',
+        width: 600,
+        height: 400,
+      }],
+    })).toBe(true);
+
+    const remountedRoot = new FakeElement('div');
+    const remountedLink = remountedRoot.appendChild(new FakeAnchor()) as FakeAnchor;
+    remountedLink.href = 'results/plot.svg';
+    remountedLink.textContent = 'results/plot.svg';
+    controller.enhance(remountedRoot as unknown as HTMLElement);
+
+    expect(posts).toHaveLength(1);
+    expect(remountedRoot.children).toHaveLength(2);
+    const preview = remountedRoot.children[1];
+    expect(preview.className).toBe('assistant-image-thumbnail');
+    expect((preview as FakeAnchor).href).toBe('ocfile://open?path=D%3A%2Fworkspace%2Fresults%2Fplot.svg');
+    expect([preview.children[0].width, preview.children[0].height]).toEqual([600, 400]);
+    expect((preview.children[0] as FakeImage).src).toBe('webview://plot');
+  });
 });

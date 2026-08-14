@@ -32,6 +32,8 @@ interface PendingReference {
   readonly mode: 'link' | 'inline';
 }
 
+const MAX_RESOLUTION_CACHE_ENTRIES = 256;
+
 const IMAGE_PATH_RE = /\.(?:png|jpe?g|gif|webp|bmp|svg|tiff?|ico|heic)(?:[?#].*)?$/i;
 const LOCAL_PATH_RE = /^(?:[a-z]:[\\/]|\.{1,3}[\\/]|[^:/?#]+[\\/])/i;
 
@@ -69,12 +71,92 @@ export function createAssistantImageController(
 ): AssistantImageController {
   let sequence = 0;
   const pending = new Map<string, PendingReference[]>();
+  // Virtualized rows are routinely destroyed and recreated while scrolling.
+  // Keep successful resolutions for the lifetime of this Webview so a
+  // remounted image row can reserve and render its preview synchronously,
+  // instead of briefly measuring as a text-only row and growing later.
+  const resolutionCache = new Map<string, AssistantImageResolution>();
   const createRequestId = dependencies.createRequestId
     || (() => `assistant-image-${Date.now()}-${++sequence}`);
 
   const openHref = (filePath: string, contextPath?: string): string => {
     const context = contextPath ? `&contextPath=${encodeURIComponent(contextPath)}` : '';
     return `ocfile://open?path=${encodeURIComponent(filePath)}${context}`;
+  };
+
+  const cacheKey = (filePath: string, contextPath?: string): string =>
+    `${contextPath || ''}\u0000${filePath}`;
+
+  const cacheResolution = (
+    reference: Pick<PendingReference, 'path' | 'contextPath'>,
+    resolution: AssistantImageResolution,
+  ): void => {
+    const key = cacheKey(reference.path, reference.contextPath);
+    resolutionCache.delete(key);
+    resolutionCache.set(key, resolution);
+    if (resolutionCache.size > MAX_RESOLUTION_CACHE_ENTRIES) {
+      const oldest = resolutionCache.keys().next().value;
+      if (typeof oldest === 'string') resolutionCache.delete(oldest);
+    }
+  };
+
+  const applyResolution = (
+    reference: PendingReference,
+    resolved: AssistantImageResolution | undefined,
+  ): void => {
+    const element = reference.element;
+    if (!element.isConnected) return;
+    if (!resolved?.resolvedPath || !resolved.uri) {
+      element.classList.remove('is-loading');
+      element.classList.add('is-unresolved');
+      return;
+    }
+    const href = openHref(resolved.resolvedPath);
+    if (reference.mode === 'inline' && element instanceof HTMLImageElement) {
+      element.dataset.ocResolvedPath = resolved.resolvedPath;
+      if (resolved.width && resolved.height) {
+        element.width = resolved.width;
+        element.height = resolved.height;
+      }
+      element.src = resolved.uri;
+      element.loading = 'lazy';
+      element.alt ||= resolved.path;
+      element.classList.remove('is-loading');
+      element.setAttribute('title', `Open ${resolved.resolvedPath}`);
+      return;
+    }
+    if (!(element instanceof HTMLAnchorElement) || !element.parentNode) return;
+    element.href = href;
+    if (element.nextElementSibling?.classList.contains('assistant-image-thumbnail')) return;
+    const preview = dependencies.document.createElement('a');
+    preview.className = 'assistant-image-thumbnail';
+    preview.href = href;
+    preview.setAttribute('aria-label', `Preview ${resolved.path}`);
+    preview.setAttribute('title', `Open ${resolved.resolvedPath}`);
+    const image = dependencies.document.createElement('img');
+    if (resolved.width && resolved.height) {
+      image.width = resolved.width;
+      image.height = resolved.height;
+    }
+    image.src = resolved.uri;
+    image.alt = resolved.path;
+    image.loading = 'lazy';
+    preview.appendChild(image);
+    let insertionAnchor: Element = element;
+    const visibleLabel = (element.textContent || '').trim();
+    const hidesRawPath = visibleLabel === reference.path
+      || decodeLocalReference(visibleLabel) === reference.path;
+    if (hidesRawPath) {
+      element.classList.add('assistant-image-path-hidden');
+      const code = element.parentElement?.tagName.toLowerCase() === 'code'
+        ? element.parentElement
+        : null;
+      if (code && (code.textContent || '').trim() === visibleLabel) {
+        code.classList.add('assistant-image-path-hidden');
+        insertionAnchor = code;
+      }
+    }
+    insertionAnchor.parentNode?.insertBefore(preview, insertionAnchor.nextSibling);
   };
 
   const extractElementPath = (element: Element): string => {
@@ -135,13 +217,21 @@ export function createAssistantImageController(
         element.href = openHref(localPath, referenceContext);
         element.classList.add('assistant-image-link');
       }
-      references.push({
+      const reference: PendingReference = {
         id,
         path: localPath,
         contextPath: referenceContext,
         element,
         mode: element instanceof HTMLImageElement ? 'inline' : 'link',
-      });
+      };
+      const cached = resolutionCache.get(cacheKey(localPath, referenceContext));
+      if (cached) {
+        // Applying here is intentionally synchronous with row enhancement.
+        // TanStack's first measurement therefore sees the final image box.
+        applyResolution(reference, cached);
+      } else {
+        references.push(reference);
+      }
     }
     if (references.length === 0) return;
     const requestId = createRequestId();
@@ -161,59 +251,8 @@ export function createAssistantImageController(
     const resolvedById = new Map((message.items || []).map((item) => [item.id, item]));
     for (const reference of references) {
       const resolved = resolvedById.get(reference.id);
-      const element = reference.element;
-      if (!element.isConnected) continue;
-      if (!resolved?.resolvedPath || !resolved.uri) {
-        element.classList.remove('is-loading');
-        element.classList.add('is-unresolved');
-        continue;
-      }
-      const href = openHref(resolved.resolvedPath);
-      if (reference.mode === 'inline' && element instanceof HTMLImageElement) {
-        element.dataset.ocResolvedPath = resolved.resolvedPath;
-        if (resolved.width && resolved.height) {
-          element.width = resolved.width;
-          element.height = resolved.height;
-        }
-        element.src = resolved.uri;
-        element.loading = 'lazy';
-        element.alt ||= resolved.path;
-        element.classList.remove('is-loading');
-        element.setAttribute('title', `Open ${resolved.resolvedPath}`);
-        continue;
-      }
-      if (!(element instanceof HTMLAnchorElement) || !element.parentNode) continue;
-      element.href = href;
-      if (element.nextElementSibling?.classList.contains('assistant-image-thumbnail')) continue;
-      const preview = dependencies.document.createElement('a');
-      preview.className = 'assistant-image-thumbnail';
-      preview.href = href;
-      preview.setAttribute('aria-label', `Preview ${resolved.path}`);
-      preview.setAttribute('title', `Open ${resolved.resolvedPath}`);
-      const image = dependencies.document.createElement('img');
-      if (resolved.width && resolved.height) {
-        image.width = resolved.width;
-        image.height = resolved.height;
-      }
-      image.src = resolved.uri;
-      image.alt = resolved.path;
-      image.loading = 'lazy';
-      preview.appendChild(image);
-      let insertionAnchor: Element = element;
-      const visibleLabel = (element.textContent || '').trim();
-      const hidesRawPath = visibleLabel === reference.path
-        || decodeLocalReference(visibleLabel) === reference.path;
-      if (hidesRawPath) {
-        element.classList.add('assistant-image-path-hidden');
-        const code = element.parentElement?.tagName.toLowerCase() === 'code'
-          ? element.parentElement
-          : null;
-        if (code && (code.textContent || '').trim() === visibleLabel) {
-          code.classList.add('assistant-image-path-hidden');
-          insertionAnchor = code;
-        }
-      }
-      insertionAnchor.parentNode?.insertBefore(preview, insertionAnchor.nextSibling);
+      if (resolved?.resolvedPath && resolved.uri) cacheResolution(reference, resolved);
+      applyResolution(reference, resolved);
     }
     return true;
   }
