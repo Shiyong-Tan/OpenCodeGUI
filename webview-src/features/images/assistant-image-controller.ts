@@ -105,7 +105,9 @@ export function createAssistantImageController(
     resolved: AssistantImageResolution | undefined,
   ): void => {
     const element = reference.element;
-    if (!element.isConnected) return;
+    // Message rows are enhanced while detached, before the virtualizer mounts
+    // them. Cached resolutions must still populate that detached subtree so
+    // its first connected measurement includes the preview.
     if (!resolved?.resolvedPath || !resolved.uri) {
       element.classList.remove('is-loading');
       element.classList.add('is-unresolved');

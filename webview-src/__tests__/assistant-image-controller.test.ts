@@ -223,6 +223,8 @@ describe('assistant image controller', () => {
 
     const remountedRoot = new FakeElement('div');
     const remountedLink = remountedRoot.appendChild(new FakeAnchor()) as FakeAnchor;
+    remountedRoot.isConnected = false;
+    remountedLink.isConnected = false;
     remountedLink.href = 'results/plot.svg';
     remountedLink.textContent = 'results/plot.svg';
     controller.enhance(remountedRoot as unknown as HTMLElement);
