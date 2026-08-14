@@ -382,7 +382,11 @@ describe('utility command family characterization', () => {
         const imagePath = path.join(reportDir, 'eta_kappa.png');
         fs.mkdirSync(reportDir, { recursive: true });
         fs.writeFileSync(path.join(reportDir, 'summary.json'), '{}');
-        fs.writeFileSync(imagePath, 'image');
+        const pngHeader = Buffer.alloc(24);
+        Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(pngHeader);
+        pngHeader.writeUInt32BE(1600, 16);
+        pngHeader.writeUInt32BE(900, 20);
+        fs.writeFileSync(imagePath, pngHeader);
         const executeCommand = vscode.commands.executeCommand as jest.Mock;
         executeCommand.mockClear();
         try {
@@ -405,6 +409,8 @@ describe('utility command family characterization', () => {
                     path: '.../eta_kappa.png',
                     resolvedPath: imagePath,
                     uri: `webview:${imagePath}`,
+                    width: 1600,
+                    height: 900,
                 }],
             });
 

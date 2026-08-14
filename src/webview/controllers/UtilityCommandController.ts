@@ -3,6 +3,7 @@ import * as pathModule from 'path';
 import * as vscode from 'vscode';
 import type { SmartSearchMessage } from '../../search/SmartSearchService';
 import type { AutomaticEditorContext } from '../../context/EditorContextService';
+import { readImageDimensions } from '../../images/ImageDimensions';
 
 type UtilityMessage = Record<string, any>;
 type LocalQuestionResolution = { resolved: boolean; sessionId?: string };
@@ -554,11 +555,13 @@ export class UtilityCommandController {
             if (!id || !rawPath) continue;
             const candidates = await this.resolveAssistantImageCandidates(rawPath, contextPath);
             if (candidates.length === 1) {
+                const dimensions = await readImageDimensions(candidates[0]);
                 items.push({
                     id,
                     path: rawPath,
                     resolvedPath: candidates[0],
                     uri: activeWebview.asWebviewUri(vscode.Uri.file(candidates[0])).toString(),
+                    ...(dimensions || {}),
                 });
             } else {
                 items.push({

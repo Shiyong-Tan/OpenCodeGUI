@@ -3,6 +3,8 @@ export interface AssistantImageResolution {
   readonly path: string;
   readonly resolvedPath?: string;
   readonly uri?: string;
+  readonly width?: number;
+  readonly height?: number;
 }
 
 export interface AssistantImageResolutionMessage {
@@ -169,6 +171,10 @@ export function createAssistantImageController(
       const href = openHref(resolved.resolvedPath);
       if (reference.mode === 'inline' && element instanceof HTMLImageElement) {
         element.dataset.ocResolvedPath = resolved.resolvedPath;
+        if (resolved.width && resolved.height) {
+          element.width = resolved.width;
+          element.height = resolved.height;
+        }
         element.src = resolved.uri;
         element.loading = 'lazy';
         element.alt ||= resolved.path;
@@ -185,6 +191,10 @@ export function createAssistantImageController(
       preview.setAttribute('aria-label', `Preview ${resolved.path}`);
       preview.setAttribute('title', `Open ${resolved.resolvedPath}`);
       const image = dependencies.document.createElement('img');
+      if (resolved.width && resolved.height) {
+        image.width = resolved.width;
+        image.height = resolved.height;
+      }
       image.src = resolved.uri;
       image.alt = resolved.path;
       image.loading = 'lazy';

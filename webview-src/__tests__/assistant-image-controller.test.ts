@@ -24,6 +24,8 @@ class FakeElement {
   tabIndex = -1;
   loading = '';
   alt = '';
+  width = 0;
+  height = 0;
 
   constructor(readonly tagName: string) {}
   setAttribute(name: string, value: string) { this.attributes.set(name, value); }
@@ -142,20 +144,26 @@ describe('assistant image controller', () => {
           path: '.../eta_kappa.png',
           resolvedPath: 'data/results/case-a/eta_kappa.png',
           uri: 'webview://eta',
+          width: 1600,
+          height: 900,
         },
         {
           id: 'image-2',
           path: linked.href,
           resolvedPath: 'data/results/case-a/relative_deltaD_energy.png',
           uri: 'webview://delta',
+          width: 1200,
+          height: 800,
         },
       ],
     })).toBe(true);
 
     expect(abbreviated.src).toBe('webview://eta');
     expect(abbreviated.loading).toBe('lazy');
+    expect([abbreviated.width, abbreviated.height]).toEqual([1600, 900]);
     expect(root.children).toHaveLength(4);
     expect(root.children[3].className).toBe('assistant-image-thumbnail');
+    expect([root.children[3].children[0].width, root.children[3].children[0].height]).toEqual([1200, 800]);
     expect(code.classList.contains('assistant-image-path-hidden')).toBe(true);
     abbreviated.click();
     expect(posts[1]).toEqual({
