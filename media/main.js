@@ -6119,10 +6119,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }, { passive: true });
         window.addEventListener('pointerup', () => {
             chatWindowState.directScrollInputUntil = Date.now() + 250;
-            // A scrollbar drag may have deferred an image/layout correction
-            // using the longer pointer-down window. Re-arm from the latest
-            // user-owned anchor so it settles shortly after release.
-            restoreChatWindowAnchor();
+            // The released scrollbar position is user-owned. Adopt it as the
+            // new anchor instead of replaying a layout correction captured
+            // before or during the drag.
+            if (!autoScrollPinnedToBottom) captureChatWindowAnchor();
         }, { passive: true });
         chatContainer.addEventListener('keydown', (event) => {
             if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) {
@@ -8002,7 +8002,8 @@ function shouldHideDcpUiMessage(message) {
         fineAnchorRestoreToken: 0,
         programmaticScroll: false, userScrollActiveUntil: 0, activityBelow: false, rendering: false,
         directScrollInputUntil: 0, upwardScrollIntentUntil: 0,
-        imageLayoutStabilizingUntil: 0, pendingImageLayouts: 0,
+        imageLayoutStabilizingUntil: 0, pendingImageLayouts: 0, imageAnchorRestoreToken: 0,
+        measurementViewportOwnerUntil: 0,
         pendingRangeRender: false, failedSessionId: '', localOlderSurface: null,
         localOlderObserver: null, localOlderObserverArmed: true, pendingScrollKey: '',
         pendingScrollAttempts: 0, localHistoryPresentation: null, acknowledgedRawSnapshot: null
@@ -10406,6 +10407,8 @@ function shouldHideDcpUiMessage(message) {
         chatWindowState.directScrollInputUntil = 0;
         chatWindowState.imageLayoutStabilizingUntil = 0;
         chatWindowState.pendingImageLayouts = 0;
+        chatWindowState.imageAnchorRestoreToken += 1;
+        chatWindowState.measurementViewportOwnerUntil = 0;
         chatWindowState.activityBelow = false;
         autoScrollPinnedToBottom = true;
         chatWindowState.programmaticScroll = true;
@@ -10652,17 +10655,23 @@ function shouldHideDcpUiMessage(message) {
         chatWindowState.fineAnchorRestoreToken = token;
         const sessionId = activeSessionId;
         const generation = chatWindowGeneration;
-        const retryAfterDirectInput = (nextReason) => {
+        const yieldToCurrentViewport = (yieldReason) => {
             if (chatWindowState.fineAnchorRestoreToken !== token
                 || activeSessionId !== sessionId || chatWindowGeneration !== generation) return false;
             const now = Date.now();
             const inputUntil = Math.max(chatWindowState.directScrollInputUntil, chatWindowState.userScrollActiveUntil);
-            if (inputUntil <= now) return false;
-            setTimeout(() => {
-                if (chatWindowState.fineAnchorRestoreToken !== token
-                    || activeSessionId !== sessionId || chatWindowGeneration !== generation) return;
-                scheduleFineChatWindowAnchorRestore(nextReason);
-            }, Math.max(16, inputUntil - now + 16));
+            const measurementOwnsViewport = now < Number(chatWindowState.measurementViewportOwnerUntil || 0);
+            if (inputUntil <= now && !measurementOwnsViewport) return false;
+            // Never replay an old visual offset after the user finishes a
+            // gesture, or after TanStack has already compensated resizeItem.
+            // The current viewport is authoritative; the next native scroll
+            // or structural transaction will capture a fresh anchor.
+            chatWindowState.fineAnchorRestoreToken += 1;
+            if (!autoScrollPinnedToBottom) captureChatWindowAnchor();
+            vscode.postMessage({
+                type: 'ui-debug',
+                payload: ['[WV][CHAT_WINDOW_ANCHOR_YIELD]', `reason=${yieldReason}`, `input=${inputUntil > now}`, `measurement=${measurementOwnsViewport}`]
+            });
             return true;
         };
         // Multiple virtual measurements often arrive in adjacent frames. Give
@@ -10672,12 +10681,12 @@ function shouldHideDcpUiMessage(message) {
             if (chatWindowState.fineAnchorRestoreToken !== token
                 || activeSessionId !== sessionId || chatWindowGeneration !== generation
                 || autoScrollPinnedToBottom) return;
-            if (retryAfterDirectInput('direct-input-settle')) return;
+            if (yieldToCurrentViewport('direct-input-or-measurement')) return;
             requestAnimationFrame(() => {
                 if (chatWindowState.fineAnchorRestoreToken !== token
                     || activeSessionId !== sessionId || chatWindowGeneration !== generation
                     || autoScrollPinnedToBottom) return;
-                if (retryAfterDirectInput('direct-input-settle')) return;
+                if (yieldToCurrentViewport('direct-input-or-measurement')) return;
                 const fineAnchor = chatWindowState.visualAnchorElement;
                 const fineRoot = fineAnchor?.isConnected && chatContainer.contains(fineAnchor)
                     ? fineAnchor.closest('[data-render-unit-key]')
@@ -10689,7 +10698,7 @@ function shouldHideDcpUiMessage(message) {
                     if (chatWindowState.fineAnchorRestoreToken !== token
                         || activeSessionId !== sessionId || chatWindowGeneration !== generation
                         || autoScrollPinnedToBottom) return;
-                    if (retryAfterDirectInput('direct-input-settle')) return;
+                    if (yieldToCurrentViewport('direct-input-or-measurement')) return;
                     if (!fineAnchor.isConnected || !chatContainer.contains(fineAnchor)) return;
                     const currentRoot = fineAnchor.closest('[data-render-unit-key]');
                     const currentTop = fineAnchor.getBoundingClientRect?.().top;
@@ -10714,6 +10723,12 @@ function shouldHideDcpUiMessage(message) {
 
     function restoreChatWindowAnchor() {
         if (!chatWindowState.anchorKey || autoScrollPinnedToBottom || !chatWindowState.snapshot) return;
+        // Direct input owns the viewport. Likewise, resizeItem has already
+        // applied TanStack's above-viewport compensation before onMeasurements
+        // runs. Scheduling our own correction here would replay a second,
+        // potentially stale delta when input settles.
+        if (Date.now() < chatWindowState.userScrollActiveUntil || isDirectChatScrollInputActive()
+            || Date.now() < Number(chatWindowState.measurementViewportOwnerUntil || 0)) return;
         const fineAnchor = chatWindowState.visualAnchorElement;
         if (fineAnchor?.isConnected && chatContainer.contains(fineAnchor)) {
             const fineRoot = fineAnchor.closest('[data-render-unit-key]');
@@ -10724,7 +10739,6 @@ function shouldHideDcpUiMessage(message) {
                 return;
             }
         }
-        if (Date.now() < chatWindowState.userScrollActiveUntil || isDirectChatScrollInputActive()) return;
         const item = chatWindowState.snapshot.items.find((entry) => entry.key === chatWindowState.anchorKey);
         if (!item) return;
         const rendering = window.__ocRendering;
@@ -11088,9 +11102,14 @@ function shouldHideDcpUiMessage(message) {
                     vscode.postMessage({ type: 'ui-debug', payload: ['[WV][CHAT_WINDOW_MEASURE]', `changed=${batch.changedKeys.length}`, `totalSize=${batch.totalSize}`] });
                     if (autoScrollPinnedToBottom) scrollToBottom(true);
                     else {
+                        // resizeItem has already preserved the viewport for
+                        // above-window size changes. Do not schedule a second
+                        // custom anchor correction for the same measurement.
+                        chatWindowState.measurementViewportOwnerUntil = Date.now() + 160;
+                        chatWindowState.fineAnchorRestoreToken += 1;
                         chatWindowState.activityBelow = true;
+                        captureChatWindowAnchor();
                         requestAnimationFrame(updateChatJumpBottomButton);
-                        restoreChatWindowAnchor();
                     }
                     if (chatWindowState.pendingScrollKey && batch.changedKeys.length && !chatWindowState.pendingRangeRender) {
                         chatWindowState.pendingRangeRender = true;
@@ -13023,14 +13042,13 @@ function shouldHideDcpUiMessage(message) {
     function scheduleAssistantImageAnchorRestore(reason) {
         const sessionId = activeSessionId;
         const generation = chatWindowGeneration;
+        const token = chatWindowState.imageAnchorRestoreToken + 1;
+        chatWindowState.imageAnchorRestoreToken = token;
         requestAnimationFrame(() => {
-            if (activeSessionId !== sessionId || chatWindowGeneration !== generation) return;
+            if (activeSessionId !== sessionId || chatWindowGeneration !== generation
+                || chatWindowState.imageAnchorRestoreToken !== token) return;
             restoreChatWindowAnchor();
-            requestAnimationFrame(() => {
-                if (activeSessionId !== sessionId || chatWindowGeneration !== generation) return;
-                restoreChatWindowAnchor();
-                vscode.postMessage({ type: 'ui-debug', payload: ['[WV][IMAGE_ANCHOR_SETTLE]', `reason=${reason}`, `pending=${chatWindowState.pendingImageLayouts}`] });
-            });
+            vscode.postMessage({ type: 'ui-debug', payload: ['[WV][IMAGE_ANCHOR_SETTLE]', `reason=${reason}`, `pending=${chatWindowState.pendingImageLayouts}`] });
         });
     }
 
@@ -13050,7 +13068,10 @@ function shouldHideDcpUiMessage(message) {
                 if (activeSessionId !== sessionId || chatWindowGeneration !== generation) return;
                 chatWindowState.pendingImageLayouts = Math.max(0, chatWindowState.pendingImageLayouts - 1);
                 chatWindowState.imageLayoutStabilizingUntil = Date.now() + 300;
-                scheduleAssistantImageAnchorRestore(reason);
+                // The virtualizer's ResizeObserver owns image height
+                // compensation. Only the non-virtual fallback needs an
+                // explicit anchor restore after image settlement.
+                if (!chatWindowState.adapter) scheduleAssistantImageAnchorRestore(reason);
             };
             image.addEventListener('load', () => settle('load'), { once: true });
             image.addEventListener('error', () => settle('error'), { once: true });
@@ -13082,6 +13103,8 @@ function shouldHideDcpUiMessage(message) {
         // delayed virtual/image anchor restoration captured at the old
         // position so it cannot pull the viewport back after this jump.
         chatWindowState.fineAnchorRestoreToken += 1;
+        chatWindowState.imageAnchorRestoreToken += 1;
+        chatWindowState.measurementViewportOwnerUntil = 0;
         chatWindowState.anchorKey = '';
         chatWindowState.visualOffset = 0;
         chatWindowState.visualAnchorElement = null;
@@ -14741,7 +14764,7 @@ function appendMessageImages(parentEl, message) {
                 const accepted = getAssistantImageController().acceptResponse(message);
                 if (accepted && !autoScrollPinnedToBottom) {
                     trackAssistantImageLayoutLoads();
-                    scheduleAssistantImageAnchorRestore('resolved');
+                    if (!chatWindowState.adapter) scheduleAssistantImageAnchorRestore('resolved');
                 }
                 break;
             }

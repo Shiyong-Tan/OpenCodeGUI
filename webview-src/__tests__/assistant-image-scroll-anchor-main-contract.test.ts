@@ -24,10 +24,11 @@ describe('assistant image scroll anchor production contract', () => {
     expect(source).toContain('activeSessionId !== sessionId || chatWindowGeneration !== generation');
     expect(source).toContain('&& !isDirectChatScrollInputActive()');
     expect(source).toContain('Math.abs(currentTop - firstTop) >= 0.75');
-    expect(source).toContain("retryAfterDirectInput('direct-input-settle')");
-    expect(source).toContain('inputUntil - now + 16');
+    expect(source).toContain("yieldToCurrentViewport('direct-input-or-measurement')");
+    expect(source).toContain('[WV][CHAT_WINDOW_ANCHOR_YIELD]');
+    expect(source).toContain('measurementViewportOwnerUntil');
     expect(source).toContain('|| autoScrollPinnedToBottom) return;');
-    expect(source).toContain('Re-arm from the latest');
+    expect(source).toContain('The released scrollbar position is user-owned.');
   });
 
   it('invalidates stale anchors when forced bottom navigation takes ownership', () => {
@@ -41,12 +42,19 @@ describe('assistant image scroll anchor production contract', () => {
       .toBeLessThan(block.indexOf('autoScrollPinnedToBottom = true;'));
   });
 
-  it('captures before applying resolved image DOM and restores after it', () => {
+  it('captures before applying resolved image DOM and leaves virtual image compensation to ResizeObserver', () => {
     const start = source.indexOf("case 'assistantImageReferencesResolved': {");
     const end = source.indexOf("case 'smartSessionSearchResult': {", start);
     const handler = source.slice(start, end);
     expect(handler.indexOf('captureChatWindowAnchor();')).toBeLessThan(handler.indexOf('acceptResponse(message)'));
     expect(handler).toContain('trackAssistantImageLayoutLoads();');
-    expect(handler).toContain("scheduleAssistantImageAnchorRestore('resolved');");
+    expect(handler).toContain("if (!chatWindowState.adapter) scheduleAssistantImageAnchorRestore('resolved');");
+
+    const measurementStart = source.indexOf('onMeasurements(batch)');
+    const measurementEnd = source.indexOf('if (chatWindowState.pendingScrollKey', measurementStart);
+    const measurementHandler = source.slice(measurementStart, measurementEnd);
+    expect(measurementHandler).toContain('measurementViewportOwnerUntil = Date.now() + 160;');
+    expect(measurementHandler).toContain('captureChatWindowAnchor();');
+    expect(measurementHandler).not.toContain('restoreChatWindowAnchor();');
   });
 });

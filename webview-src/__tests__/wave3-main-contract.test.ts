@@ -4350,6 +4350,7 @@ describe('A2.4D journaled keyed and structural transaction', () => {
       autoScrollPinnedToBottom: false, scrollToBottom: () => calls.push('scroll'),
       requestAnimationFrame: (callback: () => void) => callback(),
       updateChatJumpBottomButton: () => undefined,
+      captureChatWindowAnchor: () => calls.push('capture'),
       restoreChatWindowAnchor: () => calls.push('anchor'),
       chatLocalHistoryController: { complete: () => calls.push('local-complete') },
       destroyChatLocalOlderSurface: () => calls.push('local-destroy'),
@@ -4408,7 +4409,7 @@ describe('A2.4D journaled keyed and structural transaction', () => {
     expect(harness.context.chatWindowAdaptiveShadow.state).toBe(committedState);
     expect(harness.context.window.__ocChatWindowAdaptiveShadow).toBe(committedTelemetry);
     expect(harness.calls.filter((entry: string) => entry === 'schedule')).toHaveLength(1);
-    expect(harness.calls.slice(callsAfterRange.length)).toEqual(['message', 'anchor']);
+    expect(harness.calls.slice(callsAfterRange.length)).toEqual(['message', 'capture']);
 
     harness.context.observeChatWindowAdaptiveShadow(pressure, { kind: 'external', decisionGeneration: 0 });
     expect(harness.context.chatWindowAdaptiveShadow.state).toMatchObject({
@@ -4571,7 +4572,8 @@ describe('A2.4D journaled keyed and structural transaction', () => {
     harness.callbacks.onMeasurements({ changedKeys: ['published'], totalSize: 1 });
     expect(harness.calls.filter((entry) => entry === 'schedule')).toHaveLength(1);
     expect(harness.calls.filter((entry) => entry === 'message')).toHaveLength(1);
-    expect(harness.calls.filter((entry) => entry === 'anchor')).toHaveLength(1);
+    expect(harness.calls.filter((entry) => entry === 'capture')).toHaveLength(1);
+    expect(harness.calls.filter((entry) => entry === 'anchor')).toHaveLength(0);
   });
 
   test.each([
