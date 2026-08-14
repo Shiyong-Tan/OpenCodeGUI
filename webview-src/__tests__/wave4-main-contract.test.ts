@@ -338,7 +338,8 @@ describe('Wave 4 main-script local older contract', () => {
       keyedRootForKey: () => null, keyedRoots: () => [], getChatStructuralIntegrityRoots: () => [],
       sampleChatRenderDom: () => undefined, recordChatWindowPressureAttribution: () => undefined,
       assertChatWindowDomBudget: (budget: any) => budget, scheduleChatWindowPlanCorrection: () => null,
-      tryPendingChatWindowScroll: () => true, scrollToBottom: () => undefined, restoreChatWindowAnchor: () => undefined,
+      tryPendingChatWindowScroll: () => true, scrollToBottom: () => undefined,
+      restoreChatWindowStructuralAnchor: () => false, restoreChatWindowAnchor: () => undefined,
       chatLocalHistoryController: { complete: () => calls.push('unexpected-direct-complete') },
     });
     vm.runInContext(`${extractFunction('function applyWindowedKeyedChatReconciliation(')}; globalThis.apply = applyWindowedKeyedChatReconciliation;`, context);

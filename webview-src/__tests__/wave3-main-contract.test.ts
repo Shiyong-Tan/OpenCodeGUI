@@ -2295,22 +2295,47 @@ describe('Wave 3 extracted runtime coordinator', () => {
     const keyedRoot = { id: 'keyed' };
     const top = { id: 'top', style: {} };
     const bottom = { id: 'bottom', style: {} };
-    const context = executeFunctions(['function updateChatWindowSpacers('], {
+    const diagnostics: any[] = [];
+    const anchorRoot = { dataset: { renderUnitKey: 'anchor' } };
+    const fineAnchor = {
+      isConnected: true,
+      closest: () => anchorRoot,
+      getBoundingClientRect: () => ({ top: 275 }),
+    };
+    const anchorState = {
+      anchorKey: 'anchor', visualAnchorElement: fineAnchor,
+      visualAnchorKey: 'anchor', visualAnchorTop: 200,
+      visualOffset: 0, programmaticScroll: false,
+    };
+    const context = executeFunctions([
+      'function updateChatWindowSpacers(', 'function restoreChatWindowStructuralAnchor(',
+    ], {
       ensureChatWindowSpacers: () => operations.push('ensure'),
       preflightChatRenderRootAdmission: () => ({ allowed: true }),
       chatStructuralRootReservations: new Set(),
-      chatWindowState: { topSpacer: top, bottomSpacer: bottom },
+      chatWindowState: { topSpacer: top, bottomSpacer: bottom, ...anchorState },
       keyedRoots: () => [keyedRoot],
       chatContainer: {
+        scrollTop: 500,
+        contains: (element: any) => element === fineAnchor,
         insertBefore: (node: any, before: any) => operations.push(`insert:${node.id}:${before.id}`),
         appendChild: (node: any) => operations.push(`append:${node.id}`),
       },
+      autoScrollPinnedToBottom: false,
+      keyedRootForKey: () => anchorRoot,
+      vscode: { postMessage: (message: any) => diagnostics.push(message) },
+      requestAnimationFrame: (callback: () => void) => callback(),
+      Number,
       Math,
     });
     context.updateChatWindowSpacers({ items: [{ start: 120, end: 200 }], totalSize: 500 });
     expect(top.style).toEqual({ height: '120px' });
     expect(bottom.style).toEqual({ height: '300px' });
     expect(operations).toEqual(['ensure', 'insert:top:keyed', 'append:bottom']);
+    expect(context.restoreChatWindowStructuralAnchor()).toBe(true);
+    expect(context.chatContainer.scrollTop).toBe(575);
+    expect(context.chatWindowState.programmaticScroll).toBe(false);
+    expect(diagnostics[0].payload[0]).toBe('[WV][CHAT_WINDOW_STRUCTURAL_ANCHOR]');
   });
 
   test('destroy and search mount execute adapter lifecycle without stale ownership', () => {

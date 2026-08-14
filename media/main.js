@@ -10755,6 +10755,39 @@ function shouldHideDcpUiMessage(message) {
         requestAnimationFrame(() => { chatWindowState.programmaticScroll = false; });
     }
 
+    function restoreChatWindowStructuralAnchor() {
+        if (!chatWindowState.anchorKey || autoScrollPinnedToBottom) return false;
+        // A range transaction inserts/removes real DOM above the viewport in
+        // the same JavaScript turn in which its spacer changes. Preserve the
+        // pre-transaction visual anchor immediately, even while a wheel
+        // gesture is active; waiting for ResizeObserver is already one paint
+        // too late and produces the periodic upward-scroll jump.
+        let delta = NaN;
+        const fineAnchor = chatWindowState.visualAnchorElement;
+        if (fineAnchor?.isConnected && chatContainer.contains(fineAnchor)) {
+            const fineRoot = fineAnchor.closest('[data-render-unit-key]');
+            const currentTop = fineAnchor.getBoundingClientRect?.().top;
+            if (fineRoot?.dataset?.renderUnitKey === chatWindowState.visualAnchorKey
+                && Number.isFinite(currentTop) && Number.isFinite(chatWindowState.visualAnchorTop)) {
+                delta = currentTop - chatWindowState.visualAnchorTop;
+            }
+        }
+        if (!Number.isFinite(delta)) {
+            const anchorRoot = keyedRootForKey(chatWindowState.anchorKey);
+            if (!anchorRoot) return false;
+            delta = (anchorRoot.offsetTop - chatContainer.scrollTop) - chatWindowState.visualOffset;
+        }
+        if (!Number.isFinite(delta) || Math.abs(delta) < 0.5) return false;
+        chatWindowState.programmaticScroll = true;
+        chatContainer.scrollTop += delta;
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: ['[WV][CHAT_WINDOW_STRUCTURAL_ANCHOR]', `delta=${delta}`, `key=${chatWindowState.anchorKey}`]
+        });
+        requestAnimationFrame(() => { chatWindowState.programmaticScroll = false; });
+        return true;
+    }
+
     function getChatWindowKeepMountedKeys(session, units) {
         const unitKeys = new Set(units.map((unit) => unit.key));
         const keys = [session?.currentTurnAssistantKey, session?.thinkingId, chatWindowState.anchorKey, sessionSearch.windowTargetKey]
@@ -11741,7 +11774,7 @@ function shouldHideDcpUiMessage(message) {
             chatWindowState.rendering = false;
             if (chatWindowState.pendingScrollKey) tryPendingChatWindowScroll('after-transaction-finalize');
             if (autoScrollPinnedToBottom) scrollToBottom(true);
-            else restoreChatWindowAnchor();
+            else if (!restoreChatWindowStructuralAnchor()) restoreChatWindowAnchor();
             reconcileSucceeded = true;
             if (transactionControl && correctedPlan) transactionControl.correctedPlan = correctedPlan;
             return applied.acceptedUnits;
