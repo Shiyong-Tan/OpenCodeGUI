@@ -623,6 +623,10 @@ describe('Wave 3 main-script window contract', () => {
     expect(source).toContain('chatWindowState.activityBelow = true;');
     expect(source).toContain("scheduleRenderFromState('window-range-change')");
     expect(source).toContain('scrollToBottom(true);');
+    const capture = extractFunction('function captureChatWindowAnchor(');
+    expect(capture).toContain('chatWindowState.visualAnchorElement = null;');
+    expect(capture.indexOf('if (preserveFineAnchor) return;'))
+      .toBeLessThan(capture.indexOf('chatWindowState.visualAnchorElement = null;'));
   });
 });
 

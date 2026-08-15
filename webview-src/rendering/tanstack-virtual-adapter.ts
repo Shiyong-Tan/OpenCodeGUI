@@ -239,25 +239,19 @@ export function estimateRenderUnitSize(kind: RenderUnitEstimateKind): number {
 }
 
 /**
- * Preserve the visible anchor when a mounted row is measured for the first
- * time. Suppress only later rich-content measurement deltas while the user is
- * scrolling backward (upward), where correction would chase the gesture.
+ * Structural reconciliation owns viewport anchoring while the user scrolls
+ * upward. Suppress every measurement delta in that direction so TanStack
+ * cannot apply a second correction after the real DOM is already anchored.
  */
 export function shouldAdjustMeasuredItemScrollPosition(
   item: { readonly start: number },
   instance: Pick<CoreVirtualizer, 'scrollDirection' | 'scrollAdjustments' | 'getScrollOffset'>,
-  measurement: 'first' | 'remeasure' = 'remeasure',
 ): boolean {
+  if (instance.scrollDirection === 'backward') return false;
   const offset = typeof instance.getScrollOffset === 'function'
     ? Number(instance.getScrollOffset())
     : 0;
   const adjustments = Number(instance.scrollAdjustments || 0);
-  // A newly mounted row replaces an estimate with its real height. If it is
-  // above the viewport, that delta must move scrollTop by the same amount or
-  // the visible anchor jumps (large image rows make this especially obvious).
-  // Only suppress later rich-content remeasurement while the user is moving
-  // upward; those delayed deltas are the ones that cause scroll chasing.
-  if (measurement === 'remeasure' && instance.scrollDirection === 'backward') return false;
   return item.start < offset + adjustments;
 }
 
@@ -676,13 +670,8 @@ function createSingleAdapter(
     onChange: () => publishRange(),
   });
   virtualizer = new VirtualizerClass(coreOptions());
-  virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) => {
-    const key = String(item.key);
-    const index = indexForKey(key);
-    const cached = measured.get(key);
-    const knownMeasurement = index >= 0 && cached?.revision === (revisions[index] || '');
-    return shouldAdjustMeasuredItemScrollPosition(item, instance, knownMeasurement ? 'remeasure' : 'first');
-  };
+  virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) =>
+    shouldAdjustMeasuredItemScrollPosition(item, instance);
   let unmount: () => void = () => undefined;
   const activate = () => {
     if (destroyed || mounted) return;
@@ -734,11 +723,8 @@ function createSingleAdapter(
       const cached = measured.get(key);
       if (cached?.revision === revision && cached.size === size) continue;
       changedKeys.push(key);
-      virtualizer.resizeItem?.(index, size);
-      // Keep the old cache state visible to the synchronous TanStack
-      // adjustment callback above so it can distinguish first measurement
-      // from a later ResizeObserver update.
       measured.set(key, { revision, size });
+      virtualizer.resizeItem?.(index, size);
     }
     if (!changedKeys.length) return;
     const batch = {

@@ -10622,6 +10622,13 @@ function shouldHideDcpUiMessage(message) {
             && priorFineAnchor?.isConnected
             && chatContainer.contains(priorFineAnchor);
         if (preserveFineAnchor) return;
+        // A failed hit-test must not leave a fine anchor from an earlier
+        // viewport alive. Structural range reconciliation may otherwise use
+        // that stale element and replay a large, unrelated scroll delta.
+        chatWindowState.visualAnchorElement = null;
+        chatWindowState.visualAnchorTop = 0;
+        chatWindowState.visualAnchorKey = '';
+        chatWindowState.fineAnchorRestoreToken += 1;
         const bounds = chatContainer.getBoundingClientRect?.();
         if (!bounds || bounds.width <= 0 || bounds.height <= 0) return;
         const y = Math.min(bounds.bottom - 1, bounds.top + 8);
