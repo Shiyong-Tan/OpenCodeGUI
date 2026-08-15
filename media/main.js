@@ -10861,6 +10861,31 @@ function shouldHideDcpUiMessage(message) {
         return true;
     }
 
+    function restoreChatWindowMeasurementAnchor() {
+        if (autoScrollPinnedToBottom || !isDirectChatScrollInputActive()) return false;
+        const fineAnchor = chatWindowState.visualAnchorElement;
+        if (!fineAnchor?.isConnected || !chatContainer.contains(fineAnchor)) return false;
+        const fineRoot = fineAnchor.closest('[data-render-unit-key]');
+        const currentTop = fineAnchor.getBoundingClientRect?.().top;
+        if (fineRoot?.dataset?.renderUnitKey !== chatWindowState.visualAnchorKey
+            || !Number.isFinite(currentTop) || !Number.isFinite(chatWindowState.visualAnchorTop)) return false;
+        const delta = currentTop - chatWindowState.visualAnchorTop;
+        if (Math.abs(delta) < 0.5) return false;
+        const scrollTopBefore = Number(chatContainer.scrollTop || 0);
+        chatWindowState.programmaticScroll = true;
+        chatContainer.scrollTop += delta;
+        if (typeof recordChatWindowViewportDiagnostic === 'function') {
+            recordChatWindowViewportDiagnostic('measurement-anchor-applied', {
+                method: 'fine-dom',
+                delta,
+                scrollTopBefore,
+                scrollTopAfter: Number(chatContainer.scrollTop || 0)
+            });
+        }
+        requestAnimationFrame(() => { chatWindowState.programmaticScroll = false; });
+        return true;
+    }
+
     function getChatWindowKeepMountedKeys(session, units) {
         const unitKeys = new Set(units.map((unit) => unit.key));
         const keys = [session?.currentTurnAssistantKey, session?.thinkingId, chatWindowState.anchorKey, sessionSearch.windowTargetKey]
@@ -11088,6 +11113,10 @@ function shouldHideDcpUiMessage(message) {
                     : 0,
                 gap: 8,
                 initialOwnerMode: 'deferred-transaction',
+                suppressMeasurementScrollAdjustment() {
+                    return isDirectChatScrollInputActive()
+                        || Date.now() < Number(chatWindowState.upwardScrollIntentUntil || 0);
+                },
                 onRangeChange(snapshot) {
                     if (!published) return;
                     if (candidateGeneration !== chatWindowGeneration || chatWindowState.sessionId !== capturedActiveSessionId) {
@@ -11237,13 +11266,15 @@ function shouldHideDcpUiMessage(message) {
                     }
                     if (autoScrollPinnedToBottom) scrollToBottom(true);
                     else {
-                        // resizeItem has already preserved the viewport for
-                        // above-window size changes. Do not schedule a second
-                        // custom anchor correction for the same measurement.
+                        // During direct upward input the presentation layer,
+                        // rather than TanStack's direction heuristic, owns the
+                        // viewport. Keep the same visible DOM point while
+                        // images and newly mounted history rows settle.
+                        const restoredMeasurementAnchor = restoreChatWindowMeasurementAnchor();
                         chatWindowState.measurementViewportOwnerUntil = Date.now() + 160;
                         chatWindowState.fineAnchorRestoreToken += 1;
                         chatWindowState.activityBelow = true;
-                        captureChatWindowAnchor();
+                        if (!restoredMeasurementAnchor) captureChatWindowAnchor();
                         requestAnimationFrame(updateChatJumpBottomButton);
                     }
                     if (chatWindowState.pendingScrollKey && batch.changedKeys.length && !chatWindowState.pendingRangeRender) {

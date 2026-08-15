@@ -67,6 +67,8 @@ export interface VirtualAdapterOptions {
   readonly initialMeasurements?: readonly VirtualAdapterMeasurement[];
   readonly onRangeChange?: (snapshot: VirtualRangeSnapshot) => void;
   readonly onMeasurements?: (batch: MeasurementBatch) => void;
+  /** The presentation layer owns viewport anchoring during direct user input. */
+  readonly suppressMeasurementScrollAdjustment?: () => boolean;
   readonly requestAnimationFrame?: (callback: FrameRequestCallback) => number;
   readonly cancelAnimationFrame?: (handle: number) => void;
   readonly ResizeObserver?: ResizeObserverConstructorLike;
@@ -670,8 +672,10 @@ function createSingleAdapter(
     onChange: () => publishRange(),
   });
   virtualizer = new VirtualizerClass(coreOptions());
-  virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) =>
-    shouldAdjustMeasuredItemScrollPosition(item, instance);
+  virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) => {
+    if (current.suppressMeasurementScrollAdjustment?.()) return false;
+    return shouldAdjustMeasuredItemScrollPosition(item, instance);
+  };
   let unmount: () => void = () => undefined;
   const activate = () => {
     if (destroyed || mounted) return;

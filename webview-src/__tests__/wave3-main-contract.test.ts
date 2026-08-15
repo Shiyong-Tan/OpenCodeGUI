@@ -2317,6 +2317,7 @@ describe('Wave 3 extracted runtime coordinator', () => {
     };
     const context = executeFunctions([
       'function updateChatWindowSpacers(', 'function restoreChatWindowStructuralAnchor(',
+      'function restoreChatWindowMeasurementAnchor(',
     ], {
       ensureChatWindowSpacers: () => operations.push('ensure'),
       preflightChatRenderRootAdmission: () => ({ allowed: true }),
@@ -2330,6 +2331,7 @@ describe('Wave 3 extracted runtime coordinator', () => {
         appendChild: (node: any) => operations.push(`append:${node.id}`),
       },
       autoScrollPinnedToBottom: false,
+      isDirectChatScrollInputActive: () => true,
       keyedRootForKey: () => anchorRoot,
       vscode: { postMessage: (message: any) => diagnostics.push(message) },
       requestAnimationFrame: (callback: () => void) => callback(),
@@ -2344,6 +2346,9 @@ describe('Wave 3 extracted runtime coordinator', () => {
     expect(context.chatContainer.scrollTop).toBe(575);
     expect(context.chatWindowState.programmaticScroll).toBe(false);
     expect(diagnostics[0].payload[0]).toBe('[WV][CHAT_WINDOW_STRUCTURAL_ANCHOR]');
+    expect(context.restoreChatWindowMeasurementAnchor()).toBe(true);
+    expect(context.chatContainer.scrollTop).toBe(650);
+    expect(context.chatWindowState.programmaticScroll).toBe(false);
   });
 
   test('destroy and search mount execute adapter lifecycle without stale ownership', () => {
@@ -4385,6 +4390,7 @@ describe('A2.4D journaled keyed and structural transaction', () => {
       updateChatJumpBottomButton: () => undefined,
       captureChatWindowAnchor: () => calls.push('capture'),
       restoreChatWindowAnchor: () => calls.push('anchor'),
+      restoreChatWindowMeasurementAnchor: () => false,
       chatLocalHistoryController: { complete: () => calls.push('local-complete') },
       destroyChatLocalOlderSurface: () => calls.push('local-destroy'),
       closeChatWindowPressureGeneration: () => calls.push('pressure-close'),

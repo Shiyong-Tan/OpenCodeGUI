@@ -49,6 +49,7 @@ function createHarness(
   initialOwnerMode: 'active' | 'deferred-transaction' = 'active',
   initialMeasurements: readonly { key: string; revision: string; size: number }[] = [],
   rangeHysteresis = 0,
+  suppressMeasurementScrollAdjustment?: () => boolean,
 ) {
   FakeResizeObserver.instance = undefined;
   FakeResizeObserver.instances = [];
@@ -135,6 +136,7 @@ function createHarness(
       if (failMeasurementCallbackCount > 0) { failMeasurementCallbackCount -= 1; throw new Error('injected measurement callback failure'); }
       measurements.push(batch);
     },
+    suppressMeasurementScrollAdjustment,
     requestAnimationFrame: (callback) => { raf.push(callback); return raf.length; },
     cancelAnimationFrame: () => undefined,
     ResizeObserver: FakeResizeObserver as never,
@@ -1386,6 +1388,20 @@ describe('Wave 3 TanStack adapter contract', () => {
 
     const { constructions } = createHarness(4);
     expect(typeof (constructions[0] as any).shouldAdjustScrollPositionOnItemSizeChange).toBe('function');
+  });
+
+  test('lets the presentation owner suppress measurement compensation after a structural scroll', () => {
+    let directInputOwnsViewport = true;
+    const { constructions } = createHarness(4, 'active', [], 0, () => directInputOwnsViewport);
+    const adjust = (constructions[0] as any).shouldAdjustScrollPositionOnItemSizeChange;
+    const instance = {
+      scrollDirection: 'forward',
+      scrollAdjustments: 0,
+      getScrollOffset: () => 500,
+    };
+    expect(adjust({ start: 120 }, 200, instance)).toBe(false);
+    directInputOwnsViewport = false;
+    expect(adjust({ start: 120 }, 200, instance)).toBe(true);
   });
 
   test('returns plain keyed offsets, initial 80-tail range, total size, and forced tail once', () => {
