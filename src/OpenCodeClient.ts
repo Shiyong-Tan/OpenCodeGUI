@@ -6765,6 +6765,26 @@ export class OpenCodeClient {
         throw new Error('Failed to create session.');
     }
 
+    public async forkSession(sessionId: string): Promise<{ id: string }> {
+        if (!sessionId) throw new Error('Session ID is required to create a branch.');
+        await this.ensureServer();
+        const directory = encodeURIComponent(this.workspaceRoot || '.');
+        const encodedSessionId = encodeURIComponent(sessionId);
+        const session = await this.requestJson<any>(
+            'POST',
+            `/session/${encodedSessionId}/fork?directory=${directory}`,
+            {}
+        );
+        if (session?.id) {
+            return { id: session.id };
+        }
+        throw new Error('Failed to fork session.');
+    }
+
+    public hasActiveTurn(sessionId: string): boolean {
+        return Boolean(sessionId && this.turnStateBySession.has(sessionId));
+    }
+
     public async getSessionInfo(sessionId: string): Promise<any> {
         await this.ensureServer();
         return this.requestJson<any>('GET', `/session/${sessionId}`);

@@ -5872,6 +5872,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const searchNextBtn = document.getElementById('session-search-next');
     const searchCloseBtn = document.getElementById('session-search-close');
     const newSessionBtn = document.getElementById('new-session-btn');
+    const forkSessionBtn = document.getElementById('fork-session-btn');
     const sessionPanel = document.getElementById('session-panel');
     const sessionList = document.getElementById('session-list');
     const attachmentList = document.getElementById('attachment-list');
@@ -5884,6 +5885,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const panelBackdrop = document.getElementById('panel-backdrop');
     const refreshSessionsBtn = document.getElementById('refresh-sessions');
     const closeSessionsBtn = document.getElementById('close-sessions');
+    let pendingForkRequest = null;
     const createModelUiController = window.__ocFeatures?.createModelUiController;
     if (typeof createModelUiController !== 'function') {
         throw new Error('Model UI controller is unavailable');
@@ -6199,6 +6201,22 @@ document.addEventListener('DOMContentLoaded', () => {
         syncSendButtonBusyVisual();
         updateSendQuotaVisual();
         updateSendGate();
+        refreshForkSessionButtonState();
+    }
+
+    function refreshForkSessionButtonState() {
+        if (!forkSessionBtn) return;
+        const hasSession = Boolean(activeSessionId);
+        const isPending = Boolean(pendingForkRequest);
+        const isBusy = hasSession && isActiveSessionBusy();
+        forkSessionBtn.disabled = !hasSession || isPending || isBusy;
+        forkSessionBtn.title = isPending
+            ? 'Creating branch...'
+            : !hasSession
+                ? 'Open a session to create a branch'
+                : isBusy
+                    ? 'Wait for the current turn to finish'
+                    : 'New branch from current session';
     }
 
     function refreshSendButtonStateAfterSessionSwitch() {
@@ -13323,6 +13341,29 @@ function shouldHideDcpUiMessage(message) {
     window.__oc = window.__oc || {};
     window.__oc.scrollToBottom = scrollToBottom;
 
+    function requestSessionSelection(sessionId) {
+        if (!sessionId) return;
+        armedDeleteSessionId = '';
+        pendingExplicitSessionSelectionId = sessionId;
+        const previousSessionId = activeSessionId;
+        transitionActiveSessionPresentationOwner(previousSessionId, sessionId);
+        activeSessionId = sessionId;
+        clearAppendInputForSessionChange(sessionId);
+        activateSessionSearch(sessionId);
+        activateSessionOverlays(sessionId);
+        activateSessionTransientStatus(sessionId);
+        closeSessionPanel();
+        renderHeaderUsage();
+        updateUndoStatusDisplay(sessionId);
+        refreshSendButtonStateAfterSessionSwitch();
+        sessionSelectionController.select(sessionId);
+        vscode.postMessage({
+            type: 'ui-debug',
+            payload: ['[WV][SESSION_SELECTION_TARGET]', `sessionId=${sessionId}`]
+        });
+        vscode.postMessage({ type: 'selectSession', sessionId });
+    }
+
     function renderSessionList() {
         sessionList.innerHTML = '';
         if (!sessions.length) {
@@ -13358,25 +13399,7 @@ function shouldHideDcpUiMessage(message) {
             button.appendChild(title);
             button.appendChild(meta);
             button.addEventListener('click', () => {
-                armedDeleteSessionId = '';
-                pendingExplicitSessionSelectionId = item.id;
-                const previousSessionId = activeSessionId;
-                transitionActiveSessionPresentationOwner(previousSessionId, item.id);
-                activeSessionId = item.id;
-                clearAppendInputForSessionChange(item.id);
-                activateSessionSearch(item.id);
-                activateSessionOverlays(item.id);
-                activateSessionTransientStatus(item.id);
-                closeSessionPanel();
-                renderHeaderUsage();
-                updateUndoStatusDisplay(item.id);
-                refreshSendButtonStateAfterSessionSwitch();
-                sessionSelectionController.select(item.id);
-                vscode.postMessage({
-                    type: 'ui-debug',
-                    payload: ['[WV][SESSION_SELECTION_TARGET]', `sessionId=${item.id || 'null'}`]
-                });
-                vscode.postMessage({ type: 'selectSession', sessionId: item.id });
+                requestSessionSelection(item.id);
             });
 
             const actions = document.createElement('div');
@@ -14351,6 +14374,18 @@ function appendMessageImages(parentEl, message) {
         vscode.postMessage({ type: 'newSession' });
         window.__oc?.renderFromState?.();
         scrollToBottom();
+    });
+
+    forkSessionBtn?.addEventListener('click', () => {
+        const sourceSessionId = activeSessionId;
+        if (!sourceSessionId || isActiveSessionBusy() || pendingForkRequest) {
+            refreshForkSessionButtonState();
+            return;
+        }
+        const opId = `fork-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        pendingForkRequest = { sourceSessionId, opId };
+        refreshForkSessionButtonState();
+        vscode.postMessage({ type: 'forkSession', sessionId: sourceSessionId, opId });
     });
 
     document.addEventListener('mouseover', (event) => {
@@ -17700,6 +17735,34 @@ function appendMessageImages(parentEl, message) {
                     window.__oc?.renderFromState?.();
                     scrollToBottom();
                 }
+                break;
+            }
+            case 'sessionForked': {
+                const sourceSessionId = typeof message.sourceSessionId === 'string'
+                    ? message.sourceSessionId
+                    : '';
+                const nextSessionId = typeof message.sessionId === 'string' ? message.sessionId : '';
+                const matchesPending = Boolean(
+                    pendingForkRequest
+                    && pendingForkRequest.sourceSessionId === sourceSessionId
+                    && pendingForkRequest.opId === message.opId
+                );
+                if (!matchesPending) break;
+                pendingForkRequest = null;
+                refreshForkSessionButtonState();
+                if (!nextSessionId || activeSessionId !== sourceSessionId) break;
+                requestSessionSelection(nextSessionId);
+                break;
+            }
+            case 'sessionForkFailed': {
+                const matchesPending = Boolean(
+                    pendingForkRequest
+                    && pendingForkRequest.sourceSessionId === message.sourceSessionId
+                    && pendingForkRequest.opId === message.opId
+                );
+                if (!matchesPending) break;
+                pendingForkRequest = null;
+                refreshForkSessionButtonState();
                 break;
             }
             case 'newSession': {

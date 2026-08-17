@@ -185,6 +185,12 @@ body {
     justify-content: center;
 }
 
+.session-header .icon-btn:disabled {
+    opacity: 0.35;
+    cursor: default;
+    background: transparent;
+}
+
 .session-search-bar {
     display: flex;
     align-items: center;

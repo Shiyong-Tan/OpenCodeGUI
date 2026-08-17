@@ -22,6 +22,8 @@ export interface SessionCommandHost {
     getLiveWebview(fallback: vscode.Webview): vscode.Webview;
     log(message: string): void;
     refreshSessions(webview: vscode.Webview, requestId: string): Promise<void>;
+    forkSession(sessionId: string): Promise<{ id: string }>;
+    hasActiveTurn(sessionId: string): boolean;
     getSessionChildren(sessionId: string): Promise<unknown[]>;
     deleteSession(sessionId: string): Promise<boolean>;
     cleanupDeletedSessionArtifacts(sessionId: string): Promise<void>;
@@ -86,6 +88,7 @@ const SESSION_COMMANDS = new Set([
     'refreshSessions',
     'deleteSession',
     'selectSession',
+    'forkSession',
     'newSession',
     'snapshotTimelineIds',
 ]);
@@ -107,6 +110,9 @@ export class SessionCommandController {
                 return true;
             case 'selectSession':
                 await this.selectSession(data, activeWebview);
+                return true;
+            case 'forkSession':
+                await this.forkSession(data, activeWebview);
                 return true;
             case 'newSession':
                 await this.newSession(activeWebview);
@@ -160,6 +166,45 @@ export class SessionCommandController {
             liveWebview.postMessage({
                 type: 'sessionDeleteFailed',
                 sessionId,
+                opId,
+                reason: String(error),
+            });
+        }
+    }
+
+    private async forkSession(data: SessionCommandMessage, activeWebview: vscode.Webview): Promise<void> {
+        const sourceSessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
+        const opId = typeof data.opId === 'string' ? data.opId : '';
+        if (!sourceSessionId) return;
+        const liveWebview = this.host.getLiveWebview(activeWebview);
+
+        if (this.host.hasActiveTurn(sourceSessionId)) {
+            liveWebview.postMessage({
+                type: 'sessionForkFailed',
+                sourceSessionId,
+                opId,
+                reason: 'active_turn',
+            });
+            return;
+        }
+
+        try {
+            const forked = await this.host.forkSession(sourceSessionId);
+            liveWebview.postMessage({
+                type: 'sessionForked',
+                sourceSessionId,
+                sessionId: forked.id,
+                opId,
+            });
+            await this.host.refreshSessions(liveWebview, `fork-${Date.now()}`);
+        } catch (error) {
+            this.host.log(
+                `[EXT][SESSION_FORK_FAIL] sourceSessionId=${sourceSessionId} opId=${opId || 'null'} err=${String(error)}`
+            );
+            vscode.window.showErrorMessage(`Failed to create session branch: ${error}`);
+            liveWebview.postMessage({
+                type: 'sessionForkFailed',
+                sourceSessionId,
                 opId,
                 reason: String(error),
             });

@@ -77,6 +77,7 @@ describe('session command family characterization', () => {
             'refreshSessions',
             'deleteSession',
             'selectSession',
+            'forkSession',
             'newSession',
             'snapshotTimelineIds',
         ]) {
@@ -233,9 +234,24 @@ describe('session command family characterization', () => {
         ]);
     });
 
+    test('fork captures its source and leaves selection to the Webview response', () => {
+        const block = extractSessionMethod('private async forkSession(');
+        expectOrder(block, [
+            "const sourceSessionId = typeof data.sessionId === 'string' ? data.sessionId : ''",
+            'this.host.hasActiveTurn(sourceSessionId)',
+            'await this.host.forkSession(sourceSessionId)',
+            "type: 'sessionForked'",
+            'await this.host.refreshSessions(liveWebview',
+        ]);
+        expect(block).not.toContain('adoptSessionSelection');
+        expect(block).not.toContain('prepareNewSession');
+        expect(block).not.toContain('readSnapshot');
+    });
+
     test('routes session-owned mutable state only through provider domain methods', () => {
         const sessionBlocks = [
             extractSessionMethod('private async deleteSession('),
+            extractSessionMethod('private async forkSession('),
             extractSessionMethod('private async selectSession('),
             extractSessionMethod('private async newSession('),
         ].join('\n');
@@ -295,6 +311,8 @@ function createRuntimeHarness(overrides: Record<string, unknown> = {}) {
         getLiveWebview: jest.fn((fallback: unknown) => fallback),
         log: jest.fn(),
         refreshSessions: jest.fn(async () => undefined),
+        forkSession: jest.fn(async () => ({ id: 'session-fork' })),
+        hasActiveTurn: jest.fn(() => false),
         getSessionChildren: jest.fn(async () => []),
         deleteSession: jest.fn(async () => true),
         cleanupDeletedSessionArtifacts: jest.fn(async () => undefined),
@@ -412,6 +430,55 @@ describe('SessionCommandController runtime protocol', () => {
             { type: 'sessionDeleteStarted', sessionId: 'session-a', opId: 'op-1' },
             { type: 'sessionDeleted', sessionId: 'session-a', opId: 'op-1' },
         ]);
+    });
+
+    test('forks an idle source without mutating extension selection state', async () => {
+        const order: string[] = [];
+        const harness = createRuntimeHarness({
+            forkSession: jest.fn(async () => { order.push('fork'); return { id: 'session-child' }; }),
+            refreshSessions: jest.fn(async () => { order.push('refresh'); }),
+        });
+        harness.activeWebview.postMessage.mockImplementation(async (message: any) => {
+            harness.posts.push(message);
+            order.push(message.type);
+            return true;
+        });
+
+        await harness.handler(
+            { type: 'forkSession', sessionId: 'session-source', opId: 'fork-1' },
+            harness.activeWebview,
+            harness.resolvingWebview,
+        );
+
+        expect(order).toEqual(['fork', 'sessionForked', 'refresh']);
+        expect(harness.posts).toContainEqual({
+            type: 'sessionForked',
+            sourceSessionId: 'session-source',
+            sessionId: 'session-child',
+            opId: 'fork-1',
+        });
+        expect(harness.host.adoptSessionSelection).not.toHaveBeenCalled();
+        expect(harness.host.prepareNewSession).not.toHaveBeenCalled();
+    });
+
+    test('rejects a fork when the captured source still has an active turn', async () => {
+        const harness = createRuntimeHarness({
+            hasActiveTurn: jest.fn(() => true),
+        });
+
+        await harness.handler(
+            { type: 'forkSession', sessionId: 'session-source', opId: 'fork-2' },
+            harness.activeWebview,
+            harness.resolvingWebview,
+        );
+
+        expect(harness.host.forkSession).not.toHaveBeenCalled();
+        expect(harness.posts).toContainEqual({
+            type: 'sessionForkFailed',
+            sourceSessionId: 'session-source',
+            opId: 'fork-2',
+            reason: 'active_turn',
+        });
     });
 
     test('hydrates snapshot first, then posts only the proven recent suffix merge', async () => {
