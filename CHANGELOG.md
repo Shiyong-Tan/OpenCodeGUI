@@ -29,6 +29,7 @@ All notable changes to this project will be documented in this file.
 
 - Improved display-math recovery inside ordered lists and preserved escaped-dollar formulas in quoted selections.
 - Corrected assistant processing-time pause scope for Question and Permission cards so elapsed time excludes periods waiting for user input without suppressing the cards.
+- Removed the chat-level horizontal scrollbar while preserving horizontal scrolling inside code blocks and other intentionally scrollable content.
 
 ## 5.0.2 - 2026-08-05
 

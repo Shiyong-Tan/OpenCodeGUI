@@ -5,6 +5,11 @@ const source = fs.readFileSync(path.join(process.cwd(), 'media', 'main.js'), 'ut
 const styles = fs.readFileSync(path.join(process.cwd(), 'media', 'main.css'), 'utf8');
 
 describe('assistant image scroll anchor production contract', () => {
+  it('keeps the chat viewport vertical while code blocks own horizontal overflow', () => {
+    expect(styles).toMatch(/\.chat-area\s*\{[^}]*overflow-y:\s*auto;[^}]*overflow-x:\s*hidden;/s);
+    expect(styles).toMatch(/\.message \.message-content pre\s*\{[^}]*overflow-x:\s*auto;/s);
+  });
+
   it('uses a fine-grained descendant anchor while image layout is changing', () => {
     expect(source).toContain('visualAnchorElement: null');
     expect(source).toContain("element.closest('[data-render-unit-key]')");
