@@ -6910,7 +6910,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             <svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M14 7v1H8v6H7V8H1V7h6V1h1v6h6z"/></svg>
                         </button>
                         <button class="icon-btn" id="fork-session-btn" title="New branch from current session" aria-label="New branch from current session" disabled>
-                            <svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor" aria-hidden="true"><path d="M5 2.5a1.5 1.5 0 1 1-1-1.415V9.5A2.5 2.5 0 0 0 6.5 12h2.585a1.5 1.5 0 1 1 0 1H6.5A3.5 3.5 0 0 1 3 9.5V4.915A1.5 1.5 0 0 1 5 2.5zm6 0a1.5 1.5 0 1 1-1-1.415V5.5A2.5 2.5 0 0 1 7.5 8H6V7h1.5A1.5 1.5 0 0 0 9 5.5V3.915A1.5 1.5 0 0 1 11 2.5z"/></svg>
+                            <svg width="16" height="16" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg" fill="none" aria-hidden="true"><path d="M2.916 7.914V2.914h5M12.083 2.914h5v5M10 9.997v7.084M10 9.997 3.333 3.331M10 9.997l6.666-6.666" stroke="currentColor" stroke-linecap="square"/></svg>
                         </button>
                         <button class="icon-btn" id="history-btn" title="History">
                             <svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path fill-rule="evenodd" clip-rule="evenodd" d="M8 13.5a5.5 5.5 0 1 0 0-11 5.5 5.5 0 0 0 0 11zm0 1a6.5 6.5 0 1 0 0-13 6.5 6.5 0 0 0 0 13z"/><path fill-rule="evenodd" clip-rule="evenodd" d="M8.5 4.5V8l2.5 1.5-.5.866L7.5 8.5V4.5h1z"/></svg>
