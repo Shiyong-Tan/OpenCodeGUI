@@ -448,6 +448,7 @@ export function createHydrationStateController(options: HydrationStateController
     const plan = planHydrationIntegration(input, plannerOptions);
     const state: any = {
       hydrationCoverage: plan.coverage,
+      forkOrigin: plan.forkOrigin,
       messagesById: new Map(),
       timeline: [...plan.timeline],
       nextOrder: plan.nextOrder,
@@ -593,6 +594,7 @@ export function createHydrationStateController(options: HydrationStateController
     session.timeline = [...state.timeline];
     session.nextOrder = state.nextOrder;
     session.hydrationCoverage = state.hydrationCoverage;
+    session.forkOrigin = state.forkOrigin;
 
     if (plan.reset.segments) {
       if (!(session.segmentsByNoticeKey instanceof Map)) session.segmentsByNoticeKey = new Map();

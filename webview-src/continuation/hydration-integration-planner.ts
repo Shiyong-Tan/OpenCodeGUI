@@ -7,6 +7,13 @@ export type HydrationCoverage =
   | 'repairInProgress'
   | 'repairError';
 
+export type ForkOrigin = Readonly<{
+  version: 1;
+  parentSessionId: string;
+  parentTitle: string;
+  createdAt: number;
+}>;
+
 type HydrationMessage = Readonly<{
   id?: unknown;
   role?: unknown;
@@ -40,6 +47,7 @@ export type HydrationIntegrationInput = Readonly<{
     timelineMessageIds?: readonly unknown[];
     segmentBackingMessageIds?: readonly unknown[];
     hydrationCoverage?: unknown;
+    forkOrigin?: unknown;
   }>;
   turnFullyFinalized?: boolean;
   preservedVolatileMessageIds?: readonly string[];
@@ -69,6 +77,7 @@ export type HydrationIntegrationPlan = Readonly<{
     firstBootstrap: boolean;
   }>;
   coverage: HydrationCoverage;
+  forkOrigin: ForkOrigin | null;
   reset: Readonly<{
     messages: true;
     timeline: true;
@@ -120,6 +129,22 @@ export function normalizeHydrationCoverage(value: unknown): HydrationCoverage {
     : 'deltaContinuityUnknown';
 }
 
+export function normalizeForkOrigin(value: unknown): ForkOrigin | null {
+  if (!value || typeof value !== 'object') return null;
+  const candidate = value as Record<string, unknown>;
+  const parentSessionId = typeof candidate.parentSessionId === 'string'
+    ? candidate.parentSessionId.trim()
+    : '';
+  if (!parentSessionId) return null;
+  const parentTitle = typeof candidate.parentTitle === 'string' && candidate.parentTitle.trim()
+    ? candidate.parentTitle.trim()
+    : 'Parent session';
+  const createdAt = typeof candidate.createdAt === 'number' && Number.isFinite(candidate.createdAt)
+    ? candidate.createdAt
+    : 0;
+  return Object.freeze({ version: 1, parentSessionId, parentTitle, createdAt });
+}
+
 export function planHydrationIntegration(
   input: HydrationIntegrationInput,
   options: HydrationIntegrationPlannerOptions,
@@ -137,11 +162,13 @@ export function planHydrationIntegration(
     firstBootstrap,
   });
   const coverage = normalizeHydrationCoverage(input.meta?.hydrationCoverage);
+  const forkOrigin = normalizeForkOrigin(input.meta?.forkOrigin);
   const emptyPlan = {
     accepted: false,
     reason: 'missing-session' as const,
     selection,
     coverage,
+    forkOrigin,
     reset: Object.freeze({
       messages: true as const,
       timeline: true as const,
@@ -155,7 +182,7 @@ export function planHydrationIntegration(
     hiddenControlUserIds: Object.freeze([]),
     segments: Object.freeze([]),
     appendRoots: Object.freeze([]),
-    snapshotNoticeRequired: input.meta?.source === 'snapshot',
+    snapshotNoticeRequired: input.meta?.source === 'snapshot' && !forkOrigin,
     preserve: Object.freeze({
       volatileState: true as const,
       durableCache: false as const,
@@ -398,6 +425,7 @@ export function planHydrationIntegration(
     reason: 'planned',
     selection,
     coverage,
+    forkOrigin,
     reset: Object.freeze({
       messages: true,
       timeline: true,
@@ -411,7 +439,7 @@ export function planHydrationIntegration(
     hiddenControlUserIds: freezeArray(hiddenControlUserIds),
     segments: freezeArray(segmentPlans),
     appendRoots: freezeArray(appendRoots),
-    snapshotNoticeRequired: input.meta?.source === 'snapshot',
+    snapshotNoticeRequired: input.meta?.source === 'snapshot' && !forkOrigin,
     preserve: Object.freeze({
       volatileState: true,
       durableCache: false,

@@ -110,6 +110,9 @@ anchor, safe-shell, recovery, and prepare/commit/abort coordinators remain froze
 
 - Snapshot data is applied first. Only a proven newer suffix may be appended; an
   unproven boundary remains non-authoritative until the full-repair path proves it.
+- A fork snapshot starts at the child branch boundary. Parent history remains in the
+  OpenCode backend context but is neither rendered nor duplicated in the child
+  snapshot; fork-origin metadata provides navigation back to the parent session.
 - Export failure does not disable snapshot persistence for subsequent local events.
 - Background-session events update that session's store and never mutate the current
   session DOM.

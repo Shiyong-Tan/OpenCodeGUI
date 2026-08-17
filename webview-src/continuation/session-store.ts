@@ -1,6 +1,7 @@
 export function createSessionState() {
   return {
     hydrationCoverage: 'deltaContinuityUnknown',
+    forkOrigin: null,
     messagesById: new Map(),
     timeline: [] as string[],
     messageIndexMap: new Map(),

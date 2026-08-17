@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import type { SessionMessage } from '../../changes/ChangeListInjection';
 import type { SegmentState } from '../../undo/UndoSegmentPersistence';
+import { isEmptyForkBoundarySnapshot } from '../../history/ForkSnapshotBoundary';
 
 type SessionCommandMessage = Record<string, any>;
 type HydrationCoverage =
@@ -23,6 +24,7 @@ export interface SessionCommandHost {
     log(message: string): void;
     refreshSessions(webview: vscode.Webview, requestId: string): Promise<void>;
     forkSession(sessionId: string): Promise<{ id: string }>;
+    initializeForkSnapshot(sourceSessionId: string, childSessionId: string): Promise<void>;
     hasActiveTurn(sessionId: string): boolean;
     getSessionChildren(sessionId: string): Promise<unknown[]>;
     deleteSession(sessionId: string): Promise<boolean>;
@@ -190,6 +192,7 @@ export class SessionCommandController {
 
         try {
             const forked = await this.host.forkSession(sourceSessionId);
+            await this.host.initializeForkSnapshot(sourceSessionId, forked.id);
             liveWebview.postMessage({
                 type: 'sessionForked',
                 sourceSessionId,
@@ -264,6 +267,8 @@ export class SessionCommandController {
             let baseMessages: SessionMessage[] = [];
             let snapPayload: any = null;
             let snapshotTimelineIds: string[] = [];
+            let emptyForkBoundary = false;
+            let forkOrigin: unknown = null;
 
             const snapshotStart = Date.now();
             try {
@@ -281,6 +286,8 @@ export class SessionCommandController {
                         snapPayload,
                         snapshotMessages
                     );
+                    emptyForkBoundary = isEmptyForkBoundarySnapshot(snapPayload);
+                    forkOrigin = snapPayload.meta?.forkOrigin || null;
                     const payload = {
                         type: 'sessionData',
                         sessionId: targetSessionId,
@@ -291,7 +298,9 @@ export class SessionCommandController {
                             ...(snapPayload.meta || {}),
                             source: 'snapshot',
                             timelineMessageIds: snapshotTimelineIds,
-                            hydrationCoverage: 'deltaContinuityUnknown' as HydrationCoverage,
+                            hydrationCoverage: (emptyForkBoundary
+                                ? 'authoritativeHistoryComplete'
+                                : 'deltaContinuityUnknown') as HydrationCoverage,
                         },
                     };
                     const sent = postSessionData(payload, 'snapshot');
@@ -309,6 +318,13 @@ export class SessionCommandController {
                 this.host.log(
                     `[EXT][SNAP_LOAD_FAIL] sessionId=${targetSessionId} err=${String(error)} costMs=${Date.now() - snapshotStart}`
                 );
+            }
+
+            if (emptyForkBoundary) {
+                this.host.log(
+                    `[EXT][SESSION_FORK_BOUNDARY_LOAD] sessionId=${targetSessionId} action=retain-empty-child-history`
+                );
+                return;
             }
 
             let recentFailedReason = '';
@@ -365,6 +381,7 @@ export class SessionCommandController {
                     segments,
                     meta: {
                         timelineMessageIds: [...snapshotIds, ...newIds],
+                        ...(forkOrigin ? { forkOrigin } : {}),
                         hydrationCoverage: (snapshotIds.length > 0
                             ? 'authoritativeHistoryComplete'
                             : 'deltaContinuityUnknown') as HydrationCoverage,
@@ -465,6 +482,7 @@ export class SessionCommandController {
                 segments,
                 meta: {
                     timelineMessageIds: fullDelta.timelineMessageIds,
+                    ...(forkOrigin ? { forkOrigin } : {}),
                     hydrationCoverage: (fullDelta.proven
                         ? 'authoritativeHistoryComplete'
                         : 'deltaContinuityUnknown') as HydrationCoverage,

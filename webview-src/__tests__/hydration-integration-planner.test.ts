@@ -270,6 +270,29 @@ describe('hydration integration planner', () => {
     });
   });
 
+  test('projects a validated fork origin without turning parent history into messages', () => {
+    const result = plan({
+      hasSegments: false,
+      meta: {
+        hydrationCoverage: 'authoritativeHistoryComplete',
+        forkOrigin: {
+          version: 1,
+          parentSessionId: 'session-parent',
+          parentTitle: 'Parent title',
+          createdAt: 123,
+        },
+      },
+    });
+    expect(result.timeline).toEqual([]);
+    expect(result.forkOrigin).toEqual({
+      version: 1,
+      parentSessionId: 'session-parent',
+      parentTitle: 'Parent title',
+      createdAt: 123,
+    });
+    expect(result.snapshotNoticeRequired).toBe(false);
+  });
+
   test('is side-effect free and returns frozen decision collections', () => {
     const input: HydrationIntegrationInput = {
       sessionId: 'session-a',

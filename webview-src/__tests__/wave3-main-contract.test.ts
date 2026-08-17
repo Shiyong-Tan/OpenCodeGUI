@@ -1555,7 +1555,7 @@ describe('UI log regression repairs', () => {
     const surfaceOwner = extractFunction('function renderChatLocalOlderSurface(');
     expect(surfaceOwner).toContain('if (suppressContent === true)');
     expect(extractFunction('function applyWindowedKeyedChatReconciliation('))
-      .toContain('renderChatLocalOlderSurface(localWindow.presentation, localWindow.suppressSurfaceContent === true);');
+      .toContain('localWindow.forkOrigin');
     expect(extractFunction('function resolveChatLocalHistoryWindow('))
       .toContain("|| units.every((unit) => unit.kind === 'greeting')");
     expect(extractFunction('function resolveChatLocalHistoryWindow('))

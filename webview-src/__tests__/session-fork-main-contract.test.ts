@@ -32,4 +32,10 @@ describe('current session fork Webview contract', () => {
     expect(receipt).toContain('if (!nextSessionId || activeSessionId !== sourceSessionId) break;');
     expect(receipt).toContain('requestSessionSelection(nextSessionId);');
   });
+
+  test('renders the branch origin as a parent-session navigation link', () => {
+    expect(source).toContain("presentation.state === 'localStartReached'");
+    expect(source).toContain("link.className = 'chat-fork-origin-link'");
+    expect(source).toContain('requestSessionSelection(forkOrigin.parentSessionId)');
+  });
 });

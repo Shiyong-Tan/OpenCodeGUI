@@ -152,7 +152,8 @@ describe('session command family characterization', () => {
             "postSessionData(sessionPayload, 'full')",
         ]);
         expect(block).toContain("source: 'snapshot'");
-        expect(block).toContain("hydrationCoverage: 'deltaContinuityUnknown'");
+        expect(block).toContain("? 'authoritativeHistoryComplete'");
+        expect(block).toContain(": 'deltaContinuityUnknown') as HydrationCoverage");
         expect(block).toContain('buildImmutableSnapshotWithProvenSuffix(baseMessages, appendMessages)');
         expect(block).toContain("throw new Error('snapshot-boundary-unproven')");
         expect(block).toContain('this.host.buildFullExportSnapshotDelta(');
@@ -240,6 +241,7 @@ describe('session command family characterization', () => {
             "const sourceSessionId = typeof data.sessionId === 'string' ? data.sessionId : ''",
             'this.host.hasActiveTurn(sourceSessionId)',
             'await this.host.forkSession(sourceSessionId)',
+            'await this.host.initializeForkSnapshot(sourceSessionId, forked.id)',
             "type: 'sessionForked'",
             'await this.host.refreshSessions(liveWebview',
         ]);
@@ -312,6 +314,7 @@ function createRuntimeHarness(overrides: Record<string, unknown> = {}) {
         log: jest.fn(),
         refreshSessions: jest.fn(async () => undefined),
         forkSession: jest.fn(async () => ({ id: 'session-fork' })),
+        initializeForkSnapshot: jest.fn(async () => undefined),
         hasActiveTurn: jest.fn(() => false),
         getSessionChildren: jest.fn(async () => []),
         deleteSession: jest.fn(async () => true),
@@ -451,6 +454,10 @@ describe('SessionCommandController runtime protocol', () => {
         );
 
         expect(order).toEqual(['fork', 'sessionForked', 'refresh']);
+        expect(harness.host.initializeForkSnapshot).toHaveBeenCalledWith(
+            'session-source',
+            'session-child',
+        );
         expect(harness.posts).toContainEqual({
             type: 'sessionForked',
             sourceSessionId: 'session-source',
@@ -479,6 +486,49 @@ describe('SessionCommandController runtime protocol', () => {
             opId: 'fork-2',
             reason: 'active_turn',
         });
+    });
+
+    test('loads an empty fork boundary without importing inherited backend history', async () => {
+        const harness = createRuntimeHarness({
+            readSnapshot: jest.fn(async () => ({
+                bytes: 200,
+                obj: {
+                    sessionData: {
+                        title: 'Child branch',
+                        messages: [],
+                        meta: {
+                            timelineMessageIds: [],
+                            hydrationCoverage: 'authoritativeHistoryComplete',
+                            forkOrigin: {
+                                version: 1,
+                                parentSessionId: 'session-parent',
+                                parentTitle: 'Parent title',
+                                createdAt: 123,
+                            },
+                        },
+                    },
+                },
+            })),
+        });
+
+        await harness.handler(
+            { type: 'selectSession', sessionId: 'session-child' },
+            harness.activeWebview,
+            harness.resolvingWebview,
+        );
+
+        expect(harness.posts).toContainEqual(expect.objectContaining({
+            type: 'sessionData',
+            sessionId: 'session-child',
+            messages: [],
+            phase: 'snapshot',
+            meta: expect.objectContaining({
+                hydrationCoverage: 'authoritativeHistoryComplete',
+                forkOrigin: expect.objectContaining({ parentSessionId: 'session-parent' }),
+            }),
+        }));
+        expect(harness.host.exportSessionRecent).not.toHaveBeenCalled();
+        expect(harness.host.exportSession).not.toHaveBeenCalled();
     });
 
     test('hydrates snapshot first, then posts only the proven recent suffix merge', async () => {

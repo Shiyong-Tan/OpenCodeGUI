@@ -698,6 +698,42 @@ describe('W5A snapshot export and finalize contracts', () => {
         expect(written.messages).toEqual([baseA, boundary, msg('msg_new', 3, 'assistant', 'new canonical')]);
     });
 
+    it('keeps a fork boundary empty of parent history and appends only child messages', async () => {
+        const provider = createProvider();
+        const forkOrigin = {
+            version: 1,
+            parentSessionId: 'ses_parent',
+            parentTitle: 'Parent session',
+            createdAt: 123,
+        };
+        const forkBoundary = snapshotOf([], []);
+        forkBoundary.obj.sessionId = 'ses_child';
+        forkBoundary.obj.sessionData.sessionId = 'ses_child';
+        forkBoundary.obj.sessionData.meta = {
+            timelineMessageIds: [],
+            segmentBackingMessageIds: [],
+            hydrationCoverage: 'authoritativeHistoryComplete',
+            forkOrigin,
+        };
+        provider.readSnapshot = jest.fn().mockResolvedValue(forkBoundary);
+        provider.writeSnapshotAtomic = jest.fn().mockResolvedValue(123);
+
+        const childUser = msg('msg_child_user', 101, 'user', 'child prompt');
+        const childAssistant = msg('msg_child_assistant', 102, 'assistant', 'child answer');
+        await provider.appendSnapshotIncremental(
+            'ses_child',
+            [childUser.id, childAssistant.id],
+            [childUser, childAssistant],
+            'Fork child',
+        );
+
+        const written = provider.writeSnapshotAtomic.mock.calls[0][1].sessionData;
+        expect(written.meta.forkOrigin).toEqual(forkOrigin);
+        expect(written.meta.timelineMessageIds).toEqual([childUser.id, childAssistant.id]);
+        expect(written.messages).toEqual([childUser, childAssistant]);
+        expect(JSON.stringify(written)).not.toContain('parent history');
+    });
+
     it('leaves an existing snapshot untouched when the current turn has no visible records', async () => {
         const provider = createProvider();
         const base = msg('msg_boundary', 2, 'assistant', 'snapshot final');

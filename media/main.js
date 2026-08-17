@@ -10522,7 +10522,7 @@ function shouldHideDcpUiMessage(message) {
         return true;
     }
 
-    function renderChatLocalOlderSurface(presentation, suppressContent) {
+    function renderChatLocalOlderSurface(presentation, suppressContent, forkOrigin = null) {
         const surface = ensureChatLocalOlderSurface();
         surface.replaceChildren();
         surface.dataset.localOlderState = presentation.state;
@@ -10556,16 +10556,33 @@ function shouldHideDcpUiMessage(message) {
             chatWindowState.localOlderObserver?.disconnect?.();
             chatWindowState.localOlderObserver = null;
             chatWindowState.localOlderObserverArmed = true;
-            const label = document.createElement('div');
-            label.className = 'chat-local-older-label';
-            label.setAttribute('role', 'status');
-            label.textContent = presentation.label;
-            surface.appendChild(label);
-            if (presentation.hint) {
-                const hint = document.createElement('div');
-                hint.className = 'chat-local-older-hint';
-                hint.textContent = presentation.hint;
-                surface.appendChild(hint);
+            if (
+                presentation.state === 'localStartReached'
+                && typeof forkOrigin?.parentSessionId === 'string'
+                && forkOrigin.parentSessionId
+            ) {
+                const prefix = document.createElement('span');
+                prefix.className = 'chat-fork-origin-prefix';
+                prefix.textContent = 'Forked from ';
+                const link = document.createElement('button');
+                link.type = 'button';
+                link.className = 'chat-fork-origin-link';
+                link.textContent = forkOrigin.parentTitle || 'parent session';
+                link.setAttribute('aria-label', `Open parent session ${link.textContent}`);
+                link.addEventListener('click', () => requestSessionSelection(forkOrigin.parentSessionId));
+                surface.append(prefix, link);
+            } else {
+                const label = document.createElement('div');
+                label.className = 'chat-local-older-label';
+                label.setAttribute('role', 'status');
+                label.textContent = presentation.label;
+                surface.appendChild(label);
+                if (presentation.hint) {
+                    const hint = document.createElement('div');
+                    hint.className = 'chat-local-older-hint';
+                    hint.textContent = presentation.hint;
+                    surface.appendChild(hint);
+                }
             }
         }
         const admission = preflightChatRenderRootAdmission(surface);
@@ -10583,10 +10600,11 @@ function shouldHideDcpUiMessage(message) {
         chatWindowState.localHistoryPresentation = resolution.presentation;
         return {
             ...resolution,
+            forkOrigin: session?.forkOrigin || null,
             visibleUnits: units.slice(resolution.revealStart),
             suppressSurfaceContent: isActiveSessionHistoryLoading()
                 || resolution.presentation.state === 'deltaContinuityUnknown'
-                || units.every((unit) => unit.kind === 'greeting')
+                || units.every((unit) => unit.kind === 'greeting') && !session?.forkOrigin
         };
     }
 
@@ -11876,7 +11894,11 @@ function shouldHideDcpUiMessage(message) {
                 applyKeyedChatReconciliation(session, acceptedUnits, acceptedPlan.shellSelections, journal);
                 updateChatWindowSpacers(acceptedSnapshot);
                 runChatPresentationFailureSeam('spacer-applied', acceptedSnapshot);
-                renderChatLocalOlderSurface(localWindow.presentation, localWindow.suppressSurfaceContent === true);
+                renderChatLocalOlderSurface(
+                    localWindow.presentation,
+                    localWindow.suppressSurfaceContent === true,
+                    localWindow.forkOrigin
+                );
                 runChatPresentationFailureSeam('local-surface-applied', localWindow.presentation);
                 const nextMounted = new Set(acceptedUnits.map((unit) => unit.key));
                 for (const key of chatWindowState.mountedKeys) if (!nextMounted.has(key)) {

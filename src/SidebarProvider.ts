@@ -57,6 +57,7 @@ import {
     getSnapshotTimelineIds as deriveSnapshotTimelineIds,
 } from './history/SnapshotDeltaPlanner';
 import { SnapshotStore } from './history/SnapshotStore';
+import { createForkSnapshotPayload, normalizeForkOrigin } from './history/ForkSnapshotBoundary';
 import { AppendSnapshotMetaStore, type AppendSnapshotMetaRoot } from './continuation/AppendSnapshotMetaStore';
 import {
     buildFinalizeTurnIdentity as resolveFinalizeTurnIdentity,
@@ -2792,6 +2793,41 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return this.getSnapshotStore().read(sessionId);
     }
 
+    private async initializeForkSnapshot(sourceSessionId: string, childSessionId: string): Promise<void> {
+        const sourceSnapshot = await this.readSnapshot(sourceSessionId);
+        let parentTitle = typeof sourceSnapshot?.obj?.sessionData?.title === 'string'
+            ? sourceSnapshot.obj.sessionData.title.trim()
+            : '';
+        let childTitle = '';
+        try {
+            const [sourceRecent, childRecent] = await Promise.all([
+                this.client.exportSessionRecent(sourceSessionId, 1),
+                this.client.exportSessionRecent(childSessionId, 1),
+            ]);
+            const sourceFormatted = this.formatSession(sourceRecent);
+            const childFormatted = this.formatSession(childRecent);
+            if (sourceFormatted.title?.trim()) parentTitle = sourceFormatted.title.trim();
+            if (childFormatted.title?.trim()) childTitle = childFormatted.title.trim();
+        } catch (error) {
+            this.uiDebugChannel.appendLine(
+                `[EXT][SESSION_FORK_SNAPSHOT_TITLE_FALLBACK] sourceSessionId=${sourceSessionId} childSessionId=${childSessionId} err=${String(error)}`
+            );
+        }
+        const payload = createForkSnapshotPayload({
+            childSessionId,
+            parentSessionId: sourceSessionId,
+            parentTitle: parentTitle || 'Parent session',
+            childTitle: childTitle || undefined,
+        });
+        const bytes = await this.writeSnapshotAtomic(childSessionId, payload);
+        const sessionData = (payload as { sessionData: Record<string, unknown> }).sessionData;
+        this.lastSnapshotPayloadBySession.set(childSessionId, sessionData);
+        this.uiTimelineBySession.set(childSessionId, []);
+        this.uiDebugChannel.appendLine(
+            `[EXT][SESSION_FORK_SNAPSHOT_INIT] sourceSessionId=${sourceSessionId} childSessionId=${childSessionId} messages=0 timeline=0 bytes=${bytes}`
+        );
+    }
+
     private getCanceledTurnsDir(): string {
         return pathModule.join(this.getOpencodeDataDir(), 'sessionCanceledTurns');
     }
@@ -3244,13 +3280,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         timelineMessageIds: string[],
         segments: any[]
     ): Promise<void> {
+        const existing = await this.readSnapshot(sessionId);
+        const forkOrigin = normalizeForkOrigin(existing?.obj?.sessionData?.meta?.forkOrigin);
         const sessionData = await this.buildSnapshotSessionPayload({
             type: 'sessionData',
             sessionId,
             title,
             messages,
             segments,
-            meta: { timelineMessageIds }
+            meta: {
+                timelineMessageIds,
+                ...(forkOrigin ? { forkOrigin } : {})
+            }
         });
         const snapshotObj = { sessionId, exportedAt: Date.now(), sessionData };
         const bytes = await this.writeSnapshotAtomic(sessionId, snapshotObj);
@@ -4601,6 +4642,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             log: (message) => this.uiDebugChannel.appendLine(message),
             refreshSessions: (webview, requestId) => this.refreshSessions(webview, requestId),
             forkSession: (sessionId) => this.client.forkSession(sessionId),
+            initializeForkSnapshot: (sourceSessionId, childSessionId) =>
+                this.initializeForkSnapshot(sourceSessionId, childSessionId),
             hasActiveTurn: (sessionId) => this.client.hasActiveTurn(sessionId),
             getSessionChildren: (sessionId) => this.client.getSessionChildren(sessionId),
             deleteSession: (sessionId) => this.client.deleteSession(sessionId),
