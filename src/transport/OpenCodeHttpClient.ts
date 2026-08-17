@@ -16,6 +16,7 @@ export type ServerConnection = {
 export type ServerFetchOptions = {
     opName?: string;
     retry?: boolean;
+    retryTransport?: boolean;
     timeoutMs?: number;
     noTimeout?: boolean;
     retryOnAbort?: boolean;
@@ -28,12 +29,14 @@ export function getServerRequestPolicy(method: string, reqPath: string): {
     opName: string;
     timeoutMs: number;
     noTimeout?: boolean;
+    retryTransport?: boolean;
     retryOnAbort?: boolean;
     retryTimeoutMs?: number;
 } {
     const messageMatch = /\/session\/[^/]+\/message(?:\/[^/?]+)?(?:\?.*)?$/.test(reqPath);
     const promptAsyncMatch = /\/session\/[^/]+\/prompt_async(?:\?.*)?$/.test(reqPath);
     const summarizeMatch = /\/session\/[^/]+\/summarize(?:\?.*)?$/.test(reqPath);
+    const forkMatch = /\/session\/[^/]+\/fork(?:\?.*)?$/.test(reqPath);
     const sessionInfoMatch = /\/session\/[^/?]+(?:\?.*)?$/.test(reqPath);
     if (reqPath === '/global/health') return { opName: 'health', timeoutMs: 1000 };
     if (reqPath === '/config/providers') return { opName: 'models.list', timeoutMs: 5000 };
@@ -46,6 +49,11 @@ export function getServerRequestPolicy(method: string, reqPath: string): {
     }
     if (summarizeMatch) {
         return { opName: 'session.summarize', timeoutMs: 0, noTimeout: true, retryOnAbort: true };
+    }
+    if (forkMatch) {
+        // Fork is a potentially slow, non-idempotent mutation. Timing out or replaying
+        // an ambiguous POST can create a child successfully and then create it again.
+        return { opName: 'session.fork', timeoutMs: 0, noTimeout: true, retryTransport: false };
     }
     if (sessionInfoMatch) {
         return { opName: 'session.info', timeoutMs: 10000, retryOnAbort: true, retryTimeoutMs: 15000 };
@@ -97,6 +105,7 @@ export class OpenCodeHttpClient {
             return this.fetch(reqPath, init, {
                 opName,
                 retry: false,
+                retryTransport: options?.retryTransport,
                 timeoutMs,
                 noTimeout: options?.noTimeout,
                 retryOnAbort,
@@ -105,7 +114,7 @@ export class OpenCodeHttpClient {
                 skipReady: true,
             });
         } catch (error) {
-            if (!retry) throw error;
+            if (!retry || options?.retryTransport === false) throw error;
             if (retryOnAbort && (error as Error)?.name === 'AbortError') {
                 const nextConn = await this.options.getConnection(true);
                 return this.fetch(reqPath, init, {

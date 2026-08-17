@@ -21,6 +21,9 @@ describe('OpenCode HTTP client', () => {
         expect(getServerRequestPolicy('POST', '/session/s1/summarize')).toEqual({
             opName: 'session.summarize', timeoutMs: 0, noTimeout: true, retryOnAbort: true,
         });
+        expect(getServerRequestPolicy('POST', '/session/s1/fork?directory=D%3A%5Cworkspace')).toEqual({
+            opName: 'session.fork', timeoutMs: 0, noTimeout: true, retryTransport: false,
+        });
     });
 
     test('migrates and retries once on unauthorized responses', async () => {
@@ -81,5 +84,26 @@ describe('OpenCode HTTP client', () => {
         expect(getConnection).toHaveBeenLastCalledWith(true);
         expect(recoverTransport).not.toHaveBeenCalled();
         expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    test('does not replay a fork after an ambiguous transport failure', async () => {
+        const recoverTransport = jest.fn(async () => undefined);
+        const fetchMock = jest.fn().mockRejectedValue(new Error('connection closed after commit'));
+        const client = new OpenCodeHttpClient({
+            waitUntilReady: async () => undefined,
+            getConnection: async () => connection(42000),
+            migrateUnauthorized: async () => undefined,
+            recoverTransport,
+            log: () => undefined,
+            fetch: fetchMock,
+        });
+
+        await expect(client.requestJson(
+            'POST',
+            '/session/s1/fork?directory=D%3A%5Cworkspace',
+            {},
+        )).rejects.toThrow('connection closed after commit');
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(recoverTransport).not.toHaveBeenCalled();
     });
 });
