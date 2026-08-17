@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## 5.0.3 - 2026-08-17
+
+### Session forks and titles
+
+- Added a current-session fork action beside the new-session control. Forked sessions start at a clean history boundary instead of copying the parent's complete visible history and snapshot, while retaining a link back to the parent session.
+- Prevented duplicate fork requests during slow backend responses and refined the fork icon for clearer directionality.
+- Added inline title renaming from the chat header: double-click the title, then press `Enter` or click away to save; press `Escape` to cancel.
+- Added safe inline `$...$` math rendering to both the chat header and session history titles while keeping the raw title editable.
+
+### Cross-session append reliability
+
+- Hardened append-generation ownership and hydration so active text, subagent progress, finalized replies, and acknowledged user messages remain attached to the correct turn across session switches.
+- Prevented stale append owners or older assistant generations from finalizing, replacing, merging with, or hiding a newer response.
+- Preserved accepted final responses and retired append presentation chains without recreating duplicate assistant bubbles after hydration.
+- Made cancellation remove the complete active append presentation while retaining previously finalized conversation history.
+
+### Long-session scrolling and images
+
+- Reworked upward virtual-scroll anchoring to reduce periodic jumps while moving across large messages, user-message boundaries, and image-heavy history.
+- Reserved preview dimensions, restored cached image sizes before mount, and stabilized late image measurements so loading previews no longer repeatedly displaces the visible viewport.
+- Prevented duplicate scroll compensation, final-render range oscillation, and jump-to-bottom rebound after an explicit navigation action.
+- Added focused virtual-viewport diagnostics for identifying any remaining browser- or content-specific layout shifts.
+
+### Markdown and interaction polish
+
+- Improved display-math recovery inside ordered lists and preserved escaped-dollar formulas in quoted selections.
+- Corrected assistant processing-time pause scope for Question and Permission cards so elapsed time excludes periods waiting for user input without suppressing the cards.
+
 ## 5.0.2 - 2026-08-05
 
 ### Session continuity and assistant presentation
