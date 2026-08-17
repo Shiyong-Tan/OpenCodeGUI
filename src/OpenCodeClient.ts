@@ -6781,6 +6781,27 @@ export class OpenCodeClient {
         throw new Error('Failed to fork session.');
     }
 
+    public async renameSession(sessionId: string, title: string): Promise<{ id: string; title: string }> {
+        if (!sessionId) throw new Error('Session ID is required to rename a session.');
+        const normalizedTitle = title.trim();
+        if (!normalizedTitle) throw new Error('Session title cannot be empty.');
+        await this.ensureServer();
+        const directory = encodeURIComponent(this.workspaceRoot || '.');
+        const encodedSessionId = encodeURIComponent(sessionId);
+        const session = await this.requestJson<any>(
+            'PATCH',
+            `/session/${encodedSessionId}?directory=${directory}`,
+            { title: normalizedTitle }
+        );
+        if (!session?.id) throw new Error('Failed to rename session.');
+        return {
+            id: session.id,
+            title: typeof session.title === 'string' && session.title.trim()
+                ? session.title.trim()
+                : normalizedTitle,
+        };
+    }
+
     public hasActiveTurn(sessionId: string): boolean {
         return Boolean(sessionId && this.turnStateBySession.has(sessionId));
     }

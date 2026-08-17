@@ -688,6 +688,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private readonly sidebarWebviewDependencies: SidebarWebviewDependencies;
     private uiTimelineBySession = new Map<string, string[]>();
     private lastSnapshotPayloadBySession = new Map<string, any>();
+    private readonly sessionTitleOverrideBySession = new Map<string, string>();
     private snapshotStore?: SnapshotStore;
     private changeListStore?: ChangeListStore;
     private readonly diffFileViewer: DiffFileViewer;
@@ -2785,12 +2786,61 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return this.snapshotStore;
     }
 
+    private applySessionTitleOverride(sessionId: string, sessionData: any): any {
+        const titleOverride = this.sessionTitleOverrideBySession.get(sessionId);
+        if (!titleOverride || !sessionData || typeof sessionData !== 'object') return sessionData;
+        return { ...sessionData, title: titleOverride };
+    }
+
+    private cacheSnapshotPayload(sessionId: string, sessionData: any): void {
+        this.lastSnapshotPayloadBySession.set(
+            sessionId,
+            this.applySessionTitleOverride(sessionId, sessionData)
+        );
+    }
+
     private async writeSnapshotAtomic(sessionId: string, payloadObj: unknown): Promise<number> {
-        return this.getSnapshotStore().writeAtomic(sessionId, payloadObj);
+        let payload = payloadObj;
+        if (payloadObj && typeof payloadObj === 'object') {
+            const source = payloadObj as Record<string, any>;
+            if (source.sessionData && typeof source.sessionData === 'object') {
+                payload = {
+                    ...source,
+                    sessionData: this.applySessionTitleOverride(sessionId, source.sessionData),
+                };
+            }
+        }
+        return this.getSnapshotStore().writeAtomic(sessionId, payload);
     }
 
     private async readSnapshot(sessionId: string): Promise<{ obj: any; bytes: number } | null> {
         return this.getSnapshotStore().read(sessionId);
+    }
+
+    private async persistSessionTitle(sessionId: string, title: string): Promise<void> {
+        const normalizedTitle = title.trim();
+        if (!sessionId || !normalizedTitle) return;
+        this.sessionTitleOverrideBySession.set(sessionId, normalizedTitle);
+        const existing = await this.readSnapshot(sessionId);
+        if (!existing?.obj?.sessionData) {
+            this.uiDebugChannel.appendLine(
+                `[EXT][SESSION_RENAME_SNAPSHOT_SKIP] sessionId=${sessionId} reason=no-snapshot`
+            );
+            return;
+        }
+        const snapshotObj = {
+            ...existing.obj,
+            exportedAt: Date.now(),
+            sessionData: {
+                ...existing.obj.sessionData,
+                title: normalizedTitle,
+            },
+        };
+        const bytes = await this.writeSnapshotAtomic(sessionId, snapshotObj);
+        this.cacheSnapshotPayload(sessionId, snapshotObj.sessionData);
+        this.uiDebugChannel.appendLine(
+            `[EXT][SESSION_RENAME_SNAPSHOT] sessionId=${sessionId} bytes=${bytes}`
+        );
     }
 
     private async initializeForkSnapshot(sourceSessionId: string, childSessionId: string): Promise<void> {
@@ -2821,7 +2871,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         });
         const bytes = await this.writeSnapshotAtomic(childSessionId, payload);
         const sessionData = (payload as { sessionData: Record<string, unknown> }).sessionData;
-        this.lastSnapshotPayloadBySession.set(childSessionId, sessionData);
+        this.cacheSnapshotPayload(childSessionId, sessionData);
         this.uiTimelineBySession.set(childSessionId, []);
         this.uiDebugChannel.appendLine(
             `[EXT][SESSION_FORK_SNAPSHOT_INIT] sourceSessionId=${sourceSessionId} childSessionId=${childSessionId} messages=0 timeline=0 bytes=${bytes}`
@@ -3295,7 +3345,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         });
         const snapshotObj = { sessionId, exportedAt: Date.now(), sessionData };
         const bytes = await this.writeSnapshotAtomic(sessionId, snapshotObj);
-        this.lastSnapshotPayloadBySession.set(sessionId, sessionData);
+        this.cacheSnapshotPayload(sessionId, sessionData);
         this.uiTimelineBySession.set(sessionId, timelineMessageIds);
         this.uiDebugChannel.appendLine(
             `[EXT][SNAP_REPAIR_WRITE] sessionId=${sessionId} timelineCount=${timelineMessageIds.length} messageCount=${messages.length} bytes=${bytes}`
@@ -3413,7 +3463,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         segmentMemberMessages: SessionMessage[] = []
     ) {
         const payload = await this.buildSnapshotSessionPayload(sessionPayload, segmentMemberMessages);
-        this.lastSnapshotPayloadBySession.set(sessionId, payload);
+        this.cacheSnapshotPayload(sessionId, payload);
         return payload;
     }
 
@@ -3613,7 +3663,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         snapshotObj.sessionData.meta.timelineMessageIds = nextTimeline;
         snapshotObj.exportedAt = Date.now();
         const bytes = await this.writeSnapshotAtomic(sessionId, snapshotObj);
-        this.lastSnapshotPayloadBySession.set(sessionId, snapshotObj.sessionData);
+        this.cacheSnapshotPayload(sessionId, snapshotObj.sessionData);
         return bytes;
     }
 
@@ -4642,6 +4692,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             log: (message) => this.uiDebugChannel.appendLine(message),
             refreshSessions: (webview, requestId) => this.refreshSessions(webview, requestId),
             forkSession: (sessionId) => this.client.forkSession(sessionId),
+            renameSession: (sessionId, title) => this.client.renameSession(sessionId, title),
+            persistSessionTitle: (sessionId, title) => this.persistSessionTitle(sessionId, title),
             initializeForkSnapshot: (sourceSessionId, childSessionId) =>
                 this.initializeForkSnapshot(sourceSessionId, childSessionId),
             hasActiveTurn: (sessionId) => this.client.hasActiveTurn(sessionId),
@@ -5890,6 +5942,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private async cleanupDeletedSessionArtifacts(sessionId: string): Promise<void> {
+        this.sessionTitleOverrideBySession.delete(sessionId);
+        this.lastSnapshotPayloadBySession.delete(sessionId);
         try {
             await this.rmPathIfExists(this.getSnapshotFile(sessionId));
         } catch (error) {

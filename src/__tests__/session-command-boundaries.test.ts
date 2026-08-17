@@ -78,6 +78,7 @@ describe('session command family characterization', () => {
             'deleteSession',
             'selectSession',
             'forkSession',
+            'renameSession',
             'newSession',
             'snapshotTimelineIds',
         ]) {
@@ -315,6 +316,8 @@ function createRuntimeHarness(overrides: Record<string, unknown> = {}) {
         refreshSessions: jest.fn(async () => undefined),
         forkSession: jest.fn(async () => ({ id: 'session-fork' })),
         initializeForkSnapshot: jest.fn(async () => undefined),
+        renameSession: jest.fn(async (sessionId: string, title: string) => ({ id: sessionId, title })),
+        persistSessionTitle: jest.fn(async () => undefined),
         hasActiveTurn: jest.fn(() => false),
         getSessionChildren: jest.fn(async () => []),
         deleteSession: jest.fn(async () => true),
@@ -466,6 +469,32 @@ describe('SessionCommandController runtime protocol', () => {
         });
         expect(harness.host.adoptSessionSelection).not.toHaveBeenCalled();
         expect(harness.host.prepareNewSession).not.toHaveBeenCalled();
+    });
+
+    test('renames a session remotely before persisting its snapshot title', async () => {
+        const order: string[] = [];
+        const harness = createRuntimeHarness({
+            renameSession: jest.fn(async (sessionId: string, title: string) => {
+                order.push('remote');
+                return { id: sessionId, title };
+            }),
+            persistSessionTitle: jest.fn(async () => { order.push('snapshot'); }),
+        });
+        harness.activeWebview.postMessage.mockImplementation(async (message: any) => {
+            harness.posts.push(message);
+            order.push(message.type);
+            return true;
+        });
+
+        await harness.handler(
+            { type: 'renameSession', sessionId: 'session-a', title: '  New title  ', opId: 'rename-1' },
+            harness.activeWebview,
+            harness.resolvingWebview,
+        );
+
+        expect(order).toEqual(['remote', 'snapshot', 'sessionRenamed']);
+        expect(harness.host.renameSession).toHaveBeenCalledWith('session-a', 'New title');
+        expect(harness.host.persistSessionTitle).toHaveBeenCalledWith('session-a', 'New title');
     });
 
     test('rejects a fork when the captured source still has an active turn', async () => {

@@ -24,6 +24,8 @@ export interface SessionCommandHost {
     log(message: string): void;
     refreshSessions(webview: vscode.Webview, requestId: string): Promise<void>;
     forkSession(sessionId: string): Promise<{ id: string }>;
+    renameSession(sessionId: string, title: string): Promise<{ id: string; title: string }>;
+    persistSessionTitle(sessionId: string, title: string): Promise<void>;
     initializeForkSnapshot(sourceSessionId: string, childSessionId: string): Promise<void>;
     hasActiveTurn(sessionId: string): boolean;
     getSessionChildren(sessionId: string): Promise<unknown[]>;
@@ -91,6 +93,7 @@ const SESSION_COMMANDS = new Set([
     'deleteSession',
     'selectSession',
     'forkSession',
+    'renameSession',
     'newSession',
     'snapshotTimelineIds',
 ]);
@@ -115,6 +118,9 @@ export class SessionCommandController {
                 return true;
             case 'forkSession':
                 await this.forkSession(data, activeWebview);
+                return true;
+            case 'renameSession':
+                await this.renameSession(data, activeWebview);
                 return true;
             case 'newSession':
                 await this.newSession(activeWebview);
@@ -208,6 +214,49 @@ export class SessionCommandController {
             liveWebview.postMessage({
                 type: 'sessionForkFailed',
                 sourceSessionId,
+                opId,
+                reason: String(error),
+            });
+        }
+    }
+
+    private async renameSession(data: SessionCommandMessage, activeWebview: vscode.Webview): Promise<void> {
+        const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
+        const title = typeof data.title === 'string' ? data.title.trim() : '';
+        const opId = typeof data.opId === 'string' ? data.opId : '';
+        const liveWebview = this.host.getLiveWebview(activeWebview);
+        if (!sessionId || !title) {
+            liveWebview.postMessage({
+                type: 'sessionRenameFailed',
+                sessionId,
+                opId,
+                reason: 'invalid_title',
+            });
+            return;
+        }
+        try {
+            const renamed = await this.host.renameSession(sessionId, title);
+            try {
+                await this.host.persistSessionTitle(sessionId, renamed.title);
+            } catch (snapshotError) {
+                this.host.log(
+                    `[EXT][SESSION_RENAME_SNAPSHOT_FAIL] sessionId=${sessionId} err=${String(snapshotError)}`
+                );
+            }
+            liveWebview.postMessage({
+                type: 'sessionRenamed',
+                sessionId,
+                title: renamed.title,
+                opId,
+            });
+        } catch (error) {
+            this.host.log(
+                `[EXT][SESSION_RENAME_FAIL] sessionId=${sessionId} opId=${opId || 'null'} err=${String(error)}`
+            );
+            vscode.window.showErrorMessage(`Failed to rename session: ${error}`);
+            liveWebview.postMessage({
+                type: 'sessionRenameFailed',
+                sessionId,
                 opId,
                 reason: String(error),
             });

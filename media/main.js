@@ -6066,7 +6066,13 @@ document.addEventListener('DOMContentLoaded', () => {
         getRecomputedUsage: (sessionId) => recomputeSessionUsageFromMessages(getSessionState(sessionId)),
         isCompactDisabled: isCompactDisabledForSession,
         compactDisabledTitle: COMPACTION_ACTIVE_SESSION_NOTICE,
-        onCompact: (sessionId) => vscode.postMessage({ type: 'compactSession', sessionId })
+        onCompact: (sessionId) => vscode.postMessage({ type: 'compactSession', sessionId }),
+        onRename: (sessionId, title, opId) => vscode.postMessage({
+            type: 'renameSession',
+            sessionId,
+            title,
+            opId
+        })
     });
     headerUiController.install();
     renderHeaderTitle();
@@ -15377,6 +15383,23 @@ function appendMessageImages(parentEl, message) {
                 }
                 pendingDeleteSessionOpBySession.set(sessionId, opId);
                 renderSessionList();
+                break;
+            }
+            case 'sessionRenamed': {
+                headerUiController?.handleSessionRenameResult({
+                    sessionId: typeof message.sessionId === 'string' ? message.sessionId : '',
+                    opId: typeof message.opId === 'string' ? message.opId : '',
+                    title: typeof message.title === 'string' ? message.title : '',
+                    success: true
+                });
+                break;
+            }
+            case 'sessionRenameFailed': {
+                headerUiController?.handleSessionRenameResult({
+                    sessionId: typeof message.sessionId === 'string' ? message.sessionId : '',
+                    opId: typeof message.opId === 'string' ? message.opId : '',
+                    success: false
+                });
                 break;
             }
             case 'sessionDeleted': {

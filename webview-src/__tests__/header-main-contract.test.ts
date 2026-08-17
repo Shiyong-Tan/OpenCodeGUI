@@ -27,4 +27,10 @@ describe('header production ownership', () => {
     expect(source).toContain('headerUiController?.renderUsage();');
     expect(source).not.toContain("usageEl.addEventListener('mouseenter'");
   });
+
+  it('delegates inline session title renaming to the header controller', () => {
+    expect(source).toContain('onRename: (sessionId, title, opId) => vscode.postMessage({');
+    expect(source).toContain("type: 'renameSession'");
+    expect(source).toContain('headerUiController?.handleSessionRenameResult({');
+  });
 });

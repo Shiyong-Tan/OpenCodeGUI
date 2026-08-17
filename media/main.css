@@ -94,6 +94,19 @@ body {
     color: var(--vscode-editorWarning-foreground, #cca700);
 }
 
+.session-title.is-editing {
+    cursor: text;
+    overflow: visible;
+    text-overflow: clip;
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: 3px;
+    border-radius: 2px;
+}
+
+.session-title.is-rename-pending {
+    opacity: 0.72;
+}
+
 .server-status-dot {
     width: 8px;
     height: 8px;
