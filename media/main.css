@@ -108,7 +108,9 @@ body {
 }
 
 .session-title .session-title-math,
-.session-title .katex {
+.session-title .katex,
+.session-item-title .session-title-math,
+.session-item-title .katex {
     display: inline;
     font-size: 1em;
 }

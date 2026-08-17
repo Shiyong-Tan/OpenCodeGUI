@@ -25,4 +25,15 @@ describe('session selection production integration', () => {
     expect(block).not.toContain('messagesById.clear');
     expect(block).not.toContain('timeline = []');
   });
+
+  test('renders session history titles with the shared inline math renderer', () => {
+    const renderSessionList = source.indexOf('function renderSessionList() {');
+    const renderTitle = source.indexOf(
+      'renderInlineMathTitle(title, item.title || item.id);',
+      renderSessionList,
+    );
+
+    expect(renderSessionList).toBeGreaterThan(0);
+    expect(renderTitle).toBeGreaterThan(renderSessionList);
+  });
 });

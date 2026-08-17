@@ -13436,7 +13436,7 @@ function shouldHideDcpUiMessage(message) {
 
             const title = document.createElement('span');
             title.className = 'session-item-title';
-            title.textContent = item.title || item.id;
+            renderInlineMathTitle(title, item.title || item.id);
 
             const meta = document.createElement('span');
             meta.className = 'session-item-meta';
