@@ -8,6 +8,7 @@ import { createClipboardAttachmentController, getClipboardImageItems } from './c
 import { createComposerInputController, decideComposerInputKeyAction } from './composer/input-controller';
 import { createAutoEditorContextController } from './composer/auto-editor-context-controller';
 import { createHeaderUiController } from './header/header-controller';
+import { createInlineMathTitleRenderer } from './header/inline-math-title';
 import { createHeaderState, recomputeSessionUsage } from './header/header-state';
 import { createModelUiController } from './models/model-controller';
 import { createModelState, isCopilotProvider, isFreeModel, normalizeResetText, parseSpeedMultiplier } from './models/model-state';
@@ -54,6 +55,7 @@ const facade = Object.freeze({
   createHeaderState,
   recomputeSessionUsage,
   createHeaderUiController,
+  createInlineMathTitleRenderer,
   createModelState,
   isCopilotProvider,
   isFreeModel,

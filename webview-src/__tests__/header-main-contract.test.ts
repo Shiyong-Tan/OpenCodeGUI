@@ -33,4 +33,10 @@ describe('header production ownership', () => {
     expect(source).toContain("type: 'renameSession'");
     expect(source).toContain('headerUiController?.handleSessionRenameResult({');
   });
+
+  it('renders only inline math in the displayed session title', () => {
+    expect(source).toContain('createInlineMathTitleRenderer({');
+    expect(source).toContain('renderTitleContent: renderInlineMathTitle');
+    expect(source).toContain('displayMode: false');
+  });
 });

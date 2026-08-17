@@ -6055,6 +6055,23 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     const headerState = getHeaderStateController();
     headerState.setBaseTitle(sessionTitle.textContent || 'OpenCode: Chat');
+    const createInlineMathTitleRenderer = window.__ocFeatures?.createInlineMathTitleRenderer;
+    if (typeof createInlineMathTitleRenderer !== 'function') {
+        throw new Error('Inline math title renderer is unavailable');
+    }
+    const renderInlineMathTitle = createInlineMathTitleRenderer({
+        document,
+        renderMath: (source, element) => {
+            if (!window.katex || typeof window.katex.render !== 'function') {
+                throw new Error('KaTeX is unavailable');
+            }
+            window.katex.render(source, element, {
+                displayMode: false,
+                throwOnError: false,
+                strict: false
+            });
+        }
+    });
     headerUiController = createHeaderUiController({
         state: headerState,
         titleElement: sessionTitle,
@@ -6072,7 +6089,8 @@ document.addEventListener('DOMContentLoaded', () => {
             sessionId,
             title,
             opId
-        })
+        }),
+        renderTitleContent: renderInlineMathTitle
     });
     headerUiController.install();
     renderHeaderTitle();

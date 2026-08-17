@@ -25,6 +25,7 @@ export function createHeaderUiController(options: {
   compactDisabledTitle: string;
   onCompact(sessionId: string): void;
   onRename(sessionId: string, title: string, opId: string): void;
+  renderTitleContent?(element: HTMLElement, title: string): void;
 }): HeaderUiController {
   const {
     state,
@@ -53,7 +54,9 @@ export function createHeaderUiController(options: {
     if (editing) clearEditingPresentation();
     const pendingRename = pendingRenames.get(activeSessionId);
     if (pendingRename) state.setBaseTitle(pendingRename.requestedTitle);
-    titleElement.textContent = state.getDisplayTitle();
+    const displayTitle = state.getDisplayTitle();
+    if (options.renderTitleContent) options.renderTitleContent(titleElement, displayTitle);
+    else titleElement.textContent = displayTitle;
     titleElement.classList.toggle('is-waiting', state.isWaiting());
     titleElement.classList.toggle('is-rename-pending', pendingRenames.has(activeSessionId));
   };

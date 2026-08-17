@@ -107,6 +107,12 @@ body {
     opacity: 0.72;
 }
 
+.session-title .session-title-math,
+.session-title .katex {
+    display: inline;
+    font-size: 1em;
+}
+
 .server-status-dot {
     width: 8px;
     height: 8px;
