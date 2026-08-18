@@ -115,6 +115,36 @@ describe('markdown text normalization', () => {
     expect(html).not.toContain('<h1>');
     expect(html).not.toContain('$$<br>');
   });
+
+  test('protects math vertical bars from Markdown table column parsing', () => {
+    const markdown = [
+      '| $\\alpha$ | old mean $|v|$ | new mean \\$|v|\\$ |',
+      '|---:|---:|---:|',
+      '| 1.25 | 14.9412 | 13.6638 |',
+    ].join('\n');
+
+    const normalized = normalizeMarkdownText(markdown);
+    expect(normalized).toContain('old mean \\(\\vert{}v\\vert{}\\)');
+    expect(normalized).toContain('new mean \\(\\vert{}v\\vert{}\\)');
+
+    const html = renderWithProductionMath(markdown);
+    expect(html).toContain('<table>');
+    expect(html.match(/class="katex"/g)).toHaveLength(3);
+    expect(html).not.toContain('| old mean');
+  });
+
+  test('does not rewrite math pipes outside a Markdown table or ordinary currency cells', () => {
+    expect(normalizeMarkdownText('Conditional probability $P(A|B)$ remains prose.'))
+      .toBe('Conditional probability $P(A|B)$ remains prose.');
+
+    const currencyTable = [
+      '| old | new |',
+      '|---:|---:|',
+      '| $12 | $15 |',
+    ].join('\n');
+    expect(normalizeMarkdownText(currencyTable)).toBe(currencyTable);
+    expect(renderWithProductionMath(currencyTable)).toContain('<table>');
+  });
 });
 
 type Listener = (event: { stopPropagation(): void }) => unknown;

@@ -28,6 +28,7 @@ All notable changes to this project will be documented in this file.
 ### Markdown and interaction polish
 
 - Improved display-math recovery inside ordered lists and preserved escaped-dollar formulas in quoted selections.
+- Preserved Markdown table structure when inline math uses vertical bars, including absolute-value expressions such as `$|v|$`.
 - Corrected assistant processing-time pause scope for Question and Permission cards so elapsed time excludes periods waiting for user input without suppressing the cards.
 - Removed the chat-level horizontal scrollbar while preserving horizontal scrolling inside code blocks and other intentionally scrollable content.
 

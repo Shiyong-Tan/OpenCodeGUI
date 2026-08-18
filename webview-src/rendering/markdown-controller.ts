@@ -55,7 +55,7 @@ function normalizeEscapedDollarMath(value: string): string {
     const index = protectedMarkdown.push(segment) - 1;
     return `\u0000OC_CODE_${index}\u0000`;
   });
-  const looksLikeLatex = (inner: string): boolean => /\\[a-zA-Z]+|[_^]|\\[{}]/.test(inner);
+  const looksLikeLatex = (inner: string): boolean => /\\[a-zA-Z]+|[_^]|\\[{}]|\|[^|\n]+\|/.test(inner);
   const normalized = protectedText
     .replace(/\\\$\\\$([\s\S]*?)\\\$\\\$/g, (match, inner: string) => (
       looksLikeLatex(inner) ? `$$${inner}$$` : match
@@ -90,6 +90,96 @@ function normalizeMultilineDollarMath(value: string): string {
   ));
 }
 
+function isEscapedAt(value: string, index: number): boolean {
+  let slashes = 0;
+  for (let cursor = index - 1; cursor >= 0 && value[cursor] === '\\'; cursor -= 1) slashes += 1;
+  return slashes % 2 === 1;
+}
+
+function replaceUnescapedMathPipes(value: string): string {
+  let output = '';
+  for (let index = 0; index < value.length; index += 1) {
+    output += value[index] === '|' && !isEscapedAt(value, index) ? '\\vert{}' : value[index];
+  }
+  return output;
+}
+
+function normalizeDollarMathPipes(value: string): string {
+  let output = '';
+  let cursor = 0;
+  while (cursor < value.length) {
+    const opening = value.indexOf('$', cursor);
+    if (opening < 0) return output + value.slice(cursor);
+    output += value.slice(cursor, opening);
+    const next = value[opening + 1] || '';
+    if (isEscapedAt(value, opening) || value[opening - 1] === '$' || next === '$' || /\s/.test(next)) {
+      output += '$';
+      cursor = opening + 1;
+      continue;
+    }
+    let closing = opening + 1;
+    while ((closing = value.indexOf('$', closing + 1)) >= 0) {
+      const before = value[closing - 1] || '';
+      const after = value[closing + 1] || '';
+      if (!isEscapedAt(value, closing)
+        && value[closing + 1] !== '$'
+        && !/\s/.test(before)
+        && (!after || /[\s.,;:!?)}\]|]/.test(after))) break;
+    }
+    if (closing < 0) return output + value.slice(opening);
+    const inner = value.slice(opening + 1, closing);
+    output += `$${replaceUnescapedMathPipes(inner)}$`;
+    cursor = closing + 1;
+  }
+  return output;
+}
+
+function isMarkdownTableDivider(value: string): boolean {
+  const trimmed = value.trim().replace(/^\|/, '').replace(/\|$/, '');
+  const cells = trimmed.split('|').map((cell) => cell.trim());
+  return cells.length >= 2 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+// Markdown-it determines table columns before texmath parses inline formulas,
+// so raw math bars must stop looking like column separators at this boundary.
+function normalizeTableMathPipes(value: string): string {
+  const lines = value.split('\n');
+  const fenced = new Array<boolean>(lines.length).fill(false);
+  let inFence = false;
+  for (let index = 0; index < lines.length; index += 1) {
+    const fenceLine = /^\s*(```|~~~)/.test(lines[index]);
+    fenced[index] = inFence || fenceLine;
+    if (fenceLine) inFence = !inFence;
+  }
+
+  const tableRows = new Set<number>();
+  for (let index = 1; index < lines.length; index += 1) {
+    if (fenced[index] || fenced[index - 1] || !isMarkdownTableDivider(lines[index])) continue;
+    if (!lines[index - 1].includes('|')) continue;
+    tableRows.add(index - 1);
+    for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
+      if (fenced[cursor] || !lines[cursor].trim() || !lines[cursor].includes('|')) break;
+      tableRows.add(cursor);
+    }
+  }
+
+  for (const index of tableRows) {
+    const code: string[] = [];
+    let line = lines[index].replace(/`+[^`\n]*?`+/g, (segment) => {
+      const key = code.push(segment) - 1;
+      return `\u0000OC_TABLE_CODE_${key}\u0000`;
+    });
+    line = line.replace(/\\\((.*?)\\\)/g, (_match, inner: string) => (
+      `\\(${replaceUnescapedMathPipes(inner)}\\)`
+    ));
+    line = normalizeDollarMathPipes(line);
+    lines[index] = line.replace(/\u0000OC_TABLE_CODE_(\d+)\u0000/g, (_match, rawIndex: string) => (
+      code[Number(rawIndex)] || ''
+    ));
+  }
+  return lines.join('\n');
+}
+
 export function normalizeMarkdownText(value: string): string {
   let text = typeof value === 'string' ? value : '';
   text = text
@@ -98,6 +188,7 @@ export function normalizeMarkdownText(value: string): string {
     .replace(/\r\n/g, '\n');
   text = normalizeEscapedDollarMath(text);
   text = normalizeMultilineDollarMath(text);
+  text = normalizeTableMathPipes(text);
   text = text.replace(/\\\[(.*?)\\\]/gs, (_match, inner: string) => `\n\n\\[${inner}\\]\n\n`);
   text = text.replace(/\$([^$\n]*?)\$/g, (match, inner: string) => {
     if (!/\\[a-zA-Z]+|\^|_/.test(inner)) return match;
