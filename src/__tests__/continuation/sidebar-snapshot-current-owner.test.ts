@@ -110,6 +110,100 @@ describe('SidebarProvider Task 8 snapshot/reload current-owner semantics', () =>
         expect(formatted.messages.map((message: any) => message.id)).toEqual(['msg_user', 'msg_current']);
     });
 
+    it('keeps the latest assistant identity while inheriting text across a tool-only generation', () => {
+        const provider = createProvider();
+        const formatted = provider.formatSession({
+            session: { id: 'ses_task8', title: 'Recovered active turn' },
+            messages: [
+                { info: { id: 'msg_user', role: 'user' }, parts: [{ type: 'text', text: 'continue' }] },
+                {
+                    info: {
+                        id: 'msg_text', role: 'assistant', parentID: 'msg_user', finish: 'tool-calls',
+                        time: { created: 100, completed: 200 },
+                    },
+                    parts: [{ type: 'text', text: 'keep this visible while tools continue' }],
+                },
+                {
+                    info: {
+                        id: 'msg_tool_only', role: 'assistant', parentID: 'msg_user', finish: 'tool-calls',
+                        time: { created: 300 },
+                    },
+                    parts: [{ type: 'tool', state: { status: 'running' } }],
+                },
+            ],
+        });
+
+        expect(formatted.messages.map((message: any) => message.id)).toEqual(['msg_user', 'msg_tool_only']);
+        expect(formatted.messages[1]).toEqual(expect.objectContaining({
+            text: 'keep this visible while tools continue',
+            meta: expect.objectContaining({
+                parentID: 'msg_user',
+                timeCreated: 300,
+                timeCompleted: undefined,
+                inheritedTextFromAssistantId: 'msg_text',
+            }),
+        }));
+    });
+
+    it('reconstructs the active turn owner from hydrated busy-session messages', () => {
+        const provider = createProvider();
+        provider.client.recoverActiveTurn = jest.fn();
+        provider.markWebviewActiveTurnUpdated = jest.fn();
+        provider.markBusySessionInFlight('ses_task8', 'init:status-busy');
+
+        const recovered = provider.recoverBusySessionTurnFromMessages('ses_task8', [
+            { role: 'assistant', id: 'msg_previous', text: 'previous final', meta: { timeCompleted: 50 } },
+            { role: 'user', id: 'msg_user', text: 'continue' },
+            {
+                role: 'assistant',
+                id: 'msg_active',
+                text: 'working',
+                meta: { parentID: 'msg_user', timeCreated: 100, timeCompleted: undefined },
+            },
+        ], 'init:status-busy');
+
+        expect(recovered).toEqual({ userMessageId: 'msg_user', assistantMessageId: 'msg_active' });
+        expect(provider.sendInFlightBySession.has('ses_task8')).toBe(true);
+        expect(provider.pendingAssistantMessageIdBySession.get('ses_task8')).toBe('msg_active');
+        expect(provider.client.recoverActiveTurn).toHaveBeenCalledWith('ses_task8', 'msg_user', 'msg_active', 100);
+        expect(provider.markWebviewActiveTurnUpdated).toHaveBeenCalledWith('ses_task8', 'init:status-busy');
+    });
+
+    it('does not revive a completed assistant while reconstructing a busy session', () => {
+        const provider = createProvider();
+        provider.client.recoverActiveTurn = jest.fn();
+        provider.markBusySessionInFlight('ses_task8', 'init:status-busy');
+
+        const recovered = provider.recoverBusySessionTurnFromMessages('ses_task8', [
+            { role: 'user', id: 'msg_user', text: 'continue' },
+            {
+                role: 'assistant',
+                id: 'msg_final',
+                text: 'done',
+                meta: { parentID: 'msg_user', timeCreated: 100, timeCompleted: 200 },
+            },
+        ], 'init:status-busy');
+
+        expect(recovered).toBeNull();
+        expect(provider.sendInFlightBySession.has('ses_task8')).toBe(true);
+        expect(provider.client.recoverActiveTurn).not.toHaveBeenCalled();
+    });
+
+    it('does not mistake an older snapshot assistant for the current busy turn', () => {
+        const provider = createProvider();
+        provider.client.recoverActiveTurn = jest.fn();
+        provider.markBusySessionInFlight('ses_task8', 'init:status-busy');
+
+        const recovered = provider.recoverBusySessionTurnFromMessages('ses_task8', [
+            { role: 'user', id: 'msg_old_user', text: 'old request' },
+            { role: 'assistant', id: 'msg_old_assistant', text: 'old answer', meta: { parentID: 'msg_old_user' } },
+            { role: 'user', id: 'msg_current_user', text: 'current request' },
+        ], 'init:status-busy');
+
+        expect(recovered).toBeNull();
+        expect(provider.client.recoverActiveTurn).not.toHaveBeenCalled();
+    });
+
     it('does not collapse assistant messages from separate ordinary turns', async () => {
         const provider = createProvider();
         provider.readPersistedSessionMap = jest.fn().mockResolvedValue({

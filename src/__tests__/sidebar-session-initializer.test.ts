@@ -33,4 +33,19 @@ describe('SidebarSessionInitializer', () => {
     expect(repairExport).toBeGreaterThan(immutableMerge);
     expect(initializerSource).toContain("hydrationCoverage = fullDelta.proven ? 'authoritativeHistoryComplete' : 'deltaContinuityUnknown'");
   });
+
+  test('recovers a busy runtime before publishing hydrated history', () => {
+    const statusRead = initializerSource.indexOf('await host.client.getSessionStatusType(runtimeRecoverySessionId)');
+    const initPost = initializerSource.indexOf("type: 'init'");
+    const recentFormat = initializerSource.indexOf('const formattedRaw = host.formatSession(recentExport)');
+    const recoverOwner = initializerSource.indexOf('host.recoverBusySessionTurnFromMessages(');
+    const sessionPost = initializerSource.indexOf('liveWebview.postMessage(sessionPayload)');
+    expect(statusRead).toBeGreaterThanOrEqual(0);
+    expect(initPost).toBeGreaterThan(statusRead);
+    expect(recoverOwner).toBeGreaterThan(recentFormat);
+    expect(sessionPost).toBeGreaterThan(recoverOwner);
+    expect(initializerSource).toContain("statusType === 'busy' || statusType === 'retry'");
+    expect(initializerSource).toContain("type: 'turnInFlight'");
+    expect(initializerSource).toContain('ownerMsgId: recoveredTurn.assistantMessageId');
+  });
 });

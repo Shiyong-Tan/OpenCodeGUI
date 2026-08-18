@@ -4083,6 +4083,59 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             && this.turnCommandOwnerBySession.get(sessionId) === clientMessageId;
     }
 
+    private markBusySessionInFlight(sessionId: string, reason: string): void {
+        if (!sessionId) return;
+        this.sendInFlightBySession.add(sessionId);
+        this.markWebviewActiveTurnUpdated(sessionId, reason);
+    }
+
+    private recoverBusySessionTurnFromMessages(
+        sessionId: string,
+        messages: SessionMessage[],
+        reason: string,
+    ): { userMessageId: string; assistantMessageId: string } | null {
+        if (!sessionId || !this.sendInFlightBySession.has(sessionId)) return null;
+        const timeline = Array.isArray(messages) ? messages : [];
+        const latestUser = [...timeline].reverse().find((message) => (
+            message?.role === 'user'
+            && typeof message.id === 'string'
+            && message.id.startsWith('msg_')
+        ));
+        if (!latestUser || typeof latestUser.id !== 'string') return null;
+        const latestUserId = latestUser.id;
+        for (let index = timeline.length - 1; index >= 0; index--) {
+            const assistant = timeline[index];
+            if (assistant?.role !== 'assistant' || typeof assistant.id !== 'string' || !assistant.id.startsWith('msg_')) continue;
+            if (typeof assistant.meta?.timeCompleted === 'number' && Number.isFinite(assistant.meta.timeCompleted)) continue;
+            const parentId = typeof assistant.meta?.parentID === 'string' ? assistant.meta.parentID : '';
+            if (parentId !== latestUserId) continue;
+            if (!this.turnCommandOwnerBySession.has(sessionId)) {
+                this.turnCommandOwnerBySession.set(sessionId, parentId);
+            }
+            if (!this.pendingLocalKeyBySession.has(sessionId)) {
+                this.pendingLocalKeyBySession.set(sessionId, parentId);
+                this.rawUserTextByLocalKey.set(parentId, typeof latestUser.text === 'string' ? latestUser.text : '');
+            }
+            this.pendingAssistantMessageIdBySession.set(sessionId, assistant.id);
+            this.client.recoverActiveTurn(
+                sessionId,
+                parentId,
+                assistant.id,
+                typeof assistant.meta?.timeCreated === 'number' ? assistant.meta.timeCreated : undefined,
+            );
+            this.markWebviewActiveTurnUpdated(sessionId, reason);
+            this.uiDebugChannel.appendLine(
+                `EXT: session.init.activeTurn.recovered | sessionId=${sessionId} | ` +
+                `userMsgId=${parentId} | assistantMsgId=${assistant.id} | reason=${reason}`
+            );
+            return { userMessageId: parentId, assistantMessageId: assistant.id };
+        }
+        this.uiDebugChannel.appendLine(
+            `EXT: session.init.activeTurn.recover.skip | sessionId=${sessionId} | reason=no-incomplete-assistant`
+        );
+        return null;
+    }
+
     private async createTurnSession(): Promise<string> {
         const sessionInfo = await this.client.createSession();
         this.currentSessionId = sessionInfo.id;
@@ -6512,7 +6565,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             return typeof v === 'number' ? v : -Infinity;
         };
 
-        const pickFinalAssistantId = (candidates: any[]): string | null => {
+        const getAssistantText = (message: any): string => {
+            const parts = Array.isArray(message?.parts)
+                ? message.parts.filter((part: any) => part.type === 'text' && typeof part.text === 'string')
+                : [];
+            return parts.map((part: any) => part.text).join('');
+        };
+
+        const pickAssistantPresentation = (candidates: any[]): { ownerId: string; text: string; textSourceId: string } | null => {
             if (!Array.isArray(candidates) || !candidates.length) return null;
             const stopCandidates = candidates.filter((message) => message?.info?.finish === 'stop');
             const pickFrom = stopCandidates.length ? stopCandidates : candidates;
@@ -6530,15 +6590,31 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     bestScore = score;
                 }
             }
-            const id = best?.info?.id;
-            return typeof id === 'string' ? id : null;
+            const ownerId = best?.info?.id;
+            if (typeof ownerId !== 'string') return null;
+            const ownerIndex = candidates.indexOf(best);
+            for (let index = ownerIndex; index >= 0; index--) {
+                const textSource = candidates[index];
+                const text = getAssistantText(textSource);
+                if (!text) continue;
+                const textSourceId = textSource?.info?.id;
+                if (typeof textSourceId !== 'string') continue;
+                return { ownerId, text, textSourceId };
+            }
+            return null;
         };
 
         const finalAssistantIds = new Set<string>();
+        const assistantPresentationById = new Map<string, { text: string; textSourceId: string }>();
         for (const userId of userIds) {
             const candidates = assistantByParent.get(userId) || [];
-            const picked = pickFinalAssistantId(candidates);
-            if (picked) finalAssistantIds.add(picked);
+            const presentation = pickAssistantPresentation(candidates);
+            if (!presentation) continue;
+            finalAssistantIds.add(presentation.ownerId);
+            assistantPresentationById.set(presentation.ownerId, {
+                text: presentation.text,
+                textSourceId: presentation.textSourceId,
+            });
         }
 
         for (let i = 0; i < rawMessages.length; i++) {
@@ -6586,10 +6662,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             if (role === 'assistant' && !finalAssistantIds.has(resolvedId)) {
                 continue;
             }
-            const parts = Array.isArray(message?.parts)
-                ? message.parts.filter((part: any) => part.type === 'text' && typeof part.text === 'string')
-                : [];
-            const text = parts.map((part: any) => part.text).join('');
+            const presentation = role === 'assistant' ? assistantPresentationById.get(resolvedId) : undefined;
+            const text = presentation?.text ?? getAssistantText(message);
             if (!text) continue;
             const mode = typeof message?.info?.mode === 'string' ? message.info.mode.toLowerCase() : '';
             const agent = typeof message?.info?.agent === 'string' ? message.info.agent.toLowerCase() : '';
@@ -6623,7 +6697,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     tokens: (message?.info as any)?.tokens,
                     cost: (message?.info as any)?.cost,
                     timeCreated: (message?.info as any)?.time?.created,
-                    timeCompleted: (message?.info as any)?.time?.completed
+                    timeCompleted: (message?.info as any)?.time?.completed,
+                    ...(presentation && presentation.textSourceId !== resolvedId
+                        ? { inheritedTextFromAssistantId: presentation.textSourceId }
+                        : {})
                 }
                 : undefined;
             messages.push({ role, text: displayText, id: resolvedId, messageIndex, ...(meta ? { meta } : {}) });

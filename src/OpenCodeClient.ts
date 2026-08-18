@@ -6842,6 +6842,57 @@ export class OpenCodeClient {
         return { session: info, messages };
     }
 
+    public async getSessionStatusType(sessionId: string): Promise<string | undefined> {
+        if (!sessionId) return undefined;
+        await this.ensureServer();
+        const statusMap = await this.requestJson<Record<string, { type?: unknown }>>('GET', '/session/status');
+        const type = statusMap?.[sessionId]?.type;
+        return typeof type === 'string' ? type : undefined;
+    }
+
+    public recoverActiveTurn(
+        sessionId: string,
+        userMessageId: string,
+        assistantMessageId: string,
+        startedAt?: number,
+    ): void {
+        if (!sessionId || !userMessageId.startsWith('msg_') || !assistantMessageId.startsWith('msg_')) return;
+        this.sessionIdleReceivedBySession.delete(sessionId);
+        this.turnFinishedBySession.delete(sessionId);
+        this.turnFinalMsgIdBySession.delete(sessionId);
+        this.finalizingMsgIdBySession.delete(sessionId);
+        this.currentTurnUserMsgIdBySession.set(sessionId, userMessageId);
+        this.pendingUserMsgIdBySession.set(sessionId, userMessageId);
+        this.currentTurnAssistantMsgIdBySession.set(sessionId, assistantMessageId);
+        this.pendingAssistantMsgIdBySession.set(sessionId, assistantMessageId);
+        const existingState = this.turnStateBySession.get(sessionId);
+        const turnMessageIds = new Set(existingState?.turnMessageIds || []);
+        turnMessageIds.add(userMessageId);
+        turnMessageIds.add(assistantMessageId);
+        const assistantMessageIds = new Set(existingState?.assistantMessageIds || []);
+        assistantMessageIds.add(assistantMessageId);
+        this.turnStateBySession.set(sessionId, {
+            ...existingState,
+            pendingUserLocalKey: existingState?.pendingUserLocalKey || userMessageId,
+            assistantMsgId: assistantMessageId,
+            exportInFlight: existingState?.exportInFlight ?? false,
+            exportResolved: existingState?.exportResolved ?? false,
+            resolvedUserMsgId: existingState?.resolvedUserMsgId || userMessageId,
+            lastResolvedAssistantMsgId: assistantMessageId,
+            turnMessageIds,
+            assistantMessageIds,
+        });
+        const normalizedStartedAt = typeof startedAt === 'number' && Number.isFinite(startedAt) && startedAt > 0
+            ? startedAt
+            : Date.now();
+        this.currentTurnStartedAtBySession.set(sessionId, normalizedStartedAt);
+        this.scheduleSilenceResync(sessionId);
+        this.logUiDebug(
+            `EXT: turn.recover.active | sessionId=${sessionId} | userMsgId=${userMessageId} | ` +
+            `assistantMsgId=${assistantMessageId} | startedAt=${normalizedStartedAt}`
+        );
+    }
+
     public async listSessionMessages(sessionId: string): Promise<any[]> {
         await this.ensureServer();
         const messages = await this.requestJson<any[]>('GET', `/session/${sessionId}/message`);

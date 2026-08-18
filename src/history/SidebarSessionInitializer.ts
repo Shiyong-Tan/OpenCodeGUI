@@ -175,6 +175,26 @@ export async function initializeSidebarSession(
             initSessionCandidate = workspaceRecent?.id;
         }
 
+        const runtimeRecoverySessionId = rescueHydration?.sessionId || initSessionCandidate || host.currentSessionId || '';
+        if (!rescueHydration && runtimeRecoverySessionId && !host.sendInFlightBySession.has(runtimeRecoverySessionId)) {
+            try {
+                const statusType = await host.client.getSessionStatusType(runtimeRecoverySessionId);
+                if (!isStillCurrent()) throw new Error('stale-handshake-after-session-status');
+                const isActive = statusType === 'busy' || statusType === 'retry';
+                host.uiDebugChannel.appendLine(
+                    `EXT: session.init.status | sessionId=${runtimeRecoverySessionId} | ` +
+                    `status=${statusType || 'unknown'} | recoverActive=${String(isActive)}`
+                );
+                if (isActive) {
+                    host.markBusySessionInFlight(runtimeRecoverySessionId, `init:status-${statusType}`);
+                }
+            } catch (error) {
+                host.uiDebugChannel.appendLine(
+                    `EXT: session.init.status.fail | sessionId=${runtimeRecoverySessionId} | err=${String(error)}`
+                );
+            }
+        }
+
         if (!host.initPosted && !rescueHydration?.activeTurn.fresh) {
             host.currentSessionId = host.currentSessionId || initSessionCandidate || undefined;
             if (host.currentSessionId) {
@@ -451,7 +471,22 @@ export async function initializeSidebarSession(
                                 }
                             };
                             if (!isRecentHydrationCurrent()) throw new Error('stale-before-recent-publish');
+                            const recoveredTurn = host.recoverBusySessionTurnFromMessages(
+                                recentSessionId,
+                                mergedMessages,
+                                'init:recent-history',
+                            );
                             liveWebview.postMessage(sessionPayload);
+                            if (host.sendInFlightBySession.has(recentSessionId)) {
+                                liveWebview.postMessage({
+                                    type: 'turnInFlight',
+                                    sessionId: recentSessionId,
+                                    inFlight: true,
+                                    ...(recoveredTurn?.assistantMessageId
+                                        ? { ownerMsgId: recoveredTurn.assistantMessageId, assistantMsgId: recoveredTurn.assistantMessageId }
+                                        : {})
+                                });
+                            }
                             if (mergedMessages.length > 0) {
                                 sessionDataSent = true;
                             }
