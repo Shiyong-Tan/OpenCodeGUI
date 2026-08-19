@@ -172,6 +172,48 @@ describe('append followup same-turn handoff', () => {
         expect(client.getFinalizingMsgId('ses')).toBe('msg_c');
     });
 
+    it('reparents a delta-created successor when final metadata identifies a newer append user', () => {
+        const client = createSameTurnFixture();
+        client.mapServerEventToChatEvents('message.updated', {
+            info: { id: 'msg_a', sessionID: 'ses', role: 'assistant', parentID: 'msg_root', finish: 'tool-calls' },
+        }, 'sse');
+        client.mapServerEventToChatEvents('message.updated', {
+            info: { id: 'msg_b', sessionID: 'ses', role: 'assistant', parentID: 'msg_u' },
+        }, 'sse');
+        client.mapServerEventToChatEvents('message.updated', {
+            info: { id: 'msg_b', sessionID: 'ses', role: 'assistant', parentID: 'msg_u', finish: 'tool-calls' },
+        }, 'sse');
+
+        client.beginAppendPrompt('ses', 'append-client-2', 'latest follow up', 'msg_root');
+        client.bindAppendUserMessage('ses', 'msg_u2');
+
+        const deltaEvents = client.mapServerEventToChatEvents('message.part.updated', {
+            part: { sessionID: 'ses', messageID: 'msg_c', type: 'text', text: 'final answer' },
+        }, 'sse');
+        expect(deltaEvents).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                type: 'turnInFlight',
+                appendFollowup: expect.objectContaining({ assistantMsgId: 'msg_c', appendUserMsgId: 'msg_u' }),
+            }),
+        ]));
+
+        const finalEvents = client.mapServerEventToChatEvents('message.updated', {
+            info: { id: 'msg_c', sessionID: 'ses', role: 'assistant', parentID: 'msg_u2', finish: 'stop' },
+        }, 'sse');
+        expect(finalEvents).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                type: 'assistantMessageMeta',
+                assistantMsgId: 'msg_c',
+                appendFollowup: expect.objectContaining({ assistantMsgId: 'msg_c', appendUserMsgId: 'msg_u2' }),
+            }),
+        ]));
+        expect(client.getActiveAppendFollowup('ses')).toEqual(expect.objectContaining({
+            assistantMsgId: 'msg_c',
+            appendUserMsgId: 'msg_u2',
+        }));
+        expect(client.getCurrentTurnUserMsgId('ses')).toBe('msg_u2');
+    });
+
     it('emits one handoff for each new append successor generation and not for duplicate SSE', () => {
         const client = createSameTurnFixture();
         client.mapServerEventToChatEvents('message.updated', {

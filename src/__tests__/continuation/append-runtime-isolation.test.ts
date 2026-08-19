@@ -339,6 +339,7 @@ function loadAppendPresentationHarness() {
 this.buildAppendChildPresentationIndex = buildAppendChildPresentationIndex;
 this.isAppendChildTopLevelUser = isAppendChildTopLevelUser;
 this.isAppendChainTopLevelAssistantHidden = isAppendChainTopLevelAssistantHidden;
+this.rebindAppendFollowupPresentation = rebindAppendFollowupPresentation;
 this.collectAppendPresentationRetiredIds = collectAppendPresentationRetiredIds;`, context);
     return { context, posts };
 }
@@ -438,6 +439,67 @@ describe('append runtime isolation', () => {
         expect(context.classifyAppendFollowupTransition(generationOne, { ...generationTwo, predecessorAssistantMsgId: 'msg_other' })).toBe('reject');
         expect(context.classifyAppendFollowupTransition(generationOne, { ...generationTwo, appendUserMsgId: 'msg_other_user' })).toBe('reject');
         expect(context.classifyAppendFollowupTransition(generationTwo, generationOne)).toBe('reject');
+    });
+
+    it('reparents the same append successor generation before terminal hiding is rebuilt', () => {
+        const { context } = loadAppendPresentationHarness();
+        const assistant = {
+            id: 'msg_final',
+            role: 'assistant',
+            text: 'final answer',
+            meta: { parentID: 'msg_append_1', isThinking: true },
+        };
+        const session: any = {
+            messagesById: new Map<string, any>([
+                ['msg_root', {
+                    id: 'msg_root',
+                    role: 'user',
+                    meta: {
+                        appendedPrompts: [
+                            { appendUserMsgId: 'msg_append_1' },
+                            { appendUserMsgId: 'msg_append_2' },
+                        ],
+                    },
+                }],
+                ['msg_append_1', { id: 'msg_append_1', role: 'user', meta: { appendRootUserMsgId: 'msg_root' } }],
+                ['msg_append_2', { id: 'msg_append_2', role: 'user', meta: { appendRootUserMsgId: 'msg_root' } }],
+                ['msg_previous', { id: 'msg_previous', role: 'assistant', meta: { parentID: 'msg_append_1' } }],
+                ['msg_final', assistant],
+            ]),
+            timeline: ['msg_root', 'msg_append_1', 'msg_previous', 'msg_append_2', 'msg_final'],
+            appendFollowupIdentity: {
+                kind: 'append-followup',
+                mode: 'same-turn-handoff',
+                sessionId: 'ses',
+                appendUserMsgId: 'msg_append_1',
+                predecessorAssistantMsgId: 'msg_previous',
+                assistantMsgId: 'msg_final',
+                generation: 6,
+                predecessorPresentationAssistantId: 'msg_previous',
+            },
+        };
+
+        expect(context.rebindAppendFollowupPresentation(session, {
+            kind: 'append-followup',
+            mode: 'same-turn-handoff',
+            sessionId: 'ses',
+            appendUserMsgId: 'msg_append_2',
+            predecessorAssistantMsgId: 'msg_previous',
+            assistantMsgId: 'msg_final',
+            generation: 6,
+        })).toBe(true);
+        expect(session.appendFollowupIdentity.appendUserMsgId).toBe('msg_append_2');
+        expect(session.appendFollowupIdentity.predecessorPresentationAssistantId).toBe('msg_previous');
+        expect(assistant.meta.parentID).toBe('msg_append_2');
+
+        session.appendFollowupIdentity = null;
+        const appendIndex = context.buildAppendChildPresentationIndex(session);
+        expect(context.isAppendChainTopLevelAssistantHidden(
+            session, session.messagesById.get('msg_previous'), 'msg_previous', appendIndex,
+        )).toBe(true);
+        expect(context.isAppendChainTopLevelAssistantHidden(
+            session, assistant, 'msg_final', appendIndex,
+        )).toBe(false);
     });
 
     it('keeps duplicate append generations on the explicit no-op path', () => {

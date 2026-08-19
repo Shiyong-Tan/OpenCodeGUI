@@ -2756,6 +2756,31 @@ function classifyAppendFollowupTransition(current, incoming) {
     return 'reject';
 }
 
+function rebindAppendFollowupPresentation(session, incoming) {
+    const current = session?.appendFollowupIdentity;
+    if (
+        current?.kind !== 'append-followup'
+        || current.mode !== 'same-turn-handoff'
+        || incoming?.kind !== 'append-followup'
+        || incoming.mode !== 'same-turn-handoff'
+        || current.sessionId !== incoming.sessionId
+        || current.assistantMsgId !== incoming.assistantMsgId
+        || current.generation !== incoming.generation
+        || current.appendUserMsgId === incoming.appendUserMsgId
+        || typeof incoming.appendUserMsgId !== 'string'
+        || !incoming.appendUserMsgId.length
+    ) {
+        return false;
+    }
+    const target = session.messagesById?.get?.(incoming.assistantMsgId);
+    if (!target || target.role !== 'assistant') return false;
+    session.appendFollowupIdentity = { ...current, ...incoming };
+    target.meta = { ...(target.meta || {}), parentID: incoming.appendUserMsgId };
+    if (Object.prototype.hasOwnProperty.call(target, 'parentId')) target.parentId = incoming.appendUserMsgId;
+    if (Object.prototype.hasOwnProperty.call(target, 'parentID')) target.parentID = incoming.appendUserMsgId;
+    return true;
+}
+
 function cloneAppendPresentationArray(value) {
     if (!Array.isArray(value)) return undefined;
     return value.map((item) => (
@@ -16330,6 +16355,15 @@ function appendMessageImages(parentEl, message) {
                 if (followup?.kind === 'append-followup' && followup.mode === 'same-turn-handoff'
                     && followup.sessionId === sessionId && session?.appendFollowupIdentity?.generation === followup.generation
                     && followup.assistantMsgId === message.assistantMsgId) {
+                    const appendParentRebound = rebindAppendFollowupPresentation(session, followup);
+                    if (appendParentRebound) {
+                        vscode.postMessage({
+                            type: 'ui-debug',
+                            payload: ['[WV][APPEND_PRESENTATION_REPARENT]', `sessionId=${sessionId}`,
+                                `assistantMsgId=${followup.assistantMsgId}`, `appendUserMsgId=${followup.appendUserMsgId}`,
+                                `generation=${followup.generation}`]
+                        });
+                    }
                     const target = session.messagesById.get(followup.assistantMsgId);
                     if (!target || target.role !== 'assistant') break;
                     if (Number.isFinite(Number(message?.timeCreated))) {

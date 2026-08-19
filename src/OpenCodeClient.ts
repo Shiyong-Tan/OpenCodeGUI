@@ -2877,6 +2877,21 @@ export class OpenCodeClient {
         const active = append?.activeSuccessor;
         if (!append || !state || !active) return { status: 'blocked' };
         if (active.assistantMsgId === assistantMsgId) {
+            if (parentId && parentId !== active.appendUserMsgId) {
+                if (!append.appendUserMsgIds.has(parentId)) return { status: 'conflict' };
+                active.appendUserMsgId = parentId;
+                if (
+                    state.appendFollowupHandoff?.phase === 'followup-active'
+                    && state.appendFollowupHandoff.followupAssistantMsgId === assistantMsgId
+                ) {
+                    state.appendFollowupHandoff.appendUserMsgId = parentId;
+                }
+                this.currentTurnUserMsgIdBySession.set(sessionId, parentId);
+                this.pendingUserMsgIdBySession.set(sessionId, parentId);
+                this.logUiDebug(
+                    `EXT: append.followup.reparent | sessionId=${sessionId} | assistantMsgId=${assistantMsgId} | appendUserMsgId=${parentId} | generation=${active.generation}`
+                );
+            }
             return { status: 'existing', identity: { ...active } };
         }
         const handoff = state.appendFollowupHandoff;
