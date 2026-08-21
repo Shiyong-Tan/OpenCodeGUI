@@ -93,8 +93,9 @@ afterEach(async () => {
 });
 
 describe('SidebarProvider parentID session history filtering', () => {
-    it('preserves backend parentID when listing sessions', async () => {
+    it('asks OpenCode to filter root sessions before applying the result limit', async () => {
         const client = new OpenCodeClient() as any;
+        client.workspaceRoot = 'D:\\workspace';
         client.ensureServer = jest.fn().mockResolvedValue(undefined);
         client.requestJson = jest.fn().mockResolvedValue([
             {
@@ -114,6 +115,10 @@ describe('SidebarProvider parentID session history filtering', () => {
 
         const sessions = await client.listSessions();
 
+        expect(client.requestJson).toHaveBeenCalledWith(
+            'GET',
+            '/session?directory=D%3A%5Cworkspace&roots=true&limit=1000'
+        );
         expect(sessions).toEqual([
             expect.objectContaining({ id: 'ses_child_backend', parentID: 'ses_parent_backend' }),
             expect.objectContaining({ id: 'ses_main_backend', parentID: undefined }),

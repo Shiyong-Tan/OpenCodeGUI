@@ -6751,7 +6751,14 @@ export class OpenCodeClient {
 
     public async listSessions(): Promise<SessionInfo[]> {
         await this.ensureServer();
-        const sessions = await this.requestJson<any[]>('GET', '/session');
+        // Filter root sessions before OpenCode applies its result limit. Fetching the
+        // unfiltered endpoint first lets busy subagent sessions consume the entire
+        // window and makes older user-visible sessions disappear from history.
+        const directory = encodeURIComponent(this.workspaceRoot || '.');
+        const sessions = await this.requestJson<any[]>(
+            'GET',
+            `/session?directory=${directory}&roots=true&limit=1000`
+        );
         if (!Array.isArray(sessions)) {
             return [];
         }
