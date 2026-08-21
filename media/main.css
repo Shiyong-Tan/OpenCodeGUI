@@ -991,6 +991,29 @@ body {
     white-space: normal;
 }
 
+.user-message-collapse-toggle {
+    display: block;
+    margin: 6px 0 0;
+    padding: 0;
+    border: 0;
+    color: color-mix(in srgb, var(--vscode-button-foreground) 82%, transparent);
+    background: transparent;
+    font: inherit;
+    font-size: 0.78em;
+    line-height: 1.3;
+    cursor: pointer;
+}
+
+.user-message-collapse-toggle:hover {
+    color: var(--vscode-button-foreground);
+    text-decoration: underline;
+}
+
+.user-message-collapse-toggle:focus-visible {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: 2px;
+}
+
 .append-message-status {
     margin-top: 4px;
     color: var(--vscode-descriptionForeground);

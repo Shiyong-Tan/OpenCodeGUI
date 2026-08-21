@@ -3,11 +3,69 @@ type SessionState = any;
 type RenderElement = any;
 
 import { appendAssistantProcessingTime } from './processing-time';
+import { planUserMessageCollapse } from './user-message-collapse';
 
 type SubagentTextExpansionState = {
     get(key: string): boolean | undefined;
     set(key: string, expanded: boolean): void;
 };
+
+const expandedUserMessageParts = new WeakMap<object, Set<string>>();
+
+function isUserMessagePartExpanded(owner: object, partKey: string): boolean {
+    return expandedUserMessageParts.get(owner)?.has(partKey) === true;
+}
+
+function setUserMessagePartExpanded(owner: object, partKey: string, expanded: boolean): void {
+    let parts = expandedUserMessageParts.get(owner);
+    if (!parts && expanded) {
+        parts = new Set<string>();
+        expandedUserMessageParts.set(owner, parts);
+    }
+    if (!parts) return;
+    if (expanded) parts.add(partKey);
+    else parts.delete(partKey);
+    if (parts.size === 0) expandedUserMessageParts.delete(owner);
+}
+
+function appendCollapsibleUserMarkdown(
+  host: MessageRendererHost,
+  container: RenderElement,
+  owner: object,
+  partKey: string,
+  markdown: string,
+): void {
+    const plan = planUserMessageCollapse(markdown);
+    if (!plan.collapsed) {
+        host.renderUserMarkdown(container, plan.full);
+        return;
+    }
+
+    const body = document.createElement('div');
+    body.className = 'user-message-collapsible-body';
+    container.appendChild(body);
+
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'user-message-collapse-toggle';
+    container.appendChild(toggle);
+
+    const renderState = () => {
+        const expanded = isUserMessagePartExpanded(owner, partKey);
+        body.replaceChildren();
+        host.renderUserMarkdown(body, expanded ? plan.full : plan.preview);
+        toggle.textContent = expanded
+            ? 'Show less'
+            : `Show more · ${plan.hiddenLineCount} more ${plan.hiddenLineCount === 1 ? 'line' : 'lines'}`;
+        toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    };
+
+    toggle.addEventListener('click', () => {
+        setUserMessagePartExpanded(owner, partKey, !isUserMessagePartExpanded(owner, partKey));
+        renderState();
+    });
+    renderState();
+}
 
 export interface MessageRendererHost {
     readonly KEYED_CHAT_RECONCILE_ENABLED: boolean;
@@ -274,9 +332,9 @@ export function renderMessageElement(
             if (message.role === 'user') {
                 const mainText = document.createElement('div');
                 mainText.className = 'message-user-text';
-                host.renderUserMarkdown(mainText, sanitized);
+                appendCollapsibleUserMarkdown(host, mainText, message, 'main', sanitized);
                 content.appendChild(mainText);
-                for (const item of host.getAppendItems(message)) {
+                for (const [appendIndex, item] of host.getAppendItems(message).entries()) {
                     if (!item || typeof item.text !== 'string' || !item.text.trim()) continue;
                     const block = document.createElement('div');
                     block.className = 'append-message-block';
@@ -285,7 +343,12 @@ export function renderMessageElement(
                     block.appendChild(divider);
                     const textEl = document.createElement('div');
                     textEl.className = 'append-message-text';
-                    host.renderUserMarkdown(textEl, item.text);
+                    const appendPartKey = typeof item.appendUserMsgId === 'string' && item.appendUserMsgId
+                        ? `append:${item.appendUserMsgId}`
+                        : typeof item.clientMessageId === 'string' && item.clientMessageId
+                            ? `append-client:${item.clientMessageId}`
+                            : `append-index:${appendIndex}`;
+                    appendCollapsibleUserMarkdown(host, textEl, message, appendPartKey, item.text);
                     block.appendChild(textEl);
                     if (item.status && item.status !== 'applied') {
                         const status = document.createElement('div');
