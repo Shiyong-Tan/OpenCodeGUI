@@ -502,6 +502,74 @@ describe('append runtime isolation', () => {
         )).toBe(false);
     });
 
+    it('keeps only the canonical final visible after terminal append identity cleanup', () => {
+        const { context } = loadAppendPresentationHarness();
+        const predecessor = {
+            id: 'msg_predecessor',
+            role: 'assistant',
+            text: 'intermediate answer',
+            meta: { parentID: 'msg_append_1' },
+        };
+        const finalAssistant = {
+            id: 'msg_final',
+            role: 'assistant',
+            text: 'authoritative final answer',
+            // Reproduce the terminal projection seen in the UI log: the
+            // durable final can still carry an older append parent after the
+            // transient handoff owner has already been cleared.
+            meta: { parentID: 'msg_append_1' },
+        };
+        const targetSession: any = {
+            messagesById: new Map<string, any>([
+                ['msg_root', {
+                    id: 'msg_root',
+                    role: 'user',
+                    meta: {
+                        appendedPrompts: [
+                            { appendUserMsgId: 'msg_append_1' },
+                            { appendUserMsgId: 'msg_append_2' },
+                        ],
+                    },
+                }],
+                ['msg_append_1', { id: 'msg_append_1', role: 'user', meta: { appendRootUserMsgId: 'msg_root' } }],
+                ['msg_append_2', { id: 'msg_append_2', role: 'user', meta: { appendRootUserMsgId: 'msg_root' } }],
+                ['msg_predecessor', predecessor],
+                ['msg_final', finalAssistant],
+            ]),
+            timeline: ['msg_root', 'msg_append_1', 'msg_predecessor', 'msg_append_2', 'msg_final'],
+            appendFollowupIdentity: null,
+            backendTurnInFlight: true,
+            turnFullyFinalized: false,
+            canceledActiveTurn: false,
+            finalAssistantLock: { assistantMsgId: 'msg_final', ts: 1234 },
+        };
+        const backgroundSession: any = {
+            messagesById: new Map<string, any>([
+                ['msg_background', { id: 'msg_background', role: 'assistant', text: 'still active', meta: {} }],
+            ]),
+            timeline: ['msg_background'],
+            appendFollowupIdentity: null,
+            backendTurnInFlight: true,
+            turnFullyFinalized: false,
+            canceledActiveTurn: false,
+            currentTurnAssistantKey: 'msg_background',
+            thinkingId: 'msg_background',
+        };
+
+        const targetIndex = context.buildAppendChildPresentationIndex(targetSession);
+        const backgroundIndex = context.buildAppendChildPresentationIndex(backgroundSession);
+
+        expect(context.isAppendChainTopLevelAssistantHidden(
+            targetSession, predecessor, 'msg_predecessor', targetIndex,
+        )).toBe(true);
+        expect(context.isAppendChainTopLevelAssistantHidden(
+            targetSession, finalAssistant, 'msg_final', targetIndex,
+        )).toBe(false);
+        expect(context.isAppendChainTopLevelAssistantHidden(
+            backgroundSession, backgroundSession.messagesById.get('msg_background'), 'msg_background', backgroundIndex,
+        )).toBe(false);
+    });
+
     it('keeps duplicate append generations on the explicit no-op path', () => {
         const source = fs.readFileSync(path.join(__dirname, '../../../media/main.js'), 'utf8');
         const turnInFlightStart = source.indexOf("case 'turnInFlight':");

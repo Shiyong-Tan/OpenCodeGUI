@@ -3140,6 +3140,18 @@ function isAppendChildTopLevelUser(session, msg, id, appendChildPresentationInde
 
 function isAppendChainTopLevelAssistantHidden(session, msg, id, appendChildPresentationIndex) {
     if (!session || !msg || msg.role !== 'assistant') return false;
+    const canonicalFinalAssistantId = typeof session.finalAssistantLock?.assistantMsgId === 'string'
+        ? session.finalAssistantLock.assistantMsgId
+        : null;
+    if (
+        canonicalFinalAssistantId
+        // This is deliberately an exact-ID exemption. Append handoff aliases
+        // point retired generations at the canonical final, so alias-aware
+        // matching here would resurrect those retired assistant bubbles.
+        && (id === canonicalFinalAssistantId || msg.id === canonicalFinalAssistantId)
+    ) {
+        return false;
+    }
     const followup = session.appendFollowupIdentity;
     const successor = followup?.assistantMsgId ? session.messagesById.get(followup.assistantMsgId) : null;
     const messageKeys = new Set();
