@@ -105,7 +105,16 @@ export function createWebviewLifecycleController(
             return (async () => {
                 switch (data.type) {
                     case 'webviewReady': {
+                        const readyReceivedAt = Date.now();
+                        host.log(
+                            `[EXT][WEBVIEW_INIT] phase=ready-received panelId=${panelId} ` +
+                            `webviewInstanceId=${typeof data?.webviewInstanceId === 'string' ? data.webviewInstanceId : 'none'}`
+                        );
                         if (await host.handleCommandReloadReady(data, webviewView, panelId)) {
+                            host.log(
+                                `[EXT][WEBVIEW_INIT] phase=command-reload-ready-handled panelId=${panelId} ` +
+                                `totalMs=${Date.now() - readyReceivedAt}`
+                            );
                             break;
                         }
                         const readiness = host.prepareReady(data, webviewView, panelId);
@@ -115,7 +124,12 @@ export function createWebviewLifecycleController(
                         const { pending, newWebviewInstanceId, hardRescueGuard } = readiness;
                         const liveWebview = host.getActiveWebview();
                         if (liveWebview) {
+                            const sendInitStartedAt = Date.now();
                             host.log(`[EXT][HANDSHAKE_2_START] calling sendInit() | initPosted=${host.getInitPosted()}`);
+                            host.log(
+                                `[EXT][WEBVIEW_INIT] phase=send-init-start panelId=${panelId} ` +
+                                `webviewInstanceId=${newWebviewInstanceId || 'none'}`
+                            );
                             let sendInitError: Error | undefined;
                             try {
                                 if (pending) {
@@ -142,11 +156,20 @@ export function createWebviewLifecycleController(
                                     await host.sendInit(liveWebview);
                                 }
                                 host.log('[EXT][HANDSHAKE_3_DONE] sendInit() complete, sending ack');
+                                host.log(
+                                    `[EXT][WEBVIEW_INIT] phase=send-init-complete panelId=${panelId} ` +
+                                    `stageMs=${Date.now() - sendInitStartedAt} totalMs=${Date.now() - readyReceivedAt}`
+                                );
                             } catch (error) {
                                 sendInitError = error instanceof Error
                                     ? error
                                     : new Error(String(error));
                                 host.log(`[EXT][SENDINIT_ERROR] sendInit threw: ${sendInitError.message}`);
+                                host.log(
+                                    `[EXT][WEBVIEW_INIT] phase=send-init-error panelId=${panelId} ` +
+                                    `stageMs=${Date.now() - sendInitStartedAt} totalMs=${Date.now() - readyReceivedAt} ` +
+                                    `error=${sendInitError.name}`
+                                );
                             }
 
                             if (pending && (!hardRescueGuard || !hardRescueGuard())) {
@@ -207,6 +230,11 @@ export function createWebviewLifecycleController(
                                 });
                                 host.log('[EXT][HANDSHAKE_4_ACK] ack sent');
                             }
+                            host.log(
+                                `[EXT][WEBVIEW_INIT] phase=ready-ack-dispatched panelId=${panelId} ` +
+                                `hardRescue=${String(Boolean(pending))} error=${String(Boolean(sendInitError))} ` +
+                                `totalMs=${Date.now() - readyReceivedAt}`
+                            );
                             host.startLivenessProbes();
                             void host.triggerLivenessProbe('webviewReadyAck');
                         }

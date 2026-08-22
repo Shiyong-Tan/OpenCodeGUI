@@ -16,6 +16,16 @@ export async function initializeSidebarSession(
     webview: vscode.Webview,
     options: SidebarSendInitOptions = {}
 ): Promise<void> {
+        const sendInitStartedAt = Date.now();
+        let lastStageAt = sendInitStartedAt;
+        const logStage = (phase: string, details = ''): void => {
+            const now = Date.now();
+            host.uiDebugChannel.appendLine(
+                `[EXT][SENDINIT_STAGE] phase=${phase} stageMs=${now - lastStageAt} ` +
+                `totalMs=${now - sendInitStartedAt}${details ? ` ${details}` : ''}`
+            );
+            lastStageAt = now;
+        };
         const isStillCurrent = options.isStillCurrent || (() => true);
         if (!isStillCurrent()) throw new Error('stale-handshake-before-sendInit');
     const isHardRescueSendInit = Boolean(options.hardRescue && options.isStillCurrent);
@@ -60,12 +70,14 @@ export async function initializeSidebarSession(
                 host.uiDebugChannel.appendLine(`[EXT][ADD_RESPONSE_DROP] reason=missing-session-owner source=initializeModels error=${String(error)}`);
             }
         }
+        logStage('models-loaded', `count=${models.length}`);
 
         try {
             agents = await host.client.listAgents();
         } catch (error) {
             host.uiDebugChannel.appendLine(`EXT: agents.load.fail | err=${String(error)}`);
         }
+        logStage('agents-loaded', `count=${agents.length}`);
 
         try {
             sessions = await host.client.listSessions();
@@ -76,8 +88,10 @@ export async function initializeSidebarSession(
                 host.uiDebugChannel.appendLine(`[EXT][ADD_RESPONSE_DROP] reason=missing-session-owner source=initializeSessions error=${String(error)}`);
             }
         }
+        logStage('sessions-loaded', `count=${sessions.length}`);
         const initWorkspaceRoot = host.client.getWorkspaceRoot() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         sessions = await host.filterSessionsForWorkspace(sessions, initWorkspaceRoot, 'init');
+        logStage('sessions-filtered', `count=${sessions.length}`);
         const storedModel = host._context.globalState.get('opencode.model') as string | undefined;
         const storedVariant = host._context.globalState.get('opencode.variant') as string | undefined;
         const storedMode = host._context.globalState.get('opencode.mode') as string | undefined;
@@ -136,6 +150,7 @@ export async function initializeSidebarSession(
         host.uiDebugChannel.appendLine(
             `EXT: mode.init | stored=${storedMode || 'null'} | selected=${resolvedMode || 'null'} | available=${host.availableModes.join(',') || 'none'}`
         );
+        logStage('model-selection-persisted');
 
         const workspaceRoot = initWorkspaceRoot;
         const workspaceCount = vscode.workspace.workspaceFolders?.length || 0;
@@ -194,6 +209,7 @@ export async function initializeSidebarSession(
                 );
             }
         }
+        logStage('session-candidate-resolved', `hasSession=${String(Boolean(runtimeRecoverySessionId))}`);
 
         if (!host.initPosted && !rescueHydration?.activeTurn.fresh) {
             host.currentSessionId = host.currentSessionId || initSessionCandidate || undefined;
@@ -270,6 +286,7 @@ export async function initializeSidebarSession(
                 });
             }
         }
+        logStage('metadata-posted', `initPosted=${String(host.initPosted)}`);
 
         if (options.hardRescue?.activeTurn.fresh) {
             const hardRescueSessionId = options.hardRescue.sessionId;
@@ -278,7 +295,7 @@ export async function initializeSidebarSession(
             if (!isStillCurrent()) throw new Error('stale-hard-rescue-after-live-history');
             host.postLiveTurnResumeForSendInitGuardDefer(webview, hardRescueSessionId, options.hardRescue.activeTurn);
             host.queueSendInitGuardCompensation(hardRescueSessionId, 'sendInitGuard.defer', options.hardRescue.activeTurn);
-            host.uiDebugChannel.appendLine(`[EXT][SENDINIT_END] sendInit completed successfully | hardRescue=true | postedSessionData=false`);
+            host.uiDebugChannel.appendLine(`[EXT][SENDINIT_END] sendInit completed successfully | hardRescue=true | postedSessionData=false | totalMs=${Date.now() - sendInitStartedAt}`);
             return;
         }
         if (options.commandReload?.activeTurn.fresh) {
@@ -288,12 +305,13 @@ export async function initializeSidebarSession(
             if (!isStillCurrent()) throw new Error('stale-command-reload-after-live-history');
             host.postLiveTurnResumeForSendInitGuardDefer(webview, commandReloadSessionId, options.commandReload.activeTurn);
             host.queueSendInitGuardCompensation(commandReloadSessionId, 'sendInitGuard.defer', options.commandReload.activeTurn);
-            host.uiDebugChannel.appendLine(`[EXT][SENDINIT_END] sendInit completed successfully | commandReload=true | postedSessionData=false`);
+            host.uiDebugChannel.appendLine(`[EXT][SENDINIT_END] sendInit completed successfully | commandReload=true | postedSessionData=false | totalMs=${Date.now() - sendInitStartedAt}`);
             return;
         }
 
         let snapshotLoaded = false;
         let sessionDataSent = false;
+        logStage('history-start', `hasRecentSession=${String(Boolean(recentSessionId))}`);
                 if (recentSessionId) {
                     try {
                         host.currentSessionId = recentSessionId;
@@ -315,6 +333,7 @@ export async function initializeSidebarSession(
                             await host.postLiveTurnHistoryForSendInitGuardDefer(liveWebview, recentSessionId, activeTurn);
                             host.postLiveTurnResumeForSendInitGuardDefer(liveWebview, recentSessionId, activeTurn);
                             host.queueSendInitGuardCompensation(recentSessionId, 'sendInitGuard.defer', activeTurn);
+                            host.uiDebugChannel.appendLine(`[EXT][SENDINIT_END] sendInit completed successfully | activeTurn=true | postedSessionData=false | totalMs=${Date.now() - sendInitStartedAt}`);
                             return;
                         }
                         try {
@@ -505,6 +524,7 @@ export async function initializeSidebarSession(
                                         stderrLastLine: recentErr || ''
                                     }
                                 });
+                                host.uiDebugChannel.appendLine(`[EXT][SENDINIT_END] sendInit completed with history error | snapshotLoaded=false | totalMs=${Date.now() - sendInitStartedAt}`);
                                 return;
                             }
                         }
@@ -666,6 +686,6 @@ export async function initializeSidebarSession(
             }
         }
 
-        host.uiDebugChannel.appendLine(`[EXT][SENDINIT_END] sendInit completed successfully`);
+        host.uiDebugChannel.appendLine(`[EXT][SENDINIT_END] sendInit completed successfully | totalMs=${Date.now() - sendInitStartedAt}`);
 
 }

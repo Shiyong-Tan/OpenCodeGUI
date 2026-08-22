@@ -71,7 +71,7 @@ describe('Webview lifecycle command family characterization', () => {
         expectOrder(controllerSource, [
             'const panelId = lifecycleController.begin(webviewView)',
             'webviewView.webview.options =',
-            'webviewView.webview.html = dependencies.getHtmlForWebview(webviewView.webview)',
+            'webviewView.webview.html = html',
             'webviewView.webview.onDidReceiveMessage(async (data) =>',
         ]);
         const begin = extractProviderRange(
@@ -201,6 +201,9 @@ describe('Webview lifecycle command family characterization', () => {
             'host.startLivenessProbes()',
             "host.triggerLivenessProbe('webviewReadyAck')",
         ]);
+        expect(ready).toContain('[EXT][WEBVIEW_INIT] phase=ready-received');
+        expect(ready).toContain('[EXT][WEBVIEW_INIT] phase=send-init-complete');
+        expect(ready).toContain('[EXT][WEBVIEW_INIT] phase=ready-ack-dispatched');
     });
 
     test('delegates liveness acknowledgements exactly once', () => {

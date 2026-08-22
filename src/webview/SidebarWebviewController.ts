@@ -23,6 +23,7 @@ export function resolveSidebarWebviewView(
     _token: vscode.CancellationToken,
     dependencies: SidebarWebviewDependencies
 ): void {
+    const resolveStartedAt = Date.now();
     const {
         lifecycleController,
         utilityCommandHandler,
@@ -31,12 +32,32 @@ export function resolveSidebarWebviewView(
         undoCommandHandler,
     } = dependencies;
     const panelId = lifecycleController.begin(webviewView);
+    dependencies.log(
+        `[EXT][WEBVIEW_INIT] phase=resolve-begin panelId=${panelId} ` +
+        `visible=${String(webviewView.visible)} elapsedMs=${Date.now() - resolveStartedAt}`
+    );
 
     webviewView.webview.options = {
         enableScripts: true,
         localResourceRoots: [...dependencies.localResourceRoots],
     };
-    webviewView.webview.html = dependencies.getHtmlForWebview(webviewView.webview);
+    const htmlStartedAt = Date.now();
+    try {
+        const html = dependencies.getHtmlForWebview(webviewView.webview);
+        webviewView.webview.html = html;
+        dependencies.log(
+            `[EXT][WEBVIEW_INIT] phase=html-assigned panelId=${panelId} ` +
+            `htmlChars=${html.length} stageMs=${Date.now() - htmlStartedAt} ` +
+            `totalMs=${Date.now() - resolveStartedAt}`
+        );
+    } catch (error) {
+        dependencies.log(
+            `[EXT][WEBVIEW_INIT] phase=html-error panelId=${panelId} ` +
+            `stageMs=${Date.now() - htmlStartedAt} totalMs=${Date.now() - resolveStartedAt} ` +
+            `error=${error instanceof Error ? error.name : typeof error}`
+        );
+        throw error;
+    }
 
     webviewView.webview.onDidReceiveMessage(async (data) => {
         const activeWebview = lifecycleController.getActiveWebview(webviewView.webview);
@@ -80,4 +101,8 @@ export function resolveSidebarWebviewView(
     webviewView.onDidDispose(() => {
         lifecycleController.handleDispose(panelId);
     });
+    dependencies.log(
+        `[EXT][WEBVIEW_INIT] phase=listeners-registered panelId=${panelId} ` +
+        `totalMs=${Date.now() - resolveStartedAt}`
+    );
 }

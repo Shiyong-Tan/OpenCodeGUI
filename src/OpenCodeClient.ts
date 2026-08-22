@@ -24,6 +24,7 @@ import { OpenCodeEventStream } from './transport/OpenCodeEventStream';
 import { OpenCodeServerProcess } from './transport/OpenCodeServerProcess';
 import { OpenCodeServerController } from './transport/OpenCodeServerController';
 import { mapServerEventToChatEvents } from './events/OpenCodeEventMapper';
+import { AssistantSseDiagnostics } from './diagnostics/AssistantSseDiagnostics';
 import {
     buildChangeSpecs,
     extractDeletedPathsFromCommand,
@@ -462,6 +463,7 @@ const COPILOT_SPEED_MULTIPLIER_CACHE_KEY = 'opencode.copilotSpeedMultiplierCache
 const COPILOT_SPEED_MULTIPLIER_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
 export class OpenCodeClient {
+    private readonly assistantSseDiagnostics = new AssistantSseDiagnostics();
     private readonly modelQuotaService: ModelQuotaService;
     private readonly commandResolver: OpenCodeCommandResolver;
     private readonly processRunner: OpenCodeProcessRunner;
@@ -5396,7 +5398,10 @@ export class OpenCodeClient {
             }
         }
         if (source === 'sse' && this.shouldLogAssistantSse(type, props)) {
-            OpenCodeClient.outputChannel.appendLine(`[SSE_ASSIST] ${payload}`);
+            const diagnostic = this.assistantSseDiagnostics.summarize(type, props, payload.length);
+            if (diagnostic) {
+                OpenCodeClient.outputChannel.appendLine(diagnostic);
+            }
         }
         const events = this.mapServerEventToChatEvents(type, props, source);
         this.emitChatEvents(events);
