@@ -145,6 +145,65 @@ describe('SidebarProvider Task 8 snapshot/reload current-owner semantics', () =>
         }));
     });
 
+    it('excludes summary-flagged compaction records and their assistant children from hydrated history', () => {
+        const provider = createProvider();
+        const formatted = provider.formatSession({
+            session: { id: 'ses_task8', title: 'Compacted active turn' },
+            messages: [
+                { info: { id: 'msg_user', role: 'user' }, parts: [{ type: 'text', text: 'continue' }] },
+                {
+                    info: {
+                        id: 'msg_visible', role: 'assistant', parentID: 'msg_user', finish: 'tool-calls',
+                        time: { created: 100 },
+                    },
+                    parts: [{ type: 'text', text: 'visible active response' }],
+                },
+                {
+                    info: { id: 'msg_compaction_user', role: 'user', summary: true },
+                    parts: [{ type: 'text', text: 'Objective and important details' }],
+                },
+                {
+                    info: {
+                        id: 'msg_compaction_child', role: 'assistant', parentID: 'msg_compaction_user',
+                        time: { created: 200 },
+                    },
+                    parts: [{ type: 'text', text: 'internal compacted context' }],
+                },
+            ],
+        });
+
+        expect(formatted.messages.map((message: any) => message.id)).toEqual(['msg_user', 'msg_visible']);
+        expect(formatted.messages.map((message: any) => message.text)).not.toContain('Objective and important details');
+        expect(formatted.messages.map((message: any) => message.text)).not.toContain('internal compacted context');
+    });
+
+    it('does not let a summary-flagged assistant replace the visible assistant generation', () => {
+        const provider = createProvider();
+        const formatted = provider.formatSession({
+            session: { id: 'ses_task8', title: 'Compaction generation' },
+            messages: [
+                { info: { id: 'msg_user', role: 'user' }, parts: [{ type: 'text', text: 'continue' }] },
+                {
+                    info: {
+                        id: 'msg_visible', role: 'assistant', parentID: 'msg_user', finish: 'tool-calls',
+                        time: { created: 100 },
+                    },
+                    parts: [{ type: 'text', text: 'visible active response' }],
+                },
+                {
+                    info: {
+                        id: 'msg_summary', role: 'assistant', parentID: 'msg_user', summary: true,
+                        time: { created: 200 },
+                    },
+                    parts: [{ type: 'text', text: 'Objective and important details' }],
+                },
+            ],
+        });
+
+        expect(formatted.messages.map((message: any) => message.id)).toEqual(['msg_user', 'msg_visible']);
+        expect(formatted.messages[1]).toEqual(expect.objectContaining({ text: 'visible active response' }));
+    });
+
     it('reconstructs the active turn owner from hydrated busy-session messages', () => {
         const provider = createProvider();
         provider.client.recoverActiveTurn = jest.fn();

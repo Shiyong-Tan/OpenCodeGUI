@@ -6503,6 +6503,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return normalized;
     }
 
+    private isCompactionSummaryInfo(info: any): boolean {
+        if (!info || typeof info !== 'object') return false;
+        if (info.summary === true) return true;
+        const mode = typeof info.mode === 'string' ? info.mode.toLowerCase() : '';
+        const agent = typeof info.agent === 'string' ? info.agent.toLowerCase() : '';
+        return mode === 'compaction' || agent === 'compaction';
+    }
+
     private formatSession(exportData: any): { title: string; messages: SessionMessage[] } {
         const title = exportData?.session?.title || exportData?.info?.title || 'Session';
         const messages: SessionMessage[] = [];
@@ -6530,8 +6538,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     ? msg.parts.filter((part: any) => part.type === 'text' && typeof part.text === 'string')
                     : [];
                 const text = parts.map((part: any) => part.text).join('');
-                const mode = typeof msg?.info?.mode === 'string' ? msg.info.mode.toLowerCase() : '';
-                const agent = typeof msg?.info?.agent === 'string' ? msg.info.agent.toLowerCase() : '';
                 const isAutoResumeText = text.trimStart().startsWith('[OC_UI_AUTORESUME');
                 const isStopContinuationText = this.isHiddenControlUserText(text);
                 const isOmoContinuation =
@@ -6540,12 +6546,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         text.includes('[SYSTEM DIRECTIVE: OH-MY-OPENCODE - BOULDER CONTINUATION]')
                         || text.includes('[SYSTEM DIRECTIVE: OH-MY-OPENCODE - TODO CONTINUATION]')
                     );
-                const isSyntheticUser = isAutoResumeText || isStopContinuationText || isOmoContinuation || mode === 'compaction' || agent === 'compaction';
+                const isSyntheticUser = isAutoResumeText
+                    || isStopContinuationText
+                    || isOmoContinuation
+                    || this.isCompactionSummaryInfo(msg?.info);
                 if (isSyntheticUser) {
                     syntheticUserIds.add(id);
                 }
             }
-            if (role === 'assistant') {
+            if (role === 'assistant' && !this.isCompactionSummaryInfo(msg?.info)) {
                 const parentId = msg?.info?.parentID;
                 if (typeof parentId === 'string') {
                     const list = assistantByParent.get(parentId) || [];
@@ -6662,11 +6671,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             if (role === 'assistant' && !finalAssistantIds.has(resolvedId)) {
                 continue;
             }
+            if (this.isCompactionSummaryInfo(message?.info)) {
+                continue;
+            }
             const presentation = role === 'assistant' ? assistantPresentationById.get(resolvedId) : undefined;
             const text = presentation?.text ?? getAssistantText(message);
             if (!text) continue;
-            const mode = typeof message?.info?.mode === 'string' ? message.info.mode.toLowerCase() : '';
-            const agent = typeof message?.info?.agent === 'string' ? message.info.agent.toLowerCase() : '';
             const isAutoResumeText = role === 'user' && text.trimStart().startsWith('[OC_UI_AUTORESUME');
             const isStopContinuationText = role === 'user' && this.isHiddenControlUserText(text);
             const isOmoContinuation =
@@ -6676,7 +6686,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     text.includes('[SYSTEM DIRECTIVE: OH-MY-OPENCODE - BOULDER CONTINUATION]')
                     || text.includes('[SYSTEM DIRECTIVE: OH-MY-OPENCODE - TODO CONTINUATION]')
                 );
-            const isSyntheticUser = role === 'user' && (isAutoResumeText || isStopContinuationText || isOmoContinuation || mode === 'compaction' || agent === 'compaction');
+            const isSyntheticUser = role === 'user' && (
+                isAutoResumeText
+                || isStopContinuationText
+                || isOmoContinuation
+                || this.isCompactionSummaryInfo(message?.info)
+            );
             if (isSyntheticUser) {
                 continue;
             }
