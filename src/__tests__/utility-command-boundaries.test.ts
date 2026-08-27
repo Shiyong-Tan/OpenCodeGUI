@@ -483,6 +483,34 @@ describe('utility command family characterization', () => {
         }
     });
 
+    test('opens pdf paths with the PDF preview instead of the text editor', async () => {
+        const os = require('os') as typeof import('os');
+        const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'opencode-assistant-pdf-'));
+        const pdfPath = path.join(tempRoot, 'report.pdf');
+        fs.writeFileSync(pdfPath, '%PDF-1.7');
+        const executeCommand = vscode.commands.executeCommand as jest.Mock;
+        executeCommand.mockClear();
+        try {
+            const harness = createHarness({ getWorkspaceRootPath: jest.fn(() => tempRoot) });
+            await harness.send({
+                type: 'openFileAtLocation',
+                path: 'report.pdf',
+            });
+
+            expect(executeCommand).toHaveBeenCalledWith(
+                'vscode.openWith',
+                { fsPath: pdfPath },
+                'pdf.preview',
+            );
+            expect(vscode.workspace.openTextDocument).not.toHaveBeenCalledWith({ fsPath: pdfPath });
+            expect(harness.host.uiDebugChannel.appendLine).toHaveBeenCalledWith(
+                expect.stringContaining('opened=pdf'),
+            );
+        } finally {
+            fs.rmSync(tempRoot, { recursive: true, force: true });
+        }
+    });
+
     test('keeps clipboard attachment responses bound to the payload session', async () => {
         const saveClipboardImage = jest.fn()
             .mockResolvedValueOnce({ id: 'attachment-1', name: 'image.png', filePath: 'saved/image.png' })

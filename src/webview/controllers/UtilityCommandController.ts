@@ -645,7 +645,27 @@ export class UtilityCommandController {
                 );
                 return;
             }
-            if (pathModule.extname(absPath).toLowerCase() === '.ipynb') {
+            const extension = pathModule.extname(absPath).toLowerCase();
+            if (extension === '.pdf') {
+                const pdfUri = vscode.Uri.file(absPath);
+                try {
+                    await vscode.commands.executeCommand(
+                        'vscode.openWith',
+                        pdfUri,
+                        'pdf.preview'
+                    );
+                } catch {
+                    // Let VS Code choose another registered PDF editor when its
+                    // built-in PDF preview is unavailable. Never decode the PDF
+                    // through openTextDocument, which produces binary gibberish.
+                    await vscode.commands.executeCommand('vscode.open', pdfUri, { preview: true });
+                }
+                this.host.log(
+                    `EXT: openFileAtLocation | path=${rawPath} | resolvedAbs=${absPath} | opened=pdf`
+                );
+                return;
+            }
+            if (extension === '.ipynb') {
                 const notebookUri = vscode.Uri.file(absPath);
                 try {
                     await vscode.commands.executeCommand(
