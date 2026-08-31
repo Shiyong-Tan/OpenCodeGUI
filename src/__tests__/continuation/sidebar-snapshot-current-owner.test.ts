@@ -204,6 +204,74 @@ describe('SidebarProvider Task 8 snapshot/reload current-owner semantics', () =>
         expect(formatted.messages[1]).toEqual(expect.objectContaining({ text: 'visible active response' }));
     });
 
+    it('folds an OpenCode post-compaction continuation back into the active visible turn', () => {
+        const provider = createProvider();
+        const formatted = provider.formatSession({
+            session: { id: 'ses_task8', title: 'Post-compaction continuation' },
+            messages: [
+                { info: { id: 'msg_user', role: 'user' }, parts: [{ type: 'text', text: 'finish the task' }] },
+                {
+                    info: {
+                        id: 'msg_before_compaction', role: 'assistant', parentID: 'msg_user',
+                        time: { created: 100 },
+                    },
+                    parts: [{ type: 'text', text: 'working before compaction' }],
+                },
+                { info: { id: 'msg_compaction_user', role: 'user' }, parts: [] },
+                {
+                    info: {
+                        id: 'msg_compaction_summary', role: 'assistant', parentID: 'msg_compaction_user',
+                        mode: 'compaction', agent: 'compaction', summary: true, time: { created: 200 },
+                    },
+                    parts: [{ type: 'text', text: 'internal compacted context' }],
+                },
+                {
+                    info: { id: 'msg_resume_control', role: 'user', agent: 'researcher' },
+                    parts: [{
+                        type: 'text',
+                        text: 'Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.',
+                    }],
+                },
+                {
+                    info: {
+                        id: 'msg_after_compaction', role: 'assistant', parentID: 'msg_resume_control',
+                        time: { created: 300 },
+                    },
+                    parts: [{ type: 'text', text: 'current active response' }],
+                },
+            ],
+        });
+
+        expect(formatted.messages.map((message: any) => message.id)).toEqual([
+            'msg_user', 'msg_after_compaction',
+        ]);
+        expect(formatted.messages[1]).toEqual(expect.objectContaining({
+            text: 'current active response',
+            meta: expect.objectContaining({ parentID: 'msg_user' }),
+        }));
+        expect(formatted.messages.map((message: any) => message.text)).not.toContain(
+            'Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.',
+        );
+    });
+
+    it('keeps the same continuation sentence when it is not structurally preceded by compaction', () => {
+        const provider = createProvider();
+        const prompt = 'Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.';
+        const formatted = provider.formatSession({
+            session: { id: 'ses_task8', title: 'Ordinary user text' },
+            messages: [
+                { info: { id: 'msg_user', role: 'user' }, parts: [{ type: 'text', text: prompt }] },
+                {
+                    info: { id: 'msg_assistant', role: 'assistant', parentID: 'msg_user', time: { created: 100 } },
+                    parts: [{ type: 'text', text: 'ordinary response' }],
+                },
+            ],
+        });
+
+        expect(formatted.messages.map((message: any) => message.id)).toEqual(['msg_user', 'msg_assistant']);
+        expect(formatted.messages[0].text).toBe(prompt);
+    });
+
     it('reconstructs the active turn owner from hydrated busy-session messages', () => {
         const provider = createProvider();
         provider.client.recoverActiveTurn = jest.fn();

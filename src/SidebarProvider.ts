@@ -58,6 +58,7 @@ import {
 } from './history/SnapshotDeltaPlanner';
 import { SnapshotStore } from './history/SnapshotStore';
 import { createForkSnapshotPayload, normalizeForkOrigin } from './history/ForkSnapshotBoundary';
+import { planCompactionContinuations } from './history/CompactionContinuationPlanner';
 import { AppendSnapshotMetaStore, type AppendSnapshotMetaRoot } from './continuation/AppendSnapshotMetaStore';
 import {
     buildFinalizeTurnIdentity as resolveFinalizeTurnIdentity,
@@ -6524,7 +6525,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const exportLines: string[] = [];
         const idRoleMap = new Map<string, Set<string>>();
         const seenIds = new Set<string>();
-        const syntheticUserIds = new Set<string>();
+        const compactionContinuationPlan = planCompactionContinuations(rawMessages, {
+            isCompactionSummaryInfo: (info) => this.isCompactionSummaryInfo(info),
+            isHiddenControlUserText: (text) => this.isHiddenControlUserText(text),
+        });
+        const syntheticUserIds = new Set<string>(compactionContinuationPlan.syntheticUserIds);
+        const displayParentBySyntheticUserId = compactionContinuationPlan.displayParentBySyntheticUserId;
+        const displayParentByAssistantId = new Map<string, string>();
         let duplicateIds = false;
 
         const assistantByParent = new Map<string, any[]>();
@@ -6557,9 +6564,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             if (role === 'assistant' && !this.isCompactionSummaryInfo(msg?.info)) {
                 const parentId = msg?.info?.parentID;
                 if (typeof parentId === 'string') {
-                    const list = assistantByParent.get(parentId) || [];
+                    const displayParentId = displayParentBySyntheticUserId.get(parentId) || parentId;
+                    const list = assistantByParent.get(displayParentId) || [];
                     list.push(msg);
-                    assistantByParent.set(parentId, list);
+                    assistantByParent.set(displayParentId, list);
+                    if (typeof id === 'string') {
+                        displayParentByAssistantId.set(id, displayParentId);
+                    }
                 }
             }
         }
@@ -6677,29 +6688,22 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const presentation = role === 'assistant' ? assistantPresentationById.get(resolvedId) : undefined;
             const text = presentation?.text ?? getAssistantText(message);
             if (!text) continue;
-            const isAutoResumeText = role === 'user' && text.trimStart().startsWith('[OC_UI_AUTORESUME');
-            const isStopContinuationText = role === 'user' && this.isHiddenControlUserText(text);
-            const isOmoContinuation =
-                role === 'user'
-                && text.includes('<!-- OMO_INTERNAL_INITIATOR -->')
-                && (
-                    text.includes('[SYSTEM DIRECTIVE: OH-MY-OPENCODE - BOULDER CONTINUATION]')
-                    || text.includes('[SYSTEM DIRECTIVE: OH-MY-OPENCODE - TODO CONTINUATION]')
-                );
-            const isSyntheticUser = role === 'user' && (
-                isAutoResumeText
-                || isStopContinuationText
-                || isOmoContinuation
-                || this.isCompactionSummaryInfo(message?.info)
-            );
-            if (isSyntheticUser) {
+            if (role === 'user' && syntheticUserIds.has(resolvedId)) {
                 continue;
             }
-            const parentId =
+            const rawParentId =
                 (typeof message?.info?.parentID === 'string' && message.info.parentID)
                 || (typeof message?.info?.parentId === 'string' && message.info.parentId)
                 || '';
-            if (role === 'assistant' && parentId && syntheticUserIds.has(parentId)) {
+            const parentId = role === 'assistant'
+                ? (displayParentByAssistantId.get(resolvedId) || rawParentId)
+                : rawParentId;
+            if (
+                role === 'assistant'
+                && rawParentId
+                && syntheticUserIds.has(rawParentId)
+                && !displayParentBySyntheticUserId.has(rawParentId)
+            ) {
                 continue;
             }
             const displayText = role === 'user' ? this.stripModeInjectionBlock(text) : text;
