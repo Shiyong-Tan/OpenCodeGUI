@@ -2583,6 +2583,10 @@ select#mode-select {
     gap: 8px;
 }
 
+.model-option[hidden] {
+    display: none;
+}
+
 .model-recent-option {
     padding-left: 8px;
 }
