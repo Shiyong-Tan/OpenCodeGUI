@@ -114,6 +114,11 @@
           "type": "boolean",
           "default": true,
           "description": "Show local English and project-term word completions in the chat input. Press Tab to accept a suggestion."
+        },
+        "opencode.diffViewer.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically open a diff tab when the agent modifies a file. Disable to stop the extension from triggering the diff viewer."
         }
       }
     }

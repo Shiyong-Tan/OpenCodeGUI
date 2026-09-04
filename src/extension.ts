@@ -62,6 +62,9 @@ export function activate(context: vscode.ExtensionContext) {
             if (event.affectsConfiguration('opencode.autoEditorContext.enabled')) {
                 sidebarProvider.scheduleAutoEditorContextRefresh(0);
             }
+            if (event.affectsConfiguration('opencode.diffViewer.enabled')) {
+                sidebarProvider.refreshDiffViewerConfig();
+            }
         })
     );
 
