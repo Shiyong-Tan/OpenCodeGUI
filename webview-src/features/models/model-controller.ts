@@ -282,12 +282,13 @@ export function createModelUiController(options: ModelUiControllerOptions) {
     dropdown.append(toggle, panel);
     searchInput.addEventListener('input', () => {
       const query = normalizeModelSearchText(searchInput.value);
+      const queryTokens = query ? query.split(' ') : [];
       panel.querySelectorAll<HTMLElement>('.model-option').forEach((option) => {
         const model = models.find((item) => item.fullId === option.dataset.value);
         const haystack = model
           ? normalizeModelSearchText(`${model.name || ''} ${model.fullId} ${model.providerId || ''}`)
           : '';
-        option.hidden = Boolean(query && !haystack.includes(query));
+        option.hidden = queryTokens.length > 0 && !queryTokens.every((token) => haystack.includes(token));
       });
       panel.querySelectorAll<HTMLElement>('.model-group:not(.model-recent-group)').forEach((group) => {
         const hasMatch = Array.from(group.querySelectorAll<HTMLElement>('.model-option')).some((option) => !option.hidden);
