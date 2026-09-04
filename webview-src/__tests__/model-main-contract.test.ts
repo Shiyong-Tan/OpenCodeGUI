@@ -50,6 +50,7 @@ describe('model state production ownership', () => {
     expect(controllerSource).toContain(".replace(/[^a-z0-9]+/g, ' ')");
     expect(controllerSource).toContain('queryTokens.every((token) => haystack.includes(token))');
     expect(fs.readFileSync(path.join(process.cwd(), 'media', 'main.css'), 'utf8')).toContain('.model-option[hidden]');
+    expect(source).toContain("const sessionSettings = sessionSettingsById.get(activeSessionId || '__new__');");
   });
 
   it('refreshes the visible quota tooltip when hover results arrive for send or stop', () => {

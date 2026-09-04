@@ -15307,11 +15307,22 @@ function appendMessageImages(parentEl, message) {
                     activeSessionId = incomingSessionId || activeSessionId || '';
                     activateSessionSearch(activeSessionId);
                 }
+                const sessionSettings = sessionSettingsById.get(activeSessionId || '__new__');
+                const activeModelSelection = sessionSettings
+                    ? modelUiController.setCatalog(
+                        message.models,
+                        sessionSettings.model || undefined,
+                        sessionSettings.variant || '',
+                    )
+                    : modelSelection;
+                if (sessionSettings) {
+                    if (modes.includes(sessionSettings.mode)) selectedMode = sessionSettings.mode;
+                }
                 modeSelect.value = selectedMode;
                 applyModeStyles(selectedMode);
                 renderModelSelect();
                 renderModeSelect();
-                updateVariantOptions(modelSelection.variantChanged);
+                updateVariantOptions(activeModelSelection.variantChanged);
                 updateSendQuotaVisual();
                 renderSessionList();
                 if (!hydrated) {
