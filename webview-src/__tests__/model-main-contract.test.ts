@@ -46,6 +46,7 @@ describe('model state production ownership', () => {
     expect(controllerSource).toContain('model.name || \'\'} ${model.fullId} ${model.providerId || \'\'}');
     expect(controllerSource).toContain('state.getRecentModels()');
     expect(controllerSource).toContain('options.onVariantSelected?.(selection)');
+    expect(controllerSource).toContain('options.onModelSelected?.(selection)');
     expect(controllerSource).toContain("list?.classList.remove('is-collapsed')");
     expect(controllerSource).toContain('collapsedProviders.has(provider)');
     expect(controllerSource).toContain(".replace(/[^a-z0-9]+/g, ' ')");

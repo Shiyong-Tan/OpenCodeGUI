@@ -5944,6 +5944,9 @@ document.addEventListener('DOMContentLoaded', () => {
         sendButton: sendBtn,
         postMessage: (message) => vscode.postMessage(message),
         getSessionId: () => activeSessionId || '',
+        onModelSelected: (selection) => {
+            recordSessionSettings({ model: selection.selectedModel, variant: selection.selectedVariant });
+        },
         onVariantSelected: (selection) => {
             recordSessionSettings({ variant: selection.selectedVariant });
         },
