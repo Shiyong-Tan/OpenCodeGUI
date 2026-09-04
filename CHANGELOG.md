@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## 5.0.5 - 2026-09-04
+
+### Session history and active turns
+
+- Restored active assistant presentation after reload and session switches, preserving the latest text, tool-only updates, subagent progress, Todo state, and canonical identity for an in-flight turn.
+- Preserved appended final assistant responses through cleanup and hydration so accepted finals do not disappear or fall back to an earlier generation.
+- Restored complete root-session history while keeping forked child sessions at their intentional clean-history boundary.
+- Hid OpenCode compaction summaries from visible history and folded the unmarked post-compaction continuation prompt back into its original active turn, retaining the continued assistant response without exposing an internal user bubble.
+
+### Message and Markdown presentation
+
+- Collapsed long pasted code and command output in user messages to a two-line preview with an explicit expand/collapse control.
+- Preserved Markdown table parsing when inline math contains vertical bars, including absolute-value expressions.
+- Removed the chat-level horizontal scrollbar while retaining horizontal scrolling for code blocks and other intentionally scrollable content.
+
+### Files and diagnostics
+
+- Opened Markdown links to PDF files in VS Code's PDF preview instead of the raw text editor.
+- Bounded and session-scoped Webview, lifecycle, hydration, and assistant SSE diagnostics to retain actionable evidence without flooding hot event paths.
+
 ## 5.0.3 - 2026-08-17
 
 ### Session forks and titles
@@ -28,9 +48,7 @@ All notable changes to this project will be documented in this file.
 ### Markdown and interaction polish
 
 - Improved display-math recovery inside ordered lists and preserved escaped-dollar formulas in quoted selections.
-- Preserved Markdown table structure when inline math uses vertical bars, including absolute-value expressions such as `$|v|$`.
 - Corrected assistant processing-time pause scope for Question and Permission cards so elapsed time excludes periods waiting for user input without suppressing the cards.
-- Removed the chat-level horizontal scrollbar while preserving horizontal scrolling inside code blocks and other intentionally scrollable content.
 
 ## 5.0.2 - 2026-08-05
 
