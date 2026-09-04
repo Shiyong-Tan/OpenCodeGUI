@@ -47,6 +47,7 @@ describe('model state production ownership', () => {
     expect(controllerSource).toContain('state.getRecentModels()');
     expect(controllerSource).toContain("list?.classList.remove('is-collapsed')");
     expect(controllerSource).toContain('collapsedProviders.has(provider)');
+    expect(controllerSource).toContain(".replace(/[^a-z0-9]+/g, ' ')");
     expect(fs.readFileSync(path.join(process.cwd(), 'media', 'main.css'), 'utf8')).toContain('.model-option[hidden]');
   });
 

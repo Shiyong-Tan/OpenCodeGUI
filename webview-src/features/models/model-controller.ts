@@ -1,6 +1,14 @@
 import type { ModelQuota, ModelSelectionResult, ModelState, WebviewModel } from './model-state';
 import { isCopilotProvider, normalizeResetText, parseSpeedMultiplier } from './model-state';
 
+function normalizeModelSearchText(value: unknown): string {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
 interface SimpleSelectConfig {
   getValue(): string;
   onSelect(value: string): void;
@@ -273,10 +281,12 @@ export function createModelUiController(options: ModelUiControllerOptions) {
     panel.style.minWidth = panel.style.width;
     dropdown.append(toggle, panel);
     searchInput.addEventListener('input', () => {
-      const query = searchInput.value.trim().toLowerCase();
+      const query = normalizeModelSearchText(searchInput.value);
       panel.querySelectorAll<HTMLElement>('.model-option').forEach((option) => {
         const model = models.find((item) => item.fullId === option.dataset.value);
-        const haystack = model ? `${model.name || ''} ${model.fullId} ${model.providerId || ''}`.toLowerCase() : '';
+        const haystack = model
+          ? normalizeModelSearchText(`${model.name || ''} ${model.fullId} ${model.providerId || ''}`)
+          : '';
         option.hidden = Boolean(query && !haystack.includes(query));
       });
       panel.querySelectorAll<HTMLElement>('.model-group:not(.model-recent-group)').forEach((group) => {
