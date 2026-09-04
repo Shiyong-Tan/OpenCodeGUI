@@ -45,6 +45,8 @@ describe('model state production ownership', () => {
     expect(controllerSource).toContain("recentHeader.textContent = 'Recent'");
     expect(controllerSource).toContain('model.name || \'\'} ${model.fullId} ${model.providerId || \'\'}');
     expect(controllerSource).toContain('state.getRecentModels()');
+    expect(controllerSource).toContain("list?.classList.remove('is-collapsed')");
+    expect(controllerSource).toContain('collapsedProviders.has(provider)');
   });
 
   it('refreshes the visible quota tooltip when hover results arrive for send or stop', () => {

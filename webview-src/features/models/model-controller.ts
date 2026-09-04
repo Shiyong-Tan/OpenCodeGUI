@@ -280,7 +280,19 @@ export function createModelUiController(options: ModelUiControllerOptions) {
         option.hidden = Boolean(query && !haystack.includes(query));
       });
       panel.querySelectorAll<HTMLElement>('.model-group:not(.model-recent-group)').forEach((group) => {
-        group.hidden = Boolean(query && !Array.from(group.querySelectorAll<HTMLElement>('.model-option')).some((option) => !option.hidden));
+        const hasMatch = Array.from(group.querySelectorAll<HTMLElement>('.model-option')).some((option) => !option.hidden);
+        group.hidden = Boolean(query && !hasMatch);
+        const list = group.querySelector<HTMLElement>('.model-group-list');
+        const header = group.querySelector<HTMLElement>('.model-group-header');
+        if (query && hasMatch) {
+          list?.classList.remove('is-collapsed');
+          header?.classList.remove('is-collapsed');
+        } else if (!query && list && header) {
+          const provider = header.textContent || '';
+          const collapsed = collapsedProviders.has(provider);
+          list.classList.toggle('is-collapsed', collapsed);
+          header.classList.toggle('is-collapsed', collapsed);
+        }
       });
       if (recentModels.length) {
         recentGroup.hidden = Boolean(query && !Array.from(recentList.querySelectorAll<HTMLElement>('.model-option')).some((option) => !option.hidden));
