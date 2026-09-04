@@ -5944,6 +5944,9 @@ document.addEventListener('DOMContentLoaded', () => {
         sendButton: sendBtn,
         postMessage: (message) => vscode.postMessage(message),
         getSessionId: () => activeSessionId || '',
+        onVariantSelected: (selection) => {
+            recordSessionSettings({ variant: selection.selectedVariant });
+        },
         persistRecentModels: (recentModels) => {
             try {
                 localStorage.setItem('opencode.recentModels.v1', JSON.stringify(recentModels.map((model) => model.fullId)));

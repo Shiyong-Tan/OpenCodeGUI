@@ -24,6 +24,7 @@ export interface ModelUiControllerOptions {
   postMessage(message: unknown): void;
   getSessionId(): string;
   persistRecentModels?(models: readonly WebviewModel[]): void;
+  onVariantSelected?(selection: ModelSelectionResult): void;
   renderSimpleSelect(select: HTMLSelectElement, config: SimpleSelectConfig): void;
   computePanelWidth(wrapper: HTMLElement, models: readonly WebviewModel[]): number;
   getChevronSvg(): string;
@@ -104,7 +105,11 @@ export function createModelUiController(options: ModelUiControllerOptions) {
     return selection;
   };
 
-  const selectVariant = (variant: string): ModelSelectionResult => state.selectVariant(variant);
+  const selectVariant = (variant: string): ModelSelectionResult => {
+    const selection = state.selectVariant(variant);
+    options.onVariantSelected?.(selection);
+    return selection;
+  };
 
   function renderVariantSelect() {
     renderSimpleSelect(variantSelect, {
