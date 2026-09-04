@@ -85,11 +85,15 @@ export function createModelState(initial?: {
   selectedModel?: string;
   selectedVariant?: string;
   quota?: ModelQuota | null;
+  recentModelIds?: unknown;
 }) {
   let models = normalizeModels(initial?.models);
   let selectedModel = initial?.selectedModel || models[0]?.fullId || '';
   let selectedVariant = initial?.selectedVariant || '';
   let quota = initial?.quota || null;
+  let recentModelIds = Array.isArray(initial?.recentModelIds)
+    ? initial?.recentModelIds.filter((value): value is string => typeof value === 'string').slice(0, 5)
+    : [];
   let freeModelIds = new Set<string>();
 
   const refreshFreeModels = () => {
@@ -117,6 +121,9 @@ export function createModelState(initial?: {
     getModels: (): readonly WebviewModel[] => models,
     getSelectedModel: (): string => selectedModel,
     getSelectedVariant: (): string => selectedVariant,
+    getRecentModels: (): readonly WebviewModel[] => recentModelIds
+      .map((id) => models.find((model) => model.fullId === id))
+      .filter((model): model is WebviewModel => Boolean(model)),
     getQuota: (): ModelQuota | null => quota,
     getVariants: (): readonly string[] => variantsFor(models.find((model) => model.fullId === selectedModel)),
     getContextLimit: (): number => {
@@ -133,8 +140,16 @@ export function createModelState(initial?: {
       return normalizeSelection();
     },
     selectModel(modelId: string): ModelSelectionResult {
-      if (models.some((model) => model.fullId === modelId)) selectedModel = modelId;
+      if (models.some((model) => model.fullId === modelId)) {
+        selectedModel = modelId;
+        recentModelIds = [modelId, ...recentModelIds.filter((id) => id !== modelId)].slice(0, 5);
+      }
       return normalizeSelection();
+    },
+    setRecentModelIds(ids: unknown): void {
+      recentModelIds = Array.isArray(ids)
+        ? ids.filter((value): value is string => typeof value === 'string').slice(0, 5)
+        : [];
     },
     selectVariant(variant: string): ModelSelectionResult {
       const variants = variantsFor(models.find((model) => model.fullId === selectedModel));

@@ -13,7 +13,7 @@ describe('model state production ownership', () => {
   });
 
   it('routes initialization, catalog refresh, selection, and quota through the model state facade', () => {
-    expect(source).toContain('modelStateController = factory();');
+    expect(source).toContain('modelStateController = factory({ recentModelIds });');
     expect(source).toContain('const modelSelection = modelUiController.setCatalog(');
     expect(source).toContain("case 'models': {");
     expect(source).toContain('const selection = modelUiController.setCatalog(');
@@ -34,6 +34,17 @@ describe('model state production ownership', () => {
     expect(source).toContain('modelUiController.updateVariantOptions(notifyCurrentVariant);');
     expect(source).toContain('modelUiController.showQuotaTooltip();');
     expect(source).toContain("vscode.postMessage({ type: 'refreshModelQuota' });");
+  });
+
+  it('provides recent model navigation and cross-provider search', () => {
+    const controllerSource = fs.readFileSync(
+      path.join(process.cwd(), 'webview-src', 'features', 'models', 'model-controller.ts'),
+      'utf8',
+    );
+    expect(controllerSource).toContain("searchInput.placeholder = 'Search models'");
+    expect(controllerSource).toContain("recentHeader.textContent = 'Recent'");
+    expect(controllerSource).toContain('model.name || \'\'} ${model.fullId} ${model.providerId || \'\'}');
+    expect(controllerSource).toContain('state.getRecentModels()');
   });
 
   it('refreshes the visible quota tooltip when hover results arrive for send or stop', () => {

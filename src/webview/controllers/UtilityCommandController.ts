@@ -11,9 +11,9 @@ type LocalQuestionResolution = { resolved: boolean; sessionId?: string };
 export interface UtilityCommandHost {
     getLiveWebview(fallback: vscode.Webview): vscode.Webview;
     log(message: string): void;
-    applyModelSelection(value: unknown, webview: vscode.Webview): Promise<void>;
-    applyModeSelection(value: unknown): Promise<void>;
-    applyVariantSelection(value: unknown): Promise<void>;
+    applyModelSelection(value: unknown, sessionId: string, webview: vscode.Webview): Promise<void>;
+    applyModeSelection(value: unknown, sessionId: string): Promise<void>;
+    applyVariantSelection(value: unknown, sessionId: string): Promise<void>;
     pickCompactionModelId(): string | undefined;
     parseModelRef(fullId: string): { providerID: string; modelID: string } | undefined;
     summarizeSession(
@@ -113,16 +113,16 @@ export class UtilityCommandController {
 
         switch (data.type) {
             case 'setModel':
-                await this.host.applyModelSelection(data.value, activeWebview);
+                await this.host.applyModelSelection(data.value, typeof data.sessionId === 'string' ? data.sessionId : '', activeWebview);
                 return true;
             case 'compactSession':
                 await this.compactSession(data, activeWebview);
                 return true;
             case 'setMode':
-                await this.host.applyModeSelection(data.value);
+                await this.host.applyModeSelection(data.value, typeof data.sessionId === 'string' ? data.sessionId : '');
                 return true;
             case 'setVariant':
-                await this.host.applyVariantSelection(data.value);
+                await this.host.applyVariantSelection(data.value, typeof data.sessionId === 'string' ? data.sessionId : '');
                 return true;
             case 'refreshModels':
                 await this.host.refreshModels(activeWebview);

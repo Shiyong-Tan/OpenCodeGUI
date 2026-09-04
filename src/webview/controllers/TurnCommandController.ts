@@ -69,7 +69,8 @@ export interface TurnCommandHost {
     readonly attachments: TurnAttachmentStorage;
     getLiveWebview(fallback: vscode.Webview): vscode.Webview;
     getCurrentSessionId(): string | undefined;
-    getTurnSelection(): TurnSelection;
+    getTurnSelection(sessionId: string): TurnSelection;
+    saveSessionSettings(sessionId: string, settings: TurnSelection): Promise<void>;
     log(message: string): void;
     logBridge(message: string): void;
     createTurnSession(): Promise<string>;
@@ -239,7 +240,15 @@ export class TurnCommandController {
                     return true;
                 }
                 const reqId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-                const { model: targetModel, variant: targetVariant, mode: targetMode, } = host.getTurnSelection();
+                const selection = host.getTurnSelection(targetSessionId);
+                const targetModel = typeof data.model === 'string' ? data.model : selection.model;
+                const targetVariant = typeof data.variant === 'string' ? data.variant : selection.variant;
+                const targetMode = typeof data.mode === 'string' ? data.mode : selection.mode;
+                await host.saveSessionSettings(targetSessionId, {
+                    model: targetModel,
+                    variant: targetVariant,
+                    mode: targetMode,
+                });
                 let activeSendSessionId: string | undefined = targetSessionId;
                 let turnClientMessageId: string | undefined;
                 let turnTmpAssistantKey: string | undefined;
@@ -580,7 +589,7 @@ ${attachmentLines.join('\n')}`
                 host.markAppendSubmissionStarted(sessionId);
                 host.log(`[EXT][APPEND_ROUTE] accepted sessionId=${sessionId} rootUserMsgId=${beginAppend.rootUserMsgId} clientMessageId=${clientMessageId}`);
                 try {
-                    const turnSelection = host.getTurnSelection();
+                    const turnSelection = host.getTurnSelection(sessionId);
                     await host.client.appendPrompt(sessionId, value, {
                         model: turnSelection.model,
                         mode: turnSelection.mode,

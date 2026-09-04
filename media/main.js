@@ -222,6 +222,7 @@ let sessions = [];
 let modes = ['plan', 'build'];
 let selectedMode = 'plan';
 let activeSessionId = '';
+let sessionSettingsById = new Map();
 let isBusy = false;
 let busySessionId = '';
 let attachmentStateController = null;
@@ -5669,7 +5670,14 @@ function getModelStateController() {
     if (typeof factory !== 'function') {
         throw new Error('Model state controller is unavailable');
     }
-    modelStateController = factory();
+    let recentModelIds = [];
+    try {
+        const stored = JSON.parse(localStorage.getItem('opencode.recentModels.v1') || '[]');
+        if (Array.isArray(stored)) recentModelIds = stored;
+    } catch (_) {
+        recentModelIds = [];
+    }
+    modelStateController = factory({ recentModelIds });
     return modelStateController;
 }
 
@@ -5935,6 +5943,14 @@ document.addEventListener('DOMContentLoaded', () => {
         variantSelect,
         sendButton: sendBtn,
         postMessage: (message) => vscode.postMessage(message),
+        getSessionId: () => activeSessionId || '',
+        persistRecentModels: (recentModels) => {
+            try {
+                localStorage.setItem('opencode.recentModels.v1', JSON.stringify(recentModels.map((model) => model.fullId)));
+            } catch (_) {
+                // Recent model navigation is best effort when Webview storage is unavailable.
+            }
+        },
         renderSimpleSelect,
         computePanelWidth: computeModelPanelWidthPx,
         getChevronSvg,
@@ -6069,10 +6085,11 @@ document.addEventListener('DOMContentLoaded', () => {
             const nextMode = modeItems[nextIndex] || 'plan';
             modeSelect.value = nextMode;
             selectedMode = nextMode;
+            recordSessionSettings({ mode: selectedMode });
             applyModeStyles(selectedMode);
             renderModeSelect();
             vscode.postMessage({ type: 'ui-debug', payload: ['[TAB_SWITCH_MODE]', `to=${selectedMode}`, `displayValue=${modeSelect.value}`] });
-            vscode.postMessage({ type: 'setMode', value: selectedMode });
+            vscode.postMessage({ type: 'setMode', value: selectedMode, sessionId: activeSessionId || '' });
         },
         onSend: () => sendBtn.click(),
         onAppendInputChanged: updateSendGate
@@ -13152,8 +13169,9 @@ function shouldHideDcpUiMessage(message) {
             onSelect: (value) => {
                 selectedMode = value;
                 modeSelect.value = value;
+                recordSessionSettings({ mode: selectedMode });
                 applyModeStyles(selectedMode);
-                vscode.postMessage({ type: 'setMode', value: selectedMode });
+                vscode.postMessage({ type: 'setMode', value: selectedMode, sessionId: activeSessionId || '' });
                 syncModeControlWidth(modeSelect, modeItems, selectedMode);
                 if (modePanel) {
                     modePanel.style.width = `${computeModePanelWidthPx(modeWrapper, modeItems)}px`;
@@ -13168,6 +13186,69 @@ function shouldHideDcpUiMessage(message) {
             const panelWidth = computeModePanelWidthPx(modeWrapper, modeItems);
             modePanel.style.width = `${panelWidth}px`;
         }
+    }
+
+    function currentSessionSettings() {
+        const settings = sessionSettingsById.get(activeSessionId || '__new__') || {};
+        const modelState = typeof modelUiController !== 'undefined' ? modelUiController?.state : null;
+        return {
+            ...settings,
+            model: modelState?.getSelectedModel?.() || settings.model,
+            variant: modelState?.getSelectedVariant?.() || settings.variant,
+            mode: selectedMode,
+        };
+    }
+
+    function currentTurnSelection() {
+        const modelState = typeof modelUiController !== 'undefined' ? modelUiController?.state : null;
+        return {
+            model: modelState?.getSelectedModel?.(),
+            variant: modelState?.getSelectedVariant?.(),
+            mode: selectedMode,
+        };
+    }
+
+    const postVscodeMessage = vscode.postMessage.bind(vscode);
+    vscode.postMessage = (message) => {
+        if (message?.type === 'sendMessage'
+            && !Object.prototype.hasOwnProperty.call(message, 'model')) {
+            const selection = currentTurnSelection();
+            return postVscodeMessage({
+                ...message,
+                model: selection.model,
+                variant: selection.variant,
+                mode: selection.mode,
+            });
+        }
+        return postVscodeMessage(message);
+    };
+
+    function activateSessionSettings(sessionId, inheritFromSessionId = '') {
+        const key = sessionId || '__new__';
+        if (!sessionSettingsById.has(key) && inheritFromSessionId) {
+            const inherited = sessionSettingsById.get(inheritFromSessionId || '__new__');
+            if (inherited) sessionSettingsById.set(key, { ...inherited });
+        }
+        const settings = sessionSettingsById.get(key) || {};
+        modelUiController.setCatalog(
+            modelUiController.state.getModels(),
+            settings.model || modelUiController.state.getModels()[0]?.fullId,
+            settings.variant || '',
+        );
+        selectedMode = modes.includes(settings.mode)
+            ? settings.mode
+            : (modes.includes('plan') ? 'plan' : (modes[0] || 'plan'));
+        modeSelect.value = selectedMode;
+        applyModeStyles(selectedMode);
+        modelUiController.renderModelSelect();
+        modelUiController.updateVariantOptions();
+        renderModeSelect();
+        updateSendQuotaVisual();
+    }
+
+    function recordSessionSettings(patch) {
+        const key = activeSessionId || '__new__';
+        sessionSettingsById.set(key, { ...currentSessionSettings(), ...patch });
     }
 
     function renderSimpleSelect(selectEl, { getValue, onSelect }) {
@@ -13429,6 +13510,7 @@ function shouldHideDcpUiMessage(message) {
         armedDeleteSessionId = '';
         pendingExplicitSessionSelectionId = sessionId;
         const previousSessionId = activeSessionId;
+        activateSessionSettings(sessionId);
         transitionActiveSessionPresentationOwner(previousSessionId, sessionId);
         activeSessionId = sessionId;
         clearAppendInputForSessionChange(sessionId);
@@ -14409,20 +14491,23 @@ function appendMessageImages(parentEl, message) {
         if (activeSessionId) {
             // agent timeout notice removed
         }
-        vscode.postMessage({ type: 'setModel', value: selection.selectedModel });
+        recordSessionSettings({ model: selection.selectedModel, variant: selection.selectedVariant });
+        vscode.postMessage({ type: 'setModel', value: selection.selectedModel, sessionId: activeSessionId || '' });
     });
 
     modeSelect.addEventListener('change', (e) => {
         selectedMode = e.target.value;
+        recordSessionSettings({ mode: selectedMode });
         applyModeStyles(selectedMode);
         vscode.postMessage({ type: 'ui-debug', payload: ['[MODE_SELECT_CHANGE]', `to=${selectedMode}`, `displayValue=${e.target.value}`] });
-        vscode.postMessage({ type: 'setMode', value: selectedMode });
+        vscode.postMessage({ type: 'setMode', value: selectedMode, sessionId: activeSessionId || '' });
         syncModeControlWidth(modeSelect, modes, selectedMode);
     });
 
     variantSelect.addEventListener('change', (e) => {
         const selection = modelUiController.selectVariant(e.target.value);
-        vscode.postMessage({ type: 'setVariant', value: selection.selectedVariant });
+        recordSessionSettings({ variant: selection.selectedVariant });
+        vscode.postMessage({ type: 'setVariant', value: selection.selectedVariant, sessionId: activeSessionId || '' });
     });
 
     historyBtn.addEventListener('click', () => {
@@ -14439,6 +14524,7 @@ function appendMessageImages(parentEl, message) {
     });
 
     newSessionBtn.addEventListener('click', () => {
+        sessionSettingsById.set('__new__', currentSessionSettings());
         exitAppendInputMode({ restoreDraft: false });
         transitionActiveSessionPresentationOwner(activeSessionId, '');
         activeSessionId = '';
@@ -17860,6 +17946,8 @@ function appendMessageImages(parentEl, message) {
                 pendingForkRequest = null;
                 refreshForkSessionButtonState();
                 if (!nextSessionId || activeSessionId !== sourceSessionId) break;
+                const sourceSettings = sessionSettingsById.get(sourceSessionId);
+                if (sourceSettings) sessionSettingsById.set(nextSessionId, { ...sourceSettings });
                 requestSessionSelection(nextSessionId);
                 break;
             }
@@ -17876,6 +17964,7 @@ function appendMessageImages(parentEl, message) {
             }
             case 'newSession': {
                 const nextSessionId = message.sessionId || '';
+                activateSessionSettings(nextSessionId, '__new__');
                 transitionActiveSessionPresentationOwner(activeSessionId, nextSessionId);
                 activeSessionId = nextSessionId;
                 pendingExplicitSessionSelectionId = '';

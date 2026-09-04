@@ -13,7 +13,7 @@ import { createSessionRenderScheduler } from '../continuation/session-render-sch
 
 const { createAtomicScenarioExecutor, createRealTransactionHarness } = require('../../scripts/chat-window-adaptive-range-harness.js');
 
-const source = fs.readFileSync(path.join(process.cwd(), 'media', 'main.js'), 'utf8');
+const source = fs.readFileSync(path.join(process.cwd(), 'media', 'main.js'), 'utf8').replace(/\r\n/g, '\n');
 const wave3TestSource = fs.readFileSync(__filename, 'utf8');
 const b4ScriptPath = path.join(process.cwd(), 'scripts', 'chat-window-adaptive-range-synthetic.js');
 const b4EvidencePath = 'C:\\Users\\tan_s\\AppData\\Local\\Temp\\opencode\\wave-b4-adaptive-range-evidence.json';

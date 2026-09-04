@@ -52,6 +52,15 @@ describe('webview model state', () => {
     expect(state.deriveQuotaVisual(true).visible).toBe(false);
   });
 
+  it('keeps five most recently selected models in order', () => {
+    const recentModels = ['a', 'b', 'c', 'd', 'e', 'f'].map((fullId) => ({ fullId }));
+    const state = createModelState({ models: recentModels });
+    for (const model of recentModels) state.selectModel(model.fullId);
+    expect(state.getRecentModels().map((model) => model.fullId)).toEqual(['f', 'e', 'd', 'c', 'b']);
+    state.selectModel('c');
+    expect(state.getRecentModels().map((model) => model.fullId)).toEqual(['c', 'f', 'e', 'd', 'b']);
+  });
+
   it('normalizes reset labels without changing their remaining text', () => {
     expect(normalizeResetText('resets in 2 hours')).toBe('2 hours');
     expect(normalizeResetText('resets on Tuesday')).toBe('Tuesday');

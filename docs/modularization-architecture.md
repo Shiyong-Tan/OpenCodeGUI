@@ -9,6 +9,7 @@ create a second writer for their host state.
 | Capability | Module owner | Entry responsibility |
 | --- | --- | --- |
 | Models, variants, quota | `src/models/ModelQuotaService.ts` | Construct service and forward results |
+| Per-session model/reasoning/mode settings | `src/session-runtime/SessionSettingsStore.ts` | Route explicit session identity and provide persisted settings |
 | OpenCode process and transport | `src/transport/*` | Supply workspace/configuration and lifecycle callbacks |
 | Server-event interpretation | `src/events/OpenCodeEventMapper.ts` | `OpenCodeClient` retains lifecycle stores; mapper preserves event/side-effect order |
 | Webview chat-event adaptation | `src/events/SidebarChatEventHandler.ts` | `SidebarProvider` retains session and finalization state |
@@ -53,6 +54,7 @@ changes call location without creating a second writer.
 | State or behavior | Module owner |
 | --- | --- |
 | Model selection | `webview-src/features/models/*` |
+| Active chat model/reasoning/mode projection | `webview-src/features/models/*`, `media/main.js` |
 | Composer attachments/context/input | `webview-src/features/composer/*` |
 | Header state and rendering | `webview-src/features/header/*` |
 | Normal and Smart Search state/navigation | `webview-src/features/search/*` |

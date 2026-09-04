@@ -90,7 +90,7 @@ describe('turn command family characterization', () => {
             'if (!payloadSessionId && !host.getCurrentSessionId())',
             'const targetSessionId = payloadSessionId || host.getCurrentSessionId()',
             'host.isTurnCommandInFlight(targetSessionId)',
-            '} = host.getTurnSelection()',
+            'host.getTurnSelection(targetSessionId)',
             'let activeSendSessionId: string | undefined = targetSessionId',
             'host.startTurnCommandState(',
             'await host.client.chat(',

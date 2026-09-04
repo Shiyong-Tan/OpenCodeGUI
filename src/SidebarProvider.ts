@@ -14,6 +14,7 @@ import { SmartSearchSessionRegistry } from './search/SmartSearchSessionRegistry'
 import { SmartSearchService } from './search/SmartSearchService';
 import { handleSidebarChatEvent } from './events/SidebarChatEventHandler';
 import { initializeSidebarSession } from './history/SidebarSessionInitializer';
+import { SessionSettingsStore, type SessionSettings } from './session-runtime/SessionSettingsStore';
 import {
     resolveSidebarWebviewView,
     type SidebarWebviewDependencies,
@@ -649,6 +650,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private selectedModel?: string;
     private selectedVariant?: string;
     private selectedMode?: string;
+    private readonly sessionSettingsStore: SessionSettingsStore;
+    private readonly sessionSettingsLoaded: Promise<void>;
     private availableModes: string[] = ['plan', 'build'];
     private draftByLocalKey = new Map<string, { text: string; attachments: string[]; model?: string; variant?: string; mode?: string }>();
     private currentDiffFilePath: string | null = null;
@@ -3939,24 +3942,52 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
     }
 
-    private async applyUtilityModelSelection(value: unknown, webview: vscode.Webview): Promise<void> {
-        this.selectedModel = (value || undefined) as string | undefined;
-        await this._context.globalState.update('opencode.model', this.selectedModel);
+    private async applyUtilityModelSelection(value: unknown, sessionId: string, webview: vscode.Webview): Promise<void> {
+        const targetSessionId = sessionId || this.currentSessionId || '';
+        const selectedModel = (value || undefined) as string | undefined;
+        if (targetSessionId === this.currentSessionId) this.selectedModel = selectedModel;
+        const current = this.sessionSettingsStore.get(targetSessionId);
+        await this.sessionSettingsStore.set(targetSessionId, { ...current, model: selectedModel });
         await this.postModelQuota(webview, 'model-change');
     }
 
-    private async applyUtilityModeSelection(value: unknown): Promise<void> {
+    private async applyUtilityModeSelection(value: unknown, sessionId: string): Promise<void> {
         const requestedMode = typeof value === 'string' ? value : '';
         const mode = this.availableModes.includes(requestedMode)
             ? requestedMode
             : (this.availableModes[0] || 'plan');
-        this.selectedMode = mode || undefined;
-        await this._context.globalState.update('opencode.mode', this.selectedMode);
+        const targetSessionId = sessionId || this.currentSessionId || '';
+        if (targetSessionId === this.currentSessionId) this.selectedMode = mode || undefined;
+        const current = this.sessionSettingsStore.get(targetSessionId);
+        await this.sessionSettingsStore.set(targetSessionId, { ...current, mode: mode || undefined });
     }
 
-    private async applyUtilityVariantSelection(value: unknown): Promise<void> {
-        this.selectedVariant = (value || undefined) as string | undefined;
-        await this._context.globalState.update('opencode.variant', this.selectedVariant);
+    private async applyUtilityVariantSelection(value: unknown, sessionId: string): Promise<void> {
+        const targetSessionId = sessionId || this.currentSessionId || '';
+        const selectedVariant = (value || undefined) as string | undefined;
+        if (targetSessionId === this.currentSessionId) this.selectedVariant = selectedVariant;
+        const current = this.sessionSettingsStore.get(targetSessionId);
+        await this.sessionSettingsStore.set(targetSessionId, { ...current, variant: selectedVariant });
+    }
+
+    private async ensureSessionSettingsLoaded(): Promise<void> {
+        await this.sessionSettingsLoaded;
+    }
+
+    private getSessionSettingsSnapshot(): Record<string, SessionSettings> {
+        return this.sessionSettingsStore.snapshot();
+    }
+
+    private getSessionSettings(sessionId: string | undefined): SessionSettings {
+        return this.sessionSettingsStore.get(sessionId);
+    }
+
+    private async saveSessionSettings(sessionId: string, settings: SessionSettings): Promise<void> {
+        await this.sessionSettingsStore.set(sessionId, settings);
+    }
+
+    private async deleteSessionSettings(sessionId: string): Promise<void> {
+        await this.sessionSettingsStore.delete(sessionId);
     }
 
     private resolveUtilityLocalQuestion(
@@ -3982,6 +4013,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private adoptSessionSelection(targetSessionId: string): void {
         this.resetUiState(targetSessionId);
         this.currentSessionId = targetSessionId;
+        const settings = this.sessionSettingsStore.get(targetSessionId);
+        this.selectedModel = settings.model;
+        this.selectedVariant = settings.variant;
+        this.selectedMode = settings.mode;
         this.trackUserOwnedSession(targetSessionId);
         this.client.setSessionId(targetSessionId);
     }
@@ -4611,6 +4646,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         private readonly diffProvider: OpenCodeDiffProvider
     ) {
         this.client = new OpenCodeClient();
+        this.sessionSettingsStore = new SessionSettingsStore(this._context.globalState);
+        this.sessionSettingsLoaded = this.sessionSettingsStore.load();
         this.diffFileViewer = new DiffFileViewer({
             resolveRepo: (sessionId) => this.resolveInternalRepo(sessionId),
             getHead: (repo) => this.getInternalHeadCommit(repo),
@@ -4713,9 +4750,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.utilityCommandHandler = createUtilityCommandHandler({
             getLiveWebview: (fallback) => this._view?.webview || fallback,
             log: (message) => this.uiDebugChannel.appendLine(message),
-            applyModelSelection: (value, webview) => this.applyUtilityModelSelection(value, webview),
-            applyModeSelection: (value) => this.applyUtilityModeSelection(value),
-            applyVariantSelection: (value) => this.applyUtilityVariantSelection(value),
+            applyModelSelection: (value, sessionId, webview) => this.applyUtilityModelSelection(value, sessionId, webview),
+            applyModeSelection: (value, sessionId) => this.applyUtilityModeSelection(value, sessionId),
+            applyVariantSelection: (value, sessionId) => this.applyUtilityVariantSelection(value, sessionId),
             pickCompactionModelId: () => this.client.pickFreeModel(
                 this.lastKnownModels,
                 this.selectedModel
@@ -4755,6 +4792,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             deleteSession: (sessionId) => this.client.deleteSession(sessionId),
             cleanupDeletedSessionArtifacts: (sessionId) => this.cleanupDeletedSessionArtifacts(sessionId),
             clearRecentSessionIfMatches: (sessionId) => this.clearRecentSessionIfMatches(sessionId),
+            deleteSessionSettings: (sessionId) => this.deleteSessionSettings(sessionId),
             clearSelectedSessionAfterDelete: (sessionId) => this.clearSelectedSessionAfterDelete(sessionId),
             startSessionSelection: (sessionId) => this.startSessionSelection(sessionId),
             adoptSessionSelection: (sessionId) => this.adoptSessionSelection(sessionId),
@@ -4867,11 +4905,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             },
             getLiveWebview: (fallback) => this._view?.webview || fallback,
             getCurrentSessionId: () => this.currentSessionId,
-            getTurnSelection: () => ({
-                model: this.selectedModel,
-                variant: this.selectedVariant,
-                mode: this.selectedMode,
-            }),
+            getTurnSelection: (sessionId) => {
+                const settings = this.getSessionSettings(sessionId);
+                return {
+                    model: settings.model || this.selectedModel,
+                    variant: settings.variant || this.selectedVariant,
+                    mode: settings.mode || this.selectedMode,
+                };
+            },
+            saveSessionSettings: (sessionId, settings) => this.saveSessionSettings(sessionId, settings),
             log: (message) => this.uiDebugChannel.appendLine(message),
             logBridge: (message) => OpenCodeClient.outputChannel.appendLine(message),
             createTurnSession: () => this.createTurnSession(),
