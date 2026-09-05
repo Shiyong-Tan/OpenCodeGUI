@@ -48,4 +48,8 @@ describe('SidebarSessionInitializer', () => {
     expect(initializerSource).toContain("type: 'turnInFlight'");
     expect(initializerSource).toContain('ownerMsgId: recoveredTurn.assistantMessageId');
   });
+
+  test('sends the persisted per-session settings snapshot on both init paths', () => {
+    expect(initializerSource.match(/sessionSettings: host\.getSessionSettingsSnapshot\(\)/g)).toHaveLength(2);
+  });
 });

@@ -222,7 +222,6 @@ export function createModelUiController(options: ModelUiControllerOptions) {
     const selectAndClose = (modelId: string) => {
       const selection = selectModel(modelId);
       postMessage({ type: 'setModel', value: selection.selectedModel, sessionId: options.getSessionId() });
-      updateVariantOptions(selection.variantChanged);
       updateLabel();
       updateSendQuotaVisual();
       close();

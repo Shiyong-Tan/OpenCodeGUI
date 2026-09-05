@@ -13205,30 +13205,6 @@ function shouldHideDcpUiMessage(message) {
         };
     }
 
-    function currentTurnSelection() {
-        const modelState = typeof modelUiController !== 'undefined' ? modelUiController?.state : null;
-        return {
-            model: modelState?.getSelectedModel?.(),
-            variant: modelState?.getSelectedVariant?.(),
-            mode: selectedMode,
-        };
-    }
-
-    const postVscodeMessage = vscode.postMessage.bind(vscode);
-    vscode.postMessage = (message) => {
-        if (message?.type === 'sendMessage'
-            && !Object.prototype.hasOwnProperty.call(message, 'model')) {
-            const selection = currentTurnSelection();
-            return postVscodeMessage({
-                ...message,
-                model: selection.model,
-                variant: selection.variant,
-                mode: selection.mode,
-            });
-        }
-        return postVscodeMessage(message);
-    };
-
     function activateSessionSettings(sessionId, inheritFromSessionId = '') {
         const key = sessionId || '__new__';
         if (!sessionSettingsById.has(key) && inheritFromSessionId) {
@@ -15264,6 +15240,17 @@ function appendMessageImages(parentEl, message) {
                 );
                 const models = modelUiController.state.getModels();
                 sessions = Array.isArray(message.sessions) ? message.sessions : [];
+                // Hydrate the persisted per-session settings snapshot so a fresh
+                // webview shows each session's own model/variant/mode instead of
+                // falling back to the global defaults.
+                const initSettingsSnapshot = (
+                    typeof message.sessionSettings === 'object' && message.sessionSettings
+                ) ? message.sessionSettings : {};
+                for (const [sessionId, settings] of Object.entries(initSettingsSnapshot)) {
+                    if (sessionId && settings && typeof settings === 'object') {
+                        sessionSettingsById.set(sessionId, { ...settings });
+                    }
+                }
                 // Deduplicate modes and keep OMO-family agents in one contiguous block.
                 const rawModes = Array.isArray(message.modes)
                     ? message.modes.filter((item, index, arr) => typeof item === 'string' && item.length > 0 && arr.indexOf(item) === index)

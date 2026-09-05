@@ -71,6 +71,40 @@ describe('model state production ownership', () => {
     expect(controllerSource.slice(tooltipStart, tooltipEnd)).not.toContain('if (isBusy()) return;');
   });
 
+  it('hydrates the persisted per-session settings snapshot on init', () => {
+    const initStart = source.indexOf("case 'init': {");
+    const initEnd = source.indexOf("case 'serverStatus': {", initStart);
+    const initHandler = source.slice(initStart, initEnd);
+    expect(initStart).toBeGreaterThanOrEqual(0);
+    expect(initHandler).toContain('message.sessionSettings');
+    expect(initHandler).toContain('sessionSettingsById.set(sessionId, { ...settings })');
+    expect(initHandler).toContain("const sessionSettings = sessionSettingsById.get(activeSessionId || '__new__');");
+  });
+
+  it('does not monkey-patch vscode.postMessage to inject model selection into sends', () => {
+    expect(source).not.toContain('vscode.postMessage = ');
+    expect(source).not.toContain('currentTurnSelection');
+    expect(source).not.toContain('postVscodeMessage');
+  });
+
+  it('redraws variant options exactly once per model selection', () => {
+    const controllerSource = fs.readFileSync(
+      path.join(process.cwd(), 'webview-src', 'features', 'models', 'model-controller.ts'),
+      'utf8',
+    );
+    const selectModelStart = controllerSource.indexOf('const selectModel = (modelId: string)');
+    const selectModelEnd = controllerSource.indexOf('};', selectModelStart);
+    const selectModelBody = controllerSource.slice(selectModelStart, selectModelEnd);
+    expect(selectModelBody).toContain('updateVariantOptions(selection.variantChanged)');
+
+    const selectAndCloseStart = controllerSource.indexOf('const selectAndClose = (modelId: string) => {');
+    const selectAndCloseEnd = controllerSource.indexOf('const close = () => {', selectAndCloseStart);
+    const selectAndCloseBody = controllerSource.slice(selectAndCloseStart, selectAndCloseEnd);
+    expect(selectAndCloseStart).toBeGreaterThanOrEqual(0);
+    expect(selectAndCloseBody).not.toContain('updateVariantOptions');
+    expect(selectAndCloseBody).toContain('const selection = selectModel(modelId)');
+  });
+
   it('redraws quota after the session lifecycle is fully finalized', () => {
     const phaseStart = source.indexOf("case 'turnFinalizePhase': {");
     const phaseEnd = source.indexOf("case 'chatDone': {", phaseStart);
