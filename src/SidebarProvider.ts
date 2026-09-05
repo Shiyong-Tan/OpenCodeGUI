@@ -6280,6 +6280,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private tryOpenDiffForEventFile(rawFile: any, webview: vscode.Webview, index: number, sessionId: string, lane: 'main' | 'subagent'): void {
+        if (!this.diffViewerEnabled) {
+            this.uiDebugChannel.appendLine(`subagent.diff.skipped | lane=${lane} | reason=setting-disabled`);
+            return;
+        }
         if (!this.hasRenderableDiffPayload(rawFile)) {
             this.uiDebugChannel.appendLine(`subagent.diff.skipped | lane=${lane} | reason=no-renderable-payload`);
             return;
@@ -6411,7 +6415,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private refreshDiffIfTouched(touchedFiles: string[]): void {
-        if (!this.diffViewerEnabled) return;
         if (!this.currentDiffFilePath) return;
         if (!touchedFiles.includes(this.currentDiffFilePath)) return;
         const editor = vscode.window.visibleTextEditors.find((item) => {
