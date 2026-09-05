@@ -90,7 +90,7 @@ describe('turn command family characterization', () => {
             'if (!payloadSessionId && !host.getCurrentSessionId())',
             'const targetSessionId = payloadSessionId || host.getCurrentSessionId()',
             'host.isTurnCommandInFlight(targetSessionId)',
-            '} = host.getTurnSelection()',
+            'host.getTurnSelection(targetSessionId)',
             'let activeSendSessionId: string | undefined = targetSessionId',
             'host.startTurnCommandState(',
             'await host.client.chat(',
@@ -126,6 +126,13 @@ describe('turn command family characterization', () => {
             'await this._context.globalState.update(',
             'return sessionInfo.id',
         ]);
+    });
+
+    test('persists the resolved send selection without ever blocking the turn on storage', () => {
+        const block = extractRange('case "sendMessage"', 'case "appendMessage"');
+        expect(block).toContain('void host.saveSessionSettings(targetSessionId, {');
+        expect(block).not.toContain('await host.saveSessionSettings(');
+        expect(block).toContain('.catch(() => undefined)');
     });
 
     test('binds local, temporary, and assistant identities before publishing turn messages', () => {

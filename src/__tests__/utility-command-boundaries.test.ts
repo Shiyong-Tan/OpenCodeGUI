@@ -99,19 +99,19 @@ function createHarness(overrides: Record<string, unknown> = {}) {
         availableModes: ['plan', 'build'],
         _context: { globalState: { update: jest.fn(async () => undefined) } },
         postModelQuota: jest.fn(async () => undefined),
-        applyUtilityModelSelection: async function (this: any, value: unknown, targetWebview: unknown) {
+        applyUtilityModelSelection: async function (this: any, value: unknown, _sessionId: string, targetWebview: unknown) {
             this.selectedModel = value || undefined;
             await this._context.globalState.update('opencode.model', this.selectedModel);
             await this.postModelQuota(targetWebview, 'model-change');
         },
-        applyUtilityModeSelection: async function (this: any, value: unknown) {
+        applyUtilityModeSelection: async function (this: any, value: unknown, _sessionId: string) {
             const requestedMode = typeof value === 'string' ? value : '';
             this.selectedMode = this.availableModes.includes(requestedMode)
                 ? requestedMode
                 : (this.availableModes[0] || 'plan');
             await this._context.globalState.update('opencode.mode', this.selectedMode);
         },
-        applyUtilityVariantSelection: async function (this: any, value: unknown) {
+        applyUtilityVariantSelection: async function (this: any, value: unknown, _sessionId: string) {
             this.selectedVariant = value || undefined;
             await this._context.globalState.update('opencode.variant', this.selectedVariant);
         },
@@ -152,9 +152,9 @@ function createHarness(overrides: Record<string, unknown> = {}) {
     const utilityCommandHandler = createUtilityCommandHandler({
         getLiveWebview: (fallback) => host._view?.webview || fallback,
         log: (message) => host.uiDebugChannel.appendLine(message),
-        applyModelSelection: (value, targetWebview) => host.applyUtilityModelSelection(value, targetWebview),
-        applyModeSelection: (value) => host.applyUtilityModeSelection(value),
-        applyVariantSelection: (value) => host.applyUtilityVariantSelection(value),
+        applyModelSelection: (value, sessionId, targetWebview) => host.applyUtilityModelSelection(value, sessionId, targetWebview),
+        applyModeSelection: (value, sessionId) => host.applyUtilityModeSelection(value, sessionId),
+        applyVariantSelection: (value, sessionId) => host.applyUtilityVariantSelection(value, sessionId),
         pickCompactionModelId: () => undefined,
         parseModelRef: () => undefined,
         summarizeSession: (sessionId, options) => host.client.summarizeSession(sessionId, options),
@@ -222,9 +222,9 @@ describe('utility command family characterization', () => {
         expect(providerSource).not.toContain('createUtilityCommandHandler(this)');
         expect(controllerSource).toContain('const utilityHandling = utilityCommandHandler(data, activeWebview, webviewView.webview)');
         expect(controllerSource).toContain('utilityHandling !== false && await utilityHandling');
-        expect(utilityControllerSource).toContain('this.host.applyModelSelection(data.value, activeWebview)');
-        expect(utilityControllerSource).toContain('this.host.applyModeSelection(data.value)');
-        expect(utilityControllerSource).toContain('this.host.applyVariantSelection(data.value)');
+        expect(utilityControllerSource).toContain('this.host.applyModelSelection(data.value, typeof data.sessionId === \'string\' ? data.sessionId : \'\', activeWebview)');
+        expect(utilityControllerSource).toContain('this.host.applyModeSelection(data.value, typeof data.sessionId === \'string\' ? data.sessionId : \'\')');
+        expect(utilityControllerSource).toContain('this.host.applyVariantSelection(data.value, typeof data.sessionId === \'string\' ? data.sessionId : \'\')');
         expect(utilityControllerSource).toContain('this.host.resolveLocalQuestion(callId, data?.result)');
         for (const forbidden of [
             'sendInFlightBySession',
@@ -237,6 +237,19 @@ describe('utility command family characterization', () => {
             'applyUtilityModelSelection', 'applyUtilityModeSelection',
             'applyUtilityVariantSelection', 'resolveUtilityLocalQuestion',
         ]) expect(providerSource).toMatch(new RegExp(`private (?:async )?${method}\\b`));
+
+        expect(providerSource).not.toContain('sessionId || this.currentSessionId');
+        expect(providerSource.match(/resolveSessionSettingsScope\(sessionId, this\.currentSessionId\)/g)).toHaveLength(3);
+    });
+
+    test('routes an empty new-session draft selection to defaults, never to the visible session', async () => {
+        const harness = createHarness();
+        await harness.send({ type: 'setModel', value: 'draft/model', sessionId: '' });
+
+        expect(harness.host.selectedModel).toBe('draft/model');
+        expect(harness.host.selectedMode).toBe('plan');
+        expect(harness.host.selectedVariant).toBe(undefined);
+        expect(harness.host.postModelQuota).toHaveBeenCalledWith(harness.view.webview, 'model-change');
     });
 
     test('extracts every utility command while retaining one top-level message registration', () => {

@@ -1,6 +1,14 @@
 import type { ModelQuota, ModelSelectionResult, ModelState, WebviewModel } from './model-state';
 import { isCopilotProvider, normalizeResetText, parseSpeedMultiplier } from './model-state';
 
+function normalizeModelSearchText(value: unknown): string {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
 interface SimpleSelectConfig {
   getValue(): string;
   onSelect(value: string): void;
@@ -14,6 +22,10 @@ export interface ModelUiControllerOptions {
   variantSelect: HTMLSelectElement;
   sendButton: HTMLElement;
   postMessage(message: unknown): void;
+  getSessionId(): string;
+  persistRecentModels?(models: readonly WebviewModel[]): void;
+  onModelSelected?(selection: ModelSelectionResult): void;
+  onVariantSelected?(selection: ModelSelectionResult): void;
   renderSimpleSelect(select: HTMLSelectElement, config: SimpleSelectConfig): void;
   computePanelWidth(wrapper: HTMLElement, models: readonly WebviewModel[]): number;
   getChevronSvg(): string;
@@ -38,7 +50,7 @@ export function createModelUiController(options: ModelUiControllerOptions) {
   let modelDropdownOutsideHandler: ((event: MouseEvent) => void) | null = null;
   let quotaTooltip: HTMLDivElement | null = null;
 
-  const postVariant = (value: string) => postMessage({ type: 'setVariant', value });
+  const postVariant = (value: string) => postMessage({ type: 'setVariant', value, sessionId: options.getSessionId() });
 
   const updateVariantOptions = (notifyCurrentVariant = false) => {
     const selectedModel = state.getSelectedModel();
@@ -89,11 +101,17 @@ export function createModelUiController(options: ModelUiControllerOptions) {
 
   const selectModel = (modelId: string): ModelSelectionResult => {
     const selection = state.selectModel(modelId);
+    options.persistRecentModels?.(state.getRecentModels());
+    options.onModelSelected?.(selection);
     updateVariantOptions(selection.variantChanged);
     return selection;
   };
 
-  const selectVariant = (variant: string): ModelSelectionResult => state.selectVariant(variant);
+  const selectVariant = (variant: string): ModelSelectionResult => {
+    const selection = state.selectVariant(variant);
+    options.onVariantSelected?.(selection);
+    return selection;
+  };
 
   function renderVariantSelect() {
     renderSimpleSelect(variantSelect, {
@@ -183,6 +201,40 @@ export function createModelUiController(options: ModelUiControllerOptions) {
         option.classList.toggle('is-selected', option.dataset.value === current);
       });
     };
+    const searchInput = document.createElement('input');
+    searchInput.type = 'search';
+    searchInput.className = 'model-search-input';
+    searchInput.placeholder = 'Search models';
+    searchInput.setAttribute('aria-label', 'Search models');
+    panel.appendChild(searchInput);
+
+    const recentModels = state.getRecentModels();
+    const recentGroup = document.createElement('div');
+    recentGroup.className = 'model-group model-recent-group';
+    const recentHeader = document.createElement('div');
+    recentHeader.className = 'model-group-header model-recent-header';
+    recentHeader.textContent = 'Recent';
+    const recentList = document.createElement('div');
+    recentList.className = 'model-group-list';
+    recentGroup.append(recentHeader, recentList);
+    if (recentModels.length) panel.appendChild(recentGroup);
+
+    const selectAndClose = (modelId: string) => {
+      const selection = selectModel(modelId);
+      postMessage({ type: 'setModel', value: selection.selectedModel, sessionId: options.getSessionId() });
+      updateLabel();
+      updateSendQuotaVisual();
+      close();
+    };
+    for (const model of recentModels) {
+      const option = document.createElement('button');
+      option.type = 'button';
+      option.className = 'model-option model-recent-option';
+      option.dataset.value = model.fullId;
+      option.textContent = model.name || model.fullId;
+      option.addEventListener('click', () => selectAndClose(model.fullId));
+      recentList.appendChild(option);
+    }
     const close = () => {
       panel.classList.add('hidden');
       toggle.setAttribute('aria-expanded', 'false');
@@ -223,13 +275,7 @@ export function createModelUiController(options: ModelUiControllerOptions) {
           speed.textContent = model.speedMultiplier;
           option.appendChild(speed);
         }
-        option.addEventListener('click', () => {
-          const selection = selectModel(model.fullId);
-          postMessage({ type: 'setModel', value: selection.selectedModel });
-          updateLabel();
-          updateSendQuotaVisual();
-          close();
-        });
+        option.addEventListener('click', () => selectAndClose(model.fullId));
         list.appendChild(option);
       }
       group.append(header, list);
@@ -240,6 +286,35 @@ export function createModelUiController(options: ModelUiControllerOptions) {
     panel.style.width = width > 0 ? `${width}px` : '';
     panel.style.minWidth = panel.style.width;
     dropdown.append(toggle, panel);
+    searchInput.addEventListener('input', () => {
+      const query = normalizeModelSearchText(searchInput.value);
+      const queryTokens = query ? query.split(' ') : [];
+      panel.querySelectorAll<HTMLElement>('.model-option').forEach((option) => {
+        const model = models.find((item) => item.fullId === option.dataset.value);
+        const haystack = model
+          ? normalizeModelSearchText(`${model.name || ''} ${model.fullId} ${model.providerId || ''}`)
+          : '';
+        option.hidden = queryTokens.length > 0 && !queryTokens.every((token) => haystack.includes(token));
+      });
+      panel.querySelectorAll<HTMLElement>('.model-group:not(.model-recent-group)').forEach((group) => {
+        const hasMatch = Array.from(group.querySelectorAll<HTMLElement>('.model-option')).some((option) => !option.hidden);
+        group.hidden = Boolean(query && !hasMatch);
+        const list = group.querySelector<HTMLElement>('.model-group-list');
+        const header = group.querySelector<HTMLElement>('.model-group-header');
+        if (query && hasMatch) {
+          list?.classList.remove('is-collapsed');
+          header?.classList.remove('is-collapsed');
+        } else if (!query && list && header) {
+          const provider = header.textContent || '';
+          const collapsed = collapsedProviders.has(provider);
+          list.classList.toggle('is-collapsed', collapsed);
+          header.classList.toggle('is-collapsed', collapsed);
+        }
+      });
+      if (recentModels.length) {
+        recentGroup.hidden = Boolean(query && !Array.from(recentList.querySelectorAll<HTMLElement>('.model-option')).some((option) => !option.hidden));
+      }
+    });
     wrapper.appendChild(dropdown);
     toggle.addEventListener('click', (event) => {
       event.stopPropagation();

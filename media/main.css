@@ -2487,6 +2487,25 @@ select#mode-select {
     right: auto;
 }
 
+.model-search-input {
+    box-sizing: border-box;
+    width: 100%;
+    margin-bottom: 4px;
+    padding: 4px 7px;
+    border: 1px solid var(--vscode-input-border, transparent);
+    border-radius: 4px;
+    background: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+}
+
+.model-recent-header {
+    cursor: default;
+}
+
+.model-recent-header::before {
+    display: none;
+}
+
 .dropdown-panel {
     position: absolute;
     bottom: calc(100% + 4px);
@@ -2562,6 +2581,14 @@ select#mode-select {
     display: flex;
     align-items: center;
     gap: 8px;
+}
+
+.model-option[hidden] {
+    display: none;
+}
+
+.model-recent-option {
+    padding-left: 8px;
 }
 
 .simple-option {

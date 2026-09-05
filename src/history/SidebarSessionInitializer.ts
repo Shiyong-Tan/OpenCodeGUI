@@ -28,6 +28,7 @@ export async function initializeSidebarSession(
         };
         const isStillCurrent = options.isStillCurrent || (() => true);
         if (!isStillCurrent()) throw new Error('stale-handshake-before-sendInit');
+        await host.ensureSessionSettingsLoaded();
     const isHardRescueSendInit = Boolean(options.hardRescue && options.isStillCurrent);
     const rescueHydration = options.hardRescue || options.commandReload;
     const initSessionId = rescueHydration?.sessionId || host.currentSessionId || '';
@@ -92,9 +93,10 @@ export async function initializeSidebarSession(
         const initWorkspaceRoot = host.client.getWorkspaceRoot() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         sessions = await host.filterSessionsForWorkspace(sessions, initWorkspaceRoot, 'init');
         logStage('sessions-filtered', `count=${sessions.length}`);
-        const storedModel = host._context.globalState.get('opencode.model') as string | undefined;
-        const storedVariant = host._context.globalState.get('opencode.variant') as string | undefined;
-        const storedMode = host._context.globalState.get('opencode.mode') as string | undefined;
+        const storedSettings = host.getSessionSettings(initSessionId);
+        const storedModel = storedSettings.model as string | undefined;
+        const storedVariant = storedSettings.variant as string | undefined;
+        const storedMode = storedSettings.mode as string | undefined;
 
         const allModes = agents
             // Keep primary agents visible in the mode picker; only hidden agents stay excluded.
@@ -135,14 +137,12 @@ export async function initializeSidebarSession(
         host.selectedModel = resolvedModel;
         host.selectedVariant = resolvedVariant;
 
-        if (resolvedModel && resolvedModel !== storedModel) {
-            await host._context.globalState.update('opencode.model', resolvedModel);
-        }
-        if ((resolvedVariant || '') !== (storedVariant || '')) {
-            await host._context.globalState.update('opencode.variant', resolvedVariant);
-        }
-        if ((resolvedMode || '') !== (storedMode || '')) {
-            await host._context.globalState.update('opencode.mode', resolvedMode);
+        if (initSessionId) {
+            await host.saveSessionSettings(initSessionId, {
+                model: resolvedModel,
+                variant: resolvedVariant,
+                mode: resolvedMode,
+            });
         }
         host.uiDebugChannel.appendLine(
             `[EXT][INIT_MODEL_RESOLVE] models=${models.length} storedModel=${storedModel || 'null'} selectedModel=${resolvedModel || 'null'} storedVariant=${storedVariant || 'null'} selectedVariant=${resolvedVariant || 'null'}`
@@ -231,6 +231,7 @@ export async function initializeSidebarSession(
                 selectedModel: host.selectedModel,
                 selectedVariant: host.selectedVariant,
                 selectedMode: resolvedMode,
+                sessionSettings: host.getSessionSettingsSnapshot(),
                 currentSessionId: initSessionId,
                 sessionId: initSessionId,
                 panelId: host.getWebviewLivenessPanelId(),
@@ -271,6 +272,7 @@ export async function initializeSidebarSession(
                 selectedModel: host.selectedModel,
                 selectedVariant: host.selectedVariant,
                 selectedMode: resolvedMode,
+                sessionSettings: host.getSessionSettingsSnapshot(),
                 currentSessionId: initSessionId,
                 sessionId: initSessionId,
                 panelId: host.getWebviewLivenessPanelId(),

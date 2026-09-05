@@ -31,6 +31,7 @@ export interface SessionCommandHost {
     getSessionChildren(sessionId: string): Promise<unknown[]>;
     deleteSession(sessionId: string): Promise<boolean>;
     cleanupDeletedSessionArtifacts(sessionId: string): Promise<void>;
+    deleteSessionSettings(sessionId: string): Promise<void>;
     clearRecentSessionIfMatches(sessionId: string): Promise<void>;
     clearSelectedSessionAfterDelete(sessionId: string): void;
     startSessionSelection(targetSessionId: string): number;
@@ -162,6 +163,7 @@ export class SessionCommandController {
             if (!deletedOnServer) throw new Error('Delete session returned false');
 
             await this.host.cleanupDeletedSessionArtifacts(sessionId);
+            await this.host.deleteSessionSettings(sessionId);
             await this.host.clearRecentSessionIfMatches(sessionId);
             this.host.clearSelectedSessionAfterDelete(sessionId);
             await this.host.refreshSessions(liveWebview, `delete-${Date.now()}`);

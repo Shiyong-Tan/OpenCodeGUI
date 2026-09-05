@@ -13,7 +13,7 @@ describe('model state production ownership', () => {
   });
 
   it('routes initialization, catalog refresh, selection, and quota through the model state facade', () => {
-    expect(source).toContain('modelStateController = factory();');
+    expect(source).toContain('modelStateController = factory({ recentModelIds });');
     expect(source).toContain('const modelSelection = modelUiController.setCatalog(');
     expect(source).toContain("case 'models': {");
     expect(source).toContain('const selection = modelUiController.setCatalog(');
@@ -36,6 +36,25 @@ describe('model state production ownership', () => {
     expect(source).toContain("vscode.postMessage({ type: 'refreshModelQuota' });");
   });
 
+  it('provides recent model navigation and cross-provider search', () => {
+    const controllerSource = fs.readFileSync(
+      path.join(process.cwd(), 'webview-src', 'features', 'models', 'model-controller.ts'),
+      'utf8',
+    );
+    expect(controllerSource).toContain("searchInput.placeholder = 'Search models'");
+    expect(controllerSource).toContain("recentHeader.textContent = 'Recent'");
+    expect(controllerSource).toContain('model.name || \'\'} ${model.fullId} ${model.providerId || \'\'}');
+    expect(controllerSource).toContain('state.getRecentModels()');
+    expect(controllerSource).toContain('options.onVariantSelected?.(selection)');
+    expect(controllerSource).toContain('options.onModelSelected?.(selection)');
+    expect(controllerSource).toContain("list?.classList.remove('is-collapsed')");
+    expect(controllerSource).toContain('collapsedProviders.has(provider)');
+    expect(controllerSource).toContain(".replace(/[^a-z0-9]+/g, ' ')");
+    expect(controllerSource).toContain('queryTokens.every((token) => haystack.includes(token))');
+    expect(fs.readFileSync(path.join(process.cwd(), 'media', 'main.css'), 'utf8')).toContain('.model-option[hidden]');
+    expect(source).toContain("const sessionSettings = sessionSettingsById.get(activeSessionId || '__new__');");
+  });
+
   it('refreshes the visible quota tooltip when hover results arrive for send or stop', () => {
     const quotaStart = source.indexOf("case 'modelQuota': {");
     const quotaEnd = source.indexOf("case 'init': {", quotaStart);
@@ -50,6 +69,40 @@ describe('model state production ownership', () => {
     const tooltipStart = controllerSource.indexOf('const showQuotaTooltip = () => {');
     const tooltipEnd = controllerSource.indexOf('const hideQuotaTooltip', tooltipStart);
     expect(controllerSource.slice(tooltipStart, tooltipEnd)).not.toContain('if (isBusy()) return;');
+  });
+
+  it('hydrates the persisted per-session settings snapshot on init', () => {
+    const initStart = source.indexOf("case 'init': {");
+    const initEnd = source.indexOf("case 'serverStatus': {", initStart);
+    const initHandler = source.slice(initStart, initEnd);
+    expect(initStart).toBeGreaterThanOrEqual(0);
+    expect(initHandler).toContain('message.sessionSettings');
+    expect(initHandler).toContain('sessionSettingsById.set(sessionId, { ...settings })');
+    expect(initHandler).toContain("const sessionSettings = sessionSettingsById.get(activeSessionId || '__new__');");
+  });
+
+  it('does not monkey-patch vscode.postMessage to inject model selection into sends', () => {
+    expect(source).not.toContain('vscode.postMessage = ');
+    expect(source).not.toContain('currentTurnSelection');
+    expect(source).not.toContain('postVscodeMessage');
+  });
+
+  it('redraws variant options exactly once per model selection', () => {
+    const controllerSource = fs.readFileSync(
+      path.join(process.cwd(), 'webview-src', 'features', 'models', 'model-controller.ts'),
+      'utf8',
+    );
+    const selectModelStart = controllerSource.indexOf('const selectModel = (modelId: string)');
+    const selectModelEnd = controllerSource.indexOf('};', selectModelStart);
+    const selectModelBody = controllerSource.slice(selectModelStart, selectModelEnd);
+    expect(selectModelBody).toContain('updateVariantOptions(selection.variantChanged)');
+
+    const selectAndCloseStart = controllerSource.indexOf('const selectAndClose = (modelId: string) => {');
+    const selectAndCloseEnd = controllerSource.indexOf('const close = () => {', selectAndCloseStart);
+    const selectAndCloseBody = controllerSource.slice(selectAndCloseStart, selectAndCloseEnd);
+    expect(selectAndCloseStart).toBeGreaterThanOrEqual(0);
+    expect(selectAndCloseBody).not.toContain('updateVariantOptions');
+    expect(selectAndCloseBody).toContain('const selection = selectModel(modelId)');
   });
 
   it('redraws quota after the session lifecycle is fully finalized', () => {
