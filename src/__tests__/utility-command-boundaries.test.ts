@@ -237,6 +237,19 @@ describe('utility command family characterization', () => {
             'applyUtilityModelSelection', 'applyUtilityModeSelection',
             'applyUtilityVariantSelection', 'resolveUtilityLocalQuestion',
         ]) expect(providerSource).toMatch(new RegExp(`private (?:async )?${method}\\b`));
+
+        expect(providerSource).not.toContain('sessionId || this.currentSessionId');
+        expect(providerSource.match(/resolveSessionSettingsScope\(sessionId, this\.currentSessionId\)/g)).toHaveLength(3);
+    });
+
+    test('routes an empty new-session draft selection to defaults, never to the visible session', async () => {
+        const harness = createHarness();
+        await harness.send({ type: 'setModel', value: 'draft/model', sessionId: '' });
+
+        expect(harness.host.selectedModel).toBe('draft/model');
+        expect(harness.host.selectedMode).toBe('plan');
+        expect(harness.host.selectedVariant).toBe(undefined);
+        expect(harness.host.postModelQuota).toHaveBeenCalledWith(harness.view.webview, 'model-change');
     });
 
     test('extracts every utility command while retaining one top-level message registration', () => {

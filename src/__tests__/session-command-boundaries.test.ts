@@ -192,6 +192,7 @@ describe('session command family characterization', () => {
         expectOrder(block, [
             'await this.host.deleteSession(sessionId)',
             'await this.host.cleanupDeletedSessionArtifacts(sessionId)',
+            'await this.host.deleteSessionSettings(sessionId)',
             'await this.host.clearRecentSessionIfMatches(sessionId)',
             'this.host.clearSelectedSessionAfterDelete(sessionId)',
             'await this.host.refreshSessions(liveWebview',
@@ -322,6 +323,7 @@ function createRuntimeHarness(overrides: Record<string, unknown> = {}) {
         getSessionChildren: jest.fn(async () => []),
         deleteSession: jest.fn(async () => true),
         cleanupDeletedSessionArtifacts: jest.fn(async () => undefined),
+        deleteSessionSettings: jest.fn(async () => undefined),
         clearRecentSessionIfMatches: jest.fn(async () => undefined),
         clearSelectedSessionAfterDelete: jest.fn(),
         startSessionSelection: jest.fn(() => 1),
@@ -408,6 +410,7 @@ describe('SessionCommandController runtime protocol', () => {
         const harness = createRuntimeHarness({
             deleteSession: jest.fn(async () => { order.push('delete'); return true; }),
             cleanupDeletedSessionArtifacts: jest.fn(async () => { order.push('cleanup'); }),
+            deleteSessionSettings: jest.fn(async () => { order.push('delete-settings'); }),
             clearRecentSessionIfMatches: jest.fn(async () => { order.push('clear-recent'); }),
             clearSelectedSessionAfterDelete: jest.fn(() => { order.push('clear-selected'); }),
             refreshSessions: jest.fn(async () => { order.push('refresh'); }),
@@ -427,6 +430,7 @@ describe('SessionCommandController runtime protocol', () => {
             'sessionDeleteStarted',
             'delete',
             'cleanup',
+            'delete-settings',
             'clear-recent',
             'clear-selected',
             'refresh',

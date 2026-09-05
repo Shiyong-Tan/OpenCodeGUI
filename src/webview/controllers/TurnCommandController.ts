@@ -244,11 +244,15 @@ export class TurnCommandController {
                 const targetModel = typeof data.model === 'string' ? data.model : selection.model;
                 const targetVariant = typeof data.variant === 'string' ? data.variant : selection.variant;
                 const targetMode = typeof data.mode === 'string' ? data.mode : selection.mode;
-                await host.saveSessionSettings(targetSessionId, {
+                // Policy: never block a send on session-settings persistence, and
+                // never let a storage failure abort the turn. The store resolves
+                // settled writes in submission order, so the latest in-memory
+                // snapshot always wins regardless of await timing.
+                void host.saveSessionSettings(targetSessionId, {
                     model: targetModel,
                     variant: targetVariant,
                     mode: targetMode,
-                });
+                }).catch(() => undefined);
                 let activeSendSessionId: string | undefined = targetSessionId;
                 let turnClientMessageId: string | undefined;
                 let turnTmpAssistantKey: string | undefined;

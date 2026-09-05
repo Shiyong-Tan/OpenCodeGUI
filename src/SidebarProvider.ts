@@ -15,6 +15,7 @@ import { SmartSearchService } from './search/SmartSearchService';
 import { handleSidebarChatEvent } from './events/SidebarChatEventHandler';
 import { initializeSidebarSession } from './history/SidebarSessionInitializer';
 import { SessionSettingsStore, type SessionSettings } from './session-runtime/SessionSettingsStore';
+import { resolveSessionSettingsScope } from './session-runtime/session-settings-scope';
 import {
     resolveSidebarWebviewView,
     type SidebarWebviewDependencies,
@@ -3943,31 +3944,37 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private async applyUtilityModelSelection(value: unknown, sessionId: string, webview: vscode.Webview): Promise<void> {
-        const targetSessionId = sessionId || this.currentSessionId || '';
+        const scope = resolveSessionSettingsScope(sessionId, this.currentSessionId);
         const selectedModel = (value || undefined) as string | undefined;
-        if (targetSessionId === this.currentSessionId) this.selectedModel = selectedModel;
-        const current = this.sessionSettingsStore.get(targetSessionId);
-        await this.sessionSettingsStore.set(targetSessionId, { ...current, model: selectedModel });
+        if (scope.kind === 'global' || scope.isCurrent) this.selectedModel = selectedModel;
+        if (scope.kind === 'session') {
+            const current = this.sessionSettingsStore.get(scope.sessionId);
+            await this.sessionSettingsStore.set(scope.sessionId, { ...current, model: selectedModel });
+        }
         await this.postModelQuota(webview, 'model-change');
     }
 
     private async applyUtilityModeSelection(value: unknown, sessionId: string): Promise<void> {
+        const scope = resolveSessionSettingsScope(sessionId, this.currentSessionId);
         const requestedMode = typeof value === 'string' ? value : '';
         const mode = this.availableModes.includes(requestedMode)
             ? requestedMode
             : (this.availableModes[0] || 'plan');
-        const targetSessionId = sessionId || this.currentSessionId || '';
-        if (targetSessionId === this.currentSessionId) this.selectedMode = mode || undefined;
-        const current = this.sessionSettingsStore.get(targetSessionId);
-        await this.sessionSettingsStore.set(targetSessionId, { ...current, mode: mode || undefined });
+        if (scope.kind === 'global' || scope.isCurrent) this.selectedMode = mode || undefined;
+        if (scope.kind === 'session') {
+            const current = this.sessionSettingsStore.get(scope.sessionId);
+            await this.sessionSettingsStore.set(scope.sessionId, { ...current, mode: mode || undefined });
+        }
     }
 
     private async applyUtilityVariantSelection(value: unknown, sessionId: string): Promise<void> {
-        const targetSessionId = sessionId || this.currentSessionId || '';
+        const scope = resolveSessionSettingsScope(sessionId, this.currentSessionId);
         const selectedVariant = (value || undefined) as string | undefined;
-        if (targetSessionId === this.currentSessionId) this.selectedVariant = selectedVariant;
-        const current = this.sessionSettingsStore.get(targetSessionId);
-        await this.sessionSettingsStore.set(targetSessionId, { ...current, variant: selectedVariant });
+        if (scope.kind === 'global' || scope.isCurrent) this.selectedVariant = selectedVariant;
+        if (scope.kind === 'session') {
+            const current = this.sessionSettingsStore.get(scope.sessionId);
+            await this.sessionSettingsStore.set(scope.sessionId, { ...current, variant: selectedVariant });
+        }
     }
 
     private async ensureSessionSettingsLoaded(): Promise<void> {
