@@ -655,6 +655,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private diffHashes = new Map<string, { before: string; after: string }>();
     private shownDiffKeysBySession = new Map<string, Set<string>>();
     private postFinalWatchDiffFocusedBySession = new Set<string>();
+    private diffViewerEnabled = vscode.workspace.getConfiguration('opencode').get<boolean>('diffViewer.enabled', true);
     private clientMessageIdMap = new Map<string, string>();
     private readonly revertedSegmentHistoryStore = new RevertedSegmentHistoryStore();
     private readonly pendingConflictStore = new PendingConflictStore();
@@ -5523,6 +5524,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }, Math.max(0, delayMs));
     }
 
+    public refreshDiffViewerConfig(): void {
+        this.diffViewerEnabled = vscode.workspace.getConfiguration('opencode').get<boolean>('diffViewer.enabled', true);
+        this.uiDebugChannel.appendLine(`[CONFIG] diffViewer.enabled=${this.diffViewerEnabled}`);
+    }
+
     private async observeTurnRuntimeShadow(event: ChatEvent): Promise<TurnShadowObservation | undefined> {
         if (
             !event.sessionId
@@ -6274,6 +6280,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private tryOpenDiffForEventFile(rawFile: any, webview: vscode.Webview, index: number, sessionId: string, lane: 'main' | 'subagent'): void {
+        if (!this.diffViewerEnabled) {
+            this.uiDebugChannel.appendLine(`subagent.diff.skipped | lane=${lane} | reason=setting-disabled`);
+            return;
+        }
         if (!this.hasRenderableDiffPayload(rawFile)) {
             this.uiDebugChannel.appendLine(`subagent.diff.skipped | lane=${lane} | reason=no-renderable-payload`);
             return;
@@ -6305,6 +6315,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     private openDiffForFileChange(file: FileSnapshot, webview: vscode.Webview, index: number): void {
         void webview;
+        if (!this.diffViewerEnabled) return;
         // Only auto-open diff for file changes produced by tool_use write/edit/apply_patch.
         // Ignore session-wide diffs (e.g. session.diff) which can be emitted during read-only work.
         const isToolUseChange =
@@ -6345,6 +6356,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     private forceOpenDiffForFileChange(file: FileSnapshot, webview: vscode.Webview, index: number): void {
         void webview;
+        if (!this.diffViewerEnabled) return;
         const isToolUseChange =
             file.type === 'update' ||
             file.type === 'create' ||
