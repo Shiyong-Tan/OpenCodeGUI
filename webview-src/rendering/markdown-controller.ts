@@ -190,10 +190,16 @@ export function normalizeMarkdownText(value: string): string {
   text = normalizeMultilineDollarMath(text);
   text = normalizeTableMathPipes(text);
   text = text.replace(/\\\[(.*?)\\\]/gs, (_match, inner: string) => `\n\n\\[${inner}\\]\n\n`);
-  text = text.replace(/\$([^$\n]*?)\$/g, (match, inner: string) => {
-    if (!/\\[a-zA-Z]+|\^|_/.test(inner)) return match;
-    return `\\(${inner.trim()}\\)`;
-  });
+  // Bracket delimiters do not require English whitespace around inline math.
+  // Consume code and display math first so their dollar signs stay literal.
+  text = text.replace(/(```[\s\S]*?```|~~~[\s\S]*?~~~|`+[^`\n]*?`+|\$\$[\s\S]*?\$\$)|(?<!\\)\$([^$\n]+?)(?<!\\)\$/g,
+    (match, protectedText: string | undefined, inner: string | undefined) => {
+      if (protectedText || inner === undefined) return match;
+      const body = inner.trim();
+      const simpleMath = /^[A-Za-z](?:\s*[=<>+*/-]\s*[A-Za-z0-9]+)*$/.test(body);
+      if (!simpleMath && !/\\[a-zA-Z]+|\^|_/.test(body)) return match;
+      return `\\(${body}\\)`;
+    });
 
   const lines = text.split('\n');
   let inFence = false;

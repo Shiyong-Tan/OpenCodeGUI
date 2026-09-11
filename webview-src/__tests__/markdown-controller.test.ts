@@ -23,6 +23,17 @@ function renderWithProductionMath(markdown: string): string {
 }
 
 describe('markdown text normalization', () => {
+  test.each(['$N$：图像像素数', '$P$: 候选数量', '$K$；系数数量', '不需要让$P$等于采样点数', '$P>N$也可以'])('renders simple inline math next to Chinese or punctuation: %s', (input) => {
+    const html = renderWithProductionMath(input);
+    expect(html).toContain('class="katex"');
+    expect(html).not.toContain('$');
+  });
+
+  test('preserves code, display delimiters, escaped dollars and prices', () => {
+    const input = '`$N$` and ``$x_1$``\n```text\n$P>N$\n```\n$$N$$\nPrice $12.50 and $20.00\n\\$N\\$';
+    expect(normalizeMarkdownText(input)).toBe(input);
+  });
+
   test('preserves the production reminder, math, newline, and nested-list transformations', () => {
     expect(normalizeMarkdownText('<system-reminder source="x">keep</system-reminder>\r\n\\[x + y\\]\r\n$  x_1  $'))
       .toBe('&lt;system-reminder&gt;keep&lt;/system-reminder&gt;\n\n\n\\[x + y\\]\n\n\n\\(x_1\\)');
