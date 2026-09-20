@@ -12,7 +12,7 @@ test('isolated attach verifies actual version and rejects instance changes witho
     let descriptor = connection();
     const load = jest.fn(async () => descriptor);
     const fetcher = jest.fn(async () => Response.json({ version: '1.18.29' }));
-    const runtime = new SupervisorExperiment('explicit-descriptor', load, fetcher as typeof fetch);
+    const runtime = new SupervisorExperiment(resolve('isolated/state/supervisor/connection.json'), load, fetcher as typeof fetch);
     await runtime.ensure(descriptor.workspace);
     expect(runtime.serverConnection().isolatedSupervisor).toBe(true);
     expect(runtime.serverConnection().lock.password).toBe('');
@@ -25,7 +25,7 @@ test('isolated attach verifies actual version and rejects instance changes witho
 
 test('wrong service version and missing descriptor fail without a fallback connection', async () => {
     const descriptor = connection();
-    const runtime = new SupervisorExperiment('explicit-descriptor', async () => descriptor,
+    const runtime = new SupervisorExperiment(resolve('isolated/state/supervisor/connection.json'), async () => descriptor,
         (async () => Response.json({ version: '1.18.31' })) as typeof fetch);
     await expect(runtime.ensure(descriptor.workspace)).rejects.toThrow('version mismatch');
     expect(() => runtime.serverConnection()).toThrow('unavailable');
@@ -37,7 +37,7 @@ test('wrong service version and missing descriptor fail without a fallback conne
 
 test('isolated authentication failure never enters workspace lock migration', async () => {
     const descriptor = connection();
-    const runtime = new SupervisorExperiment('explicit', async () => descriptor,
+    const runtime = new SupervisorExperiment(resolve('isolated/state/supervisor/connection.json'), async () => descriptor,
         (async () => Response.json({ version: '1.18.29' })) as typeof fetch);
     await runtime.ensure(descriptor.workspace);
     const migrate = jest.fn(), recover = jest.fn();

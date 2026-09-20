@@ -235,3 +235,26 @@ describe('SidebarProvider parentID session history filtering', () => {
         expect(initPayload.currentSessionId).toBe('ses_main_init');
     });
 });
+
+test('history formatter removes only trusted notification input and retains parent reply and identical user text', () => {
+    const provider = Object.create(SidebarProvider.prototype) as any;
+    provider.client = {
+        getTrustedSupervisorNotification: (session: string, id: string) => session === 'ses_A' && id === 'msg_notice' ? {} : undefined,
+        registerMessage: jest.fn(() => 0),
+    };
+    provider.uiDebugChannel = { appendLine: jest.fn() };
+    const message = (id: string, role: string, text: string, parentID?: string) => ({
+        info: { id, role, sessionID: 'ses_A', parentID, finish: role === 'assistant' ? 'stop' : undefined },
+        parts: [{ type: 'text', text }],
+    });
+    const raw = [message('msg_user', 'user', 'original input'), message('msg_final', 'assistant', 'old final', 'msg_user'),
+        message('msg_notice', 'user', 'Supervisor completion notification example'),
+        message('msg_followup', 'assistant', 'real parent follow-up', 'msg_notice'),
+        message('msg_same_text_user', 'user', 'Supervisor completion notification example')];
+    const before = JSON.stringify(raw);
+    const output = provider.formatSession({ session: { id: 'ses_A' }, messages: raw });
+    expect(output.messages.map((item: any) => item.id)).toEqual(['msg_user', 'msg_final', 'msg_followup', 'msg_same_text_user']);
+    expect(output.messages.find((item: any) => item.id === 'msg_followup').text).toBe('real parent follow-up');
+    expect(JSON.stringify(raw)).toBe(before);
+    expect(provider.formatSession({ session: { id: 'ses_B' }, messages: raw }).messages.some((item: any) => item.id === 'msg_notice')).toBe(true);
+});

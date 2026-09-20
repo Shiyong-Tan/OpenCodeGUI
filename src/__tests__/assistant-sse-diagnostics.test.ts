@@ -6,7 +6,8 @@ describe('AssistantSseDiagnostics', () => {
     test('OpenCodeClient routes assistant SSE through bounded diagnostics', () => {
         const source = fs.readFileSync(path.join(__dirname, '..', 'OpenCodeClient.ts'), 'utf8');
 
-        expect(source).toContain('this.assistantSseDiagnostics.summarize(type, props, payload.length)');
+        expect(source).toContain('this.handleClassifiedServerEvent(type, props, source, payload.length)');
+        expect(source).toContain('this.assistantSseDiagnostics.summarize(type, props, payloadLength)');
         expect(source).not.toContain('`[SSE_ASSIST] ${payload}`');
     });
 

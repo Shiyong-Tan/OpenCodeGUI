@@ -6701,6 +6701,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const presentation = role === 'assistant' ? assistantPresentationById.get(resolvedId) : undefined;
             const text = presentation?.text ?? getAssistantText(message);
             if (!text) continue;
+            if (role === 'user' && this.client.getTrustedSupervisorNotification?.(sessionId, resolvedId)) continue;
             if (role === 'user' && syntheticUserIds.has(resolvedId)) {
                 continue;
             }

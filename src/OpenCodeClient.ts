@@ -1,3 +1,4 @@
+import { SupervisorNotificationIngress } from './supervisor/SupervisorNotificationIngress';
 import { SupervisorExperiment } from './supervisor/SupervisorExperiment';
 import * as https from 'https';
 import * as path from 'path';
@@ -932,10 +933,19 @@ export class OpenCodeClient {
     }
 
     private readonly supervisorExperiment?: SupervisorExperiment;
+    private readonly supervisorIngress?: SupervisorNotificationIngress;
+    private readonly supervisorClassificationBlocked = new Set<string>();
 
     constructor(options?: { supervisorDevelopment?: boolean; supervisorDescriptorPath?: string }) {
         if (options?.supervisorDevelopment && vscode.workspace.getConfiguration('opencode').get<boolean>('experimentalSupervisor', false)) {
             this.supervisorExperiment = new SupervisorExperiment(options.supervisorDescriptorPath || process.env.OPENCODE_GUI_SUPERVISOR_DESCRIPTOR || '');
+            this.supervisorIngress = new SupervisorNotificationIngress(
+                (sessionId, messageId) => this.supervisorExperiment!.lookupNotification(sessionId, messageId),
+                sessionId => {
+                    if (this.supervisorClassificationBlocked.has(sessionId)) return;
+                    this.supervisorClassificationBlocked.add(sessionId);
+                    this.logUiDebug('Supervisor notification classification unavailable; reload isolated window: ' + sessionId);
+                });
         }
         this.modelQuotaService = new ModelQuotaService({ log: (message) => this.logUiDebug(message) });
         this.commandResolver = new OpenCodeCommandResolver((message) => OpenCodeClient.outputChannel.appendLine(message));
@@ -992,7 +1002,12 @@ export class OpenCodeClient {
 
     public isSupervisorExperiment(): boolean { return Boolean(this.supervisorExperiment); }
 
+    public getTrustedSupervisorNotification(sessionId: string, messageId: string) {
+        return this.supervisorExperiment?.knownNotification(sessionId, messageId);
+    }
+
     public async readSupervisorState(sessionId: string) {
+        if (this.supervisorClassificationBlocked.has(sessionId)) return { status: 'unavailable' as const, reason: 'read_failed' as const };
         return this.supervisorExperiment?.read(sessionId) ?? { status: 'unavailable' as const, reason: 'read_failed' as const };
     }
 
@@ -1005,6 +1020,7 @@ export class OpenCodeClient {
         this.workspaceRoot = newRoot;
         this.gitUndo = new GitUndoEngine(this.workspaceRoot, (message) => this.logUiDebug(message));
         this.gitUndoAvailable = false;
+        this.supervisorIngress?.dispose();
         this.supervisorExperiment?.dispose();
         this.serverController.resetForWorkspaceChange();
     }
@@ -4975,6 +4991,7 @@ export class OpenCodeClient {
     public async shutdownServer(): Promise<void> {
         if (this.supervisorExperiment) {
             this.eventStream?.stop();
+            this.supervisorIngress?.dispose();
             this.supervisorExperiment.dispose();
             return;
         }
@@ -5414,6 +5431,18 @@ export class OpenCodeClient {
         }
         const type = parsed?.type as string;
         const props = parsed?.properties || {};
+        const sessionId = this.getSessionIdFromEvent(type, props);
+        if (this.supervisorIngress && sessionId && source === 'sse') {
+            const messageId = type === 'message.updated' ? props?.info?.id
+                : type === 'message.part.updated' || type === 'message.part.delta' ? (props?.part?.messageID || props?.messageID) : undefined;
+            void this.supervisorIngress.route(sessionId, typeof messageId === 'string' ? messageId : undefined,
+                () => this.handleClassifiedServerEvent(type, props, source, payload.length));
+            return;
+        }
+        this.handleClassifiedServerEvent(type, props, source, payload.length);
+    }
+
+    private handleClassifiedServerEvent(type: string, props: any, source: EventSource, payloadLength: number): void {
         if (source === 'sse') {
             const sessionId = this.getSessionIdFromEvent(type, props);
             if (sessionId) {
@@ -5423,7 +5452,7 @@ export class OpenCodeClient {
             }
         }
         if (source === 'sse' && this.shouldLogAssistantSse(type, props)) {
-            const diagnostic = this.assistantSseDiagnostics.summarize(type, props, payload.length);
+            const diagnostic = this.assistantSseDiagnostics.summarize(type, props, payloadLength);
             if (diagnostic) {
                 OpenCodeClient.outputChannel.appendLine(diagnostic);
             }
@@ -6883,6 +6912,7 @@ export class OpenCodeClient {
         await this.ensureServer();
         const messages = await this.requestJson<any[]>( 'GET', `/session/${sessionId}/message`);
         const info = await this.requestJson<any>('GET', `/session/${sessionId}`);
+        await this.supervisorExperiment?.prepareHistory(sessionId, messages);
         return { session: info, messages };
     }
 
@@ -6891,6 +6921,7 @@ export class OpenCodeClient {
         const safeLimit = Math.max(1, Math.floor(Number.isFinite(limit) ? limit : 200));
         const messages = await this.requestJson<any[]>('GET', `/session/${sessionId}/message?limit=${safeLimit}`);
         const info = await this.requestJson<any>('GET', `/session/${sessionId}`);
+        await this.supervisorExperiment?.prepareHistory(sessionId, messages);
         return { session: info, messages };
     }
 

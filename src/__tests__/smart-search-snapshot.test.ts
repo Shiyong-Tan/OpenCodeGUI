@@ -14,7 +14,8 @@ const serviceSource = fs.readFileSync(path.join(process.cwd(), 'src', 'search', 
 function extractMethod(marker: string, ownerSource = source): string {
     const start = ownerSource.indexOf(marker);
     expect(start).toBeGreaterThanOrEqual(0);
-    const bodyStart = ownerSource.indexOf(' {\n', start);
+    const bodyOffset = ownerSource.slice(start).search(/ \{\r?\n/);
+    const bodyStart = bodyOffset < 0 ? -1 : start + bodyOffset;
     expect(bodyStart).toBeGreaterThanOrEqual(0);
     const brace = bodyStart + 1;
     let depth = 0;

@@ -49,3 +49,23 @@ production builds pass. The existing unchanged rendering bundle is 81,624 bytes,
 above the repository's 75 KiB gate; check:webview fails and its limit is unchanged.
 The duplicate configuration contribution discovered during compilation was merged
 into the existing configuration object, preserving existing setting declarations.
+
+## Classification implementation checkpoint
+
+Trusted catalog lookup is now wired before realtime mapping and remote-history
+formatting. Focused tests preserve a real assistant reply and identical user text
+while removing only the internal notification record. Failed trust lookup blocks
+the owning ingress lane and reports unavailable supervision; it never downgrades
+unverified text into user input. These are automated boundary tests, not GUI E2E.
+
+Remaining lifecycle work must coordinate with the existing ChatEventActorRouter and
+TurnFinalizationCoordinator: the old snapshot/finalization must finish before the
+client starts another generation. A notification submission must not call startTurn.
+Webview setBackendInFlight intentionally refuses terminal generations; starting a
+new round must use its lifecycle owner, with persisted source/timing metadata.
+No temporary bypass of those terminal guards is implemented here.
+
+Actual isolated VS Code launch is currently blocked by the installed application's
+vscode-updating mutex. After 31 seconds it exits with code 1 before workbench load.
+No UI acceptance or Phase 4 completion is claimed; manual update completion was
+requested. No existing VS Code window or updater process was modified.

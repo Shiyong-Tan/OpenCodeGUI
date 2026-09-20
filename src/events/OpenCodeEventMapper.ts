@@ -19,6 +19,10 @@ export function mapServerEventToChatEvents(
         const events: ChatEvent[] = [];
         const normalized = host.normalizeEvent(type, props, source);
         const sessionId = normalized.sessionId;
+        // Exact trusted identity only. Do not mark its real assistant descendants hidden.
+        const supervisorMessageId = props?.info?.id || props?.part?.messageID || props?.messageID;
+        if (sessionId && typeof supervisorMessageId === 'string'
+            && host.getTrustedSupervisorNotification?.(sessionId, supervisorMessageId)) return events;
         let appendFollowup: any;
         let appendFollowupTransition = false;
         if (source === 'sse' && type === 'message.updated' && props?.info?.role === 'assistant' && sessionId) {

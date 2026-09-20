@@ -14,6 +14,11 @@ export class SupervisorNotificationCatalog {
         this.directory = join(dirname(descriptorPath), 'identities');
     }
 
+    peek(sessionId: string, messageId: string): Readonly<NotificationIdentity> | undefined {
+        const known = this.known.get(messageId);
+        return known?.parentSessionId === sessionId ? known : undefined;
+    }
+
     async lookup(sessionId: string, messageId: string): Promise<Readonly<NotificationIdentity> | undefined> {
         if (!/^ses_[A-Za-z0-9_-]{1,176}$/.test(sessionId) || !/^msg_[A-Za-z0-9_-]{1,176}$/.test(messageId)) return undefined;
         const cached = this.known.get(messageId);

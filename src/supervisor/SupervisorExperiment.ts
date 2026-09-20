@@ -35,9 +35,9 @@ export class SupervisorExperiment {
                 throw new Error('Isolated OpenCode version mismatch');
             }
             if (this.disposed) throw new Error('Supervisor development connection disposed');
-            this.connection = loaded;
-            this.reader ??= new SupervisorReader(loaded, this.fetcher);
             this.catalog ??= new SupervisorNotificationCatalog(this.descriptorPath, loaded.isolationId);
+            this.reader ??= new SupervisorReader(loaded, this.fetcher);
+            this.connection = loaded;
         })();
         try { await this.connecting; } finally { this.connecting = undefined; }
     }
@@ -54,6 +54,21 @@ export class SupervisorExperiment {
 
     async read(parentSessionId: string): Promise<SupervisorReadResult> {
         return this.reader?.read(parentSessionId) ?? { status: 'unavailable', reason: 'read_failed' };
+    }
+
+    knownNotification(sessionId: string, messageId: string) {
+        return this.disposed ? undefined : this.catalog?.peek(sessionId, messageId);
+    }
+
+    async prepareHistory(sessionId: string, messages: unknown[]): Promise<void> {
+        for (const message of messages) {
+            if (!message || typeof message !== 'object') continue;
+            const info = (message as Record<string, unknown>).info;
+            if (!info || typeof info !== 'object') continue;
+            const record = info as Record<string, unknown>;
+            const id = record.role === 'user' ? record.id : record.parentID;
+            if (typeof id === 'string') await this.lookupNotification(sessionId, id);
+        }
     }
 
     async lookupNotification(sessionId: string, messageId: string) {

@@ -61,3 +61,14 @@ describe('OpenCodeEventMapper', () => {
     expect(calls).toEqual(['normalized-log', 'status-detail', 'idle-store', 'idle-log', 'idle-final:session-a']);
   });
 });
+
+test.each(['sse', 'resync'] as const)('trusted internal message is intercepted before append/final/text logic (%s)', source => {
+  const host = {
+    normalizeEvent: () => ({ sessionId: 'ses_A', lane: 'main' }),
+    getTrustedSupervisorNotification: (session: string, id: string) => session === 'ses_A' && id === 'msg_notice' ? {} : undefined,
+    logUiDebug: jest.fn(),
+  };
+  expect(mapServerEventToChatEvents(host, 'message.updated', { info: { id: 'msg_notice', role: 'user', sessionID: 'ses_A' } }, source)).toEqual([]);
+  expect(mapServerEventToChatEvents(host, 'message.part.updated', { part: { messageID: 'msg_notice', type: 'text', text: 'arbitrary notification text' } }, source)).toEqual([]);
+  expect(host.logUiDebug).not.toHaveBeenCalled();
+});
