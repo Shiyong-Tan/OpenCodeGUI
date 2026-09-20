@@ -1,3 +1,4 @@
+import { SupervisorExperiment } from './supervisor/SupervisorExperiment';
 import * as https from 'https';
 import * as path from 'path';
 import * as crypto from 'crypto';
@@ -930,7 +931,12 @@ export class OpenCodeClient {
         }
     }
 
-    constructor() {
+    private readonly supervisorExperiment?: SupervisorExperiment;
+
+    constructor(options?: { supervisorDevelopment?: boolean; supervisorDescriptorPath?: string }) {
+        if (options?.supervisorDevelopment && vscode.workspace.getConfiguration('opencode').get<boolean>('experimentalSupervisor', false)) {
+            this.supervisorExperiment = new SupervisorExperiment(options.supervisorDescriptorPath || process.env.OPENCODE_GUI_SUPERVISOR_DESCRIPTOR || '');
+        }
         this.modelQuotaService = new ModelQuotaService({ log: (message) => this.logUiDebug(message) });
         this.commandResolver = new OpenCodeCommandResolver((message) => OpenCodeClient.outputChannel.appendLine(message));
         this.processRunner = new OpenCodeProcessRunner({
@@ -993,11 +999,12 @@ export class OpenCodeClient {
         this.workspaceRoot = newRoot;
         this.gitUndo = new GitUndoEngine(this.workspaceRoot, (message) => this.logUiDebug(message));
         this.gitUndoAvailable = false;
+        this.supervisorExperiment?.dispose();
         this.serverController.resetForWorkspaceChange();
     }
 
     public getServerPid(): number | undefined {
-        return this.serverController.getPid();
+        return this.supervisorExperiment ? undefined : this.serverController.getPid();
     }
 
 
@@ -1006,8 +1013,11 @@ export class OpenCodeClient {
     }
 
     public async ensureServer(): Promise<void> {
-        await this.serverController.ensure(this.workspaceRoot);
-        await this.serverController.waitUntilReady();
+        if (this.supervisorExperiment) await this.supervisorExperiment.ensure(this.workspaceRoot);
+        else {
+            await this.serverController.ensure(this.workspaceRoot);
+            await this.serverController.waitUntilReady();
+        }
         if (!this.eventStream.isActive()) {
             this.connectEventStream();
         }
@@ -4937,6 +4947,10 @@ export class OpenCodeClient {
     }
 
     private async getServerConn(forceRefresh = false): Promise<ServerConnection> {
+        if (this.supervisorExperiment) {
+            await this.supervisorExperiment.ensure(this.workspaceRoot);
+            return this.supervisorExperiment.serverConnection();
+        }
         return this.serverLocks.getConnection(forceRefresh);
     }
 
@@ -4953,6 +4967,11 @@ export class OpenCodeClient {
     }
 
     public async shutdownServer(): Promise<void> {
+        if (this.supervisorExperiment) {
+            this.eventStream?.stop();
+            this.supervisorExperiment.dispose();
+            return;
+        }
         await this.serverController.shutdown();
     }
 

@@ -38,6 +38,17 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "configuration": {
+      "title": "OpenCode isolated experiments",
+      "properties": {
+        "opencode.experimentalSupervisor": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "Development extension only: connect to the explicit isolated supervisor descriptor. Requires window reload. No production fallback."
+        }
+      }
+    },
     "viewsContainers": {
       "activitybar": [
         {

@@ -1,6 +1,6 @@
-# Supervisor Phase 4 — Extension read boundary (not wired yet)
+# Supervisor Phase 4 — Extension read boundary (development transport wired)
 
-This module is experimental and is not activated by the normal GUI path. It does
+This module is experimental. The normal GUI path leaves it disabled. It does
 not create, cancel, retry or recover tasks. Plugin Registry/Executions/Notifications
 remain the canonical owners. `SupervisorReader` validates and caches a projection;
 credentials stay in `IsolatedSupervisorConnection` and must never enter Webview

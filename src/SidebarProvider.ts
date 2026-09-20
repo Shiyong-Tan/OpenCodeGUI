@@ -4610,7 +4610,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         private readonly _extensionUri: vscode.Uri,
         private readonly diffProvider: OpenCodeDiffProvider
     ) {
-        this.client = new OpenCodeClient();
+        this.client = new OpenCodeClient({ supervisorDevelopment: this._context.extensionMode === vscode.ExtensionMode.Development });
         this.diffFileViewer = new DiffFileViewer({
             resolveRepo: (sessionId) => this.resolveInternalRepo(sessionId),
             getHead: (repo) => this.getInternalHeadCommit(repo),

@@ -6,6 +6,7 @@ export type ServerLock = {
 };
 
 export type ServerConnection = {
+    isolatedSupervisor?: true;
     host: string;
     port: number;
     baseUrl: string;
@@ -99,7 +100,7 @@ export class OpenCodeHttpClient {
         const conn = options?.conn || await this.options.getConnection();
         try {
             const response = await this.fetchOnce(conn, reqPath, init, opName, timeoutMs);
-            if (response.status !== 401 || !retry) return response;
+            if (response.status !== 401 || !retry || conn.isolatedSupervisor) return response;
             await this.options.migrateUnauthorized(conn.lock);
             const nextConn = await this.options.getConnection(true);
             return this.fetch(reqPath, init, {
