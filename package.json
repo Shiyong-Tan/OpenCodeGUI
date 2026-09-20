@@ -38,17 +38,6 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
-    "configuration": {
-      "title": "OpenCode isolated experiments",
-      "properties": {
-        "opencode.experimentalSupervisor": {
-          "type": "boolean",
-          "default": false,
-          "scope": "window",
-          "description": "Development extension only: connect to the explicit isolated supervisor descriptor. Requires window reload. No production fallback."
-        }
-      }
-    },
     "viewsContainers": {
       "activitybar": [
         {
@@ -116,6 +105,12 @@
     "configuration": {
       "title": "OpenCode",
       "properties": {
+        "opencode.experimentalSupervisor": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "Development extension only: explicit isolated supervisor connection. Requires window reload. No production fallback."
+        },
         "opencode.autoEditorContext.enabled": {
           "type": "boolean",
           "default": true,
@@ -137,7 +132,7 @@
     "watch:all": "node scripts/watch-all.js",
     "build:webview": "node scripts/build-rendering.js",
     "watch:webview": "node scripts/build-rendering.js --watch",
-    "check:webview": "npm run build:webview && node scripts/check-rendering-bundle.js && node scripts/check-feature-bundle.js && node scripts/check-word-completion-bundle.js && node scripts/check-undo-bundle.js && node scripts/check-continuation-bundle.js",
+    "check:webview": "npm run build:webview && node scripts/check-rendering-bundle.js && node scripts/check-feature-bundle.js && node scripts/check-word-completion-bundle.js && node scripts/check-undo-bundle.js && node scripts/check-continuation-bundle.js && node scripts/check-supervisor-bundle.js",
     "check:webview:determinism": "node scripts/check-rendering-determinism.js",
     "check:webview:package": "npm run build:webview && node scripts/check-rendering-package.js",
     "check:webview:sourcemap": "node scripts/check-rendering-source-map.js",

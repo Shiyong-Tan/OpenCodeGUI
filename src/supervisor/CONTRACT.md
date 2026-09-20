@@ -37,5 +37,15 @@ It never starts or stops the externally launched service. Instance changes or
 workspace changes require reloading the isolated development window; no automatic
 takeover or production fallback. The launcher retains service shutdown ownership.
 
-Current `SupervisorReader` data is not yet wired to a Webview panel or notification
-classification. No GUI end-to-end completion is claimed at this checkpoint.
+The reader now feeds a throttled, selection-epoch-fenced read-only overlay in a
+separate Webview bundle. Unknown evidence remains unknown; disconnect marks cached
+evidence historical. Updates do not touch chat DOM or scroll state. There are no
+cancel or redispatch controls. Notification classification and follow-up lifecycle
+integration remain pending; this is not completed GUI end-to-end acceptance.
+
+Validation checkpoint (2026-09-20): 11 focused tests and compilation pass. The new
+bundle is 7,642 bytes (gzip 3,481), within its separate 12/6 KiB limits. Deterministic
+production builds pass. The existing unchanged rendering bundle is 81,624 bytes,
+above the repository's 75 KiB gate; check:webview fails and its limit is unchanged.
+The duplicate configuration contribution discovered during compilation was merged
+into the existing configuration object, preserving existing setting declarations.

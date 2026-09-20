@@ -11,7 +11,7 @@ const bundle = path.join(root, 'media', 'rendering.bundle.js');
 function buildAndHash() {
   const result = spawnSync(process.execPath, ['scripts/build-rendering.js'], { cwd: root, encoding: 'utf8' });
   if (result.status !== 0) throw new Error(result.stderr || result.stdout);
-  return crypto.createHash('sha256').update(fs.readFileSync(bundle)).digest('hex');
+  return crypto.createHash('sha256').update(fs.readFileSync(bundle)).update(fs.readFileSync(path.join(root, 'media', 'supervisor.bundle.js'))).digest('hex');
 }
 
 const first = buildAndHash();

@@ -990,6 +990,12 @@ export class OpenCodeClient {
         this.gitUndo = new GitUndoEngine(this.workspaceRoot, (message) => this.logUiDebug(message));
     }
 
+    public isSupervisorExperiment(): boolean { return Boolean(this.supervisorExperiment); }
+
+    public async readSupervisorState(sessionId: string) {
+        return this.supervisorExperiment?.read(sessionId) ?? { status: 'unavailable' as const, reason: 'read_failed' as const };
+    }
+
     public getWorkspaceRoot(): string {
         return this.workspaceRoot;
     }

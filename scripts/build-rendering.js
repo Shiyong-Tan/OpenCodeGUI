@@ -47,14 +47,21 @@ const completionOptions = {
   outfile: path.join(root, 'media', 'word-completion.bundle.js'),
 };
 
+const supervisorOptions = {
+  ...options,
+  entryPoints: [path.join(root, 'webview-src', 'supervisor', 'index.ts')],
+  outfile: path.join(root, 'media', 'supervisor.bundle.js'),
+};
+
 async function run() {
   if (watch) {
-    const [renderingContext, featureContext, undoContext, continuationContext, completionContext] = await Promise.all([
+    const [renderingContext, featureContext, undoContext, continuationContext, completionContext, supervisorContext] = await Promise.all([
       esbuild.context(options),
       esbuild.context(featureOptions),
       esbuild.context(undoOptions),
       esbuild.context(continuationOptions),
       esbuild.context(completionOptions),
+      esbuild.context(supervisorOptions),
     ]);
     await Promise.all([
       renderingContext.watch(),
@@ -62,6 +69,7 @@ async function run() {
       undoContext.watch(),
       continuationContext.watch(),
       completionContext.watch(),
+      supervisorContext.watch(),
     ]);
     console.log('Watching webview rendering, feature, word-completion, undo, and continuation seams...');
     return;
@@ -72,6 +80,7 @@ async function run() {
     fs.rmSync(`${undoOptions.outfile}.map`, { force: true });
     fs.rmSync(`${continuationOptions.outfile}.map`, { force: true });
     fs.rmSync(`${completionOptions.outfile}.map`, { force: true });
+    fs.rmSync(`${supervisorOptions.outfile}.map`, { force: true });
   }
   await Promise.all([
     esbuild.build(options),
@@ -79,6 +88,7 @@ async function run() {
     esbuild.build(undoOptions),
     esbuild.build(continuationOptions),
     esbuild.build(completionOptions),
+    esbuild.build(supervisorOptions),
   ]);
 }
 

@@ -1,3 +1,4 @@
+import { SupervisorPanelController } from './supervisor/SupervisorPanelController';
 import * as vscode from "vscode";
 import * as crypto from "crypto";
 import * as fs from "fs";
@@ -292,6 +293,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private _webviewInstanceId?: string;
     private client: OpenCodeClient;
     private currentSessionId?: string;
+    private supervisorPanel?: SupervisorPanelController;
     private userOwnedSessionIds = new Set<string>();
     private userOwnedSessionsLoaded: Promise<void>;
     private activeSubagentSessionIds = new Set<string>();
@@ -3975,6 +3977,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private startSessionSelection(targetSessionId: string): number {
+        this.supervisorPanel?.selectionChanged(targetSessionId);
         this.resetWebviewLiveness('session-switch');
         return ++this.sessionSelectionEpoch;
     }
@@ -4610,7 +4613,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         private readonly _extensionUri: vscode.Uri,
         private readonly diffProvider: OpenCodeDiffProvider
     ) {
-        this.client = new OpenCodeClient({ supervisorDevelopment: this._context.extensionMode === vscode.ExtensionMode.Development });
+        const supervisorDevelopment = typeof this._context.extensionMode === 'number'
+            && this._context.extensionMode === vscode.ExtensionMode.Development;
+        this.client = new OpenCodeClient({ supervisorDevelopment });
+        if (supervisorDevelopment && this.client.isSupervisorExperiment()) {
+            this.supervisorPanel = new SupervisorPanelController({
+                selection: () => ({ sessionId: this.currentSessionId, epoch: this.sessionSelectionEpoch }),
+                read: sessionId => this.client.readSupervisorState(sessionId),
+                publish: message => { void this._view?.webview.postMessage(message); },
+            });
+            this._context.subscriptions.push(this.supervisorPanel);
+        }
         this.diffFileViewer = new DiffFileViewer({
             resolveRepo: (sessionId) => this.resolveInternalRepo(sessionId),
             getHead: (repo) => this.getInternalHeadCommit(repo),
@@ -7018,6 +7031,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const styleVSCodeUri = webview.asWebviewUri(
             vscode.Uri.joinPath(this._extensionUri, "media", "vscode.css")
         );
+        const supervisorScriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, "media", "supervisor.bundle.js"));
         const scriptUri = webview.asWebviewUri(
             vscode.Uri.joinPath(this._extensionUri, "media", "main.js")
         );
@@ -7197,6 +7211,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 <script src="${undoScriptUri}"></script>
                 <script src="${continuationScriptUri}"></script>
                 <script src="${scriptUri}"></script>
+                ${this.supervisorPanel ? `<script src="${supervisorScriptUri}"></script>` : ''}
             </body>
             </html>`;
     }
