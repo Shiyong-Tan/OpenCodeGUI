@@ -40,8 +40,9 @@ takeover or production fallback. The launcher retains service shutdown ownership
 The reader now feeds a throttled, selection-epoch-fenced read-only overlay in a
 separate Webview bundle. Unknown evidence remains unknown; disconnect marks cached
 evidence historical. Updates do not touch chat DOM or scroll state. There are no
-cancel or redispatch controls. Notification classification and follow-up lifecycle
-integration remain pending; this is not completed GUI end-to-end acceptance.
+cancel or redispatch controls. Trusted notification classification is wired as
+described below; independent follow-up lifecycle integration remains pending.
+This is not completed GUI end-to-end acceptance.
 
 Validation checkpoint (2026-09-20): 11 focused tests and compilation pass. The new
 bundle is 7,642 bytes (gzip 3,481), within its separate 12/6 KiB limits. Deterministic
@@ -69,3 +70,11 @@ Actual isolated VS Code launch is currently blocked by the installed application
 vscode-updating mutex. After 31 seconds it exits with code 1 before workbench load.
 No UI acceptance or Phase 4 completion is claimed; manual update completion was
 requested. No existing VS Code window or updater process was modified.
+
+Final automated checkpoint for classification commit b8b7a03: compile passed;
+the standard npm test -- --runInBand command exited 0 with 187 suites / 1,455 tests
+passing, including snapshot/undo/restore/changelist/virtualization regressions.
+Existing ts-jest and process-listener warnings remain visible. The unchanged
+rendering-bundle size failure remains unresolved. Plugin runtime 3d1a704 and adapter
+probe e4514e6 were used with GUI b8b7a03 in a fresh real-service Node adapter probe;
+it passed and the service exited. That probe did not load an Extension Host/Webview.
