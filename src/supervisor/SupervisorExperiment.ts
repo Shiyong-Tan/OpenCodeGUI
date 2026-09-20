@@ -1,3 +1,4 @@
+import { SupervisorNotificationCatalog } from './SupervisorNotificationCatalog';
 import type { ServerConnection } from '../transport/OpenCodeHttpClient';
 import { loadIsolatedSupervisorConnection, type IsolatedSupervisorConnection } from './IsolatedSupervisorConnection';
 import { SupervisorReader, type SupervisorReadResult } from './SupervisorReader';
@@ -6,6 +7,7 @@ import { SupervisorReader, type SupervisorReadResult } from './SupervisorReader'
 export class SupervisorExperiment {
     private connection?: IsolatedSupervisorConnection;
     private reader?: SupervisorReader;
+    private catalog?: SupervisorNotificationCatalog;
     private connecting?: Promise<void>;
     private disposed = false;
     constructor(private readonly descriptorPath: string,
@@ -35,6 +37,7 @@ export class SupervisorExperiment {
             if (this.disposed) throw new Error('Supervisor development connection disposed');
             this.connection = loaded;
             this.reader ??= new SupervisorReader(loaded, this.fetcher);
+            this.catalog ??= new SupervisorNotificationCatalog(this.descriptorPath, loaded.isolationId);
         })();
         try { await this.connecting; } finally { this.connecting = undefined; }
     }
@@ -53,9 +56,15 @@ export class SupervisorExperiment {
         return this.reader?.read(parentSessionId) ?? { status: 'unavailable', reason: 'read_failed' };
     }
 
+    async lookupNotification(sessionId: string, messageId: string) {
+        if (!this.catalog || this.disposed) throw new Error('Trusted supervisor notification classification unavailable');
+        return this.catalog.lookup(sessionId, messageId);
+    }
+
     dispose(): void {
         this.disposed = true;
         this.reader?.dispose();
         this.connection = undefined;
+        this.catalog = undefined;
     }
 }

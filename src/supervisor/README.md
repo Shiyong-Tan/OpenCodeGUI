@@ -23,3 +23,18 @@ must remain unchanged. No such lifecycle change is part of this module commit.
 
 Tests of this adapter use synthetic payloads unless explicitly marked as a real
 isolated plugin probe. No GUI end-to-end acceptance is claimed by module tests.
+
+## Durable notification catalog
+
+SupervisorNotificationCatalog reads exact message IDs from the launcher's identity
+directory after the experiment validates the connection. It does not classify by
+text, synthetic flags, or parent-ID resemblance. Missing individual records mean
+unclassified; an unavailable directory, corrupt/foreign/oversized record or redirect
+fails explicitly. Immutable positive entries are bounded at 1,024; misses are never
+cached. Historical instance IDs remain usable within the same validated isolation.
+Seven real temporary-file tests cover reload, late registration, foreign session,
+same-text user IDs, corrupt evidence, size/path limits and missing directory.
+
+This is the shared read boundary for future realtime/history wiring. At this
+checkpoint the event mapper and history formatter do not call it yet, and the
+independent follow-up lifecycle contract remains unimplemented.
