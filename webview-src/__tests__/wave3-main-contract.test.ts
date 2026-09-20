@@ -1203,7 +1203,7 @@ describe('B4S-E4 named owner mutation rejection', () => {
     ['duplicate delegation', (s: string) => s.replace('handlePrimarySendClick();', 'handlePrimarySendClick();\n        handlePrimarySendClick();'), 'delegation:primary'],
     ['removed delegation', (s: string) => s.replace('handlePrimarySendClick();', ''), 'delegation:primary'],
     ['passive option', (s: string) => s.replace(
-      "chatContainer.addEventListener('scroll', () => {\n            handleChatContainerScroll();\n        }, { passive: true });",
+      /chatContainer\.addEventListener\('scroll', \(\) => \{\r?\n            handleChatContainerScroll\(\);\r?\n        \}, \{ passive: true \}\);/,
       "chatContainer.addEventListener('scroll', () => {\n            handleChatContainerScroll();\n        });",
     ), 'listener:passive'],
     ['side-effect order', (s: string) => s.replace('if (!autoScrollPinnedToBottom) captureChatWindowAnchor();', 'captureChatWindowAnchor();\n            if (!autoScrollPinnedToBottom) {}'), 'body:scroll'],
