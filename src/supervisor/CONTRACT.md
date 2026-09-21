@@ -66,10 +66,21 @@ Webview setBackendInFlight intentionally refuses terminal generations; starting 
 new round must use its lifecycle owner, with persisted source/timing metadata.
 No temporary bypass of those terminal guards is implemented here.
 
-Actual isolated VS Code launch is currently blocked by the installed application's
-vscode-updating mutex. After 31 seconds it exits with code 1 before workbench load.
-No UI acceptance or Phase 4 completion is claimed; manual update completion was
-requested. No existing VS Code window or updater process was modified.
+The installed VS Code launch failed on its vscode-updating mutex; that evidence
+is retained. On 2026-09-21 an official standalone ZIP of VS Code 1.137.0, with a
+fresh isolated profile/extensions/home and explicit development extension, entered
+the real workbench and loaded this Webview. Ordinary history-list clicks selected
+parent A, B, then A; the panel showed A's task only in A and the same plugin instance
+throughout. The window exited normally and the isolated service was cleaned up.
+No existing VS Code window or updater process was modified.
+
+This actual no-model UI checkpoint uses GUI 3f2b72e and plugin runtime 3d1a704.
+Evidence and screenshot: OpenCodeTaskSupervisor/docs/evidence/
+phase4-actual-webview-no-model.{json,png}. Registration/disposal used a documented
+test hook; no model requests or OAuth reads occurred. The first attempt did not
+select parent A and failed as expected; its evidence is retained separately.
+This proves the read-only Extension-to-Webview chain, not independent follow-up
+lifecycle or full A–H acceptance. Phase 4 remains incomplete.
 
 Final automated checkpoint for classification commit b8b7a03: compile passed;
 the standard npm test -- --runInBand command exited 0 with 187 suites / 1,455 tests
