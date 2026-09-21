@@ -137,3 +137,42 @@ describe('production chat event actor router', () => {
         expect(router.getSnapshot('A')?.turn).toBe(before);
     });
 });
+
+describe('internal operation boundary for independent follow-up turns', () => {
+    test('waits for preceding final effects, preserves old projection and leaves other sessions independent', async () => {
+        const order: string[] = [];
+        let release!: () => void;
+        const pendingSnapshot = new Promise<void>(resolve => { release = resolve; });
+        const router = new ChatEventActorRouter({ handle: async event => {
+            if (event.sessionId === 'A' && event.type === 'turnResolved') {
+                order.push('old-final-start'); await pendingSnapshot; order.push('old-snapshot-saved');
+            }
+        } });
+        await router.route({ type: 'turnInFlight', sessionId: 'A', inFlight: true });
+        await router.route({ type: 'assistantMessageMeta', sessionId: 'A', assistantMsgId: 'msg_old' });
+        const final = router.route({ type: 'turnResolved', sessionId: 'A', assistantMsgId: 'msg_old', lastText: 'old final' });
+        let prior: unknown;
+        const next = router.runSerialized('A', () => {
+            prior = router.getSnapshot('A')?.turn;
+            order.push('new-turn-operation');
+        });
+        await router.runSerialized('B', () => { order.push('B'); });
+        expect(order).toEqual(['old-final-start', 'B']);
+        release(); await Promise.all([final, next]);
+        expect(order).toEqual(['old-final-start', 'B', 'old-snapshot-saved', 'new-turn-operation']);
+        expect(router.getSnapshot('A')?.turn).toBe(prior);
+        expect(router.getHandledCount('A')).toBe(3);
+        router.dispose();
+    });
+
+    test('operation errors reject the caller without poisoning the queue; disposed callbacks cannot run', async () => {
+        const router = new ChatEventActorRouter({ handle: () => undefined });
+        await expect(router.runSerialized('A', () => { throw new Error('start failed'); })).rejects.toThrow('start failed');
+        await router.route({ type: 'text', sessionId: 'A', text: 'later' });
+        expect(router.getHandledCount('A')).toBe(1);
+        router.dispose();
+        const operation = jest.fn();
+        await expect(router.runSerialized('A', operation)).rejects.toThrow('disposed');
+        expect(operation).not.toHaveBeenCalled();
+    });
+});

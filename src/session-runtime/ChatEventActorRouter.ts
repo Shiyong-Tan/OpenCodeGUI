@@ -95,6 +95,12 @@ export class ChatEventActorRouter {
         });
     }
 
+    /** Shares the existing session effect queue; does not create another turn owner. */
+    public runSerialized<T>(sessionId: string, operation: () => Promise<T> | T): Promise<T> {
+        if (this.disposed) return Promise.reject(new Error('Chat event router disposed'));
+        return this.registry.getOrCreate(sessionId).runSerialized(operation);
+    }
+
     public getHandledCount(sessionId: string): number {
         return this.registry.get(sessionId)?.getSnapshot().handledCount || 0;
     }

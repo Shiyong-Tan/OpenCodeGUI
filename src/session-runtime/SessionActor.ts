@@ -75,11 +75,22 @@ export class SessionActor<
     }
 
     public dispatch(event: TEvent): Promise<SessionActorDispatchResult> {
-        const operation = this.queue.then(() => this.apply(event));
-        this.queue = operation.then(
-            () => undefined,
-            () => undefined,
-        );
+        return this.enqueue(() => this.apply(event));
+    }
+
+    /** Run an internal operation after preceding effects without inventing an event
+     * or changing the actor's lifecycle/sequence. Never await re-entry into this queue.
+     */
+    public runSerialized<T>(operation: () => Promise<T> | T): Promise<T> {
+        return this.enqueue(async () => {
+            if (this.disposed) throw new Error('Session actor disposed');
+            return operation();
+        });
+    }
+
+    private enqueue<T>(apply: () => Promise<T>): Promise<T> {
+        const operation = this.queue.then(apply);
+        this.queue = operation.then(() => undefined, () => undefined);
         return operation;
     }
 

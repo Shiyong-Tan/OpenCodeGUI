@@ -78,3 +78,14 @@ Existing ts-jest and process-listener warnings remain visible. The unchanged
 rendering-bundle size failure remains unresolved. Plugin runtime 3d1a704 and adapter
 probe e4514e6 were used with GUI b8b7a03 in a fresh real-service Node adapter probe;
 it passed and the service exited. That probe did not load an Extension Host/Webview.
+
+## Existing actor queue prerequisite (2026-09-21)
+
+SessionActor.runSerialized / ChatEventActorRouter.runSerialized now allow an
+internal follow-up operation to wait behind prior finalization effects using the
+same existing queue. Such an operation does not advance event sequence, mutate
+the turn reducer or create a user message. It must not await re-entry into its own
+queue. Errors reject its caller while later events can continue; disposal fences
+callbacks. Fifteen actor/router tests and TypeScript checking pass, including a
+pending old snapshot with independent session B progress. This prerequisite alone
+does not implement follow-up creation, durable timing, rendering or GUI acceptance.
