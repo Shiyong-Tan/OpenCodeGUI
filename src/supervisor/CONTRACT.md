@@ -100,3 +100,24 @@ queue. Errors reject its caller while later events can continue; disposal fences
 callbacks. Fifteen actor/router tests and TypeScript checking pass, including a
 pending old snapshot with independent session B progress. This prerequisite alone
 does not implement follow-up creation, durable timing, rendering or GUI acceptance.
+
+## Durable provenance owner (2026-09-22, not yet connected to live lifecycle)
+
+SupervisorRoundStore owns only notification/assistant/execution associations and
+first-observed activity timing. Existing session actors remain lifecycle owners;
+all mutations must run in their queue after previous finalization effects. It
+persists before publishing new provenance, preserves ended records, associates
+multiple notices with one explicit execution, and records an already-active
+parent as an existing-turn association rather than creating a new generation.
+
+Nine focused tests cover deduplication, late events, concurrent parent isolation,
+reload equivalence, persistence failure, conflicting/foreign records, and an
+unfinished ledger with a terminal host. The last case is unresolved, not permission
+to invent or resume a generation; live history reconciliation must resolve it.
+These are storage-contract tests using a controlled in-memory storage implementation,
+not filesystem durability or GUI acceptance. Live activity classification, storage
+binding, Webview round creation/labels, queue timing and full A–H remain unfinished.
+
+Actual no-model GUI evidence mapping: supervisor probe commit 51d86ec, GUI runtime
+3f2b72e (documentation 39a01b3), plugin runtime 3d1a704. No model requests have been
+made in Phase 4; the authorized budget remains 0/24.
