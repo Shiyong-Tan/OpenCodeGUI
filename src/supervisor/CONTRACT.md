@@ -121,3 +121,16 @@ binding, Webview round creation/labels, queue timing and full A–H remain unfin
 Actual no-model GUI evidence mapping: supervisor probe commit 51d86ec, GUI runtime
 3f2b72e (documentation 39a01b3), plugin runtime 3d1a704. No model requests have been
 made in Phase 4; the authorized budget remains 0/24.
+
+## Actual bridge-disconnection checkpoint (2026-09-22)
+
+Supervisor probe aacd9e8 extends the actual GUI check while the window stays open:
+a launcher-created no-model hook disposes the real plugin bridge, and the Webview
+must retain task identity with an explicit historical/unknown label and no live
+label. Fresh lab readonly-probe-qUos4P passed; the window exited with code 0, the
+descriptor disappeared and the service exited. JSON and screenshot are in
+OpenCodeTaskSupervisor/docs/evidence/phase4-actual-webview-disconnection.{json,png}.
+This covers F's bridge-disconnection path and read-only A/B selection, not model
+A–C, full lifecycle D/E, ordinary-mode G or long-history/image H. No Phase 4
+completion is claimed. Provenance source module d16d361 remains unconnected;
+the runtime Webview bundle for this check is the previously compiled 3f2b72e.
