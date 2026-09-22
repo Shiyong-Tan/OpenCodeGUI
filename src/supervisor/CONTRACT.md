@@ -134,3 +134,17 @@ This covers F's bridge-disconnection path and read-only A/B selection, not model
 A–C, full lifecycle D/E, ordinary-mode G or long-history/image H. No Phase 4
 completion is claimed. Provenance source module d16d361 remains unconnected;
 the runtime Webview bundle for this check is the previously compiled 3f2b72e.
+
+## Assistant activity evidence prerequisite (2026-09-22)
+
+SupervisorAssistantObserver correlates assistant parentID with the exact trusted
+notification lookup. Metadata, status polls and empty parts produce no activity;
+nonempty text/reasoning and tool-state parts do. Full-part duplicates are hashed
+and suppressed. Delta events have no stable event ID, so no per-delta deduplication
+is claimed; the round owner must deduplicate round creation. Cross-session or
+reassigned identities fail closed, disposal fences pending lookups, and caches
+have fixed capacities. It does not modify progress clocks or lifecycle state.
+
+Seven observer tests plus nine round-store tests pass. These are unit contracts,
+not live observer wiring or GUI round acceptance. The observer and provenance
+store remain prerequisites; current terminal guards have not been bypassed.
