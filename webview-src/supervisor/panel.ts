@@ -26,6 +26,7 @@ export function supervisorLines(view: SupervisorView, stale = false): string[] {
         }
         for (const n of view.notifications.filter(item => item.taskId === task.taskId && item.attemptId === task.attemptId)) {
             lines.push(`通知 ${n.notificationId}：${states[n.delivery] ?? '未知'} / ${states[n.progress] ?? '未知'}`);
+            lines.push('通知排队 ' + age(n.queueAgeMs) + '；提交后等待首次观测活动 ' + age(n.activityWaitAgeMs));
             if (n.escalated) lines.push('需要用户检查：父未完成规定的结果处理');
         }
     }

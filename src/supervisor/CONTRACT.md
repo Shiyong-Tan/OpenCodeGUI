@@ -148,3 +148,52 @@ have fixed capacities. It does not modify progress clocks or lifecycle state.
 Seven observer tests plus nine round-store tests pass. These are unit contracts,
 not live observer wiring or GUI round acceptance. The observer and provenance
 store remain prerequisites; current terminal guards have not been bypassed.
+
+## Live round wiring checkpoint (2026-09-22, model GUI validation pending)
+
+The classified SSE lane now captures observation time before asynchronous lookup,
+correlates real assistant activity and enters the existing session actor queue.
+SupervisorRoundCoordinator connects provenance to the isolated development host's
+Memento storage (keys include isolation and session). It persists before calling
+the existing startTurn boundary, never registers an internal display-user/append,
+and attaches accepted final successor IDs before snapshot projection. Retired
+source metadata is fenced as well as content events.
+
+Webview supervisorRoundStarted uses the existing lifecycle controller and shared
+start-presentation reset; normal prompts retain their existing behavior. The
+canonical message renderer shows a source label from message metadata. Duplicate
+starts and finalized records cannot create a generation. Existing snapshots are
+not rewritten to hide notifications. Queue wait and submission-to-first-observed
+activity are separately projected by the plugin; neither is model execution time.
+
+Compile and the fixed-source full suite passed: 191 suites / 1,482 tests. Plugin
+queue timing tests total 72 passing. First broad regression exposed two source
+harnesses needing the shared reset function; their existing behavioral assertions
+were retained. One in-flight run also saw mixed test/source versions during edits;
+the subsequent fixed-source run passed. Rendering remains over its unchanged
+75 KiB cap (now includes the provenance label); no threshold was increased.
+
+Active reload with an unfinished durable record still requires authoritative
+history reconciliation; it remains fail-closed rather than reopening a terminal
+host. Model GUI A-C, complete D/E, ordinary mode G and long-history H remain pending.
+No claim of Phase 4 completion. OAuth was read-only checked for validity under the
+current authorization; no credential was displayed/changed and requests remain 0/24.
+
+## Actual model GUI checkpoint (2026-09-22)
+
+The live wiring above passed actual isolated VS Code 1.137.0 / OpenCode 1.18.29
+model runs B and C, using openai/gpt-5.5 and 18/24 cumulative requests. B proved
+child completion during a busy parent, queued delivery and model-selected result
+reading/follow-up. C proved managed-stop evidence/artifact reading and the explicit
+stop_and_review decision. Both displayed one independent labelled assistant and no
+internal user/append bubble, preserving the previous final identity and text.
+C also passed real history-list switch-away/back and workbench reload, comparing
+all visible canonical IDs, order, labels and text. Both owned windows/services exited.
+Evidence lives in OpenCodeTaskSupervisor/.lab/gui-model-PsQiHG and gui-model-yayr7s.
+
+Active history recovery now reuses the existing busy-session recovery boundary,
+restores the durable execution ID and first-observed start, and resumes the same
+partial assistant. It does not rewrite snapshots or invent activity when idle.
+Focused recovery validation passed 11 suites / 66 tests plus compilation. Actual
+active-reload, ordinary-mode and long-history checks remain pending; Phase 4 is
+not yet complete. Earlier unconnected/0-request checkpoints above are historical.

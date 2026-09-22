@@ -13578,6 +13578,32 @@ function shouldHideDcpUiMessage(message) {
         panelBackdrop.classList.add('hidden');
     }
 
+function resetTurnPresentationForStart(session, preservePriorMessage = false) {
+    session.currentTurnAssistantMsgId = null;
+    session.currentTurnAssistantKey = null;
+    // A completed turn can receive late metadata that restores its canonical
+    // assistant as the transient thinking alias. A new prompt always owns a
+    // fresh temporary assistant; never reuse that stale alias across turns.
+    const staleThinkingAssistant = session.thinkingId ? session.messagesById.get(session.thinkingId) : null;
+    if (!preservePriorMessage && staleThinkingAssistant?.meta) {
+        staleThinkingAssistant.meta.isThinking = false;
+        staleThinkingAssistant.meta.statusText = null;
+    }
+    session.thinkingId = null;
+    session.earlyFinalAssistantId = null;
+    session.pendingAssistantUpgrade = null;
+    session.awaitingFinalMapBind = false;
+    session.streamMode = null;
+    turnLifecycleController.start(session);
+    if (session.seenDiffKeys instanceof Set) {
+        session.seenDiffKeys.clear();
+    }
+    if (session.assistantUpgradeSeen instanceof Set) {
+        session.assistantUpgradeSeen.clear();
+    }
+
+}
+
 function applyPromptToSession(sessionId, payload) {
     const session = getSessionState(sessionId, true);
     // A normal prompt starts a new turn and cannot be owned by an append
@@ -13610,28 +13636,7 @@ function applyPromptToSession(sessionId, payload) {
         });
     }
 
-    session.currentTurnAssistantMsgId = null;
-    session.currentTurnAssistantKey = null;
-    // A completed turn can receive late metadata that restores its canonical
-    // assistant as the transient thinking alias. A new prompt always owns a
-    // fresh temporary assistant; never reuse that stale alias across turns.
-    const staleThinkingAssistant = session.thinkingId ? session.messagesById.get(session.thinkingId) : null;
-    if (staleThinkingAssistant?.meta) {
-        staleThinkingAssistant.meta.isThinking = false;
-        staleThinkingAssistant.meta.statusText = null;
-    }
-    session.thinkingId = null;
-    session.earlyFinalAssistantId = null;
-    session.pendingAssistantUpgrade = null;
-    session.awaitingFinalMapBind = false;
-    session.streamMode = null;
-    turnLifecycleController.start(session);
-    if (session.seenDiffKeys instanceof Set) {
-        session.seenDiffKeys.clear();
-    }
-    if (session.assistantUpgradeSeen instanceof Set) {
-        session.assistantUpgradeSeen.clear();
-    }
+    resetTurnPresentationForStart(session);
 
         if (!session.thinkingId) {
             const tempId = createTempAssistantId();
@@ -16045,6 +16050,29 @@ function appendMessageImages(parentEl, message) {
                 syncAppendSnapshotMetadata(sessionId, 'appendUserMessage');
                 vscode.postMessage({ type: 'ui-debug', payload: ['[WV][APPEND_ROUTE]', 'appendUserMessage', 'sessionId', sessionId, 'activeSessionId', activeSessionId || 'null', 'rootUserMsgId', message.rootUserMsgId || 'null', 'appendUserMsgId', message.appendUserMsgId || 'null'] });
                 renderIfActive(sessionId, 'appendUserMessage', { scroll: true, scrollFallback: scrollToBottom });
+                break;
+            }
+            case 'supervisorRoundStarted':
+            case 'supervisorRoundResumed':
+            case 'supervisorRoundSources': {
+                const sessionId = getEventSessionId(message, message.type);
+                const api = window.__ocSupervisorRounds;
+                if (!sessionId || !api) break;
+                const host = {
+                    session: id => getSessionState(id, true),
+                    reset: (id, session) => {
+                        clearTransientAppendFollowupIdentity(id, session, 'supervisor-new-round');
+                        resetTurnPresentationForStart(session, true);
+                    },
+                    upsert: (session, record) => upsertMessage(session, record),
+                };
+                const changed = message.type === 'supervisorRoundStarted'
+                    ? api.start(host, sessionId, message.round) : message.type === 'supervisorRoundResumed'
+                        ? api.resume(host, sessionId, message.round, message.assistantMessageId) : api.update(host, sessionId, message.round);
+                if (changed) {
+                    updateSendGate();
+                    renderIfActive(sessionId, message.type, { scroll: false });
+                }
                 break;
             }
             case 'turnInFlight': {

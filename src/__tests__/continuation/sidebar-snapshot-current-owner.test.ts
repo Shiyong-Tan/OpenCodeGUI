@@ -296,6 +296,25 @@ describe('SidebarProvider Task 8 snapshot/reload current-owner semantics', () =>
         expect(provider.markWebviewActiveTurnUpdated).toHaveBeenCalledWith('ses_task8', 'init:status-busy');
     });
 
+    it('recovers a trusted supervisor parent without manufacturing a user or resetting its clock', () => {
+        const provider = createProvider();
+        const round = { kind: 'independent', executionId: 'msg_first', startedAt: 120,
+            sources: [{ parentSessionId: 'ses_task8', messageId: 'msg_notice' }] };
+        provider.supervisorRounds = { metadata: jest.fn(() => round), metadataFromParent: jest.fn() };
+        provider.client.recoverActiveTurn = jest.fn();
+        provider.client.setSupervisorRoundUnresolved = jest.fn();
+        provider.markBusySessionInFlight('ses_task8', 'init:status-busy');
+        const recovered = provider.recoverBusySessionTurnFromMessages('ses_task8', [
+            { role: 'user', id: 'msg_user', text: 'original request' },
+            { role: 'assistant', id: 'msg_old', text: 'WAITING', meta: { timeCompleted: 50 } },
+            { role: 'assistant', id: 'msg_current', text: 'partial', meta: { parentID: 'msg_notice', timeCreated: 900 } },
+        ], 'init:status-busy');
+        expect(recovered?.supervisorRound).toBe(round);
+        expect(provider.client.recoverActiveTurn).toHaveBeenCalledWith('ses_task8', 'msg_notice', 'msg_current', 120, 'msg_first');
+        expect(provider.pendingLocalKeyBySession.has('ses_task8')).toBe(false);
+        expect(provider.rawUserTextByLocalKey.has('msg_notice')).toBe(false);
+    });
+
     it('does not revive a completed assistant while reconstructing a busy session', () => {
         const provider = createProvider();
         provider.client.recoverActiveTurn = jest.fn();

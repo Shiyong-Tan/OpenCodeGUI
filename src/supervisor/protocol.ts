@@ -45,6 +45,8 @@ const notice = object({ ...identity, childSessionId: session,
   delivery: state('queued', 'submitting', 'submitted', 'unknown', 'received'),
   progress: state('not_observed', 'activity_observed', 'result_read'),
   escalated: boolean,
+  queueAgeMs: value => value === undefined ? null : nullable(age)(value),
+  activityWaitAgeMs: value => value === undefined ? null : nullable(age)(value),
 });
 const envelope = object({
   schemaVersion: literal(1), isolationId: id, instanceId: id, revision: natural,

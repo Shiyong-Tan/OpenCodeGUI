@@ -1,3 +1,5 @@
+import type { SupervisorRound } from './supervisor/SupervisorRoundStore';
+import { SupervisorRoundCoordinator } from './supervisor/SupervisorRoundCoordinator';
 import { SupervisorPanelController } from './supervisor/SupervisorPanelController';
 import * as vscode from "vscode";
 import * as crypto from "crypto";
@@ -745,6 +747,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private readonly activeTurnTracker: ActiveTurnTracker;
     private readonly turnRuntimeShadow: TurnRuntimeShadow;
     private readonly chatEventActorRouter: ChatEventActorRouter;
+    private readonly supervisorRounds?: SupervisorRoundCoordinator;
     private readonly lastTurnShadowDivergenceBySession = new Map<string, string>();
     private sendInitGuardCompensationByKey = new Map<string, SendInitGuardCompensationEntry>();
     private sendInitGuardSpentCompensationByKey = new Map<string, SendInitGuardCompensationEntry>();
@@ -3768,6 +3771,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 const processingPausedAt = this.client.getCurrentTurnProcessingPausedAt(sessionId);
                 const processingPausedMs = this.client.getCurrentTurnProcessingPausedMs(sessionId);
                 const assistantMeta: Record<string, unknown> = {
+                    ...this.supervisorRoundMetadata(sessionId, assistantMessageId),
                     ...(identity.latestAppendUserMessageId
                         ? { parentID: identity.latestAppendUserMessageId }
                         : {}),
@@ -4097,7 +4101,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         sessionId: string,
         messages: SessionMessage[],
         reason: string,
-    ): { userMessageId: string; assistantMessageId: string } | null {
+    ): { userMessageId: string; assistantMessageId: string; supervisorRound?: SupervisorRound } | null {
         if (!sessionId || !this.sendInFlightBySession.has(sessionId)) return null;
         const timeline = Array.isArray(messages) ? messages : [];
         const latestUser = [...timeline].reverse().find((message) => (
@@ -4110,13 +4114,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         for (let index = timeline.length - 1; index >= 0; index--) {
             const assistant = timeline[index];
             if (assistant?.role !== 'assistant' || typeof assistant.id !== 'string' || !assistant.id.startsWith('msg_')) continue;
-            if (typeof assistant.meta?.timeCompleted === 'number' && Number.isFinite(assistant.meta.timeCompleted)) continue;
+            const supervisorRound = this.supervisorRounds?.metadata(sessionId, assistant.id)
+                || this.supervisorRounds?.metadataFromParent(sessionId, String(assistant.meta?.parentID || ''));
+            const resumableSupervisor = supervisorRound?.kind === 'independent' && !supervisorRound.final;
+            if (typeof assistant.meta?.timeCompleted === 'number' && Number.isFinite(assistant.meta.timeCompleted)
+                && !(resumableSupervisor && assistant.meta?.supervisorFinish === 'tool-calls')) continue;
             const parentId = typeof assistant.meta?.parentID === 'string' ? assistant.meta.parentID : '';
-            if (parentId !== latestUserId) continue;
+            const supervisorSource = resumableSupervisor ? supervisorRound.sources.find(s => s.messageId === parentId && s.parentSessionId === sessionId) : undefined;
+            if (parentId !== latestUserId && !supervisorSource) continue;
+            if (supervisorSource && index < timeline.lastIndexOf(latestUser)) continue;
             if (!this.turnCommandOwnerBySession.has(sessionId)) {
-                this.turnCommandOwnerBySession.set(sessionId, parentId);
+                this.turnCommandOwnerBySession.set(sessionId, supervisorSource ? supervisorRound!.executionId : parentId);
             }
-            if (!this.pendingLocalKeyBySession.has(sessionId)) {
+            if (!supervisorSource && !this.pendingLocalKeyBySession.has(sessionId)) {
                 this.pendingLocalKeyBySession.set(sessionId, parentId);
                 this.rawUserTextByLocalKey.set(parentId, typeof latestUser.text === 'string' ? latestUser.text : '');
             }
@@ -4125,14 +4135,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 sessionId,
                 parentId,
                 assistant.id,
-                typeof assistant.meta?.timeCreated === 'number' ? assistant.meta.timeCreated : undefined,
+                supervisorSource ? supervisorRound!.startedAt : typeof assistant.meta?.timeCreated === 'number' ? assistant.meta.timeCreated : undefined,
+                ...(supervisorSource ? [supervisorRound!.executionId] as const : [] as const),
             );
+            if (supervisorSource) this.client.setSupervisorRoundUnresolved(sessionId, false);
             this.markWebviewActiveTurnUpdated(sessionId, reason);
             this.uiDebugChannel.appendLine(
                 `EXT: session.init.activeTurn.recovered | sessionId=${sessionId} | ` +
                 `userMsgId=${parentId} | assistantMsgId=${assistant.id} | reason=${reason}`
             );
-            return { userMessageId: parentId, assistantMessageId: assistant.id };
+            return { userMessageId: parentId, assistantMessageId: assistant.id, ...(supervisorSource ? { supervisorRound } : {}) };
         }
         this.uiDebugChannel.appendLine(
             `EXT: session.init.activeTurn.recover.skip | sessionId=${sessionId} | reason=no-incomplete-assistant`
@@ -4165,13 +4177,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         clientMessageId: string,
         userText: string,
         temporaryAssistantKey: string | undefined,
-        operationId: string | undefined
+        operationId: string | undefined,
+        internalSupervisor = false
     ): void {
-        this.rawUserTextByLocalKey.set(clientMessageId, userText);
+        if (!internalSupervisor) this.rawUserTextByLocalKey.set(clientMessageId, userText);
         this.sendInFlightBySession.add(sessionId);
         this.turnCommandOwnerBySession.set(sessionId, clientMessageId);
         this.markWebviewActiveTurnUpdated(sessionId, 'send:start');
-        this.pendingLocalKeyBySession.set(sessionId, clientMessageId);
+        if (internalSupervisor) {
+            this.pendingLocalKeyBySession.delete(sessionId);
+            this.pendingSnapshotUserTextBySession.delete(sessionId);
+            this.pendingSnapshotAttachmentsBySession.delete(sessionId);
+        } else this.pendingLocalKeyBySession.set(sessionId, clientMessageId);
         this.pendingAssistantTmpKeyBySession.delete(sessionId);
         this.client.startTurnWithOp(sessionId, clientMessageId, operationId);
         this.assistantTextBufferBySession.set(sessionId, '');
@@ -4669,6 +4686,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             handle: async (event) => {
                 const liveWebview = this._view?.webview;
                 if (!liveWebview) return;
+                if (event.type === 'turnResolved' && event.sessionId && event.assistantMsgId && this.supervisorRounds) {
+                    const execution = this.client.getSupervisorParentExecution(event.sessionId);
+                    await this.supervisorRounds.finish(event.sessionId, event.assistantMsgId, Date.now(), execution.kind === 'active' ? execution.executionId : undefined);
+                }
                 await this.handleChatEvent(event, liveWebview);
             },
             onError: (event, error) => {
@@ -4682,6 +4703,28 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 );
             },
         });
+        if (this.client.isSupervisorExperiment?.()) {
+            this.supervisorRounds = new SupervisorRoundCoordinator({
+                storage: isolationId => ({
+                    read: async sessionId => this._context.globalState.get('supervisorRounds.v1.' + isolationId + '.' + sessionId),
+                    write: async (sessionId, value) => { await this._context.globalState.update('supervisorRounds.v1.' + isolationId + '.' + sessionId, value); },
+                }),
+                parentExecution: sessionId => this.client.getSupervisorParentExecution(sessionId),
+                start: (round, source) => {
+                    if (!this._view?.webview) throw new Error('Supervisor round requires attached isolated Webview');
+                    this.startTurnCommandState(round.sessionId, round.executionId, '', undefined, undefined, true);
+                    this.client.startSupervisorRound(round, source);
+                    this._view.webview.postMessage({ type: 'supervisorRoundStarted', sessionId: round.sessionId, round });
+                    void this.chatEventActorRouter.route({ type: 'turnInFlight', sessionId: round.sessionId, inFlight: true, assistantMsgId: round.roundId, ownerMsgId: round.roundId });
+                },
+                update: round => { this._view?.webview.postMessage({ type: 'supervisorRoundSources', sessionId: round.sessionId, round }); },
+                unresolved: round => this.client.setSupervisorRoundUnresolved(round.sessionId, true),
+            });
+            this.client.setSupervisorRoundHandlers(
+                activity => this.chatEventActorRouter.runSerialized(activity.source.parentSessionId, () => this.supervisorRounds!.activity(activity)),
+                source => this.supervisorRounds!.preload(source),
+                source => this.supervisorRounds!.accepts(source));
+        }
         this.turnFinalizationCoordinator = new TurnFinalizationCoordinator({
             getAssistantMessageId: (sessionId) => this.client.getTurnAssistantMsgId(sessionId),
             getProcessingStartedAt: (sessionId) => this.client.getCurrentTurnStartedAt(sessionId),
@@ -6525,6 +6568,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return mode === 'compaction' || agent === 'compaction';
     }
 
+    private supervisorRoundMetadata(sessionId: string, assistantMessageId: string, parentMessageId = ''): Record<string, unknown> {
+        const round = this.supervisorRounds?.metadata(sessionId, assistantMessageId)
+            || this.supervisorRounds?.metadataFromParent(sessionId, parentMessageId);
+        return round?.kind === 'independent' ? { supervisorRound: round, processingStartedAt: round.startedAt } : {};
+    }
+
     private formatSession(exportData: any): { title: string; messages: SessionMessage[] } {
         const title = exportData?.session?.title || exportData?.info?.title || 'Session';
         const messages: SessionMessage[] = [];
@@ -6727,6 +6776,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const meta: Record<string, unknown> | undefined = role === 'assistant'
                 ? {
                     ...(parentId ? { parentID: parentId } : {}),
+                    ...this.supervisorRoundMetadata(sessionId, resolvedId, parentId),
+                    ...(this.supervisorRounds?.metadataFromParent(sessionId, parentId || '') ? { supervisorFinish: message?.info?.finish } : {}),
                     tokens: (message?.info as any)?.tokens,
                     cost: (message?.info as any)?.cost,
                     timeCreated: (message?.info as any)?.time?.created,

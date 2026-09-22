@@ -2317,7 +2317,10 @@ describe('append runtime isolation', () => {
         const promptBlock = source.slice(promptStart, promptEnd);
 
         const clearIndex = promptBlock.indexOf("clearTransientAppendFollowupIdentity(sessionId, session, 'new-normal-turn')");
-        const lifecycleIndex = promptBlock.indexOf('turnLifecycleController.start(session)');
+        const lifecycleIndex = promptBlock.indexOf('resetTurnPresentationForStart(session)');
+        const resetStart = source.indexOf('function resetTurnPresentationForStart');
+        expect(resetStart).toBeGreaterThanOrEqual(0);
+        expect(source.slice(resetStart, promptStart)).toContain('turnLifecycleController.start(session)');
         const invariantIndex = promptBlock.indexOf("assertInvariants(sessionId, 'sendPrompt')");
 
         expect(clearIndex).toBeGreaterThanOrEqual(0);

@@ -7,12 +7,13 @@ const main = fs.readFileSync(path.resolve(__dirname, '../../media/main.js'), 'ut
 function extractApplyPromptToSession(): string {
   const clearStart = main.indexOf('function clearTransientAppendFollowupIdentity(');
   const clearEnd = main.indexOf('function resolveAppendPredecessorPresentation(', clearStart);
+  const resetStart = main.indexOf('function resetTurnPresentationForStart(');
   const start = main.indexOf('function applyPromptToSession(');
   const end = main.indexOf('function canAppendToMessage(', start);
-  if (clearStart < 0 || clearEnd < 0 || start < 0 || end < 0) {
+  if (clearStart < 0 || clearEnd < 0 || resetStart < 0 || start < 0 || end < 0) {
     throw new Error('applyPromptToSession boundary not found');
   }
-  return `${main.slice(clearStart, clearEnd)}\n${main.slice(start, end)}`;
+  return `${main.slice(clearStart, clearEnd)}\n${main.slice(resetStart, end)}`;
 }
 
 describe('new turn assistant identity', () => {

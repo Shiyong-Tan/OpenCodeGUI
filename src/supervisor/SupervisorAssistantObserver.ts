@@ -64,5 +64,9 @@ export class SupervisorAssistantObserver {
         return { source: structuredClone(assistant.source), assistantMessageId: part.messageID, observedAt,
             assistantInfo: structuredClone(assistant.info) };
     }
+    sourceFor(sessionId: string, assistantMessageId: string): Readonly<NotificationIdentity> | undefined {
+        const assistant = this.assistants.get(assistantMessageId);
+        return !this.disposed && assistant?.sessionId === sessionId ? structuredClone(assistant.source) : undefined;
+    }
     dispose(): void { this.disposed = true; this.assistants.clear(); this.parts.clear(); }
 }

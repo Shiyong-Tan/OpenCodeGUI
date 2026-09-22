@@ -1,3 +1,6 @@
+import { SupervisorAssistantObserver, type SupervisorAssistantActivity } from './supervisor/SupervisorAssistantObserver';
+import type { SupervisorRound, ParentExecution } from './supervisor/SupervisorRoundStore';
+import type { NotificationIdentity } from './supervisor/notification-identity-protocol';
 import { SupervisorNotificationIngress } from './supervisor/SupervisorNotificationIngress';
 import { SupervisorExperiment } from './supervisor/SupervisorExperiment';
 import * as https from 'https';
@@ -934,11 +937,18 @@ export class OpenCodeClient {
 
     private readonly supervisorExperiment?: SupervisorExperiment;
     private readonly supervisorIngress?: SupervisorNotificationIngress;
+    private readonly supervisorAssistantObserver?: SupervisorAssistantObserver;
+    private supervisorActivityHandler?: (activity: SupervisorAssistantActivity) => Promise<'start' | 'continue' | 'drop'>;
+    private supervisorMessageGuard?: (source: Readonly<NotificationIdentity>) => boolean;
+    private supervisorHistoryHandler?: (source: Readonly<NotificationIdentity>) => Promise<void>;
     private readonly supervisorClassificationBlocked = new Set<string>();
+    private readonly supervisorRoundUnresolved = new Set<string>();
 
     constructor(options?: { supervisorDevelopment?: boolean; supervisorDescriptorPath?: string }) {
         if (options?.supervisorDevelopment && vscode.workspace.getConfiguration('opencode').get<boolean>('experimentalSupervisor', false)) {
             this.supervisorExperiment = new SupervisorExperiment(options.supervisorDescriptorPath || process.env.OPENCODE_GUI_SUPERVISOR_DESCRIPTOR || '');
+            this.supervisorAssistantObserver = new SupervisorAssistantObserver(
+                (sessionId, messageId) => this.supervisorExperiment!.lookupNotification(sessionId, messageId));
             this.supervisorIngress = new SupervisorNotificationIngress(
                 (sessionId, messageId) => this.supervisorExperiment!.lookupNotification(sessionId, messageId),
                 sessionId => {
@@ -1002,12 +1012,47 @@ export class OpenCodeClient {
 
     public isSupervisorExperiment(): boolean { return Boolean(this.supervisorExperiment); }
 
+    public setSupervisorRoundHandlers(activity: (event: SupervisorAssistantActivity) => Promise<'start' | 'continue' | 'drop'>,
+        history: (source: Readonly<NotificationIdentity>) => Promise<void>,
+        accepts: (source: Readonly<NotificationIdentity>) => boolean): void {
+        if (!this.supervisorExperiment) return;
+        this.supervisorActivityHandler = activity;
+        this.supervisorHistoryHandler = history;
+        this.supervisorMessageGuard = accepts;
+    }
+    public setSupervisorRoundUnresolved(sessionId: string, value: boolean): void {
+        if (!this.supervisorExperiment) return;
+        if (value) this.supervisorRoundUnresolved.add(sessionId); else this.supervisorRoundUnresolved.delete(sessionId);
+    }
+    public getSupervisorParentExecution(sessionId: string): ParentExecution {
+        const key = this.turnStateBySession.get(sessionId)?.pendingUserLocalKey;
+        return key && !this.turnFinishedBySession.has(sessionId) ? { kind: 'active', executionId: key } : { kind: 'terminal' };
+    }
+    public startSupervisorRound(round: SupervisorRound, source: Readonly<NotificationIdentity>): void {
+        if (!this.supervisorExperiment || round.sessionId !== source.parentSessionId) throw new Error('Invalid supervisor round owner');
+        this.activeTurnOpIdBySession.delete(round.sessionId);
+        this.currentTurnStartedAtBySession.set(round.sessionId, round.startedAt);
+        // Backend parent identity is required for final acceptance; it is never a
+        // display user or append identity. The provider already started the turn.
+        this.setCurrentTurnUserMsgId(round.sessionId, source.messageId, 'supervisor-notification-parent');
+    }
+    private async prepareSupervisorHistory(sessionId: string, messages: unknown[]): Promise<void> {
+        await this.supervisorExperiment?.prepareHistory(sessionId, messages);
+        if (!this.supervisorHistoryHandler) return;
+        for (const message of messages) {
+            const info = (message as { info?: { role?: string; parentID?: string } })?.info;
+            if (info?.role !== 'assistant' || typeof info.parentID !== 'string') continue;
+            const source = this.supervisorExperiment?.knownNotification(sessionId, info.parentID);
+            if (source) await this.supervisorHistoryHandler(source);
+        }
+    }
+
     public getTrustedSupervisorNotification(sessionId: string, messageId: string) {
         return this.supervisorExperiment?.knownNotification(sessionId, messageId);
     }
 
     public async readSupervisorState(sessionId: string) {
-        if (this.supervisorClassificationBlocked.has(sessionId)) return { status: 'unavailable' as const, reason: 'read_failed' as const };
+        if (this.supervisorClassificationBlocked.has(sessionId) || this.supervisorRoundUnresolved.has(sessionId)) return { status: 'unavailable' as const, reason: 'read_failed' as const };
         return this.supervisorExperiment?.read(sessionId) ?? { status: 'unavailable' as const, reason: 'read_failed' as const };
     }
 
@@ -1021,6 +1066,7 @@ export class OpenCodeClient {
         this.gitUndo = new GitUndoEngine(this.workspaceRoot, (message) => this.logUiDebug(message));
         this.gitUndoAvailable = false;
         this.supervisorIngress?.dispose();
+        this.supervisorAssistantObserver?.dispose();
         this.supervisorExperiment?.dispose();
         this.serverController.resetForWorkspaceChange();
     }
@@ -4992,6 +5038,7 @@ export class OpenCodeClient {
         if (this.supervisorExperiment) {
             this.eventStream?.stop();
             this.supervisorIngress?.dispose();
+        this.supervisorAssistantObserver?.dispose();
             this.supervisorExperiment.dispose();
             return;
         }
@@ -5432,11 +5479,23 @@ export class OpenCodeClient {
         const type = parsed?.type as string;
         const props = parsed?.properties || {};
         const sessionId = this.getSessionIdFromEvent(type, props);
+        const observedAt = Date.now();
         if (this.supervisorIngress && sessionId && source === 'sse') {
             const messageId = type === 'message.updated' ? props?.info?.id
                 : type === 'message.part.updated' || type === 'message.part.delta' ? (props?.part?.messageID || props?.messageID) : undefined;
             void this.supervisorIngress.route(sessionId, typeof messageId === 'string' ? messageId : undefined,
-                () => this.handleClassifiedServerEvent(type, props, source, payload.length));
+                async () => {
+                    const activity = await this.supervisorAssistantObserver?.observe(type, props, observedAt);
+                    if (activity) {
+                        if (!this.supervisorActivityHandler) throw new Error('Supervisor round handler unavailable');
+                        const decision = await this.supervisorActivityHandler(activity);
+                        if (decision === 'drop') return;
+                        if (decision === 'start') this.handleClassifiedServerEvent('message.updated', { info: activity.assistantInfo }, source, payload.length);
+                    }
+                    const trustedParent = typeof messageId === 'string' ? this.supervisorAssistantObserver?.sourceFor(sessionId, messageId) : undefined;
+                    if (trustedParent && this.supervisorMessageGuard && !this.supervisorMessageGuard(trustedParent)) return;
+                    this.handleClassifiedServerEvent(type, props, source, payload.length);
+                });
             return;
         }
         this.handleClassifiedServerEvent(type, props, source, payload.length);
@@ -6912,7 +6971,7 @@ export class OpenCodeClient {
         await this.ensureServer();
         const messages = await this.requestJson<any[]>( 'GET', `/session/${sessionId}/message`);
         const info = await this.requestJson<any>('GET', `/session/${sessionId}`);
-        await this.supervisorExperiment?.prepareHistory(sessionId, messages);
+        await this.prepareSupervisorHistory(sessionId, messages);
         return { session: info, messages };
     }
 
@@ -6921,7 +6980,7 @@ export class OpenCodeClient {
         const safeLimit = Math.max(1, Math.floor(Number.isFinite(limit) ? limit : 200));
         const messages = await this.requestJson<any[]>('GET', `/session/${sessionId}/message?limit=${safeLimit}`);
         const info = await this.requestJson<any>('GET', `/session/${sessionId}`);
-        await this.supervisorExperiment?.prepareHistory(sessionId, messages);
+        await this.prepareSupervisorHistory(sessionId, messages);
         return { session: info, messages };
     }
 
@@ -6938,6 +6997,7 @@ export class OpenCodeClient {
         userMessageId: string,
         assistantMessageId: string,
         startedAt?: number,
+        executionId?: string,
     ): void {
         if (!sessionId || !userMessageId.startsWith('msg_') || !assistantMessageId.startsWith('msg_')) return;
         this.sessionIdleReceivedBySession.delete(sessionId);
@@ -6956,7 +7016,7 @@ export class OpenCodeClient {
         assistantMessageIds.add(assistantMessageId);
         this.turnStateBySession.set(sessionId, {
             ...existingState,
-            pendingUserLocalKey: existingState?.pendingUserLocalKey || userMessageId,
+            pendingUserLocalKey: executionId || existingState?.pendingUserLocalKey || userMessageId,
             assistantMsgId: assistantMessageId,
             exportInFlight: existingState?.exportInFlight ?? false,
             exportResolved: existingState?.exportResolved ?? false,

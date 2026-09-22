@@ -496,6 +496,10 @@ export async function initializeSidebarSession(
                                 'init:recent-history',
                             );
                             liveWebview.postMessage(sessionPayload);
+                            if (recoveredTurn?.supervisorRound) {
+                                liveWebview.postMessage({ type: 'supervisorRoundResumed', sessionId: recentSessionId,
+                                    round: recoveredTurn.supervisorRound, assistantMessageId: recoveredTurn.assistantMessageId });
+                            }
                             if (host.sendInFlightBySession.has(recentSessionId)) {
                                 liveWebview.postMessage({
                                     type: 'turnInFlight',

@@ -1,3 +1,4 @@
+import { supervisorRoundLabel } from '../supervisor/round-label';
 type Message = any;
 type SessionState = any;
 type RenderElement = any;
@@ -296,6 +297,13 @@ export function renderMessageElement(
             div.classList.add('streaming');
         }
         div.dataset.messageId = message.id;
+        const provenance = supervisorRoundLabel(message.meta?.supervisorRound);
+        if (provenance) {
+            const label = document.createElement('div');
+            label.className = 'supervisor-round-label'; label.textContent = provenance;
+            label.style.cssText = 'font-size:11px;white-space:pre-wrap;overflow-wrap:anywhere;opacity:.8';
+            div.appendChild(label);
+        }
 
         const content = document.createElement('div');
         content.className = 'message-content';

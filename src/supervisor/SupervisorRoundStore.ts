@@ -79,6 +79,22 @@ export class SupervisorRoundStore {
         await this.storage.write(ledger.sessionId, structuredClone(validated));
         this.cache.set(ledger.sessionId, validated);
     }
+    peekParent(sessionId: string, parentMessageId: string): SupervisorRound | undefined {
+        const round = this.cache.get(sessionId)?.rounds.find(r => r.sources.some(s => s.messageId === parentMessageId));
+        return round ? structuredClone(round) : undefined;
+    }
+    peekSource(sessionId: string, notificationId: string): SupervisorRound | undefined {
+        const round = this.cache.get(sessionId)?.rounds.find(r => r.sources.some(s => s.notificationId === notificationId));
+        return round ? structuredClone(round) : undefined;
+    }
+    peekExecution(sessionId: string, executionId: string): SupervisorRound | undefined {
+        const round = this.cache.get(sessionId)?.rounds.find(r => r.executionId === executionId);
+        return round ? structuredClone(round) : undefined;
+    }
+    peek(sessionId: string, assistantMessageId: string): SupervisorRound | undefined {
+        const round = this.cache.get(sessionId)?.rounds.find(r => r.assistantMessageIds.includes(assistantMessageId));
+        return round ? structuredClone(round) : undefined;
+    }
     async list(sessionId: string): Promise<SupervisorRound[]> { return structuredClone((await this.load(sessionId)).rounds); }
 
     async observeActivity(input: { source: NotificationIdentity; assistantMessageId: string; observedAt: number; parent: ParentExecution }): Promise<RoundObservation> {
@@ -127,7 +143,8 @@ export class SupervisorRoundStore {
             if (round.final.assistantMessageId !== assistantMessageId) fail();
             return;
         }
-        if (!round.assistantMessageIds.includes(assistantMessageId) || !time(observedAt) || observedAt < round.startedAt) fail();
+        if (!canonical(assistantMessageId) || !time(observedAt) || observedAt < round.startedAt) fail();
+        if (!round.assistantMessageIds.includes(assistantMessageId)) round.assistantMessageIds.push(assistantMessageId);
         round.final = { assistantMessageId, observedAt };
         await this.persist(ledger);
     }
