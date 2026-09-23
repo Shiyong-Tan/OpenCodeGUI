@@ -51,7 +51,16 @@ export function updateSupervisorRoundPresentation(host: SupervisorRoundPresentat
 
 export function resumeSupervisorRoundPresentation(host: SupervisorRoundPresentationHost, sessionId: string, value: unknown, assistantMessageId: string): boolean {
     if (!validSupervisorRound(value, sessionId) || value.final) return false;
-    const session = host.session(sessionId), message = session.messagesById.get(assistantMessageId);
+    const session = host.session(sessionId);
+    if (!/^msg_[A-Za-z0-9_-]+$/.test(assistantMessageId)) return false;
+    if (!session.messagesById.has(assistantMessageId)) {
+        // The host proved current busy status, trusted parent and actual tool activity.
+        // This is transient active presentation, not a finalized snapshot record.
+        if ([...session.messagesById.values()].some(m => (m.meta?.supervisorRound as Partial<SupervisorRound> | undefined)?.roundId === value.roundId)) return false;
+        host.upsert(session, {id: assistantMessageId, role: 'assistant', text: 'Thinking...',
+            meta: {supervisorRound: structuredClone(value), processingStartedAt: value.startedAt}});
+    }
+    const message = session.messagesById.get(assistantMessageId);
     const metadata = message?.meta;
     if (!message || message.role !== 'assistant' || !metadata
         || (metadata.supervisorRound as Partial<SupervisorRound> | undefined)?.roundId !== value.roundId

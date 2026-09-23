@@ -197,3 +197,27 @@ partial assistant. It does not rewrite snapshots or invent activity when idle.
 Focused recovery validation passed 11 suites / 66 tests plus compilation. Actual
 active-reload, ordinary-mode and long-history checks remain pending; Phase 4 is
 not yet complete. Earlier unconnected/0-request checkpoints above are historical.
+
+## Tool-only active recovery regression (2026-09-23)
+
+Real run D (gui-model-C1eEbv) failed after an actual GUI process restart while
+the parent was still busy: history formatting omitted the assistant that had
+only tool activity. This is a failed GUI acceptance case, not a completed phase.
+SupervisorHistoryRecovery now projects a transient recovery candidate only from
+actual parts, the exact trusted notice parent and an unfinished durable round.
+The existing busy-session owner restores it after snapshot hydration; the candidate
+is never inserted into finalized snapshot history. The Webview restores one
+transient thinking presentation with the original observed clock. Newer users,
+foreign sessions, metadata-only placeholders and completed rounds are rejected.
+Focused validation: 11 suites / 66 tests plus full compile passed. Real model
+revalidation is pending. Budget is 31/36; any further extension requires approval.
+
+The final C history was independently reopened in a fresh GUI process and a new
+plugin instance with the same isolated profile/storage; all canonical IDs/order/
+labels/text and visible 10s/8s clocks survived. This stronger evidence supersedes
+the earlier browser-reload screenshot, which did not visibly show the sidebar.
+Normal mode G passed actual chat/append/manual stop. H image-history checks remain
+in progress. Full prior fixed-source Jest: 191 suites / 1,485 tests. VSIX contents
+and deterministic build pass. Rendering is 82,304 bytes / 75 KiB; continuation is
+55,688 bytes / 51 KiB (its source/limit unchanged from baseline 5da2132). Both size
+failures are retained; limits are not raised. Phase 4 remains incomplete.

@@ -494,6 +494,7 @@ export async function initializeSidebarSession(
                                 recentSessionId,
                                 mergedMessages,
                                 'init:recent-history',
+                                recentExport.messages,
                             );
                             liveWebview.postMessage(sessionPayload);
                             if (recoveredTurn?.supervisorRound) {

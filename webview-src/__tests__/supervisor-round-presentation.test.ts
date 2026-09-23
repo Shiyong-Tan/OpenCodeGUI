@@ -49,3 +49,12 @@ test('history resume cannot reopen a completed assistant record',()=>{
  expect(resumeSupervisorRoundPresentation(f.host,'ses_a',round,'msg_new')).toBe(false);
  expect(f.lifecycle.read(f.a).generation).toBe(1);
 });
+
+test('trusted busy tool-only resume restores transient presentation once without changing old final',()=>{
+ const f=fixture(),before=JSON.stringify(f.old);
+ expect(resumeSupervisorRoundPresentation(f.host,'ses_a',round,'msg_new')).toBe(true);
+ expect(f.a.messagesById.get('msg_new')?.meta).toMatchObject({isThinking:true,processingStartedAt:100,supervisorRound:round});
+ expect(JSON.stringify(f.old)).toBe(before);
+ expect(resumeSupervisorRoundPresentation(f.host,'ses_a',round,'msg_new')).toBe(false);
+ expect(f.a.messagesById.size).toBe(2);
+});

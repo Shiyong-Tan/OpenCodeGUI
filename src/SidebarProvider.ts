@@ -1,3 +1,4 @@
+import { supervisorRecoveryCandidate } from './supervisor/SupervisorHistoryRecovery';
 import type { SupervisorRound } from './supervisor/SupervisorRoundStore';
 import { SupervisorRoundCoordinator } from './supervisor/SupervisorRoundCoordinator';
 import { SupervisorPanelController } from './supervisor/SupervisorPanelController';
@@ -4101,9 +4102,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         sessionId: string,
         messages: SessionMessage[],
         reason: string,
+        rawMessages?: unknown,
     ): { userMessageId: string; assistantMessageId: string; supervisorRound?: SupervisorRound } | null {
         if (!sessionId || !this.sendInFlightBySession.has(sessionId)) return null;
-        const timeline = Array.isArray(messages) ? messages : [];
+        const candidate = supervisorRecoveryCandidate(sessionId, rawMessages, (id, parent) =>
+            this.supervisorRounds?.metadata(sessionId, id) || this.supervisorRounds?.metadataFromParent(sessionId, parent));
+        const timeline = Array.isArray(messages) ? [...messages] : [];
+        if (candidate && !timeline.some(m => m.id === candidate.id)) timeline.push(candidate);
         const latestUser = [...timeline].reverse().find((message) => (
             message?.role === 'user'
             && typeof message.id === 'string'
