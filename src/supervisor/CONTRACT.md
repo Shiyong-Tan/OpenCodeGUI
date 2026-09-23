@@ -1,6 +1,26 @@
 # Confirmed supervisor follow-up contract — 2026-09-19
 
-## Current acceptance status — 2026-09-23
+## Active selection recovery — 2026-09-23
+
+Recent/full history selection now invokes the same busy-turn recovery owner as
+initialization, after sessionData publication. The selected session and epoch are
+captured before status lookup; terminal round metadata is checked again inside the
+session actor. Tool-only activity is transient and cannot rewrite finalized history.
+
+Real GUI scenario R restored the same active round after a complete process restart,
+with the original observed start and old WAITING final unchanged. A real parent model
+then selected supervisor_result and read READY. Setup used an explicitly labelled
+registration/dispatch hook, so R is GUI recovery proof, not autonomous dispatch proof
+(B/C retain that evidence). Four requests brought the cumulative ledger to 42/42.
+A zero-model restart then checked the authoritative final message ID handoff and
+exact final history across switching and another process restart (4s/35s unchanged).
+The first final-history comparison was sampled before the GUI finalization buffer;
+its failure is retained and the runner now waits for actual GUI finalization.
+
+Full regression: 192 suites / 1,498 tests pass. The size gates below still need closure;
+this is not an assertion that all repository gates pass. No Phase 5 or production use.
+
+## Earlier acceptance status — 2026-09-23
 
 The plugin/Extension/Webview wiring and independent-round presentation are implemented.
 Phase 4 is still incomplete: actual active restart D failed, its tool-only recovery fix

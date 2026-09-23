@@ -546,3 +546,65 @@ describe('SidebarProvider Task 8 snapshot/reload current-owner semantics', () =>
         expect(provider.client.exportSession).not.toHaveBeenCalled();
     });
 });
+
+
+describe('supervisor selection recovery after a new GUI process', () => {
+    function fixture() {
+        const provider = createProvider();
+        const round = {kind: 'independent', sessionId: 'ses_task8', roundId: 'msg_current',
+            executionId: 'msg_first', startedAt: 120, sources: [{parentSessionId: 'ses_task8', messageId: 'msg_notice'}]};
+        provider.supervisorRounds = {metadata: jest.fn(() => round), metadataFromParent: jest.fn()};
+        provider.client.recoverActiveTurn = jest.fn();
+        provider.client.setSupervisorRoundUnresolved = jest.fn();
+        provider.client.getSessionStatusType = jest.fn().mockResolvedValue('busy');
+        provider.chatEventActorRouter.runSerialized = jest.fn(async (_id, action) => action());
+        const webview = {postMessage: jest.fn()};
+        const messages = [{role: 'user', id: 'msg_user', text: 'original'},
+            {role: 'assistant', id: 'msg_old', text: 'WAITING', meta: {timeCompleted: 50}}];
+        const raw = {messages: [{info: {id: 'msg_notice', role: 'user'}},
+            {info: {id: 'msg_current', role: 'assistant', sessionID: 'ses_task8', parentID: 'msg_notice', time: {created: 900}},
+             parts: [{type: 'tool', state: {status: 'running'}}]}]};
+        return {provider, round, webview, messages, raw};
+    }
+    it('restores real tool-only activity through the selection entry without altering finalized history', async () => {
+        const {provider, round, webview, messages, raw} = fixture();
+        const original = JSON.stringify(messages);
+        await provider.restoreSupervisorSelectionActivity('ses_task8', messages, raw, webview);
+        expect(provider.client.recoverActiveTurn).toHaveBeenCalledWith('ses_task8', 'msg_notice', 'msg_current', 120, 'msg_first');
+        expect(webview.postMessage.mock.calls.map(c => c[0].type)).toEqual(['supervisorRoundResumed', 'turnInFlight']);
+        expect(webview.postMessage.mock.calls[0][0].round).toBe(round);
+        expect(JSON.stringify(messages)).toBe(original);
+        expect(provider.rawUserTextByLocalKey.has('msg_notice')).toBe(false);
+    });
+    it('rejects a status reply after the selection changed, including away and back', async () => {
+        const {provider, webview, messages, raw} = fixture();
+        let complete: (status: string) => void = () => undefined;
+        provider.client.getSessionStatusType.mockImplementation(() => new Promise(resolve => {complete = resolve;}));
+        const pending = provider.restoreSupervisorSelectionActivity('ses_task8', messages, raw, webview);
+        provider.sessionSelectionEpoch += 2;
+        complete('busy'); await pending;
+        expect(provider.client.recoverActiveTurn).not.toHaveBeenCalled();
+        expect(webview.postMessage).not.toHaveBeenCalled();
+    });
+    it('rejects finalization that wins the actor queue during the status query', async () => {
+        const {provider, round, webview, messages, raw} = fixture();
+        provider.client.getSessionStatusType.mockImplementation(async () => {
+            Object.assign(round, {final: {completedAt: 1000}});
+            return 'busy';
+        });
+        await provider.restoreSupervisorSelectionActivity('ses_task8', messages, raw, webview);
+        expect(provider.sendInFlightBySession.has('ses_task8')).toBe(false);
+        expect(provider.client.recoverActiveTurn).not.toHaveBeenCalled();
+        expect(webview.postMessage).not.toHaveBeenCalled();
+    });
+    it.each(['idle', 'foreign', 'no-activity', 'final'])('does not revive %s evidence', async variant => {
+        const {provider, round, webview, messages, raw} = fixture();
+        if (variant === 'idle') provider.client.getSessionStatusType.mockResolvedValue('idle');
+        if (variant === 'foreign') raw.messages[1].info.sessionID = 'ses_other';
+        if (variant === 'no-activity') raw.messages[1].parts = [];
+        if (variant === 'final') Object.assign(round, {final: {completedAt: 1000}});
+        await provider.restoreSupervisorSelectionActivity('ses_task8', messages, raw, webview);
+        expect(provider.client.recoverActiveTurn).not.toHaveBeenCalled();
+        expect(webview.postMessage).not.toHaveBeenCalled();
+    });
+});

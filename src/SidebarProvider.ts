@@ -4098,6 +4098,27 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.markWebviewActiveTurnUpdated(sessionId, reason);
     }
 
+    private async restoreSupervisorSelectionActivity(sessionId: string, messages: SessionMessage[], raw: unknown, webview: vscode.Webview): Promise<void> {
+        if (!this.supervisorRounds || !raw || typeof raw !== 'object') return;
+        const rawMessages = (raw as { messages?: unknown }).messages;
+        const candidate = supervisorRecoveryCandidate(sessionId, rawMessages, (id, parent) =>
+            this.supervisorRounds?.metadata(sessionId, id) || this.supervisorRounds?.metadataFromParent(sessionId, parent));
+        if (!candidate) return;
+        const epoch = this.sessionSelectionEpoch;
+        const status = await this.client.getSessionStatusType(sessionId);
+        await this.chatEventActorRouter.runSerialized(sessionId, () => {
+            if (this.currentSessionId !== sessionId || this.sessionSelectionEpoch !== epoch || !['busy', 'retry'].includes(status || '')) return;
+            // A terminal event may win the actor queue while the status request is in flight.
+            if (!supervisorRecoveryCandidate(sessionId, rawMessages, (id, parent) =>
+                this.supervisorRounds?.metadata(sessionId, id) || this.supervisorRounds?.metadataFromParent(sessionId, parent))) return;
+            this.markBusySessionInFlight(sessionId, 'selection:supervisor-busy');
+            const recovered = this.recoverBusySessionTurnFromMessages(sessionId, messages, 'selection:supervisor-history', rawMessages);
+            if (!recovered?.supervisorRound) return;
+            webview.postMessage({type: 'supervisorRoundResumed', sessionId, round: recovered.supervisorRound, assistantMessageId: recovered.assistantMessageId});
+            webview.postMessage({type: 'turnInFlight', sessionId, inFlight: true, ownerMsgId: recovered.assistantMessageId, assistantMsgId: recovered.assistantMessageId});
+        });
+    }
+
     private recoverBusySessionTurnFromMessages(
         sessionId: string,
         messages: SessionMessage[],
@@ -4834,6 +4855,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             exportSessionRecent: (sessionId, limit) =>
                 this.client.exportSessionRecent(sessionId, limit),
             getRecentSessionLoadLimit: () => this.recentSessionLoadLimit,
+            restoreSupervisorActivity: (id, messages, raw, webview) => this.restoreSupervisorSelectionActivity(id, messages, raw, webview),
             formatSession: (exportData) => this.formatSession(exportData),
             getMaxMessageIndex: (messages) => this.getMaxMessageIndex(messages),
             classifyRecentAppendCandidates: (snapshotIds, maxIndex, messages) =>

@@ -48,6 +48,7 @@ export interface SessionCommandHost {
     getSnapshotFile(sessionId: string): string;
     exportSessionRecent(sessionId: string, limit: number): Promise<unknown>;
     getRecentSessionLoadLimit(): number;
+    restoreSupervisorActivity?(sessionId: string, messages: SessionMessage[], raw: unknown, webview: vscode.Webview): Promise<void>;
     formatSession(exportData: unknown): FormattedSession;
     getMaxMessageIndex(messages: SessionMessage[]): number | null;
     classifyRecentAppendCandidates(
@@ -437,6 +438,7 @@ export class SessionCommandController {
                     },
                 };
                 const sent = postSessionData(sessionPayload, 'recent');
+                if (sent) await this.host.restoreSupervisorActivity?.(targetSessionId, mergedMessages, recentExport, this.host.getLiveWebview(activeWebview));
                 if (sent && mergedMessages.length > 0) {
                     sessionDataSent = true;
                     baseMessages = mergedMessages;
@@ -538,6 +540,7 @@ export class SessionCommandController {
                 },
             };
             const sent = postSessionData(sessionPayload, 'full');
+            if (sent) await this.host.restoreSupervisorActivity?.(targetSessionId, fullMessages, normalized.data, this.host.getLiveWebview(activeWebview));
             if (sent && fullMessages.length > 0) sessionDataSent = true;
             if (sent) {
                 this.host.log(

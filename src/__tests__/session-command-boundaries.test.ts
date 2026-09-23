@@ -722,3 +722,29 @@ describe('SessionCommandController runtime protocol', () => {
         expect(harness.posts).toContainEqual({ type: 'newSession', sessionId: undefined });
     });
 });
+
+
+describe('selection routes supervisor activity after history publication', () => {
+    test.each(['recent', 'full'])('passes captured raw %s evidence to the existing owner', async phase => {
+        const raw = {title: 'Test', messages: [{id: 'msg_old', role: 'assistant', text: 'WAITING'}]};
+        const restore = jest.fn(async () => {
+            expect(harness.posts.filter(p => p.type === 'sessionData').at(-1)?.phase).toBe(phase);
+        });
+        const harness = createRuntimeHarness({
+            exportSessionRecent: jest.fn(async () => {if (phase === 'full') throw Error('recent unavailable'); return raw;}),
+            exportSession: jest.fn(async () => raw), restoreSupervisorActivity: restore,
+        });
+        await harness.handler({type: 'selectSession', sessionId: 'session-a'}, harness.activeWebview, harness.resolvingWebview);
+        expect(restore).toHaveBeenCalledTimes(1);
+        expect(restore).toHaveBeenCalledWith('session-a', raw.messages, raw, harness.activeWebview);
+    });
+    test('does not recover an export whose selection became stale', async () => {
+        const restore = jest.fn(); let current = true;
+        const harness = createRuntimeHarness({
+            isSessionSelectionCurrent: jest.fn(() => current), restoreSupervisorActivity: restore,
+            exportSessionRecent: jest.fn(async () => {current = false; return {messages: []};}),
+        });
+        await harness.handler({type: 'selectSession', sessionId: 'session-a'}, harness.activeWebview, harness.resolvingWebview);
+        expect(restore).not.toHaveBeenCalled();
+    });
+});
