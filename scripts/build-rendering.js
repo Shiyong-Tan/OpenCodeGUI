@@ -90,6 +90,7 @@ async function run() {
     esbuild.build(completionOptions),
     esbuild.build(supervisorOptions),
   ]);
+  if (!development) require('./compact-webview').compactProductionBundles(root);
 }
 
 run().catch((error) => {

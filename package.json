@@ -149,7 +149,8 @@
     "esbuild": "0.28.1",
     "jest": "^30.3.0",
     "ts-jest": "^29.4.6",
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "uglify-js": "3.19.3"
   },
   "dependencies": {
     "diff-match-patch": "^1.0.5",
