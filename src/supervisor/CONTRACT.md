@@ -1,5 +1,25 @@
 # Confirmed supervisor follow-up contract — 2026-09-19
 
+## Current acceptance status — 2026-09-23
+
+The plugin/Extension/Webview wiring and independent-round presentation are implemented.
+Phase 4 is still incomplete: actual active restart D failed, its tool-only recovery fix
+fb8003f passes 192 suites / 1,488 tests and compilation, but the real model rerun
+is pending. C completed-history recovery passed a fresh GUI process and new plugin
+instance. H subsequently passed actual pagination, image decode, scroll anchoring and
+fresh-process history restoration with 182 backend messages (bulk text explicitly
+seeded with noReply). B/C/G model/GUI runs passed on 331968a. No Phase 5 work.
+
+Cross-repository evidence/scripts: OpenCodeTaskSupervisor 8067c9e; runtime projection
+1ebaba2; GUI runtime 331968a then tool-only repair fb8003f. Evidence is under that
+repository's docs/evidence/phase4-gui-model. These are actual VS Code 1.137.0 and
+OpenCode 1.18.29 executions, separate from the earlier Node adapter probes.
+
+The request ledger is 31/36 after explicit user extension; another increase is not
+authorized yet. Rendering and continuation size gates remain failed as detailed
+below; supervisor size, deterministic builds and VSIX content policy pass.
+Everything below is the historical decision/checkpoint record unless superseded here.
+
 The user selected an independent follow-up turn. Preserve the previous reply,
 final identity, elapsed time and persisted history exactly.
 
