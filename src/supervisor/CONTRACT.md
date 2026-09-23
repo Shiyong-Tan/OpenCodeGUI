@@ -1,6 +1,40 @@
 # Confirmed supervisor follow-up contract — 2026-09-19
 
-## Active selection recovery — 2026-09-23
+## Final Phase 4 acceptance — 2026-09-23
+
+Phase 4 is complete within the isolated development experiment. Stop for user review;
+no Phase 5, deployment, push, automatic cancellation, persistent takeover or redispatch.
+Webview presentation, trusted identity classification, independent follow-up lifecycle,
+active recovery and completed-history recovery are implemented and actually verified.
+Earlier incomplete/pending statements below are chronological checkpoints, superseded
+by this section, not current blockers.
+
+- GUI wiring: 331968a; tool-only recovery: fb8003f; selection/epoch/terminal recovery:
+  8ec16b9; production size-gate closure: 2d90d32.
+- OpenCodeTaskSupervisor evidence/scripts/report: e5f67a1; plugin runtime projection:
+  1ebaba2. Exact repository mapping is in its docs/evidence/phase4-current-commit-map.json.
+- Full final GUI regression: 193 suites / 1,501 tests; compile, all original Webview
+  size limits, deterministic build and VSIX content checks pass. Plugin 74 tests pass.
+- Actual isolated B/C/G/H and R cover the plugin → Extension Host → Webview chain.
+  R uses a labelled setup hook, but actual models produce the child result and choose
+  the parent result tool. Its active process restart preserves the source round/start;
+  later no-model GUI checks verify the authoritative final-ID handoff and exact
+  switch/restart history with original 4s/35s clocks. No Node adapter probe is counted
+  as GUI acceptance. B/C retain autonomous dispatch/closed-loop proof.
+- Final compacted production Webview was rerun against actual H history/PNG/scroll
+  and R final history/clock/restart, without a model. Earlier failures are retained.
+  The final actor terminal recheck and compaction were not another paid model rerun.
+- Ledger: 42/42, preserving prior usage after authorized extensions. All experiment
+  services/windows exited. OAuth was read-only; no credentials, database or profile
+  is committed. No-model recovery deliberately disables all providers.
+
+Production compaction preserves getters/public keys and checks its private-field
+boundary. Rendering is 76,784/76,800 bytes (only 16 bytes of raw headroom), continuation
+51,695/52,224. Limits were not raised. See [build boundary](../../docs/production-bundle-compaction.md).
+Only Windows, OpenCode 1.18.29, and isolated VS Code 1.137.0 are validated. This does
+not establish production readiness, arbitrary tools or recovery from a hung core.
+
+## Active selection recovery checkpoint — 2026-09-23
 
 Recent/full history selection now invokes the same busy-turn recovery owner as
 initialization, after sessionData publication. The selected session and epoch are
