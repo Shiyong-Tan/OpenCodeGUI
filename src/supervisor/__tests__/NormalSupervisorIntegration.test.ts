@@ -113,6 +113,16 @@ describe('normal supervisor enable and durable classification boundary', () => {
         owner.dispose();
     });
 
+    test('another window replacing the launch while reading rejects the old observation', async () => {
+        const { owner, store, launch } = await setup();
+        store.forConnection.mockResolvedValueOnce(launch).mockResolvedValue({ ...launch,
+            binding: { ...launch.binding, serviceId: '66'.repeat(32) } });
+        owner.setEnabled(true);
+        expect((await owner.read('ses_A')).status).toBe('unavailable');
+        expect(owner.status()).toBe('disconnected');
+        owner.dispose();
+    });
+
     test('bounded metadata failure does not create additional subscriptions or retry loops', async () => {
         const { owner, store, fetcher } = await setup();
         jest.useFakeTimers();

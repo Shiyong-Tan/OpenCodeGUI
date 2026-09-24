@@ -115,7 +115,26 @@ export class NormalSupervisorIntegration {
         const generation = this.generation;
         const reader = await this.connect();
         if (!reader || generation !== this.generation || !this.enabled || this.disposed) return { status: 'unavailable', reason: 'read_failed' };
+        const key = this.connectionKey;
         const result = await reader.read(sessionId);
+        if (generation !== this.generation || !this.enabled || this.disposed) return { status: 'unavailable', reason: 'disposed' };
+        // Another window may have restarted the service during this request.
+        // Re-check the persisted launch generation before publishing its projection.
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let current: NormalLaunch | undefined;
+        try {
+            current = await Promise.race([
+                this.getConnection().then(service => this.store.forConnection(service)),
+                new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), 1000); }),
+            ]);
+        } catch { /* Missing identity makes this observation unknown. */ }
+        finally { if (timer) clearTimeout(timer); }
+        if (!current || !key.startsWith(current.binding.serviceId + ':')) {
+            if (generation === this.generation && this.enabled && !this.disposed) {
+                this.reader?.dispose(); this.reader = undefined; this.connectionKey = ''; this.state = 'disconnected';
+            }
+            return { status: 'unavailable', reason: 'read_failed' };
+        }
         if (generation !== this.generation || !this.enabled || this.disposed) return { status: 'unavailable', reason: 'disposed' };
         if (result.status !== 'observed') this.state = 'disconnected';
         return result;
@@ -163,6 +182,12 @@ export class NormalSupervisorIntegration {
         this.generation++;
         this.identityGeneration++;
         this.catalog = undefined;
+    }
+
+    invalidateServiceConnection(): void {
+        const enabled = this.enabled;
+        this.setEnabled(false);
+        this.setEnabled(enabled);
     }
 
     resetWorkspace(): void {
