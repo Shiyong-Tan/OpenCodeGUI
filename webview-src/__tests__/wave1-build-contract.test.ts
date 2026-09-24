@@ -7,7 +7,7 @@ const read = (file: string) => fs.readFileSync(path.join(root, file), 'utf8');
 describe('Wave 1 build and package contracts', () => {
   test('extension compile remains distinct while compile and prepublish are complete and non-duplicative', () => {
     const scripts = JSON.parse(read('package.json')).scripts;
-    expect(scripts['compile:extension']).toBe('tsc -p ./');
+    expect(scripts['compile:extension']).toBe('node scripts/build-service-job.js && tsc -p ./');
     expect(scripts.compile).toBe('npm run compile:extension && npm run build:webview');
     expect(scripts['vscode:prepublish']).toBe('npm run compile');
   });

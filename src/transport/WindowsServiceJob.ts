@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import { isAbsolute, join } from 'path';
 
 export interface ServiceProcessIdentity { serviceId: string; pid: number; creationFileTime: string }
-export type ServiceProcessObservation = { state: 'running' | 'root_exited_members_active' | 'stopped' | 'stop_unknown'; rootExited: boolean; activeProcesses: number };
+export type ServiceProcessObservation = { state: 'running' | 'root_exited_members_active' | 'stopped' | 'stop_unknown'; rootExited: boolean; activeProcesses: number; listenerOwned?: boolean };
 export class ServiceOperationError extends Error {
     constructor(readonly reason: string) { super(`OpenCode service operation: ${reason}`); }
 }
@@ -108,8 +108,9 @@ export class WindowsServiceJob {
         } finally { helper.end(); }
     }
 
-    async inspect(identity: ServiceProcessIdentity, stop = false): Promise<ServiceProcessObservation> {
-        const helper = this.open({ ...validateProcessIdentity(identity), op: stop ? 'stop' : 'inspect' });
+    async inspect(identity: ServiceProcessIdentity, stop = false, port?: number): Promise<ServiceProcessObservation> {
+        if (port !== undefined && (!Number.isInteger(port) || port < 1 || port > 65535)) throw new ServiceOperationError('invalid_port');
+        const helper = this.open({ ...validateProcessIdentity(identity), op: stop ? 'stop' : 'inspect', ...(port === undefined ? {} : { port }) });
         try {
             const frame = this.accept(await helper.next(stop ? 7000 : 3000));
             if (!['running', 'root_exited_members_active', 'stopped', 'stop_unknown'].includes(String(frame.state)) ||
@@ -117,7 +118,7 @@ export class WindowsServiceJob {
                 (frame.state === 'stopped' && (!frame.rootExited || frame.activeProcesses !== 0))) {
                 throw new ServiceOperationError('invalid_observation');
             }
-            return { state: frame.state as ServiceProcessObservation['state'], rootExited: frame.rootExited, activeProcesses: Number(frame.activeProcesses) };
+            return { state: frame.state as ServiceProcessObservation['state'], rootExited: frame.rootExited, activeProcesses: Number(frame.activeProcesses), ...(typeof frame.listenerOwned === 'boolean' ? { listenerOwned: frame.listenerOwned } : {}) };
         } finally { helper.end(); }
     }
 }

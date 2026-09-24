@@ -32,6 +32,7 @@ class ServiceJob {
   [DllImport("kernel32.dll")] static extern void DeleteProcThreadAttributeList(IntPtr list);
   [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool CreateProcess(string app,StringBuilder command,IntPtr processSecurity,IntPtr threadSecurity,bool inherit,uint flags,IntPtr env,string cwd,ref StartupEx startup,out ProcessInfo info);
   [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern IntPtr CreateFile(string name,uint access,uint share,ref Security security,uint disposition,uint flags,IntPtr template);
+  [DllImport("iphlpapi.dll",SetLastError=true)] static extern uint GetExtendedTcpTable(IntPtr table,ref uint size,bool order,int family,int tableClass,uint reserved);
   static readonly JavaScriptSerializer Json=new JavaScriptSerializer {MaxJsonLength=32768};
   static IntPtr pendingJob=IntPtr.Zero;
   static bool committed;
@@ -85,6 +86,24 @@ class ServiceJob {
       CloseHandle(job);
     }
   }
+  static bool ListenerOwned(IntPtr job,int port) {
+    if(port<1||port>65535)throw new InvalidOperationException("port");
+    uint size=0;GetExtendedTcpTable(IntPtr.Zero,ref size,false,2,3,0);
+    if(size<4||size>1048576)throw new InvalidOperationException("tcp_table");
+    IntPtr data=Marshal.AllocHGlobal((int)size);
+    try {if(GetExtendedTcpTable(data,ref size,false,2,3,0)!=0)throw new InvalidOperationException("tcp_query");
+      uint count=unchecked((uint)Marshal.ReadInt32(data));if(count>(size-4)/24)throw new InvalidOperationException("tcp_count");
+      for(int i=0;i<count;i++) {
+        int offset=4+i*24;uint address=unchecked((uint)Marshal.ReadInt32(data,offset+4));
+        uint raw=unchecked((uint)Marshal.ReadInt32(data,offset+8));int localPort=(int)(((raw>>8)&255)|((raw&255)<<8));
+        if(address!=0x0100007f||localPort!=port)continue;
+        uint pid=unchecked((uint)Marshal.ReadInt32(data,offset+20));IntPtr member=OpenProcess(0x1000,false,pid);
+        if(member==IntPtr.Zero)return false;
+        try {bool included;Check(IsProcessInJob(member,job,out included));return included;}finally{CloseHandle(member);}
+      }
+      return false;
+    } finally {Marshal.FreeHGlobal(data);}
+  }
   static void Inspect(Dictionary<string,object> req,bool stop) {
     uint pid=Convert.ToUInt32(req["pid"]);long created=Int64.Parse(Text(req,"creationFileTime"));
     IntPtr job=OpenJobObject(4|(stop?8u:0u),false,JobName(req));int jobError=Marshal.GetLastWin32Error();
@@ -96,7 +115,9 @@ class ServiceJob {
       if(rootEnded&&active==0){Emit(new{ok=true,state="stopped",rootExited=true,activeProcesses=0});return;}
       if(process==IntPtr.Zero||Created(process)!=created)throw new InvalidOperationException("root_identity_unknown");
       bool member;Check(IsProcessInJob(process,job,out member));if(!member)throw new InvalidOperationException("membership");
-      if(!stop){Emit(new{ok=true,state=rootEnded?"root_exited_members_active":"running",rootExited=rootEnded,activeProcesses=active});return;}
+      bool? listenerOwned=req.ContainsKey("port")?(bool?)ListenerOwned(job,Convert.ToInt32(req["port"])):null;
+      if(!stop){Emit(new{ok=true,state=rootEnded?"root_exited_members_active":"running",rootExited=rootEnded,activeProcesses=active,listenerOwned});return;}
+      if(listenerOwned==false)throw new InvalidOperationException("listener_not_owned");
       Check(TerminateJobObject(job,1223));
       var watch=System.Diagnostics.Stopwatch.StartNew();
       do {active=Active(job);rootEnded=WaitForSingleObject(process,0)==0;if(active==0&&rootEnded)break;Thread.Sleep(25);} while(watch.ElapsedMilliseconds<5000);

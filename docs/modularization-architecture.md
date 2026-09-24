@@ -154,3 +154,30 @@ A pure render projector/route classifier and an `EventEffect` representation are
 future evaluations only. They are not part of the accepted command-family extraction;
 either requires a separate reviewed plan and evidence that it simplifies ownership
 without duplicating state or disturbing side-effect order.
+
+## Phase 5 explicit Windows service ownership
+
+OpenCodeServerController remains the only service-operation owner. Its existing
+OpenCodeServerProcess composes a short-lived WindowsServiceJob OS adapter. Signed,
+immutable OpenCodeServiceRecordStore generations are persistence of that owner,
+not an independent service manager. Commands only delegate to the controller.
+
+Ownership requires the private profile signature, canonical workspace, service
+authentication binding, random Job identity, PID plus OS creation FILETIME, Job
+membership and a loopback listener belonging to that Job. An old PID, port or lock
+file alone never authorizes stopping. External and legacy unregistered services
+remain usable for ordinary chat but are not adopted or stopped.
+
+GUI reload/exit, workspace detach and supervisor disable retain the service.
+Start/Stop/Restart Service commands serialize through the existing controller
+queue and an OS workspace mutex. Active or permission-waiting execution requires
+an impact confirmation (15-second deadline); unknown activity fails closed.
+Only proven root exit and zero Job members allow a replacement. Requests target
+the captured generation; duplicate operations share work and stale requests fail.
+Unknown launch/stop outcomes retain immutable records for diagnosis. No process
+name discovery, second service manager or automatic redispatch is introduced.
+
+NormalSupervisorIntegration rechecks launch generation after a live read, including
+restarts from another window. Durable notification classification is retained
+independently of live authentication. Session, snapshot, final, append, undo and
+rendering owners and their contracts do not change.

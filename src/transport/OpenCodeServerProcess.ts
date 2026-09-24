@@ -38,9 +38,9 @@ export class OpenCodeServerProcess {
         return this.ownedIdentity.pid;
     }
 
-    public async inspectOwned(identity: ServiceProcessIdentity, stop = false) {
+    public async inspectOwned(identity: ServiceProcessIdentity, stop = false, port?: number) {
         if (!this.options.windowsJob) throw new ServiceOperationError('native_owner_unavailable');
-        return this.options.windowsJob.inspect(identity, stop);
+        return this.options.windowsJob.inspect(identity, stop, port);
     }
 
     public async acquireOperation(workspaceKey: string): Promise<() => Promise<void>> {
