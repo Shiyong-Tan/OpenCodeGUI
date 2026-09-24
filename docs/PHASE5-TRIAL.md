@@ -1,12 +1,21 @@
 # Phase 5: normal installed GUI trial
 
-Supported trial: Windows, OpenCode **1.18.29**, GUI 5.0.5 at the compatible
-commit recorded in the companion supervisor repository. VS Code 1.137.0 was
+Supported trial: Windows, OpenCode **1.18.29**, GUI **5.0.6**. The original
+phase-five acceptance used the 5.0.5 commits recorded in the companion supervisor
+repository; 5.0.6 packages that implementation as a distinct GUI release. VS Code 1.137.0 was
 actually exercised. This is a small-workspace trial, not long-term production
 certification. No global installation, production deployment or automatic upgrade
 is performed.
 
 ## Install and enable
+
+Install `opencode-gui-5.0.6.vsix` from the OpenCodeGUI repository using
+**Extensions: Install from VSIX...**, then reload when prompted. This updates the
+GUI extension, not OpenCode or the separately installed supervisor plugin. Start
+with a non-critical workspace. To reproduce the package from this repository,
+run `npm.cmd ci`, `npm.cmd run compile`, then
+`npx.cmd --yes @vscode/vsce@3.9.1 package --out opencode-gui-5.0.6.vsix`.
+Run the repository test and Webview gates before distributing a rebuilt package.
 
 Build the supervisor with `npm.cmd ci`, `npm.cmd test`, `npm.cmd run typecheck`
 and `npm.cmd run build`. Retain its dependency directory and complete `dist` tree.

@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## 5.0.6 - 2026-09-24
+
+### Task supervision
+
+- Added default-off `opencode.supervisor.enabled` integration and a read-only task panel for the separately installed OpenCodeTaskSupervisor plugin. Initial trial support is Windows with OpenCode 1.18.29; see [setup and limitations](docs/PHASE5-TRIAL.md).
+- Authenticate supervision against the owning workspace and service instance without exposing credentials to the Webview. Mark disconnected or replaced service observations as historical/unknown.
+- Classify trusted internal notifications without hiding matching user-authored text. Supervisor-triggered execution after a completed reply gets an independent follow-up round, preserving the original final and timer.
+- Persist supervision provenance and restore active tool-only rounds and completed history across session switches and GUI restarts. Start follow-up timing at observed assistant activity, separately from notification waiting.
+
+### Service lifecycle
+
+- Added `OpenCode: Start Service`, `OpenCode: Stop Service`, and `OpenCode: Restart Service` commands through the existing service owner.
+- Preserve the backend service when closing or reloading the GUI or disabling supervision. Disabling GUI supervision does not unload the backend plugin or stop its notifications.
+- Verify persistent Windows process ownership before stopping or restarting; refuse external or unverified services. Serialize operations and require confirmation when active tasks may be interrupted.
+- Service restart does not restore the plugin's in-memory task registry. No automatic task redispatch or default production cancellation is enabled.
+
+### Rendering and packaging
+
+- Fixed simple inline math next to Chinese text and a Windows-line-ending regression in the passive-listener build mutation.
+- Optimized production Webview bundles within unchanged size limits and packaged the native Windows service helper. Excluded local configuration, investigation outputs, and compiled tests from extension packages.
+
 ## 5.0.5 - 2026-09-04
 
 ### Session history and active turns
