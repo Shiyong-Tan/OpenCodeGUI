@@ -12,7 +12,7 @@ provide private supervisor metadata only for a real owned spawn. Reuse never cal
 it; failure falls back to ordinary service startup with a fixed, redacted diagnostic.
 The process owner explicitly clears inherited supervisor binding metadata unless
 that specific launch supplies it. No new service manager, discovery scan or restart
-action is introduced. The callback is not yet wired to settings or private storage.
+action is introduced. The callback is wired through workspace-scoped SecretStorage and the default-off opencode.supervisor.enabled setting.
 
 Normal connection discovery will use a separate authenticated protocol, not removal
 of experimental descriptor checks. Live supervision and durable notification
@@ -23,8 +23,7 @@ private-property mangling boundaries change.
 
 Focused startup tests cover reuse without metadata work, successful preparation,
 failure redaction, timeout with a controlled clock, and inherited-binding rejection.
-Ordinary installed VSIX/Webview acceptance is pending. No current production-ready
-claim, deployment, new credential use, automatic cancellation or redispatch.
+Ordinary installed VSIX/Webview enable, disable, new GUI process, reload and completed-history recovery passed in private profiles. The Phase 5 model run used 8/24 newly authorized requests and verified actual parent result reading and one independent follow-up. This does not establish service-restart/fault acceptance or service process exit; those remain pending. No production-ready claim, deployment, automatic cancellation or redispatch. Exact evidence is in the companion supervisor repository docs/PHASE5-RESULTS.md.
 
 ## Final Phase 4 acceptance — 2026-09-23
 
