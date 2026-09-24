@@ -3,6 +3,7 @@ import * as vscode from 'vscode';
 import * as cp from 'child_process';
 import { SidebarProvider } from './SidebarProvider';
 import { OpenCodeDiffProvider } from './OpenCodeDiffProvider';
+import { registerServiceCommands } from './transport/ServiceCommands';
 
 let disposeSidebar: (() => Promise<void>) | undefined;
 
@@ -15,6 +16,7 @@ export function activate(context: vscode.ExtensionContext) {
 	const sidebarProvider = new SidebarProvider(context, context.extensionUri, diffProvider);
     let disposal: Promise<void> | undefined;
     disposeSidebar = () => disposal ??= sidebarProvider.dispose();
+    registerServiceCommands(context, sidebarProvider);
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(
             "opencode.sidebar",

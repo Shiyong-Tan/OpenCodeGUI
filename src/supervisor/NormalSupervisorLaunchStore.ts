@@ -22,17 +22,18 @@ export class NormalSupervisorLaunchStore {
         return { canonical, hash, key: `supervisor.normal.launch.v1.${hash}` };
     }
 
-    public async prepare(lock: Readonly<ServerLock>): Promise<string> {
+    public async prepare(lock: Readonly<ServerLock>, serviceId?: string): Promise<string> {
+        if (serviceId !== undefined && !/^[a-f0-9]{64}$/.test(serviceId)) throw new Error('Invalid service identity');
         const address = await this.address(lock.workspaceRoot);
         if (this.pending.has(address.key)) throw new Error('Supervisor launch already being prepared');
         if (this.pending.size >= 16) throw new Error('Supervisor launch capacity exceeded');
-        const operation = this.create(lock, address);
+        const operation = this.create(lock, address, serviceId);
         this.pending.set(address.key, operation);
         try { return await operation; }
         finally { if (this.pending.get(address.key) === operation) this.pending.delete(address.key); }
     }
 
-    private async create(lock: Readonly<ServerLock>, address: Awaited<ReturnType<NormalSupervisorLaunchStore['address']>>) {
+    private async create(lock: Readonly<ServerLock>, address: Awaited<ReturnType<NormalSupervisorLaunchStore['address']>>, serviceId?: string) {
         const previousText = await this.secrets.get(address.key);
         let previous: NormalLaunch | undefined;
         if (previousText) {
@@ -57,7 +58,7 @@ export class NormalSupervisorLaunchStore {
         const launchKey = randomBytes(32).toString('hex');
         const binding = {
             integrationId: previous?.binding.integrationId ?? randomBytes(32).toString('hex'),
-            serviceId: randomBytes(32).toString('hex'), workspace: address.canonical,
+            serviceId: serviceId ?? randomBytes(32).toString('hex'), workspace: address.canonical,
             serviceOrigin: `http://127.0.0.1:${lock.port}`,
         };
         const authorization = `Basic ${Buffer.from(`opencode:${lock.password}`).toString('base64')}`;

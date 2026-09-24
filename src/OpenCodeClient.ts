@@ -30,6 +30,9 @@ import { OpenCodeServerLockStore } from './transport/OpenCodeServerLockStore';
 import { OpenCodeEventStream } from './transport/OpenCodeEventStream';
 import { OpenCodeServerProcess } from './transport/OpenCodeServerProcess';
 import { OpenCodeServerController } from './transport/OpenCodeServerController';
+import { WindowsServiceJob } from './transport/WindowsServiceJob';
+import type { OpenCodeServiceRecordStore } from './transport/OpenCodeServiceRecordStore';
+import { queryServiceActivity } from './transport/ServiceActivity';
 import { mapServerEventToChatEvents } from './events/OpenCodeEventMapper';
 import { AssistantSseDiagnostics } from './diagnostics/AssistantSseDiagnostics';
 import {
@@ -947,7 +950,7 @@ export class OpenCodeClient {
     private readonly supervisorClassificationBlocked = new Set<string>();
     private readonly supervisorRoundUnresolved = new Set<string>();
 
-    constructor(options?: { supervisorDevelopment?: boolean; supervisorDescriptorPath?: string; normalSupervisorStore?: NormalSupervisorLaunchStore }) {
+    constructor(options?: { supervisorDevelopment?: boolean; supervisorDescriptorPath?: string; normalSupervisorStore?: NormalSupervisorLaunchStore; serviceRecords?: OpenCodeServiceRecordStore }) {
         if (options?.supervisorDevelopment && vscode.workspace.getConfiguration('opencode').get<boolean>('experimentalSupervisor', false)) {
             this.supervisorExperiment = new SupervisorExperiment(options.supervisorDescriptorPath || process.env.OPENCODE_GUI_SUPERVISOR_DESCRIPTOR || '');
             this.supervisorAssistantObserver = new SupervisorAssistantObserver(
@@ -971,14 +974,18 @@ export class OpenCodeClient {
             getWorkspaceRoot: () => this.workspaceRoot,
             log: (message) => this.logUiDebug(message),
         });
-        this.serverProcessManager = new OpenCodeServerProcess();
+        this.serverProcessManager = new OpenCodeServerProcess({ windowsJob: options?.serviceRecords && process.platform === 'win32'
+            ? new WindowsServiceJob(path.join(__dirname, 'native', 'ServiceJob.exe')) : undefined });
         this.serverController = new OpenCodeServerController({
             locks: this.serverLocks,
             process: this.serverProcessManager,
+            ownedRecords: this.supervisorExperiment ? undefined : options?.serviceRecords,
+            activity: connection => queryServiceActivity(connection),
+            connectionChanged: () => this.normalSupervisor?.invalidateServiceConnection(),
             buildServeSpawn: (args) => this.buildServeSpawn(args),
-            prepareSupervisorLaunch: options?.normalSupervisorStore ? lock =>
+            prepareSupervisorLaunch: options?.normalSupervisorStore ? (lock, serviceId) =>
                 vscode.workspace.getConfiguration('opencode').get<boolean>('supervisor.enabled', false)
-                    ? options.normalSupervisorStore!.prepare(lock) : Promise.resolve(undefined) : undefined,
+                    ? options.normalSupervisorStore!.prepare(lock, serviceId) : Promise.resolve(undefined) : undefined,
             fetchHealth: (conn, timeoutMs) => this.serverFetch(
                 '/global/health',
                 { method: 'GET' },
@@ -5056,6 +5063,16 @@ export class OpenCodeClient {
 
     private async checkServerHealth(port: number, password: string, timeoutMs = 1000): Promise<'ok' | 'unauthorized' | 'timeout' | 'connrefused' | 'unreachable'> {
         return this.serverController.checkHealth(this.workspaceRoot, port, password, timeoutMs);
+    }
+
+    public async operateService(action: 'start' | 'stop' | 'restart', confirm: (action: 'stop' | 'restart') => Promise<boolean>): Promise<string> {
+        const workspace = this.workspaceRoot;
+        const result = await this.serverController.operate(workspace, action, confirm);
+        if (this.workspaceRoot === workspace) {
+            if (action === 'stop') this.updateServerStatus('error', 'service-explicitly-stopped');
+            else { this.connectEventStream(); this.updateServerStatus('connected', 'service-explicit-operation'); }
+        }
+        return result;
     }
 
     public async shutdownServer(): Promise<void> {

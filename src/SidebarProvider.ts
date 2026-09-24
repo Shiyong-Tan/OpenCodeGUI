@@ -3,6 +3,7 @@ import type { SupervisorRound } from './supervisor/SupervisorRoundStore';
 import { SupervisorRoundCoordinator } from './supervisor/SupervisorRoundCoordinator';
 import { SupervisorPanelController } from './supervisor/SupervisorPanelController';
 import { NormalSupervisorLaunchStore } from './supervisor/NormalSupervisorLaunchStore';
+import { OpenCodeServiceRecordStore } from './transport/OpenCodeServiceRecordStore';
 import * as vscode from "vscode";
 import * as crypto from "crypto";
 import * as fs from "fs";
@@ -4667,7 +4668,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             && this._context.extensionMode === vscode.ExtensionMode.Development;
         const normalSupervisorStore = this._context.globalStorageUri?.fsPath && this._context.secrets
             ? new NormalSupervisorLaunchStore(vscode.Uri.joinPath(this._context.globalStorageUri, 'supervisor-normal').fsPath, this._context.secrets) : undefined;
-        this.client = new OpenCodeClient({ supervisorDevelopment, normalSupervisorStore });
+        const serviceRecords = process.platform === 'win32' && this._context.globalStorageUri?.fsPath && this._context.secrets
+            ? new OpenCodeServiceRecordStore(vscode.Uri.joinPath(this._context.globalStorageUri, 'service-owner').fsPath, this._context.secrets) : undefined;
+        this.client = new OpenCodeClient({ supervisorDevelopment, normalSupervisorStore, serviceRecords });
         if (this.client.isSupervisorExperiment() || this.client.hasSupervisorSupport?.()) {
             this.supervisorPanel = new SupervisorPanelController({
                 selection: () => ({ sessionId: this.currentSessionId, epoch: this.sessionSelectionEpoch }),
@@ -5393,9 +5396,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.workspaceSwitchInFlight = true;
         try {
             this.uiDebugChannel.appendLine(`EXT: workspace.changed | reason=${reason} | old=${oldRoot} | new=${newRoot}`);
-            const oldPid = this.client.getServerPid();
-            await this.client.shutdownServer();
-            this.uiDebugChannel.appendLine(`EXT: server.stop | reason=workspace-change | pid=${oldPid || 'null'}`);
+            this.uiDebugChannel.appendLine('EXT: server.detach | reason=workspace-change; service kept running');
 
             this.client.setWorkspaceRoot(newRoot);
             this.currentWorkspaceKey = this.getWorkspaceKeyForRoot(newRoot);
@@ -6191,6 +6192,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         } catch {
             return undefined;
         }
+    }
+
+    public operateService(action: 'start' | 'stop' | 'restart', confirm: (action: 'stop' | 'restart') => Promise<boolean>): Promise<string> {
+        return this.client.operateService(action, confirm);
     }
 
     public async shutdownServer(): Promise<void> {

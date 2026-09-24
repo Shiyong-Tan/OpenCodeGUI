@@ -57,6 +57,9 @@
       ]
     },
     "commands": [
+      { "command": "opencode.service.start", "title": "OpenCode: Start Service" },
+      { "command": "opencode.service.stop", "title": "OpenCode: Stop Service" },
+      { "command": "opencode.service.restart", "title": "OpenCode: Restart Service" },
       {
         "command": "opencode.checkVersion",
         "title": "OpenCode: Check Version"
