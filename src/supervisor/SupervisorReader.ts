@@ -13,7 +13,8 @@ export class SupervisorReader {
     private readonly failures = new Map<string, { count: number; nextAt: number }>();
     constructor(private readonly connection: IsolatedSupervisorConnection,
         private readonly fetcher: typeof fetch = fetch,
-        private readonly now: () => number = Date.now) { this.connection = { ...connection }; }
+        private readonly now: () => number = Date.now,
+        private readonly parse: (value: unknown) => SupervisorView = parseSupervisorView) { this.connection = { ...connection }; }
 
     async read(parentSessionId: string): Promise<SupervisorReadResult> {
         if (this.disposed) return { status: 'unavailable', reason: 'disposed' };
@@ -41,7 +42,7 @@ export class SupervisorReader {
                     chunks.push(value);
                 }
             } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
-            const view = parseSupervisorView(JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown);
+            const view = this.parse(JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown);
             if (controller.signal.aborted || this.disposed || view.parentSessionId !== parentSessionId ||
                 view.instanceId !== this.connection.instanceId || view.isolationId !== this.connection.isolationId ||
                 view.pluginVersion !== this.connection.pluginVersion) throw new Error('Stale or foreign supervisor view');

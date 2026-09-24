@@ -9,7 +9,8 @@ import { parseNotificationIdentity, type NotificationIdentity } from './notifica
 export class SupervisorNotificationCatalog {
     private readonly known = new Map<string, Readonly<NotificationIdentity>>();
     private readonly directory: string;
-    constructor(descriptorPath: string, private readonly isolationId: string) {
+    constructor(descriptorPath: string, private readonly isolationId: string,
+        private readonly parse: (value: unknown) => NotificationIdentity = parseNotificationIdentity) {
         if (!isAbsolute(descriptorPath)) throw new Error('Absolute supervisor descriptor required');
         this.directory = join(dirname(descriptorPath), 'identities');
     }
@@ -45,7 +46,7 @@ export class SupervisorNotificationCatalog {
                 if (size > 4096) throw new Error('Supervisor identity too large');
                 value = JSON.parse(buffer.subarray(0, size).toString('utf8')) as unknown;
             } finally { await file.close(); }
-            const identity = parseNotificationIdentity(value);
+            const identity = this.parse(value);
             if (identity.isolationId !== this.isolationId || identity.messageId !== messageId)
                 throw new Error('Supervisor identity ownership mismatch');
             if (!this.known.has(messageId) && this.known.size >= 1024) throw new Error('Supervisor identity capacity exceeded');
