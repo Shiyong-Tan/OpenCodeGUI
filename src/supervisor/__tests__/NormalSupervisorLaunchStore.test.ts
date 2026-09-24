@@ -21,7 +21,7 @@ describe('normal supervisor private launch metadata', () => {
         expect(second.binding.serviceId).not.toBe(first.binding.serviceId);
         expect(second.launchKey).not.toBe(first.launchKey);
         expect(JSON.stringify([...stored])).not.toContain(lock.password);
-        expect(await readdir(first.privateDirectory)).toEqual([]);
+        expect(await readdir(first.privateDirectory)).toEqual(['identities']);
         const connection: ServerConnection = { host: '127.0.0.1', port: lock.port,
             baseUrl: `http://127.0.0.1:${lock.port}`, authHeader: `Basic ${Buffer.from(`opencode:${lock.password}`).toString('base64')}`, lock };
         expect(await owner.forConnection(connection)).toEqual(second);

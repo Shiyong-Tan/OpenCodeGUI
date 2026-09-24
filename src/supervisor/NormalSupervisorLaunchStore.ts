@@ -50,6 +50,9 @@ export class NormalSupervisorLaunchStore {
         const privateDirectory = join(this.directory, address.hash);
         await mkdir(privateDirectory, { recursive: true });
         if (await realpath(privateDirectory) !== privateDirectory) throw new Error('Supervisor workspace storage redirects');
+        const identities = join(privateDirectory, 'identities');
+        await mkdir(identities, { recursive: true });
+        if (await realpath(identities) !== identities) throw new Error('Supervisor identity storage redirects');
         const launchKey = randomBytes(32).toString('hex');
         const binding = {
             integrationId: previous?.binding.integrationId ?? randomBytes(32).toString('hex'),

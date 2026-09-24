@@ -55,3 +55,19 @@ test('a hung identity read has a deadline and its late result cannot forward an 
         expect(forward).not.toHaveBeenCalled();
     } finally { ingress.dispose(); jest.useRealTimers(); }
 });
+
+test('normal mode quarantines one failed classification without blocking later ordinary messages', async () => {
+    const forward = jest.fn(), blocked = jest.fn();
+    const ingress = new SupervisorNotificationIngress(async (_session, id) => {
+        if (id === 'msg_uncertain') throw new Error('unavailable');
+        if (id === 'msg_notice') return notice;
+        return undefined;
+    }, blocked, false);
+    await ingress.route('ses_A', 'msg_uncertain', forward);
+    await ingress.route('ses_A', 'msg_notice', forward);
+    expect(forward).not.toHaveBeenCalled();
+    await ingress.route('ses_A', 'msg_real_user', forward);
+    expect(forward).toHaveBeenCalledTimes(1);
+    expect(blocked).toHaveBeenCalledTimes(1);
+    ingress.dispose();
+});

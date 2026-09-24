@@ -10,7 +10,8 @@ export interface NotificationLookup {
 export class SupervisorNotificationIngress {
     private readonly lanes = new Map<string, { tail: Promise<void>; pending: number; failed: boolean }>();
     private disposed = false;
-    constructor(private readonly lookup: NotificationLookup, private readonly onBlocked: (sessionId: string) => void) {}
+    constructor(private readonly lookup: NotificationLookup, private readonly onBlocked: (sessionId: string) => void,
+        private readonly haltSessionOnFailure = true) {}
 
     async route(sessionId: string, messageId: string | undefined, forward: () => void | Promise<void>): Promise<void> {
         if (this.disposed) return;
@@ -21,7 +22,7 @@ export class SupervisorNotificationIngress {
             this.lanes.set(sessionId, lane);
         }
         if (lane.failed) return;
-        if (lane.pending >= 512) { lane.failed = true; this.onBlocked(sessionId); return; }
+        if (lane.pending >= 512) { lane.failed = this.haltSessionOnFailure; this.onBlocked(sessionId); return; }
         lane.pending++;
         const current = lane;
         const next = current.tail.then(async () => {
@@ -37,7 +38,7 @@ export class SupervisorNotificationIngress {
             if (this.disposed || current.failed) return;
             if (!identity) await forward();
         }).catch(() => {
-            if (!this.disposed && !current.failed) { current.failed = true; this.onBlocked(sessionId); }
+            if (!this.disposed && !current.failed) { current.failed = this.haltSessionOnFailure; this.onBlocked(sessionId); }
         }).finally(() => { current.pending--; });
         current.tail = next;
         await next;
