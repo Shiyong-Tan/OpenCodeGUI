@@ -45,7 +45,7 @@ export class SupervisorReader {
             const view = this.parse(JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown);
             if (controller.signal.aborted || this.disposed || view.parentSessionId !== parentSessionId ||
                 view.instanceId !== this.connection.instanceId || view.isolationId !== this.connection.isolationId ||
-                view.pluginVersion !== this.connection.pluginVersion) throw new Error('Stale or foreign supervisor view');
+                view.openCodeVersion !== this.connection.openCodeVersion || view.pluginVersion !== this.connection.pluginVersion) throw new Error('Stale or foreign supervisor view');
             const prior = this.cache.get(parentSessionId);
             if (prior && (view.revision < prior.revision || Date.parse(view.observedAt) < Date.parse(prior.observedAt))) throw new Error('Regressed supervisor view');
             // Caller mutations cannot change the validated cache.

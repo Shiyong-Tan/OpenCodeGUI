@@ -9,7 +9,7 @@ import type { ServerConnection } from '../../transport/OpenCodeHttpClient';
 describe('normal supervisor service/bridge authentication', () => {
     let root = '';
     afterEach(async () => { if (root) await rm(root, { recursive: true, force: true }); });
-    async function setup() {
+    async function setup(version: '1.18.29' | '1.18.31' = '1.18.29') {
         root = await realpath(await mkdtemp(join(tmpdir(), 'gui-supervisor-connect-')));
         const binding = { integrationId: '11'.repeat(32), serviceId: '22'.repeat(32), workspace: 'd:/trial', serviceOrigin: 'http://127.0.0.1:42001' };
         const authHeader = `Basic ${Buffer.from('opencode:test-only-password').toString('base64')}`;
@@ -17,7 +17,7 @@ describe('normal supervisor service/bridge authentication', () => {
         const launch: NormalLaunch = { schemaVersion: 1, kind: 'normal-gui-launch', binding, launchKey,
             identityKey: '44'.repeat(32), privateDirectory: root, authenticationProof: serviceAuthenticationProof(launchKey, binding, authHeader) };
         const lease: ConnectionLease = { schemaVersion: 1, kind: 'normal-gui', ...binding, instanceId: '55'.repeat(32),
-            bridgeOrigin: 'http://127.0.0.1:54321', pluginVersion: '0.1.0', opencodeVersion: '1.18.29', issuedAt: 1000, expiresAt: 61000 };
+            bridgeOrigin: 'http://127.0.0.1:54321', pluginVersion: '0.1.0', opencodeVersion: version, issuedAt: 1000, expiresAt: 61000 };
         const service: ServerConnection = { host: '127.0.0.1', port: 42001, baseUrl: binding.serviceOrigin, authHeader,
             lock: { workspaceRoot: 'd:/trial', port: 42001, password: 'test-only-password', updatedAt: '' } };
         const signed = signConnectionLease(lease, launchKey);
@@ -26,7 +26,7 @@ describe('normal supervisor service/bridge authentication', () => {
             expect(options.redirect).toBe('error');
             if (url === `${service.baseUrl}/global/health`) {
                 expect(options.headers).toEqual({ Authorization: authHeader });
-                return new Response(JSON.stringify({ version: '1.18.29' }));
+                return new Response(JSON.stringify({ version }));
             }
             expect(url.startsWith(`${lease.bridgeOrigin}/v1/identity?challenge=`)).toBe(true);
             expect(options.headers).toEqual({ Authorization: `Bearer ${bridgeBearer(launchKey, binding, lease.instanceId)}` });
@@ -36,9 +36,10 @@ describe('normal supervisor service/bridge authentication', () => {
         return { launch, lease, service, fetcher, signed };
     }
 
-    test('connects only after exact normal service health and live bridge challenge', async () => {
-        const { launch, lease, service, fetcher } = await setup();
+    test.each(['1.18.29', '1.18.31'] as const)('connects with matching authenticated version %s', async version => {
+        const { launch, lease, service, fetcher } = await setup(version);
         const connection = await connectNormalSupervisor(launch, service, new AbortController().signal, fetcher as typeof fetch, () => 1000);
+        expect(connection.openCodeVersion).toBe(version);
         expect(connection.instanceId).toBe(lease.instanceId);
         expect(connection.serviceEndpoint).toBe(service.baseUrl);
         expect(fetcher).toHaveBeenCalledTimes(2);
@@ -71,5 +72,26 @@ describe('normal supervisor service/bridge authentication', () => {
                 .mockResolvedValueOnce(new Response(body));
             await expect(connectNormalSupervisor(launch, service, new AbortController().signal, fetcher as typeof fetch, () => 1000)).rejects.toThrow();
         }
+    });
+
+    test.each(['1.18.32', '2.0.0', null, undefined])('rejects unsupported health %s before bridge access', async version => {
+        const { launch, service } = await setup('1.18.31');
+        const fetcher = jest.fn(async () => Response.json({ version }));
+        await expect(connectNormalSupervisor(launch, service, new AbortController().signal, fetcher as typeof fetch, () => 1000))
+            .rejects.toThrow('incompatible');
+        expect(fetcher).toHaveBeenCalledTimes(1);
+    });
+
+    test('rejects a live signed lease that changes to another supported release', async () => {
+        const { launch, lease, service } = await setup('1.18.31');
+        const changed = { ...lease, opencodeVersion: '1.18.29' as const };
+        const fetcher = jest.fn(async (url: string) => {
+            if (url.endsWith('/global/health')) return Response.json({ version: '1.18.31' });
+            const challenge = new URL(url).searchParams.get('challenge')!;
+            return Response.json({ lease: signConnectionLease(changed, launch.launchKey),
+                proof: connectionProof(launch.launchKey, changed, challenge) });
+        });
+        await expect(connectNormalSupervisor(launch, service, new AbortController().signal, fetcher as typeof fetch, () => 1000))
+            .rejects.toThrow('disconnected');
     });
 });

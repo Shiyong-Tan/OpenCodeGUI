@@ -55,6 +55,15 @@ test('normal panel shows disabled state, retains old-instance evidence and fence
     for (const status of ['connecting', 'unavailable', 'incompatible', 'disconnected', 'connected']) {
         receive({ type: 'supervisorConnectionStatus', mode: 'normal', status });
         expect(button.textContent).not.toContain('实验');
+        if (status === 'incompatible') {
+            expect(content.textContent).toContain('1.18.29、1.18.31');
+            expect(content.textContent).toContain('同时更新 GUI 和 OpenCodeTaskSupervisor');
+            expect(content.textContent).toContain('不会自动重启服务');
+        }
+        if (status === 'unavailable') {
+            expect(content.textContent).toContain('Unsupported OpenCode version');
+            expect(content.textContent).toContain('仅更新 GUI 无法修复旧插件');
+        }
     }
     receive({ type: 'supervisorState', sessionId: 'ses_A', status: 'observed', view: snapshot() });
     const next = snapshot(); next.instanceId = 'instance_B'; next.tasks = [];

@@ -57,7 +57,7 @@ export async function connectNormalSupervisor(launch: NormalLaunch, service: Ser
     const health = await boundedJson(await fetcher(`${service.baseUrl}/global/health`, {
         headers: { Authorization: service.authHeader }, signal, redirect: 'error', cache: 'no-store',
     }), signal);
-    if (!health || typeof health !== 'object' || (health as { version?: unknown }).version !== '1.18.29') {
+    if (!health || typeof health !== 'object' || (health as { version?: unknown }).version !== lease.opencodeVersion) {
         throw new NormalConnectionError('incompatible');
     }
     const token = bridgeBearer(launch.launchKey, launch.binding, lease.instanceId);
@@ -68,10 +68,10 @@ export async function connectNormalSupervisor(launch: NormalLaunch, service: Ser
     if (!response || typeof response !== 'object') throw new NormalConnectionError('disconnected');
     const identity = response as { lease?: unknown; proof?: unknown };
     const live = verifyConnectionLease(identity.lease, launch.binding, launch.launchKey, now());
-    if (signal.aborted || live.instanceId !== lease.instanceId || live.bridgeOrigin !== lease.bridgeOrigin
+    if (signal.aborted || live.opencodeVersion !== lease.opencodeVersion || live.instanceId !== lease.instanceId || live.bridgeOrigin !== lease.bridgeOrigin
         || !verifyConnectionProof(identity.proof, launch.launchKey, live, challenge)) throw new NormalConnectionError('disconnected');
     // Compatibility projection, not an isolated descriptor or replacement HTTP connection.
     return { isolationId: launch.binding.integrationId, instanceId: live.instanceId,
         workspace: launch.binding.workspace, serviceEndpoint: service.baseUrl, serviceAuthorization: service.authHeader,
-        bridgeEndpoint: live.bridgeOrigin, bridgeToken: token, openCodeVersion: '1.18.29', pluginVersion: '0.1.0' };
+        bridgeEndpoint: live.bridgeOrigin, bridgeToken: token, openCodeVersion: live.opencodeVersion, pluginVersion: '0.1.0' };
 }

@@ -1,6 +1,6 @@
 # Phase 5: normal installed GUI trial
 
-Supported trial: Windows, OpenCode **1.18.29**, GUI **5.0.6**. The original
+Supported trial: Windows, OpenCode **1.18.29 or 1.18.31**, GUI **5.0.7**. The original
 phase-five acceptance used the 5.0.5 commits recorded in the companion supervisor
 repository; 5.0.6 packages that implementation as a distinct GUI release. VS Code 1.137.0 was
 actually exercised. This is a small-workspace trial, not long-term production
@@ -9,12 +9,12 @@ is performed.
 
 ## Install and enable
 
-Install `opencode-gui-5.0.6.vsix` from the OpenCodeGUI repository using
+Install `opencode-gui-5.0.7.vsix` from the OpenCodeGUI repository using
 **Extensions: Install from VSIX...**, then reload when prompted. This updates the
 GUI extension, not OpenCode or the separately installed supervisor plugin. Start
 with a non-critical workspace. To reproduce the package from this repository,
 run `npm.cmd ci`, `npm.cmd run compile`, then
-`npx.cmd --yes @vscode/vsce@3.9.1 package --out opencode-gui-5.0.6.vsix`.
+`npx.cmd --yes @vscode/vsce@3.9.1 package --out opencode-gui-5.0.7.vsix`.
 Run the repository test and Webview gates before distributing a rebuilt package.
 
 Build the supervisor with `npm.cmd ci`, `npm.cmd test`, `npm.cmd run typecheck`
@@ -28,7 +28,7 @@ actual installation file URL:
 }]
 ```
 
-This local options tuple was verified with OpenCode 1.18.29. It defaults to
+This local options tuple was verified with OpenCode 1.18.29 and 1.18.31. See [the compatibility audit](OPENCODE-1.18.31.md); rebuild the companion Supervisor too. It defaults to
 observation; dispatch and model-triggering notifications require separate explicit
 plugin options and authorization. The GUI switch does not authorize those actions.
 

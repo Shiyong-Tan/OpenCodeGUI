@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 5.0.7 - 2026-09-24
+
+- Support audited OpenCode 1.18.31 alongside 1.18.29 across Supervisor health, signed connection leases and snapshots. Preserve the actual version and reject mismatched or unaudited releases.
+- Explain how to diagnose Supervisor version failures and that both GUI and the separately installed Supervisor must be updated. Existing services are never restarted automatically.
+- Add compatibility and mismatch regression tests. See [compatibility validation](docs/OPENCODE-1.18.31.md).
+
 ## 5.0.6 - 2026-09-24
 
 ### Task supervision

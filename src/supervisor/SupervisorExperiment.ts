@@ -31,7 +31,7 @@ export class SupervisorExperiment {
             });
             if (!response.ok) throw new Error('Isolated OpenCode health check failed');
             const health = await response.json() as unknown;
-            if (!health || typeof health !== 'object' || (health as Record<string, unknown>).version !== '1.18.29') {
+            if (!health || typeof health !== 'object' || (health as Record<string, unknown>).version !== loaded.openCodeVersion) {
                 throw new Error('Isolated OpenCode version mismatch');
             }
             if (this.disposed) throw new Error('Supervisor development connection disposed');

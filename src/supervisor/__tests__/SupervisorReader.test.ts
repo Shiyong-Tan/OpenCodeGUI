@@ -6,6 +6,27 @@ const descriptor = () => ({ schemaVersion: 1, isolationId: 'lab_A', instanceId: 
     workspace: resolve('isolated/work'), openCodeVersion: '1.18.29', pluginVersion: '0.1.0',
     service: { endpoint: 'http://127.0.0.1:40001', authorization: 'Basic dGVzdA==' },
     bridge: { endpoint: 'http://127.0.0.1:40002', token: 'a'.repeat(64) } });
+
+test.each(['1.18.29', '1.18.31'])('descriptor and snapshot preserve matching version %s', async version => {
+    const connection = parseIsolatedSupervisorConnection({ ...descriptor(), openCodeVersion: version });
+    const reader = new SupervisorReader(connection, (async () => Response.json({ ...view(), openCodeVersion: version })) as typeof fetch);
+    try {
+        const result = await reader.read('ses_A');
+        expect(result.status).toBe('observed');
+        if (result.status === 'observed') expect(result.view.openCodeVersion).toBe(version);
+    } finally { reader.dispose(); }
+});
+
+test('reader rejects a snapshot from another supported version', async () => {
+    const connection = parseIsolatedSupervisorConnection({ ...descriptor(), openCodeVersion: '1.18.31' });
+    const reader = new SupervisorReader(connection, (async () => Response.json(view())) as typeof fetch);
+    try { expect(await reader.read('ses_A')).toEqual({ status: 'unavailable', reason: 'read_failed' }); }
+    finally { reader.dispose(); }
+});
+
+test.each(['1.18.30', '1.18.32', '2.0.0', '1.18.31-beta', null, 11831])('descriptor refuses unaudited version %s', version => {
+    expect(() => parseIsolatedSupervisorConnection({ ...descriptor(), openCodeVersion: version })).toThrow('version');
+});
 const view = (parent = 'ses_A', revision = 1) => ({ schemaVersion: 1, isolationId: 'lab_A', instanceId: 'instance_A',
     revision, pluginVersion: '0.1.0', openCodeVersion: '1.18.29', observedAt: '2026-09-18T00:00:00.000Z',
     parentSessionId: parent, scope: 'isolated_allowlisted_commands', tasks: [], executions: [], notifications: [], notificationIdentities: [] });

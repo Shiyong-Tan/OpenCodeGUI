@@ -1,3 +1,4 @@
+import { parseOpenCodeVersion } from './opencode-version';
 import { parseNotificationIdentity } from './notification-identity-protocol';
 /** Version 1 deliberately carries no free-form task text, commands, paths or output. */
 type Parser<T> = (value: unknown) => T;
@@ -50,7 +51,7 @@ const notice = object({ ...identity, childSessionId: session,
 });
 const envelope = object({
   schemaVersion: literal(1), isolationId: id, instanceId: id, revision: natural,
-  pluginVersion: text(/^\d+\.\d+\.\d+$/), openCodeVersion: literal('1.18.29'),
+  pluginVersion: text(/^\d+\.\d+\.\d+$/), openCodeVersion: parseOpenCodeVersion,
   observedAt: text(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
   parentSessionId: session, scope: literal('isolated_allowlisted_commands'),
   tasks: list(task), executions: list(execution), notifications: list(notice),

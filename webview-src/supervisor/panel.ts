@@ -1,3 +1,4 @@
+import { SUPPORTED_OPENCODE_VERSIONS } from '../../src/supervisor/opencode-version';
 import { parseSupervisorView, type SupervisorView } from '../../src/supervisor/protocol';
 
 const age = (value: number | null): string => value === null ? '未知' : `${Math.floor(value / 1000)} 秒`;
@@ -60,8 +61,8 @@ export function mountSupervisorPanel(document: Document, receive: (handler: (val
         panel.setAttribute('aria-label', '子任务监督器，只读');
         title.textContent = '子任务监督器 · ' + connectionStates[status];
         const hint = status === 'disabled' ? 'GUI 展示已关闭；后端插件和任务可能仍在运行。' :
-            status === 'unavailable' ? '请检查插件安装；首次加载需要下一次正常服务启动，不会自动重启已有服务。' :
-            status === 'incompatible' ? '当前仅支持 Windows / OpenCode 1.18.29。' : connectionStates[status];
+            status === 'unavailable' ? '请检查 OpenCodeTaskSupervisor 安装及服务日志。若日志提示 Unsupported OpenCode version，请同时更新 GUI 和 Supervisor；仅更新 GUI 无法修复旧插件。首次加载需要下一次正常服务启动，不会自动重启已有服务。' :
+            status === 'incompatible' ? `版本或连接信息不匹配。已验证 Windows / OpenCode ${SUPPORTED_OPENCODE_VERSIONS.join('、')}。请同时更新 GUI 和 OpenCodeTaskSupervisor，并检查服务版本与插件日志；不会自动重启服务。` : connectionStates[status];
         if (status !== 'connected') body.textContent = (current ? historical() + '\n' : '') + hint + '\n设置：OpenCode › Supervisor: Enabled';
     };
     connectionStatus(document.querySelector('script[data-supervisor-status]')?.getAttribute('data-supervisor-status'));
