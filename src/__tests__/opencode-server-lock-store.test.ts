@@ -30,6 +30,22 @@ describe('OpenCode server lock store', () => {
         expect(logs.some((line) => line.includes('server.lock.create'))).toBe(true);
     });
 
+    test.each([false, true])('does not log credentials when replacing invalid lock: %s', async (invalid) => {
+        root = fs.mkdtempSync(path.join(os.tmpdir(), 'opencode-lock-redaction-'));
+        if (invalid) {
+            fs.mkdirSync(path.join(root, '.opencode'));
+            fs.writeFileSync(path.join(root, '.opencode', 'server.lock.json'), 'invalid json');
+        }
+        const logs: string[] = [];
+        const store = new OpenCodeServerLockStore({ getWorkspaceRoot: () => root, log: line => logs.push(line) });
+        const connection = await store.getConnection();
+        const output = logs.join('\n');
+        expect(output).toContain('server.lock.create');
+        expect(output).not.toContain(connection.lock.password.slice(0, 6));
+        expect(output).not.toContain(connection.authHeader);
+        expect(output).not.toContain('passwordHashPrefix');
+    });
+
     test('provides one deterministic pass through the configured port range', () => {
         const store = new OpenCodeServerLockStore({ getWorkspaceRoot: () => 'C:\\repo', log: () => undefined });
         const ports = store.getMigrationPorts('C:\\repo');

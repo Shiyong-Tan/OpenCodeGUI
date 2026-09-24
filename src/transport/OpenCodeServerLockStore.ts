@@ -67,7 +67,7 @@ export class OpenCodeServerLockStore {
             this.options.log(`EXT: server.lock.read | path=${lockPath} | exists=false | port=${defaultPort} | hasPassword=false`);
             const lock = this.createLock(workspaceRoot, defaultPort);
             await this.write(lock, workspaceRoot, false);
-            this.options.log(`EXT: server.lock.create | path=${lockPath} | port=${lock.port} | passwordHashPrefix=${lock.password.slice(0, 6)}`);
+            this.options.log(`EXT: server.lock.create | path=${lockPath} | port=${lock.port} | hasPassword=true`);
             const reread = await this.readFromDisk(workspaceRoot);
             if (reread) {
                 this.options.log(`EXT: server.lock.read | path=${lockPath} | exists=true | port=${reread.lock.port} | hasPassword=${String(Boolean(reread.lock.password))}`);
@@ -82,7 +82,7 @@ export class OpenCodeServerLockStore {
             this.options.log(`EXT: server.lock.read | path=${lockPath} | exists=true | port=${defaultPort} | hasPassword=false`);
             const lock = this.createLock(workspaceRoot, defaultPort);
             const mtimeMs = await this.write(lock, workspaceRoot, false);
-            this.options.log(`EXT: server.lock.create | path=${lockPath} | port=${lock.port} | passwordHashPrefix=${lock.password.slice(0, 6)}`);
+            this.options.log(`EXT: server.lock.create | path=${lockPath} | port=${lock.port} | hasPassword=true`);
             return { lock, mtimeMs };
         }
 
