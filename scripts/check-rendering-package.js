@@ -33,6 +33,10 @@ if (!files.some((file) => file.endsWith('media/supervisor.bundle.js'))) {
   throw new Error('VSIX package contents omit media/supervisor.bundle.js');
 }
 for (const file of files) {
+  if (/^(?:\.build-out\.txt|\.cf4-tests\.txt|\.(?:chk|diff|test)-.*\.txt|opencode\.jsonc?|AGENTS\.md)$/.test(file)
+      || file.startsWith('.agents/') || /^out\/.*(?:^|\/)__tests__\//.test(file)) {
+    throw new Error('Local configuration or investigation output would be packaged');
+  }
   if (
     file.includes('webview-src/')
     || file.endsWith('rendering.bundle.js.map')

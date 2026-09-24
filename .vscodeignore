@@ -81,3 +81,15 @@ extension/help.txt
 
 # assets that may be build artifacts
 extension/assets/*.exe
+
+# Local investigation outputs and workspace configuration are never trial artifacts.
+.build-out.txt
+.cf4-tests.txt
+.chk-*.txt
+.diff-*.txt
+.test-*.txt
+opencode.json
+opencode.jsonc
+.agents/**
+AGENTS.md
+out/**/__tests__/**
