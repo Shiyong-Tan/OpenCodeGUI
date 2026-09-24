@@ -25,6 +25,10 @@ Focused startup tests cover reuse without metadata work, successful preparation,
 failure redaction, timeout with a controlled clock, and inherited-binding rejection.
 Ordinary installed VSIX/Webview enable, disable, new GUI process, reload and completed-history recovery passed in private profiles. The Phase 5 model run used 8/24 newly authorized requests and verified actual parent result reading and one independent follow-up. This does not establish service-restart/fault acceptance or service process exit; those remain pending. No production-ready claim, deployment, automatic cancellation or redispatch. Exact evidence is in the companion supervisor repository docs/PHASE5-RESULTS.md.
 
+### Confirmed GUI/service lifetime — 2026-09-24
+
+The user chose to preserve services across GUI close/reload. Extension disposal must stop local polling/subscriptions and drain existing persistence without killing a service. Explicit start/stop/restart operations must remain in the existing transport owner and authenticate ownership; process-name matching and adopting unrelated services remain forbidden. These operations and restart acceptance are still pending.
+
 ## Final Phase 4 acceptance — 2026-09-23
 
 Phase 4 is complete within the isolated development experiment. Stop for user review;

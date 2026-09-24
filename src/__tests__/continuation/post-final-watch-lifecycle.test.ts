@@ -314,3 +314,21 @@ describe('OpenCodeClient post-final watch lifecycle', () => {
         ]);
     });
 });
+
+
+test('GUI disposal drains persistence and releases transport without stopping the service', async () => {
+    const client = new OpenCodeClient();
+    const shutdown = jest.spyOn(client, 'shutdownServer').mockResolvedValue();
+    const internal = client as unknown as {
+        serverController: { resetForWorkspaceChange(): void };
+        normalSupervisor: { dispose(): void };
+    };
+    const release = jest.spyOn(internal.serverController, 'resetForWorkspaceChange');
+    const dispose = jest.fn();
+    internal.normalSupervisor = { dispose };
+    await client.dispose();
+    await client.dispose();
+    expect(shutdown).not.toHaveBeenCalled();
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(dispose).toHaveBeenCalledTimes(1);
+});

@@ -4,6 +4,8 @@ import * as cp from 'child_process';
 import { SidebarProvider } from './SidebarProvider';
 import { OpenCodeDiffProvider } from './OpenCodeDiffProvider';
 
+let disposeSidebar: (() => Promise<void>) | undefined;
+
 export function activate(context: vscode.ExtensionContext) {
 	console.log('Congratulations, your extension "opencode-gui" is now active!');
 
@@ -11,6 +13,8 @@ export function activate(context: vscode.ExtensionContext) {
     const diffProvider = new OpenCodeDiffProvider(workspaceRoot);
 
 	const sidebarProvider = new SidebarProvider(context, context.extensionUri, diffProvider);
+    let disposal: Promise<void> | undefined;
+    disposeSidebar = () => disposal ??= sidebarProvider.dispose();
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(
             "opencode.sidebar",
@@ -141,11 +145,11 @@ export function activate(context: vscode.ExtensionContext) {
 
 	context.subscriptions.push(
 		new vscode.Disposable(() => {
-			void sidebarProvider.shutdownServer();
+			void disposeSidebar?.().catch(() => console.error('OpenCode GUI local cleanup failed'));
 		})
 	);
 }
 
-export function deactivate() {
-    // Best-effort cleanup handled via Disposable and process handlers.
+export function deactivate(): Promise<void> | undefined {
+    return disposeSidebar?.();
 }

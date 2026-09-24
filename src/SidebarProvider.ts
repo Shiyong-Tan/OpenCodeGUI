@@ -5227,11 +5227,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         if (!process.env.JEST_WORKER_ID) {
             void this.client.warmServer();
         }
-        process.on('exit', () => { void this.client.shutdownServer(); });
-        process.on('SIGINT', () => { void this.client.shutdownServer(); });
-        process.on('SIGTERM', () => { void this.client.shutdownServer(); });
-        process.on('uncaughtException', () => { void this.client.shutdownServer(); });
-        process.on('unhandledRejection', () => { void this.client.shutdownServer(); });
         const workspaceRoot = this.getWorkspaceRootPath();
         this.repoManager = new GitRepoManager(workspaceRoot, (message) => this.uiDebugChannel.appendLine(message));
         void this.initGitUndo();
@@ -6203,6 +6198,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     public async dispose(): Promise<void> {
+        this.supervisorPanel?.dispose();
         this.attachmentStorage.dispose();
         this.chatEventActorRouter.dispose();
         this.turnRuntimeShadow.dispose();

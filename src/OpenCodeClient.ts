@@ -7119,6 +7119,11 @@ export class OpenCodeClient {
     public async dispose(): Promise<void> {
         if (this.disposePromise) return this.disposePromise;
         this.disposePromise = (async () => {
+            this.normalSupervisor?.dispose();
+            this.supervisorIngress?.dispose();
+            this.supervisorAssistantObserver?.dispose();
+            this.supervisorExperiment?.dispose();
+            this.eventStream?.stop();
             while (true) {
                 const pending = Array.from(this.continuationPersistBySession.values());
                 if (pending.length) {
@@ -7131,7 +7136,8 @@ export class OpenCodeClient {
             this.resetSessionState();
             this.eventListeners.clear();
             this.serverStatusHandler = undefined;
-            await this.shutdownServer();
+            // GUI lifetime ends here; service lifetime requires an explicit operation.
+            this.serverController.resetForWorkspaceChange();
         })();
         return this.disposePromise;
     }
