@@ -50,3 +50,14 @@ describe('OpenCode server process', () => {
         expect(processKill).not.toHaveBeenCalled();
     });
 });
+
+
+test('Windows legacy PID-only shutdown refuses instead of calling taskkill', async () => {
+    const exec = jest.fn();
+    const owner = new OpenCodeServerProcess({ platform: 'win32', exec: exec as unknown as typeof import('child_process').exec,
+        spawn: jest.fn(() => Object.assign(new EventEmitter(), { pid: 43129 })) as unknown as typeof import('child_process').spawn });
+    owner.start({ command: 'fixture.exe', args: [] }, 'C:\\fixture', 'fixture-password');
+    await expect(owner.shutdown()).rejects.toMatchObject({ reason: 'explicit_verified_operation_required' });
+    expect(exec).not.toHaveBeenCalled();
+    owner.detach();
+});

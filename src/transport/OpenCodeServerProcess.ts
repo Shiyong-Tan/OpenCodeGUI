@@ -1,16 +1,19 @@
 import * as cp from 'child_process';
+import { WindowsServiceJob, ServiceOperationError, type ServiceProcessIdentity } from './WindowsServiceJob';
 
 export type ServerSpawnSpec = Readonly<{ command: string; args: string[]; supervisorBinding?: string }>;
 
 export class OpenCodeServerProcess {
     private child?: cp.ChildProcess;
     private rememberedPid?: number;
+    private ownedIdentity?: ServiceProcessIdentity;
 
     constructor(private readonly options: {
         spawn?: typeof cp.spawn;
         exec?: typeof cp.exec;
         processKill?: typeof process.kill;
         platform?: NodeJS.Platform;
+        windowsJob?: WindowsServiceJob;
     } = {}) {}
 
     public start(spec: ServerSpawnSpec, cwd: string, password: string): number | undefined {
@@ -26,11 +29,31 @@ export class OpenCodeServerProcess {
         return this.rememberedPid;
     }
 
+    public async startOwned(spec: ServerSpawnSpec, cwd: string, password: string, serviceId: string,
+        register: (identity: ServiceProcessIdentity) => Promise<void>): Promise<number> {
+        if (!this.options.windowsJob) throw new ServiceOperationError('native_owner_unavailable');
+        this.ownedIdentity = await this.options.windowsJob.start({ serviceId, executable: spec.command, args: spec.args, cwd },
+            { ...process.env, PYTHONIOENCODING: 'utf-8', OPENCODE_SERVER_PASSWORD: password,
+                OPENCODE_GUI_SUPERVISOR_BINDING: spec.supervisorBinding }, register);
+        return this.ownedIdentity.pid;
+    }
+
+    public async inspectOwned(identity: ServiceProcessIdentity, stop = false) {
+        if (!this.options.windowsJob) throw new ServiceOperationError('native_owner_unavailable');
+        return this.options.windowsJob.inspect(identity, stop);
+    }
+
+    public async acquireOperation(workspaceKey: string): Promise<() => Promise<void>> {
+        if (!this.options.windowsJob) throw new ServiceOperationError('native_owner_unavailable');
+        return this.options.windowsJob.acquire(workspaceKey);
+    }
+
     public getPid(): number | undefined {
-        return this.child?.pid || this.rememberedPid;
+        return this.ownedIdentity?.pid || this.child?.pid || this.rememberedPid;
     }
 
     public detach(): void {
+        this.ownedIdentity = undefined;
         this.child = undefined;
         this.rememberedPid = undefined;
     }
@@ -47,23 +70,7 @@ export class OpenCodeServerProcess {
 
     private async killProcessTree(pid: number): Promise<void> {
         const platform = this.options.platform || process.platform;
-        if (platform === 'win32') {
-            await new Promise<void>((resolve) => {
-                const attemptKill = () => {
-                    const exec = this.options.exec || cp.exec;
-                    exec(`taskkill /PID ${pid} /T /F`, async (_error, stdout, stderr) => {
-                        const output = `${String(stdout || '')}\n${String(stderr || '')}`;
-                        if (/SUCCESS/i.test(output) || !(await this.isProcessRunningWindows(pid))) {
-                            resolve();
-                            return;
-                        }
-                        setTimeout(attemptKill, 500);
-                    });
-                };
-                attemptKill();
-            });
-            return;
-        }
+        if (platform === 'win32') throw new ServiceOperationError('explicit_verified_operation_required');
         try {
             const processKill = this.options.processKill || process.kill;
             processKill(pid, 'SIGTERM');
@@ -72,21 +79,4 @@ export class OpenCodeServerProcess {
         }
     }
 
-    private async isProcessRunningWindows(pid: number): Promise<boolean> {
-        return new Promise<boolean>((resolve) => {
-            const exec = this.options.exec || cp.exec;
-            exec(`tasklist /FI "PID eq ${pid}" /FO CSV /NH`, (error, stdout, stderr) => {
-                const output = `${String(stdout || '')}\n${String(stderr || '')}`;
-                if (error && /No tasks are running|没有运行的任务|找不到/i.test(output)) {
-                    resolve(false);
-                    return;
-                }
-                if (/No tasks are running|没有运行的任务|找不到/i.test(output)) {
-                    resolve(false);
-                    return;
-                }
-                resolve(new RegExp(`\\b${pid}\\b`).test(output));
-            });
-        });
-    }
 }

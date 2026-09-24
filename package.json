@@ -133,7 +133,7 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "npm run compile:extension && npm run build:webview",
-    "compile:extension": "tsc -p ./",
+    "compile:extension": "node scripts/build-service-job.js && tsc -p ./",
     "watch": "tsc -watch -p ./",
     "watch:all": "node scripts/watch-all.js",
     "build:webview": "node scripts/build-rendering.js",
