@@ -39,7 +39,7 @@ export function mountSupervisorPanel(document: Document, receive: (handler: (val
     button.style.cssText = 'position:fixed;right:12px;top:42px;z-index:9000;font-size:12px;padding:4px 8px;';
     const panel = document.createElement('section'); panel.id = 'supervisor-panel'; panel.hidden = true;
     panel.setAttribute('aria-label', '实验监督器，只读');
-    panel.style.cssText = 'position:fixed;right:8px;top:76px;bottom:90px;width:min(380px,calc(100vw - 16px));overflow:auto;z-index:9001;background:var(--vscode-editor-background);color:var(--vscode-foreground);border:1px solid var(--vscode-panel-border);padding:12px;box-sizing:border-box;white-space:pre-wrap;font-size:12px;';
+    panel.style.cssText = 'position:fixed;right:8px;top:76px;bottom:90px;width:min(380px,calc(100vw - 16px));overflow:auto;z-index:9001;background:var(--vscode-editor-background);color:var(--vscode-foreground);border:1px solid var(--vscode-panel-border);padding:12px;box-sizing:border-box;white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;';
     const title = document.createElement('h3'); title.textContent = '实验模式，仅预设受托管命令';
     const body = document.createElement('div'); body.id = 'supervisor-content'; body.textContent = '等待会话观测';
     panel.append(title, body); document.body.append(button, panel);
