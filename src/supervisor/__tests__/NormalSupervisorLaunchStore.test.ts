@@ -12,7 +12,8 @@ describe('normal supervisor private launch metadata', () => {
         root = await mkdtemp(join(tmpdir(), 'gui-supervisor-launch-'));
         const stored = new Map<string, string>();
         const secrets = { get: async (key: string) => stored.get(key), store: async (key: string, value: string) => { stored.set(key, value); } };
-        const owner = new NormalSupervisorLaunchStore(join(root, 'private'), secrets);
+        // VS Code file URIs may lowercase the drive while realpath preserves its spelling.
+        const owner = new NormalSupervisorLaunchStore(join(root, 'private').replace(/^[A-Z]:/, drive => drive.toLowerCase()), secrets);
         const lock = { workspaceRoot: root, port: 42001, password: 'test-only-secret', updatedAt: 'now' };
         const first = JSON.parse(await owner.prepare(lock));
         const second = JSON.parse(await owner.prepare(lock));

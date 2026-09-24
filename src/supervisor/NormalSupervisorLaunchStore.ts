@@ -46,8 +46,9 @@ export class NormalSupervisorLaunchStore {
             previous = raw;
         }
         await mkdir(this.directory, { recursive: true });
-        if (await realpath(this.directory) !== resolve(this.directory)) throw new Error('Supervisor storage redirects');
-        const privateDirectory = join(this.directory, address.hash);
+        const actualDirectory = await realpath(this.directory);
+        if (canonicalWindowsWorkspace(actualDirectory) !== canonicalWindowsWorkspace(resolve(this.directory))) throw new Error('Supervisor storage redirects');
+        const privateDirectory = join(actualDirectory, address.hash);
         await mkdir(privateDirectory, { recursive: true });
         if (await realpath(privateDirectory) !== privateDirectory) throw new Error('Supervisor workspace storage redirects');
         const identities = join(privateDirectory, 'identities');
@@ -75,7 +76,7 @@ export class NormalSupervisorLaunchStore {
         if (!serialized) return undefined;
         try {
             const launch = parseNormalLaunch(serialized, address.canonical, connection.baseUrl, connection.authHeader);
-            const expected = join(resolve(this.directory), address.hash);
+            const expected = join(await realpath(this.directory), address.hash);
             if (launch.privateDirectory !== expected || await realpath(expected) !== expected) return undefined;
             return launch;
         } catch { return undefined; }
