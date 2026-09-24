@@ -2,6 +2,7 @@ import { supervisorRecoveryCandidate } from './supervisor/SupervisorHistoryRecov
 import type { SupervisorRound } from './supervisor/SupervisorRoundStore';
 import { SupervisorRoundCoordinator } from './supervisor/SupervisorRoundCoordinator';
 import { SupervisorPanelController } from './supervisor/SupervisorPanelController';
+import { NormalSupervisorLaunchStore } from './supervisor/NormalSupervisorLaunchStore';
 import * as vscode from "vscode";
 import * as crypto from "crypto";
 import * as fs from "fs";
@@ -297,6 +298,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private client: OpenCodeClient;
     private currentSessionId?: string;
     private supervisorPanel?: SupervisorPanelController;
+    public refreshSupervisorConfiguration(): void {
+        if (this.client.isSupervisorExperiment()) return;
+        const enabled = vscode.workspace.getConfiguration('opencode').get<boolean>('supervisor.enabled', false);
+        this.client.setNormalSupervisorEnabled(enabled);
+        this.supervisorPanel?.setEnabled(enabled);
+    }
     private userOwnedSessionIds = new Set<string>();
     private userOwnedSessionsLoaded: Promise<void>;
     private activeSubagentSessionIds = new Set<string>();
@@ -4658,13 +4665,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     ) {
         const supervisorDevelopment = typeof this._context.extensionMode === 'number'
             && this._context.extensionMode === vscode.ExtensionMode.Development;
-        this.client = new OpenCodeClient({ supervisorDevelopment });
-        if (supervisorDevelopment && this.client.isSupervisorExperiment()) {
+        const normalSupervisorStore = this._context.globalStorageUri?.fsPath && this._context.secrets
+            ? new NormalSupervisorLaunchStore(vscode.Uri.joinPath(this._context.globalStorageUri, 'supervisor-normal').fsPath, this._context.secrets) : undefined;
+        this.client = new OpenCodeClient({ supervisorDevelopment, normalSupervisorStore });
+        if (this.client.isSupervisorExperiment() || this.client.hasSupervisorSupport?.()) {
             this.supervisorPanel = new SupervisorPanelController({
                 selection: () => ({ sessionId: this.currentSessionId, epoch: this.sessionSelectionEpoch }),
                 read: sessionId => this.client.readSupervisorState(sessionId),
                 publish: message => { void this._view?.webview.postMessage(message); },
-            });
+                connectionStatus: () => this.client.getSupervisorStatus?.(),
+            }, 2000, this.client.isSupervisorExperiment() || vscode.workspace.getConfiguration('opencode').get<boolean>('supervisor.enabled', false));
             this._context.subscriptions.push(this.supervisorPanel);
         }
         this.diffFileViewer = new DiffFileViewer({
@@ -4729,7 +4739,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 );
             },
         });
-        if (this.client.isSupervisorExperiment?.()) {
+        if (this.client.isSupervisorExperiment?.() || this.client.hasSupervisorSupport?.()) {
             this.supervisorRounds = new SupervisorRoundCoordinator({
                 storage: isolationId => ({
                     read: async sessionId => this._context.globalState.get('supervisorRounds.v1.' + isolationId + '.' + sessionId),
@@ -7290,7 +7300,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 <script src="${undoScriptUri}"></script>
                 <script src="${continuationScriptUri}"></script>
                 <script src="${scriptUri}"></script>
-                ${this.supervisorPanel ? `<script src="${supervisorScriptUri}"></script>` : ''}
+                ${this.supervisorPanel ? `<script src="${supervisorScriptUri}" data-supervisor-status="${this.client.getSupervisorStatus?.() ?? ''}"></script>` : ''}
             </body>
             </html>`;
     }

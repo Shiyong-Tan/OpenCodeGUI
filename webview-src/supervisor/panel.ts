@@ -46,30 +46,52 @@ export function mountSupervisorPanel(document: Document, receive: (handler: (val
     button.addEventListener('click', () => { panel.hidden = !panel.hidden; button.setAttribute('aria-expanded', String(!panel.hidden)); });
     let sessionId: string | null = null;
     let current: SupervisorView | undefined;
+    let previous: SupervisorView | undefined;
+    let normal = false;
+    let lastStatus = '';
+    const historical = () => (previous ? supervisorLines(previous, true).join('\n') + '\n' : '') + (current ? supervisorLines(current, true).join('\n') : '');
+    const connectionStates: Record<string, string> = { disabled: '未启用', unavailable: '未安装或不可用',
+        connecting: '连接中', connected: '已连接', incompatible: '不兼容', disconnected: '已断开' };
+    const connectionStatus = (status: unknown) => {
+        if (typeof status !== 'string' || !connectionStates[status]) return;
+        normal = true;
+        lastStatus = status;
+        button.textContent = '监督 · ' + connectionStates[status];
+        panel.setAttribute('aria-label', '子任务监督器，只读');
+        title.textContent = '子任务监督器 · ' + connectionStates[status];
+        const hint = status === 'disabled' ? 'GUI 展示已关闭；后端插件和任务可能仍在运行。' :
+            status === 'unavailable' ? '请检查插件安装；首次加载需要下一次正常服务启动，不会自动重启已有服务。' :
+            status === 'incompatible' ? '当前仅支持 Windows / OpenCode 1.18.29。' : connectionStates[status];
+        if (status !== 'connected') body.textContent = (current ? historical() + '\n' : '') + hint + '\n设置：OpenCode › Supervisor: Enabled';
+    };
+    connectionStatus(document.querySelector('script[data-supervisor-status]')?.getAttribute('data-supervisor-status'));
     const select = (id: string | null) => {
         if (sessionId === id) return;
-        sessionId = id; current = undefined; body.replaceChildren(); body.textContent = '等待会话观测';
+        sessionId = id; current = undefined; previous = undefined; body.replaceChildren(); body.textContent = '等待会话观测';
+        if (normal) connectionStatus(lastStatus);
     };
     receive(value => {
         if (!value || typeof value !== 'object') return;
         const message = value as Record<string, unknown>;
+        if (message.type === 'supervisorConnectionStatus' && message.mode === 'normal') { connectionStatus(message.status); return; }
         if (message.type === 'supervisorSelection' || message.type === 'sessionData') {
             select(typeof message.sessionId === 'string' ? message.sessionId : null); return;
         }
         if (message.type !== 'supervisorState' || message.sessionId !== sessionId) return;
         if (message.status !== 'observed') {
-            body.textContent = current ? supervisorLines(current, true).join('\n') : '观测不可用，当前状态未知'; return;
+            body.textContent = current ? historical() : '观测不可用，当前状态未知'; return;
         }
         try {
             const next = parseSupervisorView(message.view);
             if (next.parentSessionId !== sessionId) return;
             if (current && next.instanceId === current.instanceId && next.revision < current.revision) return;
-            if (current && next.instanceId !== current.instanceId) {
+            if (normal && current && next.instanceId !== current.instanceId) previous = current;
+            if (!normal && current && next.instanceId !== current.instanceId) {
                 body.textContent = supervisorLines(current, true).join('\n') + '\n实例已变化，请重新加载隔离窗口'; return;
             }
             current = next;
             // Only this overlay's text changes. Never rebuild, measure or scroll chat DOM.
-            body.textContent = supervisorLines(next).join('\n');
+            body.textContent = (previous ? supervisorLines(previous, true).join('\n') + '\n——当前服务实例——\n' : '') + supervisorLines(next).join('\n');
         } catch { body.textContent = '监督协议不可用，当前状态未知'; }
     });
 }
