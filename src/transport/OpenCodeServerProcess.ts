@@ -1,6 +1,6 @@
 import * as cp from 'child_process';
 
-export type ServerSpawnSpec = Readonly<{ command: string; args: string[] }>;
+export type ServerSpawnSpec = Readonly<{ command: string; args: string[]; supervisorBinding?: string }>;
 
 export class OpenCodeServerProcess {
     private child?: cp.ChildProcess;
@@ -18,7 +18,9 @@ export class OpenCodeServerProcess {
         this.child = spawn(spec.command, spec.args, {
             cwd,
             shell: false,
-            env: { ...process.env, PYTHONIOENCODING: 'utf-8', OPENCODE_SERVER_PASSWORD: password },
+            env: { ...process.env, PYTHONIOENCODING: 'utf-8', OPENCODE_SERVER_PASSWORD: password,
+                // Never inherit another GUI/service launch binding from the host environment.
+                OPENCODE_GUI_SUPERVISOR_BINDING: spec.supervisorBinding },
         });
         this.rememberedPid = this.child.pid;
         return this.rememberedPid;

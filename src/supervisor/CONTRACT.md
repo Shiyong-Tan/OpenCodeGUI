@@ -1,5 +1,31 @@
 # Confirmed supervisor follow-up contract — 2026-09-19
 
+## Phase 5 normal-install integration — implementation started 2026-09-24
+
+The user explicitly authorized Phase 5 after Phase 4 acceptance. The completed
+Phase 4 evidence and 42/42 budget below remain unchanged; this is not new GUI or
+model acceptance. Normal-install enable/disable is still unfinished.
+
+The existing OpenCodeServerController and OpenCodeServerProcess remain the only
+service launch owners. An optional, two-second-bounded preparation callback may
+provide private supervisor metadata only for a real owned spawn. Reuse never calls
+it; failure falls back to ordinary service startup with a fixed, redacted diagnostic.
+The process owner explicitly clears inherited supervisor binding metadata unless
+that specific launch supplies it. No new service manager, discovery scan or restart
+action is introduced. The callback is not yet wired to settings or private storage.
+
+Normal connection discovery will use a separate authenticated protocol, not removal
+of experimental descriptor checks. Live supervision and durable notification
+classification must be separated: disabling polling cannot expose previously trusted
+internal messages or erase provenance. Existing actor, final, snapshot, append,
+timing and session isolation owners retain authority. No rendering size limits or
+private-property mangling boundaries change.
+
+Focused startup tests cover reuse without metadata work, successful preparation,
+failure redaction, timeout with a controlled clock, and inherited-binding rejection.
+Ordinary installed VSIX/Webview acceptance is pending. No current production-ready
+claim, deployment, new credential use, automatic cancellation or redispatch.
+
 ## Final Phase 4 acceptance — 2026-09-23
 
 Phase 4 is complete within the isolated development experiment. Stop for user review;

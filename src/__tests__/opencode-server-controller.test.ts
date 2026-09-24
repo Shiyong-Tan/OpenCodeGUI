@@ -17,9 +17,11 @@ describe('OpenCode server controller', () => {
             getMigrationPorts: () => [42000],
             write: jest.fn(),
         } as any;
+        const prepareSupervisorLaunch = jest.fn(async () => 'private-binding');
         const controller = new OpenCodeServerController({
             locks,
             process: processOwner,
+            prepareSupervisorLaunch,
             buildServeSpawn: async () => ({ command: 'opencode', args: ['serve'] }),
             fetchHealth: async () => new Response(null, { status: 200 }),
             stopEventStream: () => undefined,
@@ -28,11 +30,15 @@ describe('OpenCode server controller', () => {
         });
         await controller.ensure('/workspace');
         expect(processOwner.start).not.toHaveBeenCalled();
+        expect(prepareSupervisorLaunch).not.toHaveBeenCalled();
         expect(controller.getBaseUrl()).toBe('http://127.0.0.1:42000');
         expect(locks.updateCache).toHaveBeenCalled();
     });
 
-    test('starts the server and waits until health succeeds', async () => {
+    afterEach(() => jest.useRealTimers());
+
+    test.each(['ok', 'error', 'timeout'])('owned launch bounds supervision metadata: %s', async (mode) => {
+        if (mode === 'timeout') jest.useFakeTimers();
         const lock = createLock();
         const processOwner = { getPid: jest.fn(() => 7), detach: jest.fn(), shutdown: jest.fn(), start: jest.fn(() => 7), clearRememberedPid: jest.fn() } as any;
         const locks = {
@@ -47,18 +53,31 @@ describe('OpenCode server controller', () => {
         const fetchHealth = jest.fn()
             .mockResolvedValueOnce(new Response(null, { status: 503 }))
             .mockResolvedValueOnce(new Response(null, { status: 200 }));
+        const logs: string[] = [];
+        const prepareSupervisorLaunch = jest.fn(async () => {
+            if (mode === 'error') throw new Error('private-binding');
+            if (mode === 'timeout') return new Promise<string>(() => undefined);
+            return 'private-binding';
+        });
         const controller = new OpenCodeServerController({
             locks,
             process: processOwner,
+            prepareSupervisorLaunch,
             buildServeSpawn: async (args) => ({ command: 'opencode', args }),
             fetchHealth,
             stopEventStream: () => undefined,
-            log: () => undefined,
+            log: line => logs.push(line),
             showError: () => undefined,
             delay: async () => undefined,
         });
-        await controller.ensure('/workspace');
+        const starting = controller.ensure('/workspace');
+        if (mode === 'timeout') await jest.advanceTimersByTimeAsync(2000);
+        await starting;
         expect(processOwner.start).toHaveBeenCalledWith(expect.objectContaining({ command: 'opencode' }), '/workspace', 'secret');
         expect(controller.getPid()).toBe(7);
+        expect(prepareSupervisorLaunch).toHaveBeenCalledTimes(1);
+        expect(prepareSupervisorLaunch).toHaveBeenCalledWith(lock);
+        expect(processOwner.start.mock.calls[0][0].supervisorBinding).toBe(mode === 'ok' ? 'private-binding' : undefined);
+        expect(logs.join(' ')).not.toContain('private-binding');
     });
 });

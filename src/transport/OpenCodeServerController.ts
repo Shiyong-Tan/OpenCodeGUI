@@ -17,6 +17,8 @@ export class OpenCodeServerController {
         locks: OpenCodeServerLockStore;
         process: OpenCodeServerProcess;
         buildServeSpawn(args: string[]): Promise<ServerSpawnSpec>;
+        /** Optional metadata preparation for an actual owned launch, never service reuse. */
+        prepareSupervisorLaunch?(lock: Readonly<ServerLock>): Promise<string | undefined>;
         fetchHealth(conn: ServerConnection, timeoutMs: number): Promise<Response>;
         stopEventStream(): void;
         log(message: string): void;
@@ -132,7 +134,25 @@ export class OpenCodeServerController {
     private async startWithLock(lock: ServerLock): Promise<void> {
         this.initReadyPromise();
         const spawnSpec = await this.options.buildServeSpawn(['serve', '--port', String(lock.port), '--hostname', '127.0.0.1']);
-        const pid = this.options.process.start(spawnSpec, lock.workspaceRoot, lock.password);
+        let supervisorBinding: string | undefined;
+        if (this.options.prepareSupervisorLaunch) {
+            try {
+                let timer: ReturnType<typeof setTimeout> | undefined;
+                try {
+                    supervisorBinding = await Promise.race([
+                        this.options.prepareSupervisorLaunch({ ...lock }),
+                        new Promise<never>((_resolve, reject) => {
+                            timer = setTimeout(() => reject(new Error('Supervisor metadata deadline')), 2000);
+                        }),
+                    ]);
+                } finally { if (timer) clearTimeout(timer); }
+            } catch {
+                // Metadata failure must not expose secrets or disable ordinary chat.
+                this.options.log('EXT: supervisor.launch-binding-unavailable');
+            }
+        }
+        const prepared = supervisorBinding === undefined ? spawnSpec : { ...spawnSpec, supervisorBinding };
+        const pid = this.options.process.start(prepared, lock.workspaceRoot, lock.password);
         this.setConnection(lock);
         this.options.log(`EXT: server.start | port=${lock.port} | pid=${pid || 'null'}`);
         try {

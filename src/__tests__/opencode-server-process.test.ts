@@ -21,6 +21,25 @@ describe('OpenCode server process', () => {
         expect(server.getPid()).toBeUndefined();
     });
 
+    test('only the owning launch supplies private supervisor metadata', () => {
+        const previous = process.env.OPENCODE_GUI_SUPERVISOR_BINDING;
+        process.env.OPENCODE_GUI_SUPERVISOR_BINDING = 'foreign-binding';
+        const spawn = jest.fn(() => Object.assign(new EventEmitter(), { pid: 43125 })) as any;
+        const server = new OpenCodeServerProcess({ spawn });
+        try {
+            server.start({ command: 'opencode', args: ['serve'] }, '/workspace', 'secret');
+            expect(spawn.mock.calls[0][2].env.OPENCODE_GUI_SUPERVISOR_BINDING).toBeUndefined();
+            server.detach();
+            server.start({ command: 'opencode', args: ['serve'], supervisorBinding: 'own-binding' }, '/workspace', 'secret');
+            expect(spawn.mock.calls[1][2].env.OPENCODE_GUI_SUPERVISOR_BINDING).toBe('own-binding');
+            expect(spawn.mock.calls[1][2].env.OPENCODE_SERVER_PASSWORD).toBe('secret');
+        } finally {
+            server.detach();
+            if (previous === undefined) delete process.env.OPENCODE_GUI_SUPERVISOR_BINDING;
+            else process.env.OPENCODE_GUI_SUPERVISOR_BINDING = previous;
+        }
+    });
+
     test('detach forgets ownership without terminating the old process', () => {
         const child = Object.assign(new EventEmitter(), { pid: 43124 }) as ChildProcess;
         const processKill = jest.fn();
