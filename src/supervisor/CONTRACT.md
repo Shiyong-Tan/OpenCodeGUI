@@ -1,5 +1,37 @@
 # Confirmed supervisor follow-up contract — 2026-09-19
 
+## Phase 5 normal-install trial delivery — 2026-09-24
+
+Normal installation and explicit service control are implemented. The existing
+controller/process owners retain authority; signed immutable ownership generations
+plus OS Job, creation-time and listener membership authorize control across reload.
+Start/Stop/Restart are command-palette entries. Active execution requires impact
+consent; unknown identity/activity/stop result fails closed. GUI close, reload,
+workspace detach and supervisor disable preserve the service. No second manager
+or automatic redispatch exists.
+
+Runtime commits: 40ea86e native owner; 5f453ab durable generations; 73c2f9f bounded
+operations; c80fd0a command composition; cc28c6b stale-read fencing. Existing message,
+snapshot, append, final, timing and session ownership contracts are unchanged.
+Historical notification classification remains independent of live connectivity.
+
+201 suites / 1555 tests, compile, original bundle limits and determinism passed.
+Actual ordinary installed VSIX checks cover service commands, reload/close survival,
+default-off, missing plugin, invalid signed lease and external-service refusal.
+The completed real model loop was recovered in a new GUI process and survived
+service restart, reload and disable with exact final IDs/order/provenance and 10s/5s
+clocks. Active consent was exercised using a real bounded no-model shell and VS
+Code custom dialog. The failed native-dialog DOM probe is preserved; it is not a
+pass. No Development Host or Node reader probe substitutes for these GUI checks.
+
+Phase 5 is a nonimportant-workspace trial only; model ledger 16/24, Phase 4 42/42
+unchanged. See [trial operations](../../docs/PHASE5-TRIAL.md) and the companion
+supervisor repository's PHASE5-RESULTS.md/phase5-current-commit-map.json for artifact
+hashes, exact evidence, limitations and compatibility mapping. Stop at user review;
+no promotion to important sessions or long-term stability claim.
+
+The following Phase 5 entries are historical checkpoints superseded by this section.
+
 ## Phase 5 normal-install integration — implementation started 2026-09-24
 
 The user explicitly authorized Phase 5 after Phase 4 acceptance. The completed
