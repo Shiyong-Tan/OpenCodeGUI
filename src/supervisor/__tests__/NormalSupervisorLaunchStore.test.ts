@@ -30,6 +30,11 @@ describe('normal supervisor private launch metadata', () => {
         expect(await owner.forConnection({ ...connection, authHeader: `Basic ${Buffer.from('opencode:wrong-password').toString('base64')}` })).toBeUndefined();
         const reloaded = new NormalSupervisorLaunchStore(join(root, 'private'), secrets);
         expect(await reloaded.forConnection(connection)).toEqual(second);
+        const history = await reloaded.forHistory(root);
+        expect(history?.integrationId).toBe(first.binding.integrationId);
+        expect(history?.identityKey).toBe(first.identityKey);
+        expect(history?.privateDirectory).toBe(first.privateDirectory);
+        expect(history).not.toHaveProperty('launchKey');
     });
 
     test('other workspaces have independent identities and corrupt retained identity is not silently replaced', async () => {

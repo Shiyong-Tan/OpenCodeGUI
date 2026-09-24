@@ -26,7 +26,7 @@ export class NormalSupervisorIntegration {
     private catalog?: SupervisorNotificationCatalog;
     private catalogScope = '';
 
-    constructor(private readonly store: Pick<NormalSupervisorLaunchStore, 'forConnection'>,
+    constructor(private readonly store: Pick<NormalSupervisorLaunchStore, 'forConnection'> & Partial<Pick<NormalSupervisorLaunchStore, 'forHistory'>>,
         private readonly getConnection: () => Promise<ServerConnection>,
         private readonly fetcher: typeof fetch = fetch,
         private readonly now: () => number = Date.now) {}
@@ -130,7 +130,18 @@ export class NormalSupervisorIntegration {
         const known = this.knownNotification(sessionId, messageId);
         if (known) return known;
         const generation = this.identityGeneration;
-        if (!this.catalog) await this.load(await this.getConnection());
+        if (!this.catalog) {
+            const connection = await this.getConnection();
+            if (this.store.forHistory) {
+                const history = await this.store.forHistory(connection.lock.workspaceRoot);
+                if (this.disposed || generation !== this.identityGeneration) throw new Error('Supervisor classification changed');
+                if (history) {
+                    this.catalog = new SupervisorNotificationCatalog(join(history.privateDirectory, 'history.json'), history.integrationId,
+                        normalIdentityCodec(history.integrationId, history.identityKey).decode);
+                    this.catalogScope = history.integrationId;
+                }
+            } else await this.load(connection);
+        }
         if (this.disposed || generation !== this.identityGeneration) throw new Error('Supervisor classification changed');
         if (!this.catalog) return undefined;
         const identity = await this.catalog.lookup(sessionId, messageId);

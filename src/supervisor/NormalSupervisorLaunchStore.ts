@@ -70,6 +70,21 @@ export class NormalSupervisorLaunchStore {
         return serialized;
     }
 
+    /** Local historical identity is independent of today's service password/port. */
+    public async forHistory(workspace: string): Promise<{ integrationId: string; identityKey: string; privateDirectory: string } | undefined> {
+        const address = await this.address(workspace);
+        const serialized = await this.secrets.get(address.key);
+        if (!serialized) return undefined;
+        const value = JSON.parse(serialized) as NormalLaunch;
+        if (value?.schemaVersion !== 1 || value.kind !== 'normal-gui-launch' || value.binding?.workspace !== address.canonical
+            || !/^[a-f0-9]{64}$/.test(value.binding.integrationId) || !/^[a-f0-9]{64}$/.test(value.identityKey)) {
+            throw new Error('Historical supervisor identity unavailable');
+        }
+        const expected = join(await realpath(this.directory), address.hash);
+        if (value.privateDirectory !== expected || await realpath(expected) !== expected) throw new Error('Historical supervisor identity redirects');
+        return { integrationId: value.binding.integrationId, identityKey: value.identityKey, privateDirectory: expected };
+    }
+
     public async forConnection(connection: ServerConnection): Promise<NormalLaunch | undefined> {
         const address = await this.address(connection.lock.workspaceRoot);
         const serialized = await this.secrets.get(address.key);

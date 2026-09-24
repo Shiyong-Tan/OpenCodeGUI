@@ -82,6 +82,22 @@ describe('normal supervisor enable and durable classification boundary', () => {
         owner.dispose();
     });
 
+    test('reloaded disabled history never depends on live service authentication', async () => {
+        const { owner: original, launch } = await setup(); original.dispose();
+        const identity: NotificationIdentity = { schemaVersion: 1, isolationId: launch.binding.integrationId,
+            instanceId: 'old-instance', taskId: 'task_1', attemptId: 'attempt_1', parentSessionId: 'ses_A', childSessionId: 'ses_child',
+            notificationId: 'notice_1', eventId: 'event_1', messageId: 'msg_notice' };
+        await writeFile(join(root, 'identities', 'msg_notice.json'), JSON.stringify(normalIdentityCodec(launch.binding.integrationId, launch.identityKey).encode(identity)));
+        const forConnection = jest.fn(async () => undefined), fetcher = jest.fn();
+        const owner = new NormalSupervisorIntegration({ forConnection, forHistory: async () => ({ integrationId: launch.binding.integrationId,
+            identityKey: launch.identityKey, privateDirectory: root }) }, async () => ({ host: '127.0.0.1', port: 42002,
+            baseUrl: 'http://127.0.0.1:42002', authHeader: 'different-current-auth',
+            lock: { workspaceRoot: 'd:/trial', port: 42002, password: '', updatedAt: '' } }), fetcher as typeof fetch);
+        expect(await owner.lookupNotification('ses_A', 'msg_notice')).toEqual(identity);
+        expect(forConnection).not.toHaveBeenCalled(); expect(fetcher).not.toHaveBeenCalled();
+        expect(owner.status()).toBe('disabled'); owner.dispose();
+    });
+
     test('disable fences a late handshake before reader creation', async () => {
         const { owner, store, launch, fetcher } = await setup();
         let release!: (value: NormalLaunch) => void;
