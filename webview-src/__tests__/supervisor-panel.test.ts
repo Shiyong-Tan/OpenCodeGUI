@@ -1,6 +1,7 @@
 import { mountSupervisorPanel, supervisorLines } from '../supervisor/panel';
 import { parseSupervisorView } from '../../src/supervisor/protocol';
 import { taskStatus } from '../supervisor/cards';
+import { processStatus, processMetrics } from '../supervisor/processes';
 
 const snapshot = () => parseSupervisorView({ schemaVersion: 1, isolationId: 'lab_A', instanceId: 'instance_A', revision: 1,
     pluginVersion: '0.1.0', openCodeVersion: '1.18.29', observedAt: '2026-09-20T00:00:00.000Z', parentSessionId: 'ses_A',
@@ -139,7 +140,7 @@ test('task cards hide IDs, render names as text, preserve details and scroll on 
     receive({ type: 'supervisorSelection', sessionId: 'ses_A' });
     const view = snapshot(); view.tasks[0].title = '<img src=x onerror=alert(1)> Check R1 (@coder subagent)';
     receive({ type: 'supervisorState', sessionId: 'ses_A', status: 'observed', view });
-    const card = content.children[1].children[0], [name, badge, , details] = card.children;
+    const card = content.children[1].children[0], [name, badge, , , details] = card.children;
     expect(name.textContent).toBe('<img src=x onerror=alert(1)> Check R1'); expect(name.children).toHaveLength(0);
     expect(details.open).toBe(false);
     expect(card.children.slice(0, 3).map(e => e.textContent).join('')).not.toMatch(/task_A|ses_child|instance_A/);
@@ -209,7 +210,7 @@ test('task cards hide IDs, render names as text, preserve details and scroll on 
     receive({ type: 'supervisorSelection', sessionId: 'ses_A' });
     const view = snapshot(); view.tasks[0].title = '<img src=x onerror=alert(1)> Check R1 (@coder subagent)';
     receive({ type: 'supervisorState', sessionId: 'ses_A', status: 'observed', view });
-    const card = content.children[1].children[0], [name, badge, , details] = card.children;
+    const card = content.children[1].children[0], [name, badge, , , details] = card.children;
     expect(name.textContent).toBe('<img src=x onerror=alert(1)> Check R1'); expect(name.children).toHaveLength(0);
     expect(details.open).toBe(false);
     expect(card.children.slice(0, 3).map(e => e.textContent).join('')).not.toMatch(/task_A|ses_child|instance_A/);
@@ -242,4 +243,50 @@ test('display titles are optional, bounded and never admit unrelated prompt fiel
     expect(JSON.stringify(parseSupervisorView({ ...view, tasks: [{ ...view.tasks[0], prompt: 'private' }] }))).not.toContain('private');
     for (const title of ['x'.repeat(501), 'bad\nname', 123])
         expect(() => parseSupervisorView({ ...view, tasks: [{ ...view.tasks[0], title }] })).toThrow();
+});
+
+const processView = () => {
+    const view = snapshot();
+    return parseSupervisorView({ ...view, executions: [{ ...view.tasks[0], executionId: 'execution_A', toolCallId: 'call_A',
+        displayName: 'python.exe', rootPid: 42, activeProcesses: 2, durationMs: 12000, cpuPercent: 125.5, workingSetBytes: '2097152', exitCode: null,
+        phase: 'running', health: 'running', lastObservationAgeMs: 0, lastActivityAgeMs: 100,
+        rootExited: false, ownedProcessesStopped: false, cpu100ns: '100', cpuDelta100ns: '10',
+        readBytes: '0', writeBytes: '0', readDeltaBytes: '0', writeDeltaBytes: '0',
+        cancelRequested: false, requestAccepted: null, cancelOutcomeUnknown: false, coverageUnknown: false, safeToRetry: false,
+        command: 'private command', stdout: 'private output',
+    }] });
+};
+
+test('process metrics and state distinguish root exit, descendants, quiet, unknown and historical evidence', () => {
+    const e = processView().executions[0];
+    expect(processMetrics(e, false)).toContain('CPU 125.5%'); expect(processMetrics(e, false)).toContain('2.0 MiB');
+    expect(processStatus(e, false).label).toBe('Running');
+    expect(processStatus({ ...e, rootExited: true }, false).label).toContain('descendants');
+    expect(processStatus({ ...e, health: 'suspect' }, false).label).toContain('Quiet');
+    expect(processStatus({ ...e, phase: 'stopped', exitCode: 7 }, false).tone).toBe('danger');
+    expect(processStatus({ ...e, phase: 'stopped', exitCode: 0 }, false).tone).toBe('success');
+    expect(processStatus(e, true).tone).toBe('muted'); expect(processMetrics(e, true)).not.toMatch(/CPU|MiB/);
+    expect(processMetrics({ ...e, health: 'unknown' }, false)).not.toMatch(/CPU|MiB|live processes/);
+    expect(JSON.stringify(processView())).not.toMatch(/private command|private output/);
+    for (const extra of [{ cpuPercent: -1 }, { durationMs: Infinity }, { rootPid: '42' }, { displayName: 'bad\nname' }, { workingSetBytes: '-1' }])
+        expect(() => parseSupervisorView({ ...processView(), executions: [{ ...e, ...extra }] })).toThrow();
+});
+
+test('process rows retain identity during refresh, escape labels, and follow session reset and stale observations', () => {
+    const body = new Element(); let receive!: (message: unknown) => void;
+    mountSupervisorPanel({ body, createElement: () => new Element(), querySelector: () => null } as unknown as Document,
+        callback => { receive = callback; });
+    receive({ type: 'supervisorSelection', sessionId: 'ses_A' });
+    const view = processView(); view.executions[0].displayName = '<img src=x>';
+    const observed = { type: 'supervisorState', sessionId: 'ses_A', status: 'observed', view };
+    receive(observed);
+    const content = body.children.find(e => e.id === 'supervisor-panel')!.children[1];
+    const card = content.children[1].children[0], row = card.children[3].children[0];
+    expect(row.children[0].textContent).toBe('<img src=x>'); expect(row.children[0].children).toHaveLength(0);
+    expect(row.textContent).not.toMatch(/execution_A|call_A|private/);
+    view.executions[0].cpuPercent = 50; receive(observed);
+    expect(card.children[3].children[0]).toBe(row); expect(row.textContent).toContain('CPU 50.0%');
+    receive({ type: 'supervisorState', sessionId: 'ses_A', status: 'unavailable' });
+    expect(row.children[1].attributes.get('data-tone')).toBe('muted'); expect(row.textContent).not.toContain('CPU');
+    receive({ type: 'supervisorSelection', sessionId: 'ses_B' }); expect(content.textContent).not.toContain('<img src=x>');
 });

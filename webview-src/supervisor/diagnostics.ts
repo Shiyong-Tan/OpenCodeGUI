@@ -18,6 +18,7 @@ export function supervisorLines(view: SupervisorView, stale = false): string[] {
             `Last observation ${age(task.lastObservationAgeMs)}; Last activity ${age(task.lastProgressAgeMs)}`);
         for (const e of view.executions.filter(item => item.taskId === task.taskId && item.attemptId === task.attemptId)) {
             lines.push(`Execution ${e.executionId}: ${states[e.health] ?? 'Unknown'}`,
+                `Process ${e.displayName ?? 'Unknown'}; PID ${e.rootPid ?? 'Unknown'}; Root exit code ${e.exitCode ?? 'Unknown'}`,
                 `Process sample ${age(e.lastObservationAgeMs)}; Activity ${age(e.lastActivityAgeMs)}`,
                 `CPU delta ${e.cpuDelta100ns ?? 'Unknown'} ×100ns; Read/write delta ${e.readDeltaBytes ?? 'Unknown'} / ${e.writeDeltaBytes ?? 'Unknown'} bytes`,
                 `Root exited ${fact(e.rootExited)}; Managed processes stopped ${fact(e.ownedProcessesStopped)}`,

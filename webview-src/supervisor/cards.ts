@@ -1,5 +1,6 @@
 import type { SupervisorView } from '../../src/supervisor/protocol';
 import { supervisorLines } from './diagnostics';
+import { SupervisorProcesses } from './processes';
 type Task = SupervisorView['tasks'][number];
 export function taskStatus(task: Task, stale: boolean): { label: string; tone: string } {
     if (stale) return { label: 'Unknown · historical', tone: 'muted' };
@@ -22,7 +23,7 @@ export const taskName = (task: Task) => task.title?.replace(/ \(@[^\n]+ subagent
 
 /** Keyed DOM projection only. Updating ages never remounts cards or closed details. */
 export class SupervisorCards {
-    private readonly cards = new Map<string, { root: HTMLElement; name: HTMLElement; badge: HTMLElement; activity: HTMLElement; evidence: HTMLElement }>();
+    private readonly cards = new Map<string, { root: HTMLElement; name: HTMLElement; badge: HTMLElement; activity: HTMLElement; evidence: HTMLElement; processes: SupervisorProcesses }>();
     private readonly current: HTMLElement;
     private readonly history: HTMLDetailsElement;
     private readonly notice: HTMLElement;
@@ -54,15 +55,17 @@ export class SupervisorCards {
                 const root = this.node('article', 'sv-card'), name = this.node('h4', 'sv-name');
                 const badge = this.node('span', 'sv-badge'), activity = this.node('p', 'sv-activity');
                 const details = this.node('details', 'sv-details'), evidence = this.node('pre');
+                const processContainer = this.node('div', 'sv-processes');
                 details.append(this.node('summary', '', 'Diagnostics'), evidence);
-                root.append(name, badge, activity, details); this.current.append(root);
-                card = { root, name, badge, activity, evidence }; this.cards.set(key, card);
+                root.append(name, badge, activity, processContainer, details); this.current.append(root);
+                card = { root, name, badge, activity, evidence, processes: new SupervisorProcesses(this.document, processContainer) }; this.cards.set(key, card);
             }
             const status = taskStatus(task, stale);
             card.name.textContent = taskName(task); card.badge.textContent = status.label;
             card.badge.setAttribute('data-tone', status.tone);
             card.activity.textContent = `${stale ? 'Last known activity' : 'Activity'} ${elapsed(task.lastProgressAgeMs)} · Observed ${elapsed(task.lastObservationAgeMs)}`;
             card.evidence.textContent = supervisorLines({ ...view!, tasks: [task] }, stale).join('\n');
+            card.processes.render(view!.executions.filter(e => e.taskId === task.taskId && e.attemptId === task.attemptId && e.childSessionId === task.childSessionId), stale);
         }
         for (const [key, card] of this.cards) if (!retained.has(key)) { card.root.remove(); this.cards.delete(key); }
         this.history.hidden = !previous;
