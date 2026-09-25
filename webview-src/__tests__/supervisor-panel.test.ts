@@ -25,9 +25,9 @@ test('panel routes by selected session, preserves unknown values and never touch
     const content = body.children.find(element => element.id === 'supervisor-panel')!.children[1];
     receive({ type: 'supervisorSelection', sessionId: 'ses_A' });
     receive({ type: 'supervisorState', sessionId: 'ses_A', status: 'observed', view: snapshot() });
-    expect(content.textContent).toContain('等待权限'); expect(content.textContent).toContain('最后观测 未知');
+    expect(content.textContent).toContain('Waiting for permission'); expect(content.textContent).toContain('Last observation Unknown');
     receive({ type: 'supervisorState', sessionId: 'ses_A', status: 'unavailable' });
-    expect(content.textContent).toContain('当前状态未知');
+    expect(content.textContent).toContain('current state unknown');
     receive({ type: 'sessionData', sessionId: 'ses_B' });
     receive({ type: 'supervisorState', sessionId: 'ses_A', status: 'observed', view: snapshot() });
     expect(content.textContent).not.toContain('task_A');
@@ -35,10 +35,10 @@ test('panel routes by selected session, preserves unknown values and never touch
 });
 
 test('projection labels previous instance as historical and never treats absence as a completed task', () => {
-    expect(supervisorLines(snapshot(), true).join('\n')).toContain('当前状态未知');
+    expect(supervisorLines(snapshot(), true).join('\n')).toContain('current state unknown');
     const empty = snapshot(); empty.tasks = [];
-    expect(supervisorLines(empty).join('\n')).toContain('没有已登记任务');
-    expect(supervisorLines(empty).join('\n')).not.toContain('停止已确认');
+    expect(supervisorLines(empty).join('\n')).toContain('No registered tasks');
+    expect(supervisorLines(empty).join('\n')).not.toContain('Confirmed stopped');
 });
 
 test('normal panel shows disabled state, retains old-instance evidence and fences other sessions', () => {
@@ -49,20 +49,20 @@ test('normal panel shows disabled state, retains old-instance evidence and fence
     mountSupervisorPanel(document, callback => { receive = callback; });
     const button = body.children.find(element => element.id === 'supervisor-toggle')!;
     const content = body.children.find(element => element.id === 'supervisor-panel')!.children[1];
-    expect(button.textContent).toContain('未启用');
+    expect(button.textContent).toContain('Disabled');
     receive({ type: 'supervisorSelection', sessionId: 'ses_A' });
-    expect(content.textContent).toContain('后端插件和任务可能仍在运行');
+    expect(content.textContent).toContain('the backend plugin and tasks may still be running');
     for (const status of ['connecting', 'unavailable', 'incompatible', 'disconnected', 'connected']) {
         receive({ type: 'supervisorConnectionStatus', mode: 'normal', status });
-        expect(button.textContent).not.toContain('实验');
+        expect(button.textContent).not.toContain('Experimental');
         if (status === 'incompatible') {
-            expect(content.textContent).toContain('1.18.29、1.18.31');
-            expect(content.textContent).toContain('同时更新 GUI 和 OpenCodeTaskSupervisor');
-            expect(content.textContent).toContain('不会自动重启服务');
+            expect(content.textContent).toContain('1.18.29, 1.18.31');
+            expect(content.textContent).toContain('Update both GUI and OpenCodeTaskSupervisor');
+            expect(content.textContent).toContain('services will not restart automatically');
         }
         if (status === 'unavailable') {
             expect(content.textContent).toContain('Unsupported OpenCode version');
-            expect(content.textContent).toContain('仅更新 GUI 无法修复旧插件');
+            expect(content.textContent).toContain('updating GUI alone cannot fix an old plugin');
         }
     }
     receive({ type: 'supervisorState', sessionId: 'ses_A', status: 'observed', view: snapshot() });
@@ -70,10 +70,10 @@ test('normal panel shows disabled state, retains old-instance evidence and fence
     receive({ type: 'supervisorState', sessionId: 'ses_A', status: 'observed', view: next });
     expect(content.textContent).toContain('instance_A');
     expect(content.textContent).toContain('instance_B');
-    expect(content.textContent).toContain('当前状态未知');
+    expect(content.textContent).toContain('current state unknown');
     receive({ type: 'supervisorConnectionStatus', mode: 'normal', status: 'disabled' });
     expect(content.textContent).toContain('instance_A');
-    expect(content.textContent).toContain('后端插件和任务可能仍在运行');
+    expect(content.textContent).toContain('the backend plugin and tasks may still be running');
     receive({ type: 'sessionData', sessionId: 'ses_B' });
     receive({ type: 'supervisorState', sessionId: 'ses_A', status: 'observed', view: snapshot() });
     expect(content.textContent).not.toContain('task_A');

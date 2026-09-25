@@ -139,7 +139,7 @@ The user selected an independent follow-up turn. Preserve the previous reply,
 final identity, elapsed time and persisted history exactly.
 
 After the parent is terminal, a new execution triggered by trusted supervisor
-notifications starts an independent turn labelled “监督通知触发”, associated with
+notifications starts an independent turn labelled “Supervisor notification”, associated with
 its task and notification IDs. Start timing at observable parent model activity;
 when precise start time is unavailable, explicitly use first observed activity.
 Notification submission alone shows waiting and creates no empty assistant bubble.

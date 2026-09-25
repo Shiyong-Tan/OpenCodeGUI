@@ -31,7 +31,7 @@ test('source updates preserve timing and text and render explicit first-observed
  const f=fixture();startSupervisorRoundPresentation(f.host,'ses_a',round);const next={...round,sources:[...round.sources,{...round.sources[0],notificationId:'notice2',taskId:'task2'}]};
  expect(updateSupervisorRoundPresentation(f.host,'ses_a',next)).toBe(true);
  expect(f.a.messagesById.get('msg_new')?.meta.processingStartedAt).toBe(100);
- expect(supervisorRoundLabel(next)).toContain('监督通知触发 · 从首次观察到活动计时');expect(supervisorRoundLabel(next)).toContain('notice2');
+ expect(supervisorRoundLabel(next)).toContain('Supervisor notification · Timed from first observed activity');expect(supervisorRoundLabel(next)).toContain('notice2');
 });
 
 test('busy history resume keeps the same partial message and original clock, without a new bubble',()=>{
