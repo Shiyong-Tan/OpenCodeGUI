@@ -110,3 +110,11 @@ without another model request. This recovery is not a second paid live run.
 No auto-redispatch, production auto-cancel, arbitrary-shell stop guarantee, V2,
 unrelated workspace import or long-term production stability is claimed. The
 rendering budget remains 76784/76800 bytes; it was not raised.
+## Quick switch
+
+Use the Supervisor switch beside Variant in the input toolbar to enable or hide
+GUI supervision for this workspace. It saves the existing
+`opencode.supervisor.enabled` setting at workspace scope, never globally. The floating
+Supervisor label appears when enabled and disappears when disabled. Switching off
+does not stop the backend plugin, child tasks or OpenCode service. The plugin must
+already be installed and loaded; this switch does not automatically restart a service.

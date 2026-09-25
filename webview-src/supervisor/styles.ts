@@ -1,4 +1,12 @@
 export const supervisorStyles = `
+#supervisor-enable{display:inline-flex;align-items:center;gap:5px;flex-shrink:0;padding:3px 5px;border:0;border-radius:6px;background:transparent;color:var(--vscode-descriptionForeground);font:11px var(--vscode-font-family);cursor:pointer}
+#supervisor-enable[hidden]{display:none}
+#supervisor-enable::before{content:'';width:22px;height:12px;border-radius:8px;background:radial-gradient(circle at 6px 6px,currentColor 4px,transparent 4.5px),#8883}
+#supervisor-enable[aria-checked=true]{color:var(--vscode-textLink-foreground)}
+#supervisor-enable[aria-checked=true]::before{background:radial-gradient(circle at 16px 6px,currentColor 4px,transparent 4.5px),#378aff33}
+#supervisor-enable:focus-visible{outline:2px solid var(--vscode-focusBorder)}
+#supervisor-enable:disabled{opacity:.5;cursor:wait}
+@media(max-width:420px){#supervisor-enable{font-size:0;gap:0;padding:3px}}
 #supervisor-dock{position:relative;height:0;flex:0 0 0;margin:0 12px;z-index:9000}
 #supervisor-dock #supervisor-toggle{position:absolute;top:auto;right:0;bottom:0}
 #supervisor-dock #supervisor-panel{position:absolute;top:auto;right:0;bottom:38px;max-height:min(480px,50vh)}

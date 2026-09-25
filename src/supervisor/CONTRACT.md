@@ -358,6 +358,33 @@ and deterministic build pass. Rendering is 82,304 bytes / 75 KiB; continuation i
 failures are retained; limits are not raised. Phase 4 remains incomplete.
 # Task card presentation
 
+The composer switch next to Variant edits only the workspace-scoped
+`opencode.supervisor.enabled` configuration through the utility command boundary.
+The existing configuration listener owns enabling/disabling the reader; the switch
+does not start/restart services or install plugins. Acknowledgements reflect the
+actual saved flag; failed saves restore the prior selection with an error. External
+setting changes also synchronize the switch. Disabled hides both label and panel,
+without cancelling tasks or rewriting history. No workspace means no global fallback.
+The switch uses the existing VS Code API instance, keyboard-operable switch semantics
+and a compact narrow-window presentation. Its bounded bundle budget is 20 KiB / 7 KiB
+gzip; all other budgets and GUI version 5.0.7 remain unchanged.
+
+Switch validation covers workspace-only writes, malformed inputs, failed saves,
+configuration acknowledgement, external setting changes and label/panel hiding.
+An isolated browser fixture using the actual bundle verifies disabled/enabled/disabled
+round trips through the shared VS Code message bridge without touching real settings.
+
+The composer switch next to Variant edits only the workspace-scoped
+`opencode.supervisor.enabled` configuration through the utility command boundary.
+The existing configuration listener owns enabling/disabling the reader; the switch
+does not start/restart services or install plugins. Acknowledgements reflect the
+actual saved flag; failed saves restore the prior selection with an error. External
+setting changes also synchronize the switch. Disabled hides both label and panel,
+without cancelling tasks or rewriting history. No workspace means no global fallback.
+The switch uses the existing VS Code API instance, keyboard-operable switch semantics
+and a compact narrow-window presentation. Its bounded bundle budget is 20 KiB / 7 KiB
+gzip; all other budgets and GUI version 5.0.7 remain unchanged.
+
 OpenCode release labels are metadata, not a support allowlist. New valid labels
 are accepted without changing the GUI; signed service identity, health/lease/view
 version consistency and bridge schemas are still checked. The companion adapter

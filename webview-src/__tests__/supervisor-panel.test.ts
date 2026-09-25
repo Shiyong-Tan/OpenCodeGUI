@@ -8,18 +8,21 @@ const snapshot = () => parseSupervisorView({ schemaVersion: 1, isolationId: 'lab
         phase: 'active', health: 'waiting_permission', outcome: null, lastObservationAgeMs: null, lastProgressAgeMs: 1000 }],
     executions: [], notifications: [], notificationIdentities: [] });
 class Element {
-    id = ''; private text = ''; hidden = false; open = false; scrollTop = 0; className = ''; style = { cssText: '' };
+    id = ''; private text = ''; hidden = false; disabled = false; open = false; scrollTop = 0; className = ''; style = { cssText: '' };
     parent?: Element;
     get parentNode() { return this.parent; }
+    get nextSibling(): Element | null { return this.parent?.children[this.parent.children.indexOf(this) + 1] ?? null; }
     get textContent(): string { return this.text + this.children.map(c => c.textContent).join(''); }
     set textContent(value: string) { this.text = value; this.children.length = 0; }
     get lastElementChild() { return this.children[this.children.length - 1]; }
     readonly children: Element[] = [];
     readonly attributes = new Map<string, string>();
     setAttribute(key: string, value: string) { this.attributes.set(key, value); }
-    addEventListener() {}
+    readonly listeners = new Map<string, () => void>();
+    addEventListener(type: string, handler: () => void) { this.listeners.set(type, handler); }
+    click() { this.listeners.get('click')?.(); }
     append(...values: Element[]) { values.forEach(v => { v.remove(); v.parent = this; this.children.push(v); }); }
-    insertBefore(node: Element, before: Element) { node.remove(); node.parent = this; this.children.splice(this.children.indexOf(before), 0, node); }
+    insertBefore(node: Element, before: Element | null) { node.remove(); node.parent = this; this.children.splice(before ? this.children.indexOf(before) : this.children.length, 0, node); }
     remove() { if (this.parent) this.parent.children.splice(this.parent.children.indexOf(this), 1); }
     replaceChildren() { this.children.length = 0; }
 }
@@ -33,6 +36,34 @@ test('supervisor docks directly above the composer without moving chat or input 
     expect(body.children.indexOf(dock)).toBe(body.children.indexOf(composer) - 1);
     expect(dock.children.map(e => e.id)).toEqual(['supervisor-toggle', 'supervisor-panel']);
     expect(body.children[0]).toBe(chat); expect(composer.parentNode).toBe(body);
+});
+
+test('variant switch follows settings, hides disabled overlay, and waits for acknowledgement', () => {
+    const body = new Element(), toolbar = new Element(), variant = new Element();
+    toolbar.append(variant); body.append(toolbar);
+    let receive!: (message: unknown) => void; const send = jest.fn();
+    mountSupervisorPanel({ body, createElement: () => new Element(),
+        querySelector: (selector: string) => selector === '.variant-wrapper' ? variant :
+            selector.startsWith('script') ? { getAttribute: () => 'disabled' } : null } as unknown as Document,
+        callback => { receive = callback; }, send);
+    const toggle = toolbar.children[1], label = body.children.find(e => e.id === 'supervisor-toggle')!;
+    const panel = body.children.find(e => e.id === 'supervisor-panel')!;
+    expect(toggle.id).toBe('supervisor-enable'); expect(toggle.attributes.get('aria-checked')).toBe('false');
+    expect(label.hidden).toBe(true);
+    toggle.click(); toggle.click(); expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenLastCalledWith({ type: 'setSupervisorEnabled', enabled: true });
+    expect(toggle.disabled).toBe(true); expect(label.hidden).toBe(true);
+    receive({ type: 'supervisorToggleResult', enabled: true });
+    expect(toggle.disabled).toBe(false); expect(label.hidden).toBe(false);
+    receive({ type: 'supervisorConnectionStatus', mode: 'normal', status: 'connected' });
+    label.click(); expect(panel.hidden).toBe(false);
+    toggle.click(); expect(send).toHaveBeenLastCalledWith({ type: 'setSupervisorEnabled', enabled: false });
+    receive({ type: 'supervisorToggleResult', enabled: true, error: 'Could not save' });
+    expect(toggle.attributes.get('aria-checked')).toBe('true'); expect(label.hidden).toBe(false);
+    // The settings editor uses the same canonical flag.
+    receive({ type: 'supervisorConnectionStatus', mode: 'normal', status: 'disabled' });
+    expect(toggle.attributes.get('aria-checked')).toBe('false'); expect(label.hidden).toBe(true);
+    expect(panel.hidden).toBe(true); expect(label.attributes.get('aria-expanded')).toBe('false');
 });
 
 test('panel routes by selected session, preserves unknown values and never touches chat nodes', () => {

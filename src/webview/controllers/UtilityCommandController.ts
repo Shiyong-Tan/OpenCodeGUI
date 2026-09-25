@@ -4,6 +4,7 @@ import * as vscode from 'vscode';
 import type { SmartSearchMessage } from '../../search/SmartSearchService';
 import type { AutomaticEditorContext } from '../../context/EditorContextService';
 import { readImageDimensions } from '../../images/ImageDimensions';
+import { updateSupervisorSetting } from '../../supervisor/SupervisorSetting';
 
 type UtilityMessage = Record<string, any>;
 type LocalQuestionResolution = { resolved: boolean; sessionId?: string };
@@ -78,6 +79,7 @@ const UTILITY_COMMANDS = new Set([
     'compactSession',
     'setMode',
     'setVariant',
+    'setSupervisorEnabled',
     'refreshModels',
     'refreshModelQuota',
     'smartSessionSearch',
@@ -123,6 +125,9 @@ export class UtilityCommandController {
                 return true;
             case 'setVariant':
                 await this.host.applyVariantSelection(data.value);
+                return true;
+            case 'setSupervisorEnabled':
+                await updateSupervisorSetting(data.enabled, activeWebview);
                 return true;
             case 'refreshModels':
                 await this.host.refreshModels(activeWebview);

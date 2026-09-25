@@ -1,9 +1,11 @@
 import { parseSupervisorView, type SupervisorView } from '../../src/supervisor/protocol';
 import { SupervisorCards } from './cards';
 import { supervisorStyles } from './styles';
+import { mountSupervisorSwitch } from './switch';
 export { supervisorLines } from './diagnostics';
 
-export function mountSupervisorPanel(document: Document, receive: (handler: (value: unknown) => void) => void): void {
+export function mountSupervisorPanel(document: Document, receive: (handler: (value: unknown) => void) => void,
+    send: (message: unknown) => void = () => {}) {
     const style = document.createElement('style'); style.textContent = supervisorStyles;
     const button = document.createElement('button'); button.id = 'supervisor-toggle';
     button.textContent = 'Supervisor · Experimental'; button.setAttribute('aria-expanded', 'false');
@@ -20,6 +22,11 @@ export function mountSupervisorPanel(document: Document, receive: (handler: (val
         dock.append(button, panel);
     }
     const cards = new SupervisorCards(document, body); cards.reset();
+    const updateSwitch = mountSupervisorSwitch(document, send);
+    const showEnabled = (enabled: boolean, error?: string) => {
+        updateSwitch?.(enabled, error); button.hidden = !enabled;
+        if (!enabled) { panel.hidden = true; button.setAttribute('aria-expanded', 'false'); }
+    };
     button.addEventListener('click', () => { panel.hidden = !panel.hidden; button.setAttribute('aria-expanded', String(!panel.hidden)); });
     panel.addEventListener('keydown', event => {
         if (event.key === 'Escape') { panel.hidden = true; button.setAttribute('aria-expanded', 'false'); button.focus(); }
@@ -37,6 +44,7 @@ export function mountSupervisorPanel(document: Document, receive: (handler: (val
         // A duplicate heartbeat is not a reconnect and must not invalidate task evidence.
         if (normal && status === lastStatus && !selectionChanged) return;
         normal = true; lastStatus = status;
+        showEnabled(status !== 'disabled');
         button.textContent = 'Supervisor · ' + connectionStates[status];
         panel.setAttribute('aria-label', 'Subtask supervisor, read-only');
         title.textContent = 'Subtask supervisor';
@@ -55,6 +63,9 @@ export function mountSupervisorPanel(document: Document, receive: (handler: (val
     receive(value => {
         if (!value || typeof value !== 'object') return;
         const message = value as Record<string, unknown>;
+        if (message.type === 'supervisorToggleResult' && typeof message.enabled === 'boolean') {
+            showEnabled(message.enabled, typeof message.error === 'string' ? message.error : undefined); return;
+        }
         if (message.type === 'supervisorConnectionStatus' && message.mode === 'normal') { connectionStatus(message.status); return; }
         if (message.type === 'supervisorSelection' || message.type === 'sessionData') {
             select(typeof message.sessionId === 'string' ? message.sessionId : null); return;

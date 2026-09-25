@@ -112,7 +112,7 @@
           "type": "boolean",
           "default": false,
           "scope": "window",
-          "description": "Show read-only task supervision for a GUI-owned OpenCode 1.18.29 or 1.18.31 service. Disabling takes effect immediately and does not stop the backend plugin or tasks. Initial plugin loading requires the next normal service start; existing services are never restarted automatically."
+          "description": "Show read-only task supervision for a GUI-owned, API-compatible OpenCode service. Also available beside Variant in the input toolbar. Disabling hides the Supervisor label and does not stop the backend plugin or tasks. Initial plugin loading requires the next normal service start; existing services are never restarted automatically."
         },
         "opencode.experimentalSupervisor": {
           "type": "boolean",
