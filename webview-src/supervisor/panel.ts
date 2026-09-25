@@ -1,15 +1,18 @@
 import { parseSupervisorView, type SupervisorView } from '../../src/supervisor/protocol';
-import { SupervisorCards } from './cards';
+import { SupervisorCards, visibleSupervisorTasks } from './cards';
 import { supervisorStyles } from './styles';
 import { mountSupervisorSwitch } from './switch';
 export { supervisorLines } from './diagnostics';
 
 export function supervisorTone(view?: SupervisorView): 'healthy' | 'attention' | 'error' | 'unknown' {
     if (!view) return 'unknown';
-    if (view.tasks.some(t => t.outcome === 'failed') || view.executions.some(e => e.phase === 'start_failed')) return 'error';
-    if (view.tasks.some(t => !['running', 'ended'].includes(t.health)) ||
-        view.executions.some(e => !['running', 'stopped'].includes(e.health) || e.cancelOutcomeUnknown || e.coverageUnknown) ||
-        view.notifications.some(n => n.escalated)) return 'attention';
+    const tasks = visibleSupervisorTasks(view);
+    const ids = new Set(tasks.map(t => t.taskId));
+    const executions = view.executions.filter(e => ids.has(e.taskId));
+    if (tasks.some(t => t.outcome === 'failed') || executions.some(e => e.phase === 'start_failed')) return 'error';
+    if (tasks.some(t => !['running', 'ended'].includes(t.health)) ||
+        executions.some(e => !['running', 'stopped'].includes(e.health) || e.cancelOutcomeUnknown || e.coverageUnknown) ||
+        view.notifications.some(n => ids.has(n.taskId) && n.escalated)) return 'attention';
     return 'healthy';
 }
 
@@ -98,7 +101,7 @@ export function mountSupervisorPanel(document: Document, receive: (handler: (val
             }
             current = next;
             const tone = normal && lastStatus !== 'connected' ? 'unknown' : supervisorTone(next);
-            setIndicator(tone, { healthy: next.tasks.length ? 'Tasks healthy' : 'No active tasks', attention: 'Needs attention', error: 'Task failed', unknown: 'Observation unavailable' }[tone]);
+            setIndicator(tone, { healthy: visibleSupervisorTasks(next).length ? 'Tasks healthy' : 'No active tasks', attention: 'Needs attention', error: 'Task failed', unknown: 'Observation unavailable' }[tone]);
             cards.render(next, previous, normal && lastStatus !== 'connected');
         } catch { setIndicator('unknown', 'Observation unavailable'); cards.render(current, previous, true, 'Supervisor protocol unavailable; current state unknown'); }
     });

@@ -126,3 +126,12 @@ acknowledgement advances the queue and fresh server validation enables the next
 response. Polling preserves insertion order and the current card. Expired and
 unknown requests are omitted from this action queue. Hidden or detached cards
 cannot submit a decision. The overlay does not consume composer layout space.
+
+## Supervisor display cleanup
+
+Floating controls are vertically stacked at the right edge. The live list and
+icon health include only current work: terminal, ended and cancel_unknown rows
+are hidden, as is previous-service history. Waiting for permission, suspected
+stalls and unreachable active tasks remain visible. At the user's request,
+cancellation-uncertain rows are hidden without changing their backend evidence.
+This is display cleanup, not record deletion or proof that execution stopped.

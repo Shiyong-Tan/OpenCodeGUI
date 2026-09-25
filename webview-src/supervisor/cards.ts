@@ -2,6 +2,10 @@ import type { SupervisorView } from '../../src/supervisor/protocol';
 import { supervisorLines } from './diagnostics';
 import { SupervisorProcesses } from './processes';
 type Task = SupervisorView['tasks'][number];
+/** Current work only. This projection does not rewrite cancellation or stop evidence. */
+export function visibleSupervisorTasks(view: SupervisorView): Task[] {
+    return view.tasks.filter(task => task.phase !== 'terminal' && task.health !== 'ended' && task.health !== 'cancel_unknown');
+}
 export function taskStatus(task: Task, stale: boolean): { label: string; tone: string } {
     if (stale) return { label: 'Unknown · historical', tone: 'muted' };
     if (task.health === 'cancel_unknown') return { label: 'Cancellation uncertain', tone: 'warning' };
@@ -31,7 +35,7 @@ export class SupervisorCards {
     private historyKey = '';
     constructor(private readonly document: Document, body: HTMLElement) {
         this.notice = this.node('p', 'sv-notice'); this.current = this.node('div', 'sv-tasks');
-        this.empty = this.node('p', 'sv-empty', 'No registered tasks in this session');
+        this.empty = this.node('p', 'sv-empty', 'No active tasks in this session');
         this.history = this.node('details', 'sv-history');
         this.history.append(this.node('summary', '', 'Previous service · historical evidence'), this.node('pre'));
         this.history.hidden = true; body.append(this.notice, this.current, this.empty, this.history);
@@ -46,9 +50,10 @@ export class SupervisorCards {
     }
     render(view: SupervisorView | undefined, previous: SupervisorView | undefined, stale: boolean, hint = ''): void {
         this.notice.textContent = hint || (stale ? 'Observation unavailable; current state unknown' : 'Live observations · Read-only');
-        this.empty.hidden = !view || view.tasks.length > 0;
+        const visible = view ? visibleSupervisorTasks(view) : [];
+        this.empty.hidden = !view || visible.length > 0;
         const retained = new Set<string>();
-        for (const task of view?.tasks ?? []) {
+        for (const task of visible) {
             const key = `${view!.instanceId}:${task.taskId}:${task.attemptId}`; retained.add(key);
             let card = this.cards.get(key);
             if (!card) {
@@ -68,7 +73,7 @@ export class SupervisorCards {
             card.processes.render(view!.executions.filter(e => e.taskId === task.taskId && e.attemptId === task.attemptId && e.childSessionId === task.childSessionId), stale);
         }
         for (const [key, card] of this.cards) if (!retained.has(key)) { card.root.remove(); this.cards.delete(key); }
-        this.history.hidden = !previous;
+        this.history.hidden = true;
         if (previous) {
             if (this.historyKey !== previous.instanceId) this.history.open = false;
             this.historyKey = previous.instanceId;

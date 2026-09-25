@@ -1,3 +1,4 @@
+import { visibleSupervisorTasks } from '../supervisor/cards';
 import { supervisorTone } from '../supervisor/panel';
 import { mountSupervisorPanel, supervisorLines } from '../supervisor/panel';
 import { parseSupervisorView } from '../../src/supervisor/protocol';
@@ -121,8 +122,8 @@ test('normal panel shows disabled state, retains old-instance evidence and fence
     const next = snapshot(); next.instanceId = 'instance_B'; next.tasks = [];
     receive({ type: 'supervisorState', sessionId: 'ses_A', status: 'observed', view: next });
     expect(content.textContent).toContain('instance_A');
-    expect(content.textContent).toContain('No registered tasks');
-    expect(content.children[3].hidden).toBe(false);
+    expect(content.textContent).toContain('No active tasks');
+    expect(content.children[3].hidden).toBe(true);
     expect(content.children[3].open).toBe(false);
     expect(content.textContent).toContain('current state unknown');
     receive({ type: 'supervisorConnectionStatus', mode: 'normal', status: 'disabled' });
@@ -304,4 +305,21 @@ test('supervisor icon distinguishes healthy, attention, failure and missing evid
     expect(supervisorTone(view)).toBe('attention');
     view.tasks[0].outcome = 'failed';
     expect(supervisorTone(view)).toBe('error');
+});
+
+
+test('only current work remains visible without rewriting cancellation evidence', () => {
+    const view = snapshot(); view.executions = []; view.notifications = [];
+    view.tasks[0].phase = 'terminal'; view.tasks[0].health = 'ended'; view.tasks[0].outcome = 'completed';
+    expect(visibleSupervisorTasks(view)).toHaveLength(0);
+    expect(view.tasks).toHaveLength(1);
+    expect(supervisorTone(view)).toBe('healthy');
+    view.tasks[0].health = 'cancel_unknown';
+    view.tasks[0].phase = 'active';
+    expect(visibleSupervisorTasks(view)).toHaveLength(0);
+    expect(view.tasks[0].health).toBe('cancel_unknown');
+    expect(supervisorTone(view)).toBe('healthy');
+    view.tasks[0].health = 'waiting_permission';
+    expect(visibleSupervisorTasks(view)).toHaveLength(1);
+    expect(supervisorTone(view)).toBe('attention');
 });
