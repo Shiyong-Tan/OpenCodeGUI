@@ -356,3 +356,32 @@ in progress. Full prior fixed-source Jest: 191 suites / 1,485 tests. VSIX conten
 and deterministic build pass. Rendering is 82,304 bytes / 75 KiB; continuation is
 55,688 bytes / 51 KiB (its source/limit unchanged from baseline 5da2132). Both size
 failures are retained; limits are not raised. Phase 4 remains incomplete.
+# Task card presentation
+
+The read-only overlay presents a bounded optional task `title`, not canonical IDs.
+Older snapshots without this additive field remain accepted as untitled tasks.
+The plugin registry still owns task identity and status; the title is presentation
+only. Prompts, commands and output remain excluded from the snapshot projection.
+Titles are inserted with textContent and never interpreted as markup.
+
+Cards retain DOM identity by instance/task/attempt, preserving diagnostics expansion
+and scroll position through polling. IDs, versions, process evidence and notification
+details remain available in closed Diagnostics sections. Previous-instance evidence
+is closed by default. Unavailable/invalid observations retain evidence with an unknown
+status, never a fresh success color. Connection alone does not restore live status.
+Session selection clears only this overlay's projection. Chat/history ownership,
+finality and recovery behavior remain unchanged.
+
+Status colors supplement English labels: running blue, completed green, attention
+amber, failure/unreachable red, unknown/historical neutral. Rounded translucent
+surfaces use theme variables, keyboard focus outlines and forced-color fallbacks.
+The supervisor-only bundle budget is 18 KiB minified / 7 KiB gzip to include this
+keyed renderer and scoped styles; other bundle budgets are unchanged. GUI stays 5.0.7.
+
+Validation: 201 Jest suites / 1576 tests passed, including literal-title rendering,
+legacy/invalid titles, hidden diagnostics, retained card nodes/expanded details and
+scroll, session isolation, instance changes and stale status colors. Compile, bundle
+checks and determinism passed (supervisor: 17,287 bytes / 6,188 gzip). The actual bundle
+was visually checked in isolated headless Edge using static fixtures in dark/light
+themes and a 320px frame. This is not a live-service or paid-model test. The 5.0.7
+VSIX manifest and included bundle were verified; no daily service was restarted.

@@ -1,6 +1,6 @@
 import { parseOpenCodeVersion } from './opencode-version';
 import { parseNotificationIdentity } from './notification-identity-protocol';
-/** Version 1 deliberately carries no free-form task text, commands, paths or output. */
+/** Only a bounded display title is allowed; prompts, commands and output stay private. */
 type Parser<T> = (value: unknown) => T;
 type Parsed<P> = P extends Parser<infer T> ? T : never;
 const invalid = (): never => { throw new Error('Invalid supervisor snapshot'); };
@@ -25,6 +25,7 @@ const object = <P extends Record<string, Parser<unknown>>>(fields: P): Parser<{ 
 };
 const identity = { taskId: id, attemptId: id, parentSessionId: session, childSessionId: nullable(session) };
 const task = object({ ...identity,
+  title: value => value === undefined || value === null ? null : text(/^[^\x00-\x1f\x7f]{1,500}$/u)(value),
   phase: state('registered', 'dispatching', 'active', 'terminal'),
   health: state('running', 'waiting_permission', 'suspected_stall', 'unreachable', 'ended', 'cancel_unknown'),
   outcome: nullable(state('completed', 'failed')),
