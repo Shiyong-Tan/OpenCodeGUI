@@ -1,4 +1,3 @@
-import { SUPPORTED_OPENCODE_VERSIONS } from '../../src/supervisor/opencode-version';
 import { parseSupervisorView, type SupervisorView } from '../../src/supervisor/protocol';
 import { SupervisorCards } from './cards';
 import { supervisorStyles } from './styles';
@@ -42,8 +41,8 @@ export function mountSupervisorPanel(document: Document, receive: (handler: (val
         panel.setAttribute('aria-label', 'Subtask supervisor, read-only');
         title.textContent = 'Subtask supervisor';
         const hint = status === 'disabled' ? 'GUI display is disabled; the backend plugin and tasks may still be running.' :
-            status === 'unavailable' ? 'Check plugin installation and logs. Unsupported OpenCode version: update both GUI and Supervisor; updating GUI alone cannot fix an old plugin. Load changes at the next normal service start.' :
-            status === 'incompatible' ? `Version mismatch. Supported: ${SUPPORTED_OPENCODE_VERSIONS.join(', ')}. Update both GUI and OpenCodeTaskSupervisor; services will not restart automatically.` : connectionStates[status];
+            status === 'unavailable' ? 'Check plugin installation, required API responses and service logs. If an older plugin reports Unsupported OpenCode version, update the plugin; updating GUI alone cannot remove its version allowlist.' :
+            status === 'incompatible' ? 'Supervisor protocol or service identity mismatch. Check API compatibility and service logs; services will not restart automatically.' : connectionStates[status];
         // A transport reconnect alone is not fresh evidence about task health.
         cards.render(current, previous, true, status === 'connected' ? 'Connected · Waiting for fresh observations' : hint);
     };

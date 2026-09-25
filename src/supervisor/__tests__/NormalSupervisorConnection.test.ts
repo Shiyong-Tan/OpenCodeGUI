@@ -9,7 +9,7 @@ import type { ServerConnection } from '../../transport/OpenCodeHttpClient';
 describe('normal supervisor service/bridge authentication', () => {
     let root = '';
     afterEach(async () => { if (root) await rm(root, { recursive: true, force: true }); });
-    async function setup(version: '1.18.29' | '1.18.31' = '1.18.29') {
+    async function setup(version: string = '1.18.29') {
         root = await realpath(await mkdtemp(join(tmpdir(), 'gui-supervisor-connect-')));
         const binding = { integrationId: '11'.repeat(32), serviceId: '22'.repeat(32), workspace: 'd:/trial', serviceOrigin: 'http://127.0.0.1:42001' };
         const authHeader = `Basic ${Buffer.from('opencode:test-only-password').toString('base64')}`;
@@ -36,7 +36,7 @@ describe('normal supervisor service/bridge authentication', () => {
         return { launch, lease, service, fetcher, signed };
     }
 
-    test.each(['1.18.29', '1.18.31'] as const)('connects with matching authenticated version %s', async version => {
+    test.each(['1.18.29', '1.18.31', '1.18.32', '2.0.0', '2.1.0-beta+build.7'] as const)('connects with matching authenticated version %s', async version => {
         const { launch, lease, service, fetcher } = await setup(version);
         const connection = await connectNormalSupervisor(launch, service, new AbortController().signal, fetcher as typeof fetch, () => 1000);
         expect(connection.openCodeVersion).toBe(version);
@@ -74,7 +74,7 @@ describe('normal supervisor service/bridge authentication', () => {
         }
     });
 
-    test.each(['1.18.32', '2.0.0', null, undefined])('rejects unsupported health %s before bridge access', async version => {
+    test.each(['1.18.32', '2.0.0', null, undefined])('rejects mismatched or malformed health %s before bridge access', async version => {
         const { launch, service } = await setup('1.18.31');
         const fetcher = jest.fn(async () => Response.json({ version }));
         await expect(connectNormalSupervisor(launch, service, new AbortController().signal, fetcher as typeof fetch, () => 1000))
@@ -82,7 +82,7 @@ describe('normal supervisor service/bridge authentication', () => {
         expect(fetcher).toHaveBeenCalledTimes(1);
     });
 
-    test('rejects a live signed lease that changes to another supported release', async () => {
+    test('rejects a live signed lease that changes to another release', async () => {
         const { launch, lease, service } = await setup('1.18.31');
         const changed = { ...lease, opencodeVersion: '1.18.29' as const };
         const fetcher = jest.fn(async (url: string) => {

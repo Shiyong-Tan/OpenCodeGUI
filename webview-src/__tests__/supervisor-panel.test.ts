@@ -75,13 +75,13 @@ test('normal panel shows disabled state, retains old-instance evidence and fence
         receive({ type: 'supervisorConnectionStatus', mode: 'normal', status });
         expect(button.textContent).not.toContain('Experimental');
         if (status === 'incompatible') {
-            expect(content.textContent).toContain('1.18.29, 1.18.31');
-            expect(content.textContent).toContain('Update both GUI and OpenCodeTaskSupervisor');
+            expect(content.textContent).toContain('protocol or service identity mismatch');
+            expect(content.textContent).toContain('API compatibility');
             expect(content.textContent).toContain('services will not restart automatically');
         }
         if (status === 'unavailable') {
             expect(content.textContent).toContain('Unsupported OpenCode version');
-            expect(content.textContent).toContain('updating GUI alone cannot fix an old plugin');
+            expect(content.textContent).toContain('updating GUI alone cannot remove its version allowlist');
         }
     }
     receive({ type: 'supervisorState', sessionId: 'ses_A', status: 'observed', view: snapshot() });

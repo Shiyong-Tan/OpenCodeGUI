@@ -1,4 +1,4 @@
-import { isSupportedOpenCodeVersion, type SupportedOpenCodeVersion } from './opencode-version';
+import { isOpenCodeVersion, type OpenCodeVersion } from './opencode-version';
 import { open, realpath } from 'fs/promises';
 import { dirname, isAbsolute, join } from 'path';
 
@@ -11,7 +11,7 @@ export interface IsolatedSupervisorConnection {
     serviceAuthorization: string;
     bridgeEndpoint: string;
     bridgeToken: string;
-    openCodeVersion: SupportedOpenCodeVersion;
+    openCodeVersion: OpenCodeVersion;
     pluginVersion: '0.1.0';
 }
 
@@ -33,7 +33,7 @@ function endpoint(value: unknown): string {
 
 export function parseIsolatedSupervisorConnection(value: unknown): IsolatedSupervisorConnection {
     const data = record(value), service = record(data.service), bridge = record(data.bridge);
-    if (data.schemaVersion !== 1 || !isSupportedOpenCodeVersion(data.openCodeVersion) || data.pluginVersion !== '0.1.0') throw new Error('Unsupported supervisor descriptor version');
+    if (data.schemaVersion !== 1 || !isOpenCodeVersion(data.openCodeVersion) || data.pluginVersion !== '0.1.0') throw new Error('Unsupported supervisor descriptor version');
     if (typeof data.workspace !== 'string' || !isAbsolute(data.workspace)) throw new Error('Expected absolute isolated workspace');
     if (typeof service.authorization !== 'string' || !/^Basic [A-Za-z0-9+/]{1,512}={0,2}$/.test(service.authorization)) throw new Error('Invalid isolated service authentication');
     if (typeof bridge.token !== 'string' || !/^[a-f0-9]{64}$/.test(bridge.token)) throw new Error('Invalid bridge authentication');

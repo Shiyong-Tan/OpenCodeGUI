@@ -1,6 +1,7 @@
 # Phase 5: normal installed GUI trial
 
-Supported trial: Windows, OpenCode **1.18.29 or 1.18.31**, GUI **5.0.7**. The original
+Verified trial releases: Windows, OpenCode **1.18.29 or 1.18.31**, GUI **5.0.7**.
+New releases use [runtime API compatibility](SUPERVISOR-API-COMPATIBILITY.md), not a version allowlist. The original
 phase-five acceptance used the 5.0.5 commits recorded in the companion supervisor
 repository; 5.0.6 packages that implementation as a distinct GUI release. VS Code 1.137.0 was
 actually exercised. This is a small-workspace trial, not long-term production

@@ -7,7 +7,7 @@ const descriptor = () => ({ schemaVersion: 1, isolationId: 'lab_A', instanceId: 
     service: { endpoint: 'http://127.0.0.1:40001', authorization: 'Basic dGVzdA==' },
     bridge: { endpoint: 'http://127.0.0.1:40002', token: 'a'.repeat(64) } });
 
-test.each(['1.18.29', '1.18.31'])('descriptor and snapshot preserve matching version %s', async version => {
+test.each(['1.18.29', '1.18.31', '1.18.32', '2.0.0', '1.18.31-beta'])('descriptor and snapshot preserve matching version %s', async version => {
     const connection = parseIsolatedSupervisorConnection({ ...descriptor(), openCodeVersion: version });
     const reader = new SupervisorReader(connection, (async () => Response.json({ ...view(), openCodeVersion: version })) as typeof fetch);
     try {
@@ -24,7 +24,7 @@ test('reader rejects a snapshot from another supported version', async () => {
     finally { reader.dispose(); }
 });
 
-test.each(['1.18.30', '1.18.32', '2.0.0', '1.18.31-beta', null, 11831])('descriptor refuses unaudited version %s', version => {
+test.each(['invalid-version', '', null, 11831])('descriptor refuses malformed version %s', version => {
     expect(() => parseIsolatedSupervisorConnection({ ...descriptor(), openCodeVersion: version })).toThrow('version');
 });
 const view = (parent = 'ses_A', revision = 1) => ({ schemaVersion: 1, isolationId: 'lab_A', instanceId: 'instance_A',

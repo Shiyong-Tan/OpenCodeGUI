@@ -358,6 +358,12 @@ and deterministic build pass. Rendering is 82,304 bytes / 75 KiB; continuation i
 failures are retained; limits are not raised. Phase 4 remains incomplete.
 # Task card presentation
 
+OpenCode release labels are metadata, not a support allowlist. New valid labels
+are accepted without changing the GUI; signed service identity, health/lease/view
+version consistency and bridge schemas are still checked. The companion adapter
+validates required API responses at runtime. See
+[compatibility policy](../../docs/SUPERVISOR-API-COMPATIBILITY.md).
+
 Connection heartbeat fix: the controller republishes connection status before and
 after each polling read. Repeated identical status messages are idempotent in the
 panel; they must not invalidate a live task snapshot or flash an Unknown badge.

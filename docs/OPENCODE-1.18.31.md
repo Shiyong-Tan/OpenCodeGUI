@@ -1,5 +1,8 @@
 # OpenCode 1.18.31 support in GUI 5.0.7
 
+> Historical audit. The release allowlist below is superseded by
+> [runtime API compatibility](SUPERVISOR-API-COMPATIBILITY.md).
+
 The supported Supervisor versions of OpenCode are exactly **1.18.29 and 1.18.31**.
 Update both GUI and the separately installed OpenCodeTaskSupervisor build.
 Installing the VSIX alone cannot fix `Unsupported OpenCode version` thrown by

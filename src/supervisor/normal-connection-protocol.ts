@@ -1,4 +1,4 @@
-import { isSupportedOpenCodeVersion, type SupportedOpenCodeVersion } from './opencode-version';
+import { isOpenCodeVersion, type OpenCodeVersion } from './opencode-version';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
 /** Normal GUI protocol. Deliberately separate from isolated lab descriptors. */
@@ -14,7 +14,7 @@ export interface ConnectionLease extends ServiceBinding {
   kind: 'normal-gui';
   instanceId: string;
   bridgeOrigin: string;
-  opencodeVersion: SupportedOpenCodeVersion;
+  opencodeVersion: OpenCodeVersion;
   pluginVersion: '0.1.0';
   issuedAt: number;
   expiresAt: number;
@@ -66,7 +66,7 @@ function binding(value: ServiceBinding): ServiceBinding {
 function parseLease(value: unknown): ConnectionLease {
   const raw = record(value);
   exactKeys(raw, leaseKeys);
-  if (raw.schemaVersion !== 1 || raw.kind !== 'normal-gui' || !isSupportedOpenCodeVersion(raw.opencodeVersion)
+  if (raw.schemaVersion !== 1 || raw.kind !== 'normal-gui' || !isOpenCodeVersion(raw.opencodeVersion)
     || raw.pluginVersion !== '0.1.0' || typeof raw.workspace !== 'string'
     || !Number.isSafeInteger(raw.issuedAt) || !Number.isSafeInteger(raw.expiresAt)) return fail();
   const issuedAt = raw.issuedAt as number;
