@@ -109,3 +109,11 @@ requests from `waiting_permission` while retaining cancellation uncertainty.
 GUI remains 5.0.7. No global configuration edits, ordinary service restarts,
 OpenLPT edits or push. The updated companion plugin takes effect at its next
 normal service start; GUI review works directly with the current OpenCode API.
+
+## Pending-only panel visibility
+
+The composer panel is shown only while pending asks exist in its scope.
+Inactive requests alone, an empty list, or a polling failure without pending
+asks do not occupy composer space. The last acknowledged decision hides the
+panel; background refresh still discovers new asks. Visibility regression:
+5 focused tests passed.

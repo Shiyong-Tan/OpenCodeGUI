@@ -28,7 +28,7 @@ export function createPermissionReview(options: {
     const key = (card: Pick<PermissionCard, 'sessionId' | 'requestId'>) => `${card.sessionId}:${card.requestId}`;
     const update = () => {
         const cards = [...rows.values()].map(r => r.card), pending = cards.filter(c => c.state === 'pending');
-        root.hidden = !cards.length && !failed;
+        root.hidden = pending.length === 0;
         heading.textContent = failed ? 'Permissions unavailable' : `Permission requests · ${pending.length} waiting`;
         const expired = cards.filter(c => c.state === 'expired').length;
         inactive.hidden = !expired; inactiveTitle.textContent = `Inactive requests (${expired})`;

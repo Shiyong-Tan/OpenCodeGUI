@@ -70,6 +70,22 @@ test('expired and unknown requests have disabled actions; outages and failed dec
 });
 
 
+test('panel appears only for pending asks and hides after the last decision', () => {
+    const x = setup(); x.panel.select('ses_parent');
+    expect(x.root.hidden).toBe(true);
+    x.respond([{ ...card(), state: 'expired', reviewToken: '' }]);
+    expect(x.root.hidden).toBe(true);
+    jest.advanceTimersByTime(3000);
+    x.panel.receive({ ...x.send.mock.calls.at(-1)![0], type: 'permissionSnapshot', error: 'offline' });
+    expect(x.root.hidden).toBe(true);
+    jest.advanceTimersByTime(3000); x.respond([card()]);
+    expect(x.root.hidden).toBe(false);
+    x.rows.children[0].children[4].click();
+    x.panel.receive({ type: 'permissionResultAck', sessionId: 'ses_child', permissionId: 'per_a' });
+    expect(x.root.hidden).toBe(true);
+    x.panel.dispose();
+});
+
 test('late decisions from another scope leave the current permissions unchanged', () => {
     const x = setup(); x.panel.select('ses_parent'); x.respond([card()]);
     const row = x.rows.children[0], calls = x.send.mock.calls.length;
