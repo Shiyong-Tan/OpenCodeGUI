@@ -1,3 +1,4 @@
+import { fillSupervisorTitles } from './supervisor/SupervisorTitles';
 import { configureSupervisor, checkSupervisorRelease } from './supervisor/SupervisorSetup';
 import { PermissionReviewService, type PermissionSnapshot } from './permissions/PermissionReviewService';
 import { SupervisorAssistantObserver, type SupervisorAssistantActivity } from './supervisor/SupervisorAssistantObserver';
@@ -1088,7 +1089,20 @@ export class OpenCodeClient {
 
     public async readSupervisorState(sessionId: string) {
         if (this.supervisorClassificationBlocked.has(sessionId) || this.supervisorRoundUnresolved.has(sessionId)) return { status: 'unavailable' as const, reason: 'read_failed' as const };
-        return this.supervisorIntegration?.read(sessionId) ?? { status: 'unavailable' as const, reason: 'read_failed' as const };
+        const workspace = this.workspaceRoot;
+        const result = await (this.supervisorIntegration?.read(sessionId) ?? { status: 'unavailable' as const, reason: 'read_failed' as const });
+        if (result.status !== 'observed' || !result.view.tasks.some(t => !t.title && t.childSessionId)) return result;
+        const connection = await this.getServerConn();
+        if (workspace !== this.workspaceRoot) return { status: 'unavailable' as const, reason: 'read_failed' as const };
+        const view = await fillSupervisorTitles(result.view, async id => {
+            const response = await this.serverFetch(`/session/${encodeURIComponent(id)}`, {}, {
+                conn: connection, retry: false, retryTransport: false, skipReady: true, timeoutMs: 1500,
+            });
+            if (!response.ok) throw new Error('Session title unavailable');
+            return response.json();
+        });
+        if (workspace !== this.workspaceRoot) return { status: 'unavailable' as const, reason: 'read_failed' as const };
+        return { status: 'observed' as const, view };
     }
 
     public getWorkspaceRoot(): string {

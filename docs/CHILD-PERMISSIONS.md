@@ -135,3 +135,14 @@ are hidden, as is previous-service history. Waiting for permission, suspected
 stalls and unreachable active tasks remain visible. At the user's request,
 cancellation-uncertain rows are hidden without changing their backend evidence.
 This is display cleanup, not record deletion or proof that execution stopped.
+
+## Missing Supervisor title compatibility
+
+When a verified current task snapshot has no title, the GUI may read its child
+session metadata and project the title only after both child and parent IDs match.
+Existing titles are retained; failures do not change health or task evidence.
+Reads are bounded to 32 active tasks with concurrency four. Ended/cancelled rows
+are not queried. This does not restart OpenCode or infer titles from prompts.
+The reported TGV child title was confirmed in the live session API; the running
+service uses a local plugin path. Historical bridge payload loss was not directly
+confirmed, so older runtime code remains a possible cause rather than a proven one.
