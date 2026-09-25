@@ -11,6 +11,7 @@ type UtilityMessage = Record<string, any>;
 type LocalQuestionResolution = { resolved: boolean; sessionId?: string };
 
 export interface UtilityCommandHost {
+    enableSupervisor?(): Promise<void>;
     getLiveWebview(fallback: vscode.Webview): vscode.Webview;
     log(message: string): void;
     applyModelSelection(value: unknown, webview: vscode.Webview): Promise<void>;
@@ -132,7 +133,7 @@ export class UtilityCommandController {
                 await this.host.applyVariantSelection(data.value);
                 return true;
             case 'setSupervisorEnabled':
-                await updateSupervisorSetting(data.enabled, activeWebview);
+                await updateSupervisorSetting(data.enabled, activeWebview, this.host.enableSupervisor);
                 return true;
             case 'refreshModels':
                 await this.host.refreshModels(activeWebview);

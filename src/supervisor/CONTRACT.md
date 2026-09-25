@@ -425,3 +425,10 @@ checks and determinism passed (supervisor: 17,287 bytes / 6,188 gzip). The actua
 was visually checked in isolated headless Edge using static fixtures in dark/light
 themes and a 320px frame. This is not a live-service or paid-model test. The 5.0.7
 VSIX manifest and included bundle were verified; no daily service was restarted.
+
+## Explicit switch installation (2026-09-25)
+
+The user-authorized composer switch now provisions a workspace plugin declaration
+and activates it through the existing owned service controller. This supersedes
+the earlier display-only switch contract; turning off remains display-only.
+See [installation ownership and validation](../../docs/SUPERVISOR-INSTALL.md).

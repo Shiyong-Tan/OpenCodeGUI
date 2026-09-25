@@ -38,3 +38,15 @@ test('missing workspace and malformed values never fall back to global configura
     await updateSupervisorSetting('true', webview);
     expect(update).not.toHaveBeenCalled();
 });
+
+
+test('activation failure restores display state and disabling never installs or restarts', async () => {
+    const activate = jest.fn(async () => { throw new Error('Release unavailable'); });
+    await updateSupervisorSetting(true, webview, activate);
+    expect(activate).toHaveBeenCalledTimes(1);
+    expect(enabled).toBe(false);
+    expect(postMessage).toHaveBeenLastCalledWith({ type: 'supervisorToggleResult', enabled: false, error: 'Release unavailable' });
+    activate.mockClear();
+    await updateSupervisorSetting(false, webview, activate);
+    expect(activate).not.toHaveBeenCalled();
+});

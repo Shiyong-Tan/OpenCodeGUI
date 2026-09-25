@@ -1,3 +1,4 @@
+import { configureSupervisor, checkSupervisorRelease } from './supervisor/SupervisorSetup';
 import { PermissionReviewService, type PermissionSnapshot } from './permissions/PermissionReviewService';
 import { SupervisorAssistantObserver, type SupervisorAssistantActivity } from './supervisor/SupervisorAssistantObserver';
 import type { SupervisorRound, ParentExecution } from './supervisor/SupervisorRoundStore';
@@ -5068,6 +5069,40 @@ export class OpenCodeClient {
 
     private async checkServerHealth(port: number, password: string, timeoutMs = 1000): Promise<'ok' | 'unauthorized' | 'timeout' | 'connrefused' | 'unreachable'> {
         return this.serverController.checkHealth(this.workspaceRoot, port, password, timeoutMs);
+    }
+
+    private supervisorSetup?: Promise<void>;
+    public enableSupervisor(): Promise<void> {
+        if (this.supervisorSetup) return this.supervisorSetup;
+        const workspace = this.workspaceRoot;
+        const checkWorkspace = () => {
+            if (workspace !== this.workspaceRoot) throw new Error('Workspace changed during Supervisor setup. Retry in the target workspace.');
+        };
+        const operation = (async () => {
+            if (!vscode.workspace.isTrusted) throw new Error('Trust this workspace before installing Supervisor.');
+            if (process.platform !== 'win32') throw new Error('Automatic Supervisor service setup currently requires Windows.');
+            const changed = await configureSupervisor(workspace, checkSupervisorRelease);
+            checkWorkspace();
+            if (!changed && this.getSupervisorStatus() === 'connected') return;
+            this.setNormalSupervisorEnabled(true);
+            const confirm = async () => await vscode.window.showWarningMessage(
+                'Enabling Supervisor requires restarting OpenCode. Active tasks and managed processes will be interrupted; tasks are not automatically resumed.',
+                { modal: true }, 'Restart OpenCode') === 'Restart OpenCode';
+            const started = await this.operateService('start', confirm);
+            checkWorkspace();
+            if (started === 'already_running') await this.operateService('restart', confirm);
+            checkWorkspace();
+            for (let attempt = 0; attempt < 12; attempt++) {
+                await this.readSupervisorState('ses_supervisor_setup');
+                checkWorkspace();
+                if (this.getSupervisorStatus() === 'connected') return;
+                await new Promise(resolve => setTimeout(resolve, 500));
+            }
+            throw new Error('Supervisor configuration is saved, but the plugin did not connect. Check OpenCode plugin loading logs; no automatic restart will be repeated.');
+        })();
+        this.supervisorSetup = operation;
+        void operation.finally(() => { if (this.supervisorSetup === operation) this.supervisorSetup = undefined; }).catch(() => undefined);
+        return operation;
     }
 
     public async operateService(action: 'start' | 'stop' | 'restart', confirm: (action: 'stop' | 'restart') => Promise<boolean>): Promise<string> {
