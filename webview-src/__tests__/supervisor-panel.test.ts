@@ -130,6 +130,33 @@ test('display titles are optional, bounded and never admit unrelated prompt fiel
         expect(() => parseSupervisorView({ ...view, tasks: [{ ...view.tasks[0], title }] })).toThrow();
 });
 
+test('repeated connection heartbeats do not invalidate observed cards, while real disconnects do', () => {
+    const body = new Element(); let receive!: (message: unknown) => void;
+    mountSupervisorPanel({ body, createElement: () => new Element(), querySelector: () => null } as unknown as Document,
+        callback => { receive = callback; });
+    const content = body.children.find(e => e.id === 'supervisor-panel')!.children[1];
+    const connected = { type: 'supervisorConnectionStatus', mode: 'normal', status: 'connected' };
+    receive(connected); receive({ type: 'supervisorSelection', sessionId: 'ses_A' });
+    const view = snapshot(); view.tasks[0].health = 'running';
+    const observed = { type: 'supervisorState', sessionId: 'ses_A', status: 'observed', view };
+    receive(observed);
+    const card = content.children[1].children[0], badge = card.children[1];
+    for (let i = 0; i < 3; i++) {
+        receive(connected); expect(badge.textContent).toBe('Running');
+        expect(content.children[0].textContent).toBe('Live observations · Read-only');
+        receive(observed); expect(content.children[1].children[0]).toBe(card);
+    }
+    receive({ ...connected, status: 'disconnected' });
+    expect(badge.attributes.get('data-tone')).toBe('muted');
+    receive(connected); expect(badge.attributes.get('data-tone')).toBe('muted');
+    receive(observed); expect(badge.textContent).toBe('Running');
+    receive({ type: 'supervisorState', sessionId: 'ses_A', status: 'unavailable' });
+    receive(connected); expect(badge.attributes.get('data-tone')).toBe('muted');
+    receive({ type: 'supervisorSelection', sessionId: 'ses_B' });
+    expect(content.children[0].textContent).toBe('Connected · Waiting for fresh observations');
+    expect(content.children[1].children).toHaveLength(0);
+});
+
 test('task cards hide IDs, render names as text, preserve details and scroll on refresh, and discard stale status colors', () => {
     const body = new Element(); let receive!: (message: unknown) => void;
     mountSupervisorPanel({ body, createElement: () => new Element(), querySelector: () => null } as unknown as Document,

@@ -358,6 +358,13 @@ and deterministic build pass. Rendering is 82,304 bytes / 75 KiB; continuation i
 failures are retained; limits are not raised. Phase 4 remains incomplete.
 # Task card presentation
 
+Connection heartbeat fix: the controller republishes connection status before and
+after each polling read. Repeated identical status messages are idempotent in the
+panel; they must not invalidate a live task snapshot or flash an Unknown badge.
+Actual disconnect/reconnect still requires fresh task evidence. Session changes
+explicitly reapply the connection hint after clearing the previous projection.
+Regression reproduced before the fix; 14 supervisor suites / 90 tests pass after it.
+
 The read-only overlay presents a bounded optional task `title`, not canonical IDs.
 Older snapshots without this additive field remain accepted as untitled tasks.
 The plugin registry still owns task identity and status; the title is presentation

@@ -26,8 +26,11 @@ export function mountSupervisorPanel(document: Document, receive: (handler: (val
     let lastStatus = '';
     const connectionStates: Record<string, string> = { disabled: 'Disabled', unavailable: 'Unavailable',
         connecting: 'Connecting', connected: 'Connected', incompatible: 'Incompatible', disconnected: 'Disconnected' };
-    const connectionStatus = (status: unknown) => {
+    const connectionStatus = (status: unknown, selectionChanged = false) => {
         if (typeof status !== 'string' || !connectionStates[status]) return;
+        // The host republishes connection status before and after each poll.
+        // A duplicate heartbeat is not a reconnect and must not invalidate task evidence.
+        if (normal && status === lastStatus && !selectionChanged) return;
         normal = true; lastStatus = status;
         button.textContent = 'Supervisor · ' + connectionStates[status];
         panel.setAttribute('aria-label', 'Subtask supervisor, read-only');
@@ -42,7 +45,7 @@ export function mountSupervisorPanel(document: Document, receive: (handler: (val
     const select = (id: string | null) => {
         if (sessionId === id) return;
         sessionId = id; current = undefined; previous = undefined; cards.reset(); panel.scrollTop = 0;
-        if (normal) connectionStatus(lastStatus);
+        if (normal) connectionStatus(lastStatus, true);
     };
     receive(value => {
         if (!value || typeof value !== 'object') return;
