@@ -4,12 +4,27 @@ import { supervisorStyles } from './styles';
 import { mountSupervisorSwitch } from './switch';
 export { supervisorLines } from './diagnostics';
 
+export function supervisorTone(view?: SupervisorView): 'healthy' | 'attention' | 'error' | 'unknown' {
+    if (!view) return 'unknown';
+    if (view.tasks.some(t => t.outcome === 'failed') || view.executions.some(e => e.phase === 'start_failed')) return 'error';
+    if (view.tasks.some(t => !['running', 'ended'].includes(t.health)) ||
+        view.executions.some(e => !['running', 'stopped'].includes(e.health) || e.cancelOutcomeUnknown || e.coverageUnknown) ||
+        view.notifications.some(n => n.escalated)) return 'attention';
+    return 'healthy';
+}
+
 export function mountSupervisorPanel(document: Document, receive: (handler: (value: unknown) => void) => void,
     send: (message: unknown) => void = () => {}) {
     const style = document.createElement('style'); style.textContent = supervisorStyles;
     const button = document.createElement('button'); button.id = 'supervisor-toggle';
     button.textContent = 'Supervisor · Experimental'; button.setAttribute('aria-expanded', 'false');
     button.setAttribute('aria-controls', 'supervisor-panel');
+    const setIndicator = (tone: string, detail: string) => {
+        button.setAttribute('data-tone', tone);
+        button.setAttribute('title', `Supervisor: ${detail}`);
+        button.setAttribute('aria-label', `Supervisor: ${detail}`);
+    };
+    setIndicator('unknown', 'Waiting for observations');
     const panel = document.createElement('section'); panel.id = 'supervisor-panel'; panel.hidden = true;
     panel.setAttribute('aria-label', 'Experimental supervisor, read-only');
     const title = document.createElement('h3'); title.textContent = 'Subtask supervisor';
@@ -46,6 +61,7 @@ export function mountSupervisorPanel(document: Document, receive: (handler: (val
         normal = true; lastStatus = status;
         showEnabled(status !== 'disabled');
         button.textContent = 'Supervisor · ' + connectionStates[status];
+        setIndicator('unknown', connectionStates[status] + (status === 'connected' ? ' - Waiting for observations' : ''));
         panel.setAttribute('aria-label', 'Subtask supervisor, read-only');
         title.textContent = 'Subtask supervisor';
         const hint = status === 'disabled' ? 'GUI display is disabled; the backend plugin and tasks may still be running.' :
@@ -57,7 +73,7 @@ export function mountSupervisorPanel(document: Document, receive: (handler: (val
     connectionStatus(document.querySelector('script[data-supervisor-status]')?.getAttribute('data-supervisor-status'));
     const select = (id: string | null) => {
         if (sessionId === id) return;
-        sessionId = id; current = undefined; previous = undefined; cards.reset(); panel.scrollTop = 0;
+        sessionId = id; current = undefined; previous = undefined; setIndicator('unknown', 'Waiting for observations'); cards.reset(); panel.scrollTop = 0;
         if (normal) connectionStatus(lastStatus, true);
     };
     receive(value => {
@@ -71,7 +87,7 @@ export function mountSupervisorPanel(document: Document, receive: (handler: (val
             select(typeof message.sessionId === 'string' ? message.sessionId : null); return;
         }
         if (message.type !== 'supervisorState' || message.sessionId !== sessionId) return;
-        if (message.status !== 'observed') { cards.render(current, previous, true); return; }
+        if (message.status !== 'observed') { setIndicator('unknown', 'Observation unavailable'); cards.render(current, previous, true); return; }
         try {
             const next = parseSupervisorView(message.view);
             if (next.parentSessionId !== sessionId) return;
@@ -81,7 +97,9 @@ export function mountSupervisorPanel(document: Document, receive: (handler: (val
                 cards.render(current, previous, true, 'Instance changed; reload the isolated window'); return;
             }
             current = next;
+            const tone = normal && lastStatus !== 'connected' ? 'unknown' : supervisorTone(next);
+            setIndicator(tone, { healthy: next.tasks.length ? 'Tasks healthy' : 'No active tasks', attention: 'Needs attention', error: 'Task failed', unknown: 'Observation unavailable' }[tone]);
             cards.render(next, previous, normal && lastStatus !== 'connected');
-        } catch { cards.render(current, previous, true, 'Supervisor protocol unavailable; current state unknown'); }
+        } catch { setIndicator('unknown', 'Observation unavailable'); cards.render(current, previous, true, 'Supervisor protocol unavailable; current state unknown'); }
     });
 }

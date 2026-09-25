@@ -1,3 +1,4 @@
+import { supervisorTone } from '../supervisor/panel';
 import { mountSupervisorPanel, supervisorLines } from '../supervisor/panel';
 import { parseSupervisorView } from '../../src/supervisor/protocol';
 import { taskStatus } from '../supervisor/cards';
@@ -289,4 +290,18 @@ test('process rows retain identity during refresh, escape labels, and follow ses
     receive({ type: 'supervisorState', sessionId: 'ses_A', status: 'unavailable' });
     expect(row.children[1].attributes.get('data-tone')).toBe('muted'); expect(row.textContent).not.toContain('CPU');
     receive({ type: 'supervisorSelection', sessionId: 'ses_B' }); expect(content.textContent).not.toContain('<img src=x>');
+});
+
+
+test('supervisor icon distinguishes healthy, attention, failure and missing evidence', () => {
+    const view = snapshot();
+    expect(supervisorTone()).toBe('unknown');
+    expect(supervisorTone(view)).toBe('attention');
+    view.tasks.forEach(t => { t.health = 'running'; t.outcome = null; });
+    view.executions = []; view.notifications = [];
+    expect(supervisorTone(view)).toBe('healthy');
+    view.tasks[0].health = 'suspected_stall';
+    expect(supervisorTone(view)).toBe('attention');
+    view.tasks[0].outcome = 'failed';
+    expect(supervisorTone(view)).toBe('error');
 });

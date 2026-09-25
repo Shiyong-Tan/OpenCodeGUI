@@ -10,12 +10,15 @@ export const supervisorStyles = `
 #supervisor-enable:disabled{opacity:.5;cursor:wait}
 @media(max-width:420px){#supervisor-enable{font-size:0;gap:0;padding:3px}}
 #supervisor-dock{position:relative;height:0;flex:0 0 0;margin:0 12px;z-index:9000}
-#supervisor-dock #supervisor-toggle{position:absolute;top:auto;right:0;bottom:0}
-#supervisor-dock #supervisor-panel{position:absolute;top:auto;right:0;bottom:38px;max-height:min(480px,50vh)}
-#supervisor-toggle{position:fixed;right:12px;top:42px;z-index:9000;border:1px solid rgba(64,155,255,.35);border-radius:999px;background:rgba(38,120,220,.18);color:var(--vscode-foreground);padding:6px 12px;font:500 12px var(--vscode-font-family);cursor:pointer;backdrop-filter:blur(12px)}
-#supervisor-toggle{opacity:.4;transition:opacity 160ms ease,background-color 160ms ease}
+#supervisor-dock #supervisor-toggle{position:absolute;top:auto;right:58px;bottom:14px}
+#supervisor-dock #supervisor-panel{position:absolute;top:auto;right:0;bottom:58px;max-height:min(480px,50vh)}
+#supervisor-toggle{--sv-accent:64,155,255;position:fixed;right:76px;top:42px;z-index:9000;width:36px;height:36px;box-sizing:border-box;border:1px solid rgba(var(--sv-accent),.35);border-radius:50%;background:rgba(var(--sv-accent),.18);color:rgb(var(--sv-accent));padding:0;font-size:0;cursor:pointer;backdrop-filter:blur(12px);opacity:.4;transition:opacity 160ms ease,background-color 160ms ease}
+#supervisor-toggle::before{content:'';display:block;margin:auto;width:20px;height:20px;background:currentColor;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 3 3 7v5c0 5 9 9 9 9s9-4 9-9V7z' fill='none' stroke='black' stroke-width='1.8'/%3E%3Cpath d='m7 12 3 3 7-7' fill='none' stroke='black' stroke-width='1.8'/%3E%3C/svg%3E") center/contain no-repeat}
+#supervisor-toggle[data-tone=attention]{--sv-accent:235,170,65}
+#supervisor-toggle[data-tone=error]{--sv-accent:240,100,100}
+#supervisor-toggle[data-tone=unknown]{--sv-accent:155,165,180}
 #supervisor-toggle:hover,#supervisor-toggle:focus-visible,#supervisor-toggle[aria-expanded=true]{opacity:1}
-#supervisor-toggle:hover{background:rgba(38,120,220,.3)}
+#supervisor-toggle:hover{background:rgba(var(--sv-accent),.3)}
 @media (prefers-reduced-motion:reduce){#supervisor-toggle{transition:none}}
 @media (forced-colors:active){#supervisor-toggle{opacity:1}}
 #supervisor-toggle:focus-visible,#supervisor-panel summary:focus-visible{outline:2px solid var(--vscode-focusBorder);outline-offset:3px}
