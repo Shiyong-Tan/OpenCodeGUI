@@ -1,11 +1,14 @@
 export const supervisorStyles = `
+#supervisor-dock{position:relative;display:flex;justify-content:flex-end;flex-shrink:0;margin:4px 12px 0;z-index:9000}
+#supervisor-dock #supervisor-toggle{position:relative;top:auto;right:auto}
+#supervisor-dock #supervisor-panel{position:absolute;top:auto;right:0;bottom:calc(100% + 8px);max-height:min(480px,50vh)}
 #supervisor-toggle{position:fixed;right:12px;top:42px;z-index:9000;border:1px solid rgba(64,155,255,.35);border-radius:999px;background:rgba(38,120,220,.18);color:var(--vscode-foreground);padding:6px 12px;font:500 12px var(--vscode-font-family);cursor:pointer;backdrop-filter:blur(12px)}
 #supervisor-toggle:hover{background:rgba(38,120,220,.3)}
 #supervisor-toggle:focus-visible,#supervisor-panel summary:focus-visible{outline:2px solid var(--vscode-focusBorder);outline-offset:3px}
-#supervisor-panel{position:fixed;right:8px;top:80px;max-height:calc(100vh - 180px);width:min(380px,calc(100vw - 16px));overflow:auto;z-index:9001;box-sizing:border-box;padding:16px;border-radius:16px;border:1px solid rgba(90,155,230,.3);background:var(--vscode-editor-background);background:color-mix(in srgb,var(--vscode-editor-background) 68%,transparent);backdrop-filter:blur(12px);box-shadow:0 12px 36px #0004;color:var(--vscode-foreground);font:12px/1.5 var(--vscode-font-family);overflow-wrap:anywhere}
+#supervisor-panel{position:fixed;right:8px;top:80px;max-height:calc(100vh - 180px);width:min(380px,calc(100vw - 16px));overflow:auto;z-index:9001;box-sizing:border-box;padding:16px;border-radius:16px;border:1px solid rgba(90,155,230,.3);background:var(--vscode-editor-background);background:color-mix(in srgb,var(--vscode-editor-background) 58%,transparent);backdrop-filter:blur(12px);box-shadow:0 12px 36px #0004;color:var(--vscode-foreground);font:12px/1.5 var(--vscode-font-family);overflow-wrap:anywhere}
 #supervisor-panel h3{font-size:15px;margin:0 0 8px;font-weight:600}
 #supervisor-panel .sv-notice,#supervisor-panel .sv-activity,#supervisor-panel .sv-empty{color:var(--vscode-descriptionForeground);margin:8px 0;font-size:11px}
-#supervisor-panel .sv-card{border:1px solid color-mix(in srgb,var(--vscode-foreground) 12%,transparent);background:color-mix(in srgb,var(--vscode-editor-background) 24%,transparent);border-radius:12px;padding:12px;margin-top:10px}
+#supervisor-panel .sv-card{border:1px solid color-mix(in srgb,var(--vscode-foreground) 12%,transparent);background:color-mix(in srgb,var(--vscode-editor-background) 18%,transparent);border-radius:12px;padding:12px;margin-top:10px}
 #supervisor-panel .sv-name{margin:0 0 8px;font-size:13px;font-weight:600;line-height:1.4}
 #supervisor-panel .sv-badge{display:inline-block;border-radius:6px;padding:2px 7px;font-size:11px;font-weight:600;background:color-mix(in srgb,currentColor 10%,transparent)}
 #supervisor-panel [data-tone=info]{color:var(--vscode-textLink-foreground,#3794ff)}

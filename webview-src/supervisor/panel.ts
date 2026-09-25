@@ -14,6 +14,12 @@ export function mountSupervisorPanel(document: Document, receive: (handler: (val
     const title = document.createElement('h3'); title.textContent = 'Subtask supervisor';
     const body = document.createElement('div'); body.id = 'supervisor-content';
     panel.append(title, body); document.body.append(style, button, panel);
+    const composer = document.querySelector('.input-container');
+    if (composer?.parentNode) {
+        const dock = document.createElement('div'); dock.id = 'supervisor-dock';
+        composer.parentNode.insertBefore(dock, composer);
+        dock.append(button, panel);
+    }
     const cards = new SupervisorCards(document, body); cards.reset();
     button.addEventListener('click', () => { panel.hidden = !panel.hidden; button.setAttribute('aria-expanded', String(!panel.hidden)); });
     panel.addEventListener('keydown', event => {

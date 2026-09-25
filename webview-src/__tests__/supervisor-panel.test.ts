@@ -10,6 +10,7 @@ const snapshot = () => parseSupervisorView({ schemaVersion: 1, isolationId: 'lab
 class Element {
     id = ''; private text = ''; hidden = false; open = false; scrollTop = 0; className = ''; style = { cssText: '' };
     parent?: Element;
+    get parentNode() { return this.parent; }
     get textContent(): string { return this.text + this.children.map(c => c.textContent).join(''); }
     set textContent(value: string) { this.text = value; this.children.length = 0; }
     get lastElementChild() { return this.children[this.children.length - 1]; }
@@ -17,10 +18,22 @@ class Element {
     readonly attributes = new Map<string, string>();
     setAttribute(key: string, value: string) { this.attributes.set(key, value); }
     addEventListener() {}
-    append(...values: Element[]) { values.forEach(v => { v.parent = this; this.children.push(v); }); }
+    append(...values: Element[]) { values.forEach(v => { v.remove(); v.parent = this; this.children.push(v); }); }
+    insertBefore(node: Element, before: Element) { node.remove(); node.parent = this; this.children.splice(this.children.indexOf(before), 0, node); }
     remove() { if (this.parent) this.parent.children.splice(this.parent.children.indexOf(this), 1); }
     replaceChildren() { this.children.length = 0; }
 }
+
+test('supervisor docks directly above the composer without moving chat or input nodes', () => {
+    const body = new Element(), chat = new Element(), composer = new Element();
+    body.append(chat, composer);
+    mountSupervisorPanel({ body, createElement: () => new Element(),
+        querySelector: (selector: string) => selector === '.input-container' ? composer : null } as unknown as Document, () => {});
+    const dock = body.children.find(e => e.id === 'supervisor-dock')!;
+    expect(body.children.indexOf(dock)).toBe(body.children.indexOf(composer) - 1);
+    expect(dock.children.map(e => e.id)).toEqual(['supervisor-toggle', 'supervisor-panel']);
+    expect(body.children[0]).toBe(chat); expect(composer.parentNode).toBe(body);
+});
 
 test('panel routes by selected session, preserves unknown values and never touches chat nodes', () => {
     const body = new Element();
