@@ -9,33 +9,32 @@ export function createPermissionReview(options: {
     const { document, postMessage } = options;
     const root = document.createElement('section'); root.className = 'permission-review'; root.hidden = true;
     const heading = document.createElement('strong'), status = document.createElement('p'), body = document.createElement('div');
-    const inactive = document.createElement('details'), inactiveTitle = document.createElement('summary'), inactiveBody = document.createElement('div');
-    inactive.append(inactiveTitle, inactiveBody); inactive.hidden = true;
+    root.className = 'permission-review question-overlay';
+    const backdrop = document.createElement('div'); backdrop.className = 'question-overlay-backdrop';
+    const frame = document.createElement('div'); frame.className = 'conflict-card question-card question-overlay-card';
+    heading.className = 'conflict-card-header'; status.className = 'conflict-card-meta';
     const refresh = document.createElement('button'); refresh.type = 'button'; refresh.textContent = 'Refresh permissions';
-    root.append(heading, status, refresh, body, inactive);
+    refresh.className = 'conflict-card-btn question-card-btn';
+    frame.append(heading, status, refresh, body); root.append(backdrop, frame);
     const style = document.createElement('style');
-    style.textContent = `.permission-review{margin:8px 12px;padding:12px;border:1px solid var(--vscode-editorWarning-foreground);border-radius:10px;background:var(--vscode-editor-background);max-height:42vh;overflow:auto;font:12px/1.5 var(--vscode-font-family)}
-.permission-review[hidden]{display:none}.permission-review article{margin-top:10px;padding-top:8px;border-top:1px solid var(--vscode-panel-border)}
-.permission-review h4,.permission-review p{margin:4px 0}.permission-review pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:160px;overflow:auto}
-.permission-review button{margin:4px 8px 0 0;padding:4px 9px;border:1px solid var(--vscode-button-border,transparent);border-radius:5px;color:var(--vscode-button-foreground);background:var(--vscode-button-background);cursor:pointer}
-.permission-review button:disabled{opacity:.45;cursor:default}.permission-review button:focus-visible{outline:2px solid var(--vscode-focusBorder)}
-.permission-review [data-state=expired]{opacity:.65}.permission-review summary{cursor:pointer}`;
-    document.body.append(style);
-    const composer = document.querySelector('.input-container');
-    if (composer?.parentNode) composer.parentNode.insertBefore(root, composer); else document.body.append(root);
+    style.textContent = `.permission-review[hidden],.permission-review article[hidden]{display:none}
+.permission-review pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:160px;overflow:auto}
+.permission-review summary{cursor:pointer}.permission-review .question-card-question{overflow-wrap:anywhere}
+.permission-review button:disabled{opacity:.45;cursor:default}`;
+    document.body.append(style, root);
     const rows = new Map<string, Row>(), sending = new Set<string>(), errors = new Map<string, string>();
     let scopeSessionId = '', refreshId = '', counter = 0, waitingAt = 0, stale = true, failed = false;
     const key = (card: Pick<PermissionCard, 'sessionId' | 'requestId'>) => `${card.sessionId}:${card.requestId}`;
     const update = () => {
         const cards = [...rows.values()].map(r => r.card), pending = cards.filter(c => c.state === 'pending');
         root.hidden = pending.length === 0;
-        heading.textContent = failed ? 'Permissions unavailable' : `Permission requests · ${pending.length} waiting`;
-        const expired = cards.filter(c => c.state === 'expired').length;
-        inactive.hidden = !expired; inactiveTitle.textContent = `Inactive requests (${expired})`;
-        status.textContent = stale ? 'Observation unavailable. Refresh before responding.' :
-            pending.length ? 'Review the tool and scope. Each response applies to the named session.' : 'Residual requests are inactive and cannot be approved.';
+        heading.textContent = failed ? 'Permissions unavailable' : `Permission required${pending.length > 1 ? ` (${pending.length} waiting)` : ''}`;
+        status.textContent = stale ? 'Checking permission status before responding...' : '';
+        status.hidden = !stale; refresh.hidden = !failed;
+        const current = pending[0];
         for (const [id, row] of rows) {
             row.root.setAttribute('data-state', row.card.state);
+            row.root.hidden = row.card !== current;
             row.allow.disabled = row.reject.disabled = stale || row.card.state !== 'pending' || sending.has(id);
             row.reason.textContent = errors.get(id) || (sending.has(id) ? 'Submitting decision…' : row.card.reason);
         }
@@ -51,14 +50,14 @@ export function createPermissionReview(options: {
     };
     const decide = (row: Row, response: 'once' | 'reject') => {
         const card = row.card, id = key(card);
-        if (stale || card.state !== 'pending' || !card.reviewToken || sending.has(id)) return;
+        if (rows.get(id) !== row || row.root.hidden || stale || card.state !== 'pending' || !card.reviewToken || sending.has(id)) return;
         sending.add(id); errors.delete(id); update();
         postMessage({ type: 'permissionResult', scopeSessionId: card.scopeSessionId, sessionId: card.sessionId,
             permissionId: card.requestId, requestId: card.requestId, reviewToken: card.reviewToken, response });
     };
     const render = (cards: PermissionCard[]) => {
         const retained = new Set<string>();
-        for (const card of cards) {
+        for (const card of cards.filter(c => c.state === 'pending')) {
             const id = key(card); retained.add(id);
             let row = rows.get(id);
             if (!row) {
@@ -67,13 +66,15 @@ export function createPermissionReview(options: {
                 summary.textContent = 'Request details'; details.append(summary, detail);
                 const reason = document.createElement('p'), allow = document.createElement('button'), reject = document.createElement('button');
                 allow.type = reject.type = 'button'; allow.textContent = 'Approve once'; reject.textContent = 'Reject';
-                article.append(name, scope, details, reason, allow, reject); body.append(article);
+                name.className = 'question-card-question'; scope.className = 'question-card-question'; reason.className = 'conflict-card-meta';
+                allow.className = reject.className = 'conflict-card-btn question-card-btn';
+                const actions = document.createElement('div'); actions.className = 'question-card-actions permission-card-actions';
+                actions.append(allow, reject);
+                article.append(name, scope, details, reason, actions); body.append(article);
                 row = { root: article, name, scope, detail, reason, allow, reject, card }; rows.set(id, row);
                 const target = row; allow.addEventListener('click', () => decide(target, 'once')); reject.addEventListener('click', () => decide(target, 'reject'));
             }
             row.card = card;
-            const container = card.state === 'expired' ? inactiveBody : body;
-            if (row.root.parentNode !== container) container.append(row.root);
             row.name.textContent = `${card.agent || 'Agent'} · ${card.title || 'Untitled session'}`;
             row.scope.textContent = `${card.tool || 'Tool unknown'} · ${card.permission}: ${card.patterns.join(', ')}`;
             row.detail.textContent = `Session: ${card.sessionId}\nRequest: ${card.requestId}\nTool: ${card.tool}\nArguments: ${card.input}`;
@@ -86,7 +87,7 @@ export function createPermissionReview(options: {
     return {
         select(sessionId: string) {
             if (sessionId === scopeSessionId) { requestRefresh(); return; }
-            scopeSessionId = sessionId; waitingAt = 0; refreshId = ''; stale = true; failed = false; inactive.open = false;
+            scopeSessionId = sessionId; waitingAt = 0; refreshId = ''; stale = true; failed = false;
             render([]); sending.clear(); errors.clear(); requestRefresh();
         },
         refresh: requestRefresh,

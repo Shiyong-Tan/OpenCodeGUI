@@ -117,3 +117,12 @@ Inactive requests alone, an empty list, or a polling failure without pending
 asks do not occupy composer space. The last acknowledged decision hides the
 panel; background refresh still discovers new asks. Visibility regression:
 5 focused tests passed.
+
+## Sequential permission cards
+
+Permission review reuses the existing question-overlay, conflict-card and
+permission-card-actions styles. Only the first pending request is shown;
+acknowledgement advances the queue and fresh server validation enables the next
+response. Polling preserves insertion order and the current card. Expired and
+unknown requests are omitted from this action queue. Hidden or detached cards
+cannot submit a decision. The overlay does not consume composer layout space.
