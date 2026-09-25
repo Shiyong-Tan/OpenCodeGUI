@@ -1,7 +1,7 @@
 export const supervisorStyles = `
-#supervisor-dock{position:relative;display:flex;justify-content:flex-end;flex-shrink:0;margin:4px 12px 0;z-index:9000}
-#supervisor-dock #supervisor-toggle{position:relative;top:auto;right:auto}
-#supervisor-dock #supervisor-panel{position:absolute;top:auto;right:0;bottom:calc(100% + 8px);max-height:min(480px,50vh)}
+#supervisor-dock{position:relative;height:0;flex:0 0 0;margin:0 12px;z-index:9000}
+#supervisor-dock #supervisor-toggle{position:absolute;top:auto;right:0;bottom:0}
+#supervisor-dock #supervisor-panel{position:absolute;top:auto;right:0;bottom:38px;max-height:min(480px,50vh)}
 #supervisor-toggle{position:fixed;right:12px;top:42px;z-index:9000;border:1px solid rgba(64,155,255,.35);border-radius:999px;background:rgba(38,120,220,.18);color:var(--vscode-foreground);padding:6px 12px;font:500 12px var(--vscode-font-family);cursor:pointer;backdrop-filter:blur(12px)}
 #supervisor-toggle:hover{background:rgba(38,120,220,.3)}
 #supervisor-toggle:focus-visible,#supervisor-panel summary:focus-visible{outline:2px solid var(--vscode-focusBorder);outline-offset:3px}
