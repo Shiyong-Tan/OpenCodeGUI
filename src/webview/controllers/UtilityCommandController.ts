@@ -5,6 +5,7 @@ import type { SmartSearchMessage } from '../../search/SmartSearchService';
 import type { AutomaticEditorContext } from '../../context/EditorContextService';
 import { readImageDimensions } from '../../images/ImageDimensions';
 import { updateSupervisorSetting } from '../../supervisor/SupervisorSetting';
+import type { PermissionSnapshot } from '../../permissions/PermissionReviewService';
 
 type UtilityMessage = Record<string, any>;
 type LocalQuestionResolution = { resolved: boolean; sessionId?: string };
@@ -63,8 +64,11 @@ export interface UtilityCommandHost {
         sessionId: string;
         permissionId?: string;
         requestId?: string;
+        scopeSessionId?: string;
+        reviewToken?: string;
         response: 'always' | 'reject' | 'once';
     }): Promise<void>;
+    refreshPermissionRequests(scopeSessionId: string): Promise<PermissionSnapshot>;
     getWorkspaceRootPath(): string;
 }
 
@@ -94,6 +98,7 @@ const UTILITY_COMMANDS = new Set([
     'toolResult',
     'localQuestionResult',
     'permissionResult',
+    'permissionRefresh',
     'openFileAtLocation',
     'resolveAssistantImageReferences',
 ]);
@@ -172,6 +177,19 @@ export class UtilityCommandController {
             case 'permissionResult':
                 await this.respondPermission(data, activeWebview);
                 return true;
+            case 'permissionRefresh': {
+                const scopeSessionId = typeof data.scopeSessionId === 'string' ? data.scopeSessionId : '';
+                if (!scopeSessionId || typeof data.refreshId !== 'string') return true;
+                const live = this.host.getLiveWebview(activeWebview);
+                try {
+                    const snapshot = await this.host.refreshPermissionRequests(scopeSessionId);
+                    live.postMessage({ type: 'permissionSnapshot', ...snapshot, refreshId: data.refreshId });
+                } catch {
+                    live.postMessage({ type: 'permissionSnapshot', scopeSessionId, refreshId: data.refreshId,
+                        error: 'Permission observation unavailable. Refresh before responding.' });
+                }
+                return true;
+            }
             case 'openFileAtLocation':
                 await this.openFileAtLocation(data);
                 return true;
@@ -452,10 +470,13 @@ export class UtilityCommandController {
         }
         const liveWebview = this.host.getLiveWebview(activeWebview);
         try {
+            if (!['once', 'always', 'reject'].includes(data.response)) throw new Error('Choose an explicit permission response');
             await this.host.respondPermission({
                 sessionId,
                 permissionId: permissionId || undefined,
                 requestId: requestId || undefined,
+                ...(typeof data.scopeSessionId === 'string' ? { scopeSessionId: data.scopeSessionId } : {}),
+                ...(typeof data.reviewToken === 'string' ? { reviewToken: data.reviewToken } : {}),
                 response,
             });
             this.host.log(

@@ -175,6 +175,7 @@ function createHarness(overrides: Record<string, unknown> = {}) {
         sendToolResult: (input) => host.client.sendToolResult(input),
         resolveLocalQuestion: (callId, result) => host.resolveUtilityLocalQuestion(callId, result),
         respondPermission: (input) => host.client.respondPermission(input),
+        refreshPermissionRequests: (sessionId) => host.client.refreshPermissionRequests(sessionId),
         getWorkspaceRootPath: () => host.getWorkspaceRootPath(),
     });
     resolveSidebarWebviewView(
@@ -560,7 +561,9 @@ describe('utility command family characterization', () => {
             response: 'always',
         };
         await harness.send(input);
+        await harness.send({ ...input, response: 'once' });
         await harness.send({ ...input, response: 'invalid' });
+        expect(respondPermission).toHaveBeenCalledTimes(2);
 
         expect(respondPermission).toHaveBeenNthCalledWith(1, {
             sessionId: 'session-a',

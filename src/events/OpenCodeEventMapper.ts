@@ -140,7 +140,7 @@ export function mapServerEventToChatEvents(
             }
         }
         const isSessionStatus = type === 'session.status';
-        if (source === 'sse' && sessionId && host.turnFinishedBySession.has(sessionId) && !isSessionStatus && !appendFollowup) {
+        if (source === 'sse' && sessionId && host.turnFinishedBySession.has(sessionId) && !isSessionStatus && !type.startsWith('permission.') && !appendFollowup) {
             return events;
         }
         if (source === 'resync' && sessionId && (type === 'files' || type === 'diff' || type === 'toolPatch')) {

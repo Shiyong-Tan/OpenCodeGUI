@@ -4834,6 +4834,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             sendToolResult: (input) => this.client.sendToolResult(input),
             resolveLocalQuestion: (callId, result) => this.resolveUtilityLocalQuestion(callId, result),
             respondPermission: (input) => this.client.respondPermission(input),
+            refreshPermissionRequests: (sessionId) => this.client.refreshPermissionRequests(sessionId),
             getWorkspaceRootPath: () => this.getWorkspaceRootPath(),
         });
         this.sessionCommandHandler = createSessionCommandHandler({

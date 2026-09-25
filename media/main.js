@@ -337,7 +337,6 @@ const hydrationShadowSegmentTopology = createSegmentTopology({
 });
 const shownQuestionCallIds = new Set();
 const sentQuestionCallIds = new Set();
-let permissionOverlayEl = null;
 let isSwitchingSession = false;
 let pendingExplicitSessionSelectionId = '';
 let pendingRefreshRequestId = null;
@@ -355,6 +354,28 @@ if (typeof createSessionOverlayStore !== 'function') {
 const sessionOverlayStore = createSessionOverlayStore({
     questionIdentity: (question) => question?.callId || '',
     permissionIdentity: (permission) => permission?.permissionId || permission?.requestId || ''
+});
+
+// Permission requests retain their child owner; parent visibility is only a review scope.
+const permissionBlockerOwnersByScope = new Map();
+const permissionReview = window.__ocContinuation.createPermissionReview({
+    document,
+    postMessage: (message) => vscode.postMessage(message),
+    onPendingChanged: (cards, scopeSessionId) => {
+        const owners = new Set(cards.map(card => card.sessionId));
+        for (const owner of permissionBlockerOwnersByScope.get(scopeSessionId) || []) {
+            if (!owners.has(owner)) {
+                sessionOverlayStore.clearPermission(owner);
+                syncInteractiveProcessingPause(owner, 'permission-list-cleared');
+            }
+        }
+        for (const owner of owners) {
+            const card = cards.find(item => item.sessionId === owner);
+            sessionOverlayStore.setPermission(owner, { ...card, permissionId: card.requestId });
+            syncInteractiveProcessingPause(owner, 'permission-list-pending');
+        }
+        permissionBlockerOwnersByScope.set(scopeSessionId, owners);
+    }
 });
 
 function syncInteractiveProcessingPause(sessionId, reason, now = Date.now()) {
@@ -15225,6 +15246,7 @@ function appendMessageImages(parentEl, message) {
                     transitionActiveSessionPresentationOwner(activeSessionId, incomingSessionId || activeSessionId || '');
                     activeSessionId = incomingSessionId || activeSessionId || '';
                     activateSessionSearch(activeSessionId);
+                    permissionReview.select(activeSessionId);
                 }
                 modeSelect.value = selectedMode;
                 applyModeStyles(selectedMode);
@@ -15244,6 +15266,7 @@ function appendMessageImages(parentEl, message) {
             case 'serverStatus': {
                 const status = typeof message.status === 'string' ? message.status : 'connected';
                 setServerStatus(status, message.reason || null);
+                permissionReview.receive(message);
                 break;
             }
             case 'subagentStatus': {
@@ -17832,29 +17855,11 @@ function appendMessageImages(parentEl, message) {
                 showPermissionOverlay(message);
                 break;
             }
-            case 'permissionOverlayClose': {
-                const sessionId = typeof message.sessionId === 'string' ? message.sessionId : '';
-                if (!sessionId) break;
-                clearPermissionOverlay('external-close', sessionId);
-                break;
-            }
-            case 'permissionResultAck': {
-                const sessionId = typeof message.sessionId === 'string' ? message.sessionId : '';
-                if (!sessionId) break;
-                clearPermissionOverlay('result-ack', sessionId);
-                break;
-            }
-            case 'permissionResultFailed': {
-                const sessionId = typeof message.sessionId === 'string' ? message.sessionId : '';
-                if (!sessionId) break;
-                const permissionOverlayState = sessionOverlayStore.updatePermission(sessionId, (state) => ({
-                    ...state,
-                    pending: false,
-                    error: typeof message.reason === 'string' ? message.reason : 'Permission response failed.'
-                }));
-                if (permissionOverlayState && sessionId === activeSessionId) {
-                    renderPermissionOverlayModal();
-                }
+            case 'permissionOverlayClose':
+            case 'permissionResultAck':
+            case 'permissionResultFailed':
+            case 'permissionSnapshot': {
+                permissionReview.receive(message);
                 break;
             }
             case 'conflictCard': {
@@ -18706,97 +18711,6 @@ function renderQuestionOverlayModal() {
     questionOverlayEl = wrapper;
 }
 
-function renderPermissionOverlayModal() {
-    const permissionOverlayState = sessionOverlayStore.getPermission(activeSessionId);
-    if (!permissionOverlayState) return;
-    const state = permissionOverlayState;
-    if (state.sessionId && activeSessionId && state.sessionId !== activeSessionId) return;
-
-    if (permissionOverlayEl && permissionOverlayEl.parentElement) {
-        permissionOverlayEl.parentElement.removeChild(permissionOverlayEl);
-    }
-
-    const wrapper = document.createElement('div');
-    wrapper.className = 'question-overlay';
-
-    const backdrop = document.createElement('div');
-    backdrop.className = 'question-overlay-backdrop';
-    wrapper.appendChild(backdrop);
-
-    const card = document.createElement('div');
-    card.className = 'conflict-card question-card question-overlay-card';
-
-    const header = document.createElement('div');
-    header.className = 'conflict-card-header';
-    header.textContent = 'Permission required';
-    card.appendChild(header);
-
-    const prompt = document.createElement('div');
-    prompt.className = 'question-card-question';
-    const permissionText = typeof state.permission === 'string' && state.permission.length
-        ? state.permission
-        : 'The agent requests permission to continue.';
-    prompt.textContent = permissionText;
-    card.appendChild(prompt);
-
-    if (Array.isArray(state.patterns) && state.patterns.length) {
-        const detail = document.createElement('div');
-        detail.className = 'question-card-question';
-        detail.textContent = `Patterns: ${state.patterns.join(', ')}`;
-        card.appendChild(detail);
-    }
-
-    if (typeof state.error === 'string' && state.error.length) {
-        const errorText = document.createElement('div');
-        errorText.className = 'question-card-question';
-        errorText.style.color = '#ff6b6b';
-        errorText.textContent = state.error;
-        card.appendChild(errorText);
-    }
-
-    const actions = document.createElement('div');
-    actions.className = 'question-card-actions permission-card-actions';
-    const options = [
-        { label: 'once', value: 'once' },
-        { label: 'always', value: 'always' },
-        { label: 'reject', value: 'reject' }
-    ];
-    applyQuestionOptionWidth(actions, options);
-
-    for (const option of options) {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'conflict-card-btn question-card-btn';
-        button.textContent = option.label;
-        if (state.pending) {
-            button.disabled = true;
-        }
-        button.addEventListener('click', () => {
-            const latestState = sessionOverlayStore.getPermission(state.sessionId);
-            if (!latestState || latestState.pending) return;
-            sessionOverlayStore.updatePermission(state.sessionId, (currentState) => ({
-                ...currentState,
-                pending: true,
-                error: ''
-            }));
-            renderPermissionOverlayModal();
-            vscode.postMessage({
-                type: 'permissionResult',
-                sessionId: state.sessionId,
-                permissionId: state.permissionId,
-                requestId: state.requestId,
-                response: option.value
-            });
-        });
-        actions.appendChild(button);
-    }
-
-    card.appendChild(actions);
-    wrapper.appendChild(card);
-    document.body.appendChild(wrapper);
-    permissionOverlayEl = wrapper;
-}
-
 function clearQuestionOverlay(reason, advanceQueue = false, sessionId = activeSessionId) {
     if (questionOverlayTimer) {
         clearTimeout(questionOverlayTimer);
@@ -18818,29 +18732,14 @@ function clearQuestionOverlay(reason, advanceQueue = false, sessionId = activeSe
     }
 }
 
-function clearPermissionOverlay(reason, sessionId = activeSessionId) {
-    if (sessionId === activeSessionId && permissionOverlayEl && permissionOverlayEl.parentElement) {
-        permissionOverlayEl.parentElement.removeChild(permissionOverlayEl);
-    }
-    if (sessionId === activeSessionId) {
-        permissionOverlayEl = null;
-    }
-    sessionOverlayStore.clearPermission(sessionId);
-    syncInteractiveProcessingPause(sessionId, `permission-clear:${reason}`);
-}
-
 function activateSessionOverlays(sessionId) {
     if (questionOverlayEl && questionOverlayEl.parentElement) {
         questionOverlayEl.parentElement.removeChild(questionOverlayEl);
     }
     questionOverlayEl = null;
-    if (permissionOverlayEl && permissionOverlayEl.parentElement) {
-        permissionOverlayEl.parentElement.removeChild(permissionOverlayEl);
-    }
-    permissionOverlayEl = null;
+    permissionReview.select(sessionId || '');
     if (!sessionId) return;
     renderQuestionOverlayModal();
-    renderPermissionOverlayModal();
     syncInteractiveProcessingPause(sessionId, 'session-overlay-activation');
 }
 
@@ -18933,33 +18832,6 @@ function showQuestionOverlay(payload) {
 }
 
 function showPermissionOverlay(payload) {
-    if (!payload || typeof payload !== 'object') {
-        return;
-    }
-    const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId : '';
-    const permissionId = typeof payload.permissionId === 'string' ? payload.permissionId : '';
-    const requestId = typeof payload.requestId === 'string' ? payload.requestId : '';
-    const permission = typeof payload.permission === 'string' ? payload.permission : '';
-    const patterns = Array.isArray(payload.patterns)
-        ? payload.patterns.filter((value) => typeof value === 'string' && value.length > 0)
-        : [];
-    if (!sessionId || !(permissionId || requestId)) {
-        return;
-    }
-
-    const result = sessionOverlayStore.setPermission(sessionId, {
-        sessionId,
-        permissionId: permissionId || requestId,
-        requestId: requestId || permissionId || '',
-        permission,
-        patterns,
-        pending: false,
-        error: ''
-    });
-    if (result === 'duplicate') return;
-    syncInteractiveProcessingPause(sessionId, 'permission-active');
-    if (sessionId === activeSessionId) {
-        renderPermissionOverlayModal();
-    }
+    permissionReview.receive(payload);
 }
 

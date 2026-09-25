@@ -304,3 +304,17 @@ describe('SidebarChatEventHandler', () => {
     );
   });
 });
+
+
+test('subagent permission events bypass the generic child branch without changing session ownership', async () => {
+  const webview = { postMessage: jest.fn() };
+  const host = { smartSearchSessions: { owns: () => false }, _view: { webview },
+    currentSessionId: 'ses_parent', activeSubagentSessionIds: new Set(['ses_child']),
+    subagentProgressBySession: new Map([['ses_child', { parentSessionId: 'ses_parent' }]]) };
+  await handleSidebarChatEvent(host, { type: 'permissionRequest', sessionId: 'ses_child', permissionId: 'per_a',
+    requestId: 'per_a', permission: 'read', patterns: ['fixture.txt'] }, webview as any);
+  expect(webview.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'permissionOverlay', sessionId: 'ses_child', permissionId: 'per_a' }));
+  await handleSidebarChatEvent(host, { type: 'permissionReplied', sessionId: 'ses_child', permissionId: 'per_a', response: 'reject' }, webview as any);
+  expect(webview.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'permissionOverlayClose', sessionId: 'ses_child', permissionId: 'per_a' }));
+  expect(host.currentSessionId).toBe('ses_parent');
+});

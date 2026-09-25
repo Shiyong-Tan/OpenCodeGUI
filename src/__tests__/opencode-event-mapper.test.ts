@@ -72,3 +72,15 @@ test.each(['sse', 'resync'] as const)('trusted internal message is intercepted b
   expect(mapServerEventToChatEvents(host, 'message.part.updated', { part: { messageID: 'msg_notice', type: 'text', text: 'arbitrary notification text' } }, source)).toEqual([]);
   expect(host.logUiDebug).not.toHaveBeenCalled();
 });
+
+
+test('permission lifecycle events survive a finished chat generation without reviving it', () => {
+  const host = { normalizeEvent: () => ({ sessionId: 'ses_child', lane: 'subagent' }), logUiDebug: jest.fn(),
+    resolveBackgroundPulseTarget: () => undefined, turnFinishedBySession: new Set(['ses_child']),
+    rememberPendingPermission: jest.fn(), clearPendingPermission: jest.fn() };
+  const asked = mapServerEventToChatEvents(host, 'permission.asked', { sessionID: 'ses_child', id: 'per_a', permission: 'read', patterns: ['fixture.txt'] });
+  expect(asked).toEqual([expect.objectContaining({ type: 'permissionRequest', sessionId: 'ses_child', permissionId: 'per_a' })]);
+  const replied = mapServerEventToChatEvents(host, 'permission.replied', { sessionID: 'ses_child', requestID: 'per_a', reply: 'reject' });
+  expect(replied).toEqual([expect.objectContaining({ type: 'permissionReplied', sessionId: 'ses_child', permissionId: 'per_a' })]);
+  expect(host.turnFinishedBySession.has('ses_child')).toBe(true);
+});

@@ -44,6 +44,33 @@ export async function handleSidebarChatEvent(
         if (host.smartSearchSessions.owns(event.sessionId)) {
             return;
         }
+        if (event.type === 'permissionRequest' && event.sessionId && event.permissionId) {
+            const liveWebview = host._view?.webview || webview;
+            liveWebview.postMessage({
+                type: 'permissionOverlay',
+                sessionId: event.sessionId,
+                permissionId: event.permissionId,
+                requestId: event.requestId,
+                permission: event.permission || '',
+                patterns: Array.isArray(event.patterns) ? event.patterns : [],
+                metadata: event.metadata || null,
+                callId: event.callId || null
+            });
+            return;
+        }
+
+        if (event.type === 'permissionReplied' && event.sessionId && event.permissionId) {
+            const liveWebview = host._view?.webview || webview;
+            liveWebview.postMessage({
+                type: 'permissionOverlayClose',
+                reason: 'permission-replied',
+                sessionId: event.sessionId,
+                permissionId: event.permissionId,
+                response: event.response || 'once'
+            });
+            return;
+        }
+
         // Handle todoUpdate event for main session or parent-mapped subagent todos.
         if (event.type === 'todoUpdate' && (host.isUserOwnedSession(event.sessionId || '') || event.displayTarget === 'parent')) {
             webview.postMessage({
@@ -404,33 +431,6 @@ export async function handleSidebarChatEvent(
                 prompt: event.prompt,
                 options: event.options,
                 questions: event.questions
-            });
-            return;
-        }
-
-        if (event.type === 'permissionRequest' && event.sessionId && event.permissionId) {
-            const liveWebview = host._view?.webview || webview;
-            liveWebview.postMessage({
-                type: 'permissionOverlay',
-                sessionId: event.sessionId,
-                permissionId: event.permissionId,
-                requestId: event.requestId,
-                permission: event.permission || '',
-                patterns: Array.isArray(event.patterns) ? event.patterns : [],
-                metadata: event.metadata || null,
-                callId: event.callId || null
-            });
-            return;
-        }
-
-        if (event.type === 'permissionReplied' && event.sessionId && event.permissionId) {
-            const liveWebview = host._view?.webview || webview;
-            liveWebview.postMessage({
-                type: 'permissionOverlayClose',
-                reason: 'permission-replied',
-                sessionId: event.sessionId,
-                permissionId: event.permissionId,
-                response: event.response || 'once'
             });
             return;
         }

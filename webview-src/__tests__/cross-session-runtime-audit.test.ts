@@ -132,12 +132,11 @@ describe('cross-session runtime repository audit', () => {
     expect(showQuestion).toContain("const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId : ''");
     expect(showQuestion).not.toContain('payload.sessionId || activeSessionId');
     expect(showQuestion).not.toContain('reason=session-mismatch');
-    expect(showPermission).toContain('sessionOverlayStore.setPermission(sessionId, {');
-    expect(showPermission).toContain("const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId : ''");
+    expect(showPermission).toContain('permissionReview.receive(payload)');
     expect(showPermission).not.toContain('payload.sessionId || activeSessionId');
     expect(showPermission).not.toContain('payload.sessionId !== activeSessionId');
     expect(activateOverlays).toContain('renderQuestionOverlayModal();');
-    expect(activateOverlays).toContain('renderPermissionOverlayModal();');
+    expect(activateOverlays).toContain("permissionReview.select(sessionId || '')");
     expect(sessionIdHandler).toContain('activateSessionOverlays(sessionId);');
     expect(sessionIdHandler).not.toContain("clearQuestionOverlay('session-change')");
     expect(sessionIdHandler).not.toContain("clearPermissionOverlay('session-change')");

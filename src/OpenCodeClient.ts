@@ -1,3 +1,4 @@
+import { PermissionReviewService, type PermissionSnapshot } from './permissions/PermissionReviewService';
 import { SupervisorAssistantObserver, type SupervisorAssistantActivity } from './supervisor/SupervisorAssistantObserver';
 import type { SupervisorRound, ParentExecution } from './supervisor/SupervisorRoundStore';
 import type { NotificationIdentity } from './supervisor/notification-identity-protocol';
@@ -320,18 +321,6 @@ type QuestionListItem = {
     };
 };
 
-type PermissionListItem = {
-    id: string;
-    sessionID: string;
-    permission?: string;
-    patterns?: string[];
-    metadata?: any;
-    tool?: {
-        messageID?: string;
-        callID?: string;
-    };
-};
-
 export type ChatFilePart = string | {
     path?: string;
     url: string;
@@ -591,7 +580,22 @@ export class OpenCodeClient {
     private questionOverlaySeen = new Set<string>();
     private pendingQuestionsBySession = new Map<string, Map<string, PendingQuestionControl>>();
     private pendingQuestionCallIdsBySession = new Map<string, Set<string>>();
+    private readonly permissionReview = new PermissionReviewService(async (sessionId) => {
+        const conn = await this.getServerConn();
+        const directory = this.getPermissionDirectory(sessionId);
+        const request = async (path: string, body?: unknown) => {
+            const response = await this.serverFetch(`${path}?directory=${encodeURIComponent(directory)}`, {
+                method: body === undefined ? 'GET' : 'POST',
+                ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+            }, { conn, retry: false, retryTransport: false, skipReady: true, timeoutMs: 5000, opName: 'permission.review' });
+            if (!response.ok) throw new Error(`Permission request failed: HTTP ${response.status}`);
+            return response.json() as Promise<unknown>;
+        };
+        return { identity: `${conn.baseUrl}:${conn.authHeader}`, directory, read: path => request(path), reply: (path, body) => request(path, body) };
+    });
+
     private pendingPermissionIdsBySession = new Map<string, Set<string>>();
+    private permissionOwnersByScope = new Map<string, Set<string>>();
     private ignoredSummaryMessageIdsBySession = new Map<string, Set<string>>();
     private subagentToParentSessionMap = new Map<string, string>();
     private stablePulseRootSessionBySubagent = new Map<string, string>();
@@ -847,6 +851,7 @@ export class OpenCodeClient {
         this.pendingQuestionsBySession.clear();
         this.pendingQuestionCallIdsBySession.clear();
         this.pendingPermissionIdsBySession.clear();
+        this.permissionOwnersByScope.clear();
         this.ignoredSummaryMessageIdsBySession.clear();
         this.subagentToParentSessionMap.clear();
         this.stablePulseRootSessionBySubagent.clear();
@@ -6590,21 +6595,6 @@ export class OpenCodeClient {
         return `/question/${encodeURIComponent(requestId)}/reply?directory=${encodeURIComponent(directory)}`;
     }
 
-    private buildPermissionListPath(sessionId: string): string {
-        const directory = this.getPermissionDirectory(sessionId);
-        return `/permission?directory=${encodeURIComponent(directory)}`;
-    }
-
-    private buildPermissionReplyPath(sessionId: string, requestId: string): string {
-        const directory = this.getPermissionDirectory(sessionId);
-        return `/permission/${encodeURIComponent(requestId)}/reply?directory=${encodeURIComponent(directory)}`;
-    }
-
-    private buildSessionPermissionRespondPath(sessionId: string, permissionId: string): string {
-        const directory = this.getPermissionDirectory(sessionId);
-        return `/session/${encodeURIComponent(sessionId)}/permissions/${encodeURIComponent(permissionId)}?directory=${encodeURIComponent(directory)}`;
-    }
-
     private async listQuestions(sessionId: string): Promise<QuestionListItem[]> {
         const reqPath = this.buildQuestionListPath(sessionId);
         const response = await this.serverFetch(reqPath, { method: 'GET' }, {
@@ -6625,31 +6615,6 @@ export class OpenCodeClient {
         try {
             const parsed = rawText ? JSON.parse(rawText) : [];
             return Array.isArray(parsed) ? parsed as QuestionListItem[] : [];
-        } catch {
-            return [];
-        }
-    }
-
-    private async listPermissions(sessionId: string): Promise<PermissionListItem[]> {
-        const reqPath = this.buildPermissionListPath(sessionId);
-        const response = await this.serverFetch(reqPath, { method: 'GET' }, {
-            opName: 'permission.list',
-            timeoutMs: 5000,
-            retry: false
-        });
-        const contentType = response.headers.get('content-type') || '';
-        const rawText = await response.text();
-        const bodyPreview = this.toBodyPreview(rawText, 300);
-        this.logUiDebug(`EXT: permission.list | status=${response.status} | contentType=${contentType || 'unknown'} | bodyPreview=${bodyPreview || 'empty'}`);
-        if (response.status >= 400) {
-            return [];
-        }
-        if (!contentType.toLowerCase().includes('application/json')) {
-            return [];
-        }
-        try {
-            const parsed = rawText ? JSON.parse(rawText) : [];
-            return Array.isArray(parsed) ? parsed as PermissionListItem[] : [];
         } catch {
             return [];
         }
@@ -6768,59 +6733,31 @@ export class OpenCodeClient {
         this.clearPendingQuestion(sessionId, payload.callId);
     }
 
+    public async refreshPermissionRequests(scopeSessionId: string): Promise<PermissionSnapshot> {
+        const workspace = this.workspaceRoot;
+        const snapshot = await this.permissionReview.snapshot(scopeSessionId);
+        if (workspace !== this.workspaceRoot) throw new Error('Permission workspace changed during observation');
+        const owners = new Set(snapshot.requests.map(r => r.sessionId));
+        const sessions = new Set([scopeSessionId, ...owners, ...(this.permissionOwnersByScope.get(scopeSessionId) ?? [])]);
+        for (const session of sessions) {
+            const pending = new Set(snapshot.requests.filter(r => r.sessionId === session && r.state === 'pending').map(r => r.requestId));
+            for (const id of this.pendingPermissionIdsBySession.get(session) ?? []) if (!pending.has(id)) this.clearPendingPermission(session, id);
+            for (const id of pending) this.rememberPendingPermission(session, id);
+        }
+        this.permissionOwnersByScope.set(scopeSessionId, owners);
+        return snapshot;
+    }
+
     public async respondPermission(payload: {
-        sessionId: string;
-        permissionId?: string;
-        requestId?: string;
-        response: PermissionReply;
+        sessionId: string; permissionId?: string; requestId?: string;
+        scopeSessionId?: string; reviewToken?: string; response: PermissionReply;
     }): Promise<void> {
-        await this.ensureServer();
-        const sessionId = payload.sessionId.trim();
-        if (!sessionId) {
-            throw new Error('Missing session ID for permission response.');
-        }
-        const responseValue: PermissionReply = payload.response === 'always' || payload.response === 'reject'
-            ? payload.response
-            : 'once';
-        const permissionId = typeof payload.permissionId === 'string' && payload.permissionId.length
-            ? payload.permissionId
-            : (typeof payload.requestId === 'string' ? payload.requestId : '');
-
-        if (permissionId) {
-            const reqPath = this.buildSessionPermissionRespondPath(sessionId, permissionId);
-            try {
-                const result = await this.requestJson<any>('POST', reqPath, { response: responseValue });
-                if (result === false) {
-                    throw new Error('Permission respond returned false');
-                }
-                this.clearPendingPermission(sessionId, permissionId);
-                return;
-            } catch (error) {
-                this.logUiDebug(`EXT: permission.respond.fail | sessionId=${sessionId} | permissionId=${permissionId} | err=${String(error)}`);
-            }
-        }
-
-        let resolvedRequestId = typeof payload.requestId === 'string' && payload.requestId.length
-            ? payload.requestId
-            : '';
-        if (!resolvedRequestId && permissionId) {
-            resolvedRequestId = permissionId;
-        }
-        if (!resolvedRequestId) {
-            const pending = await this.listPermissions(sessionId);
-            const matched = pending.find((item) => item?.sessionID === sessionId);
-            resolvedRequestId = matched?.id || '';
-        }
-        if (!resolvedRequestId) {
-            throw new Error('No permission request ID available');
-        }
-
-        const reqPath = this.buildPermissionReplyPath(sessionId, resolvedRequestId);
-        const result = await this.requestJson<any>('POST', reqPath, { reply: responseValue });
-        if (result === false) {
-            throw new Error('Permission reply returned false');
-        }
-        this.clearPendingPermission(sessionId, resolvedRequestId);
+        const requestId = payload.requestId || payload.permissionId || '';
+        if (!requestId || (payload.requestId && payload.permissionId && payload.requestId !== payload.permissionId))
+            throw new Error('Exact original permission request ID required');
+        await this.permissionReview.respond({ scopeSessionId: payload.scopeSessionId || payload.sessionId,
+            sessionId: payload.sessionId, requestId, reviewToken: payload.reviewToken || '', response: payload.response });
+        this.clearPendingPermission(payload.sessionId, requestId);
     }
 
     public async getTuiControlResponseSchemaSummary(): Promise<string> {

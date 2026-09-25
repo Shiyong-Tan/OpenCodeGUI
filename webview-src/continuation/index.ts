@@ -14,6 +14,7 @@ import { createSessionConflictStore } from '../session-runtime/session-conflict-
 import { createSessionTransientStatusStore } from '../session-runtime/session-transient-status-store';
 import { createSessionSearchRegistry } from '../session-runtime/session-search-registry';
 import { createSessionComposerStore } from '../session-runtime/session-composer-store';
+import { createPermissionReview } from '../permissions/permission-review';
 
 export const CONTINUATION_FACADE_VERSION = 1 as const;
 
@@ -36,6 +37,7 @@ const facade = Object.freeze({
   createSessionTransientStatusStore,
   createSessionSearchRegistry,
   createSessionComposerStore,
+  createPermissionReview,
 });
 
 declare global {
