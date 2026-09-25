@@ -3,7 +3,11 @@ export const supervisorStyles = `
 #supervisor-dock #supervisor-toggle{position:absolute;top:auto;right:0;bottom:0}
 #supervisor-dock #supervisor-panel{position:absolute;top:auto;right:0;bottom:38px;max-height:min(480px,50vh)}
 #supervisor-toggle{position:fixed;right:12px;top:42px;z-index:9000;border:1px solid rgba(64,155,255,.35);border-radius:999px;background:rgba(38,120,220,.18);color:var(--vscode-foreground);padding:6px 12px;font:500 12px var(--vscode-font-family);cursor:pointer;backdrop-filter:blur(12px)}
+#supervisor-toggle{opacity:.4;transition:opacity 160ms ease,background-color 160ms ease}
+#supervisor-toggle:hover,#supervisor-toggle:focus-visible,#supervisor-toggle[aria-expanded=true]{opacity:1}
 #supervisor-toggle:hover{background:rgba(38,120,220,.3)}
+@media (prefers-reduced-motion:reduce){#supervisor-toggle{transition:none}}
+@media (forced-colors:active){#supervisor-toggle{opacity:1}}
 #supervisor-toggle:focus-visible,#supervisor-panel summary:focus-visible{outline:2px solid var(--vscode-focusBorder);outline-offset:3px}
 #supervisor-panel{position:fixed;right:8px;top:80px;max-height:calc(100vh - 180px);width:min(380px,calc(100vw - 16px));overflow:auto;z-index:9001;box-sizing:border-box;padding:16px;border-radius:16px;border:1px solid rgba(90,155,230,.3);background:var(--vscode-editor-background);background:color-mix(in srgb,var(--vscode-editor-background) 58%,transparent);backdrop-filter:blur(12px);box-shadow:0 12px 36px #0004;color:var(--vscode-foreground);font:12px/1.5 var(--vscode-font-family);overflow-wrap:anywhere}
 #supervisor-panel h3{font-size:15px;margin:0 0 8px;font-weight:600}
