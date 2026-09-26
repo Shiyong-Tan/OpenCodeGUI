@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Follow-up updates - 2026-09-26
 
+- Accept case-preserving POSIX workspace bindings for Supervisor and enable the Linux/macOS setup path through ordinary service start/reuse. Existing services require a manual stop before a fresh GUI launch; native restart and process tracking remain Windows-only. Requires the matching updated companion plugin; the published v0.1.0 asset is unchanged. Platform branches are fixture-tested on Windows, pending Linux/macOS end-to-end validation.
+
 - Indent tracked processes beneath their owning task with a subtle vertical guide to clarify the task/process hierarchy.
 
 - Show child-session permission requests in the parent session using the existing permission cards, one pending request at a time. Hide the panel when there are no actionable requests; retain original request/session routing and revalidate before responding.

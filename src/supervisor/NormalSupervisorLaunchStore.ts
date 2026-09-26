@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'crypto';
 import { mkdir, realpath } from 'fs/promises';
 import { join, resolve } from 'path';
-import { canonicalWindowsWorkspace, serviceAuthenticationProof } from './normal-connection-protocol';
+import { canonicalWorkspace, serviceAuthenticationProof } from './normal-connection-protocol';
 import { parseNormalLaunch, type NormalLaunch } from './normal-launch-protocol';
 import type { ServerConnection, ServerLock } from '../transport/OpenCodeHttpClient';
 
@@ -17,7 +17,7 @@ export class NormalSupervisorLaunchStore {
     constructor(private readonly directory: string, private readonly secrets: PrivateSecrets) {}
 
     private async address(workspace: string) {
-        const canonical = canonicalWindowsWorkspace(await realpath(workspace));
+        const canonical = canonicalWorkspace(await realpath(workspace));
         const hash = createHash('sha256').update(canonical).digest('hex');
         return { canonical, hash, key: `supervisor.normal.launch.v1.${hash}` };
     }
@@ -48,7 +48,7 @@ export class NormalSupervisorLaunchStore {
         }
         await mkdir(this.directory, { recursive: true });
         const actualDirectory = await realpath(this.directory);
-        if (canonicalWindowsWorkspace(actualDirectory) !== canonicalWindowsWorkspace(resolve(this.directory))) throw new Error('Supervisor storage redirects');
+        if (canonicalWorkspace(actualDirectory) !== canonicalWorkspace(resolve(this.directory))) throw new Error('Supervisor storage redirects');
         const privateDirectory = join(actualDirectory, address.hash);
         await mkdir(privateDirectory, { recursive: true });
         if (await realpath(privateDirectory) !== privateDirectory) throw new Error('Supervisor workspace storage redirects');

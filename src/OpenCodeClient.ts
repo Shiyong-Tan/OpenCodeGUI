@@ -1,3 +1,4 @@
+import { activateSupervisorService } from './supervisor/activate-service';
 import { fillSupervisorTitles } from './supervisor/SupervisorTitles';
 import { configureSupervisor, checkSupervisorRelease } from './supervisor/SupervisorSetup';
 import { PermissionReviewService, type PermissionSnapshot } from './permissions/PermissionReviewService';
@@ -5097,7 +5098,6 @@ export class OpenCodeClient {
         };
         const operation = (async () => {
             if (!vscode.workspace.isTrusted) throw new Error('Trust this workspace before installing Supervisor.');
-            if (process.platform !== 'win32') throw new Error('Automatic Supervisor service setup currently requires Windows.');
             const changed = await configureSupervisor(workspace, checkSupervisorRelease);
             checkWorkspace();
             if (!changed && this.getSupervisorStatus() === 'connected') return;
@@ -5105,17 +5105,18 @@ export class OpenCodeClient {
             const confirm = async () => await vscode.window.showWarningMessage(
                 'Enabling Supervisor requires restarting OpenCode. Active tasks and managed processes will be interrupted; tasks are not automatically resumed.',
                 { modal: true }, 'Restart OpenCode') === 'Restart OpenCode';
-            const started = await this.operateService('start', confirm);
-            checkWorkspace();
-            if (started === 'already_running') await this.operateService('restart', confirm);
-            checkWorkspace();
+            await activateSupervisorService(process.platform, {
+                ensure: () => this.ensureServer(), operate: action => this.operateService(action, confirm), checkWorkspace,
+            });
             for (let attempt = 0; attempt < 12; attempt++) {
                 await this.readSupervisorState('ses_supervisor_setup');
                 checkWorkspace();
                 if (this.getSupervisorStatus() === 'connected') return;
                 await new Promise(resolve => setTimeout(resolve, 500));
             }
-            throw new Error('Supervisor configuration is saved, but the plugin did not connect. Check OpenCode plugin loading logs; no automatic restart will be repeated.');
+            throw new Error(process.platform === 'win32'
+                ? 'Supervisor configuration is saved, but the plugin did not connect. Check OpenCode plugin loading logs; no automatic restart will be repeated.'
+                : 'Supervisor configuration is saved. If OpenCode was already running, stop it manually when your tasks are finished, then let the GUI start it and enable Supervisor again. Automatic service restart and native process tracking are unavailable on this platform. Check plugin loading logs if a fresh GUI launch still does not connect.');
         })();
         this.supervisorSetup = operation;
         void operation.finally(() => { if (this.supervisorSetup === operation) this.supervisorSetup = undefined; }).catch(() => undefined);

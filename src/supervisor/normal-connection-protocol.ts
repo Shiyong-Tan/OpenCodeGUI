@@ -57,8 +57,18 @@ export function canonicalWindowsWorkspace(realPath: string): string {
   return normalized;
 }
 
+
+/** Preserve POSIX case and literal backslashes; never collapse distinct workspaces. */
+export function canonicalWorkspace(realPath: string): string {
+  if (/^[a-zA-Z]:[\\/]/.test(realPath)) return canonicalWindowsWorkspace(realPath);
+  if (!realPath.startsWith('/') || realPath.startsWith('//') || /[\x00-\x1f]/.test(realPath)) return fail();
+  const normalized = realPath === '/' ? '/' : realPath.replace(/\/+$/, '');
+  if (normalized !== '/' && normalized.slice(1).split('/').some(part => !part || part === '.' || part === '..')) return fail();
+  return normalized;
+}
+
 function binding(value: ServiceBinding): ServiceBinding {
-  if (canonicalWindowsWorkspace(value.workspace) !== value.workspace) return fail();
+  if (canonicalWorkspace(value.workspace) !== value.workspace) return fail();
   return { integrationId: id(value.integrationId), serviceId: id(value.serviceId),
     workspace: value.workspace, serviceOrigin: origin(value.serviceOrigin) };
 }

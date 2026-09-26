@@ -1,6 +1,6 @@
 import { isAbsolute } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
-import { canonicalWindowsWorkspace, serviceAuthenticationProof, type ServiceBinding } from './normal-connection-protocol';
+import { canonicalWorkspace, serviceAuthenticationProof, type ServiceBinding } from './normal-connection-protocol';
 
 /** Privileged bootstrap passed only by the existing GUI service spawn owner. */
 export interface NormalLaunch {
@@ -33,7 +33,7 @@ export function parseNormalLaunch(serialized: string, realWorkspace: string, ser
     || typeof raw.privateDirectory !== 'string' || raw.privateDirectory.length > 4096 || !isAbsolute(raw.privateDirectory)
     || [raw.launchKey, raw.identityKey, raw.authenticationProof, owner.integrationId, owner.serviceId]
       .some(value => typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value))
-    || owner.workspace !== canonicalWindowsWorkspace(realWorkspace) || owner.serviceOrigin !== serviceOrigin) return invalid();
+    || owner.workspace !== canonicalWorkspace(realWorkspace) || owner.serviceOrigin !== serviceOrigin) return invalid();
   const binding = owner as unknown as ServiceBinding;
   const launchKey = raw.launchKey as string;
   let proof: string;
