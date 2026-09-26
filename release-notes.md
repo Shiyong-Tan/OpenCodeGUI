@@ -1,11 +1,13 @@
 ## Release Notes
 
-### 5.0.7 (updated 2026-09-26)
+### 5.0.8 - 2026-09-26
 
 - Review child permissions and questions from the parent session using the existing cards, one request at a time. Question answers support single/multiple choice and custom text, preserve drafts during polling, and return to the original child request.
 - Recover pending requests after reconnect and prevent responses to expired or cancelled tool requests. The companion Supervisor update displays question waits as `Waiting for answer`.
 - Improve Supervisor floating controls, status colors and task titles, and add plugin installation/activation from the workspace switch with active-task restart confirmation.
-- Keep the GUI version at 5.0.7. Install the updated local VSIX; these follow-up changes have not been published to the existing GitHub release. The companion plugin's new question status takes effect on the next normal service start.
+- Install `opencode-gui-5.0.8.vsix` with the matching updated companion plugin. Local builds have not been published to GitHub; the pinned public plugin asset does not yet contain the new question status or platform fixes. Plugin changes take effect on the next normal service start.
+- Indent tracked processes beneath their task with a subtle vertical guide.
+- Accept case-preserving Linux/macOS workspace bindings and use ordinary service start/reuse. Automatic restart and native process tracking remain Windows-only; Linux/macOS end-to-end validation is pending.
 - See [Changelog](CHANGELOG.md) and [child question behavior](docs/CHILD-QUESTIONS.md) for details. Local agent permission customizations are separate from the GUI package.
 
 ### 5.0.6

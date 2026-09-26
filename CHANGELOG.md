@@ -2,9 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## 5.0.7 - 2026-09-24
-
-### Follow-up updates - 2026-09-26
+## 5.0.8 - 2026-09-26
 
 - Accept case-preserving POSIX workspace bindings for Supervisor and enable the Linux/macOS setup path through ordinary service start/reuse. Existing services require a manual stop before a fresh GUI launch; native restart and process tracking remain Windows-only. Requires the matching updated companion plugin; the published v0.1.0 asset is unchanged. Platform branches are fixture-tested on Windows, pending Linux/macOS end-to-end validation.
 
@@ -15,9 +13,9 @@ All notable changes to this project will be documented in this file.
 - Display Supervisor question waits as `Waiting for answer` with the companion plugin update. Question events do not reactivate a finalized assistant turn. See [question ownership and validation](docs/CHILD-QUESTIONS.md).
 - Refine Supervisor presentation with compact, vertically stacked floating controls, translucent styling, status colors, current-task filtering and verified child-session title fallback.
 - Add workspace-switch installation and activation of the companion Supervisor plugin through the existing service lifecycle controls, retaining active-task restart confirmation.
-- Validate the question update with 208 GUI suites / 1616 tests, build and bundle checks, and an isolated OpenCode 1.18.31 protocol probe using a local fixture with no paid model calls.
+- Validation: 209 GUI suites / 1620 tests, build and bundle checks pass. Child-question routing also passed an isolated OpenCode 1.18.31 protocol probe using a local fixture with no paid model calls.
 
-### Initial compatibility update
+## 5.0.7 - 2026-09-24
 
 - Support audited OpenCode 1.18.31 alongside 1.18.29 across Supervisor health, signed connection leases and snapshots. Preserve the actual version and reject mismatched or unaudited releases.
 - Explain how to diagnose Supervisor version failures and that both GUI and the separately installed Supervisor must be updated. Existing services are never restarted automatically.
