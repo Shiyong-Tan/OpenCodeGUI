@@ -9,7 +9,7 @@ import type { ServerConnection } from '../../transport/OpenCodeHttpClient';
 describe('normal supervisor service/bridge authentication', () => {
     let root = '';
     afterEach(async () => { if (root) await rm(root, { recursive: true, force: true }); });
-    async function setup(version: string = '1.18.29') {
+    async function setup(version: string = '1.18.29', pluginVersion: '0.1.0' | '0.1.1' = '0.1.0') {
         root = await realpath(await mkdtemp(join(tmpdir(), 'gui-supervisor-connect-')));
         const binding = { integrationId: '11'.repeat(32), serviceId: '22'.repeat(32), workspace: 'd:/trial', serviceOrigin: 'http://127.0.0.1:42001' };
         const authHeader = `Basic ${Buffer.from('opencode:test-only-password').toString('base64')}`;
@@ -17,7 +17,7 @@ describe('normal supervisor service/bridge authentication', () => {
         const launch: NormalLaunch = { schemaVersion: 1, kind: 'normal-gui-launch', binding, launchKey,
             identityKey: '44'.repeat(32), privateDirectory: root, authenticationProof: serviceAuthenticationProof(launchKey, binding, authHeader) };
         const lease: ConnectionLease = { schemaVersion: 1, kind: 'normal-gui', ...binding, instanceId: '55'.repeat(32),
-            bridgeOrigin: 'http://127.0.0.1:54321', pluginVersion: '0.1.0', opencodeVersion: version, issuedAt: 1000, expiresAt: 61000 };
+            bridgeOrigin: 'http://127.0.0.1:54321', pluginVersion, opencodeVersion: version, issuedAt: 1000, expiresAt: 61000 };
         const service: ServerConnection = { host: '127.0.0.1', port: 42001, baseUrl: binding.serviceOrigin, authHeader,
             lock: { workspaceRoot: 'd:/trial', port: 42001, password: 'test-only-password', updatedAt: '' } };
         const signed = signConnectionLease(lease, launchKey);
@@ -93,5 +93,10 @@ describe('normal supervisor service/bridge authentication', () => {
         });
         await expect(connectNormalSupervisor(launch, service, new AbortController().signal, fetcher as typeof fetch, () => 1000))
             .rejects.toThrow('disconnected');
+    });
+    test('preserves the authenticated 0.1.1 plugin version', async () => {
+        const { launch, service, fetcher } = await setup('1.18.31', '0.1.1');
+        const connection = await connectNormalSupervisor(launch, service, new AbortController().signal, fetcher as typeof fetch, () => 1000);
+        expect(connection.pluginVersion).toBe('0.1.1');
     });
 });

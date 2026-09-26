@@ -1,5 +1,11 @@
 ## Release Notes
 
+### 5.0.9 - 2026-09-26
+
+- Install Supervisor 0.1.1 and migrate the exact official 0.1.0 URL when enabling the workspace switch. Preserve custom sources, newer URLs and existing permission options.
+- Accept authenticated plugin versions 0.1.0 and 0.1.1, preserving the actual version in connection and view checks.
+- Includes the companion plugin's POSIX binding and child-question fixes. Native process tracking and automatic service restart remain Windows-only; Linux/macOS end-to-end validation is pending.
+
 ### 5.0.8 - 2026-09-26
 
 - Review child permissions and questions from the parent session using the existing cards, one request at a time. Question answers support single/multiple choice and custom text, preserve drafts during polling, and return to the original child request.

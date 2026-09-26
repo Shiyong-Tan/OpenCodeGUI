@@ -73,5 +73,5 @@ export async function connectNormalSupervisor(launch: NormalLaunch, service: Ser
     // Compatibility projection, not an isolated descriptor or replacement HTTP connection.
     return { isolationId: launch.binding.integrationId, instanceId: live.instanceId,
         workspace: launch.binding.workspace, serviceEndpoint: service.baseUrl, serviceAuthorization: service.authHeader,
-        bridgeEndpoint: live.bridgeOrigin, bridgeToken: token, openCodeVersion: live.opencodeVersion, pluginVersion: '0.1.0' };
+        bridgeEndpoint: live.bridgeOrigin, bridgeToken: token, openCodeVersion: live.opencodeVersion, pluginVersion: live.pluginVersion };
 }

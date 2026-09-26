@@ -2,7 +2,8 @@ import { promises as fs } from 'fs';
 import { join } from 'path';
 import { applyEdits, modify, parse, type ParseError } from 'jsonc-parser';
 
-export const supervisorRelease = 'https://github.com/Shiyong-Tan/opencode-task-supervisor/releases/download/v0.1.0/opencode-task-supervisor-0.1.0.tgz';
+export const supervisorRelease = 'https://github.com/Shiyong-Tan/opencode-task-supervisor/releases/download/v0.1.1/opencode-task-supervisor-0.1.1.tgz';
+const previousSupervisorRelease = 'https://github.com/Shiyong-Tan/opencode-task-supervisor/releases/download/v0.1.0/opencode-task-supervisor-0.1.0.tgz';
 const isSupervisor = (value: unknown): boolean => typeof value === 'string' && /(?:opencode-task-supervisor|OpenCodeTaskSupervisor)(?:[\/\\@#.-]|$)/i.test(value);
 
 /** Edit only the plugin declaration; permission rules and unrelated text stay intact. */
@@ -19,7 +20,8 @@ export function mergeSupervisorConfig(source: string): string {
     const options = Array.isArray(prior) ? prior[1] : {};
     if (!options || typeof options !== 'object' || Array.isArray(options)) throw new Error('Invalid Supervisor plugin options.');
     if (options.readonlyLab || options.managedLab) throw new Error('Laboratory Supervisor configuration cannot be enabled as normal GUI mode.');
-    const entry = [Array.isArray(prior) ? prior[0] : prior ?? supervisorRelease,
+    const sourceUrl = Array.isArray(prior) ? prior[0] : prior;
+    const entry = [sourceUrl === previousSupervisorRelease ? supervisorRelease : sourceUrl ?? supervisorRelease,
         { ...options, allowDispatch: options.allowDispatch ?? true, allowNotifications: options.allowNotifications ?? false, normalGui: { enabled: true } }];
     if (JSON.stringify(prior) === JSON.stringify(entry)) return source;
     const target = config.plugin === undefined ? ['plugin'] : ['plugin', index];

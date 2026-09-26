@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 5.0.9 - 2026-09-26
+
+- Install Supervisor 0.1.1 and migrate the exact official 0.1.0 URL when enabling the workspace switch. Preserve custom sources, newer URLs and existing permission options.
+- Accept authenticated plugin versions 0.1.0 and 0.1.1, preserving the actual version in connection and view checks.
+- Includes the companion plugin's POSIX binding and child-question fixes. Native process tracking and automatic service restart remain Windows-only; Linux/macOS end-to-end validation is pending.
+
 ## 5.0.8 - 2026-09-26
 
 - Accept case-preserving POSIX workspace bindings for Supervisor and enable the Linux/macOS setup path through ordinary service start/reuse. Existing services require a manual stop before a fresh GUI launch; native restart and process tracking remain Windows-only. Requires the matching updated companion plugin; the published v0.1.0 asset is unchanged. Platform branches are fixture-tested on Windows, pending Linux/macOS end-to-end validation.
