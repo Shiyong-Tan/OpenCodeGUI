@@ -1,3 +1,4 @@
+import { SupervisorActivationPending } from './ActivationPending';
 import * as vscode from 'vscode';
 
 /** VS Code workspace configuration remains the sole owner of the enabled flag. */
@@ -15,8 +16,10 @@ export async function updateSupervisorSetting(value: unknown, webview: vscode.We
             try { await activate(); }
             catch (cause) {
                 error = cause instanceof Error ? cause.message : 'Supervisor setup failed.';
-                try { await vscode.workspace.getConfiguration('opencode').update('supervisor.enabled', previous, vscode.ConfigurationTarget.Workspace); }
-                catch { error += ' Could not restore the previous display setting.'; }
+                if (!(cause instanceof SupervisorActivationPending)) {
+                    try { await vscode.workspace.getConfiguration('opencode').update('supervisor.enabled', previous, vscode.ConfigurationTarget.Workspace); }
+                    catch { error += ' Could not restore the previous display setting.'; }
+                }
             }
         }
     }

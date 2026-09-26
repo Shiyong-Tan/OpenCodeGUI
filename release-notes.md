@@ -1,5 +1,11 @@
 ## Release Notes
 
+### 5.0.10 - 2026-09-26
+
+- Preserve Supervisor enablement when configuration is saved but activation is still pending, so a subsequent GUI-owned service launch can receive its binding.
+- Show bounded connection-stage diagnostics instead of always suggesting a restart. Installation failures still restore the previous switch state.
+- Mac end-to-end verification remains pending. Use the diagnostic stage if connection still fails; restarting the computer is not a diagnostic requirement.
+
 ### 5.0.9 - 2026-09-26
 
 - Install Supervisor 0.1.1 and migrate the exact official 0.1.0 URL when enabling the workspace switch. Preserve custom sources, newer URLs and existing permission options.

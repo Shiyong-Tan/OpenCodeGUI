@@ -1,3 +1,4 @@
+import { SupervisorActivationPending } from '../ActivationPending';
 jest.mock('vscode', () => ({
     workspace: { workspaceFolders: [{}], workspaceFile: undefined, getConfiguration: jest.fn() },
     ConfigurationTarget: { Workspace: 2, Global: 1 }, window: { showErrorMessage: jest.fn() },
@@ -49,4 +50,14 @@ test('activation failure restores display state and disabling never installs or 
     activate.mockClear();
     await updateSupervisorSetting(false, webview, activate);
     expect(activate).not.toHaveBeenCalled();
+});
+
+
+test('saved activation pending survives reload intent and can still be disabled', async () => {
+    await updateSupervisorSetting(true, webview, async () => { throw new SupervisorActivationPending('launch_binding_missing'); });
+    expect(enabled).toBe(true);
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(postMessage).toHaveBeenLastCalledWith({ type: 'supervisorToggleResult', enabled: true, error: 'launch_binding_missing' });
+    await updateSupervisorSetting(false, webview);
+    expect(enabled).toBe(false);
 });

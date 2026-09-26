@@ -31,6 +31,8 @@ export class NormalSupervisorIntegration {
         private readonly fetcher: typeof fetch = fetch,
         private readonly now: () => number = Date.now) {}
 
+    private failureStage = 'not_started';
+    diagnostic(): string { return this.failureStage; }
     status(): NormalSupervisorStatus { return this.state; }
 
     setEnabled(enabled: boolean): void {
@@ -71,10 +73,14 @@ export class NormalSupervisorIntegration {
         this.controller = controller;
         let timer: ReturnType<typeof setTimeout> | undefined;
         const work = (async () => {
+            this.failureStage = 'service_connection';
             const service = await this.getConnection();
+            this.failureStage = 'launch_binding';
             const launch = await this.load(service);
-            if (!launch) throw new NormalConnectionError('unavailable');
-            const connection = await connectNormalSupervisor(launch, service, controller.signal, this.fetcher, this.now);
+            if (!launch) { this.failureStage = 'launch_binding_missing'; throw new NormalConnectionError('unavailable'); }
+            const connection = await connectNormalSupervisor(launch, service, controller.signal, this.fetcher, this.now, stage => {
+                if (generation === this.generation && !this.disposed) this.failureStage = stage;
+            });
             if (controller.signal.aborted || this.disposed || generation !== this.generation || !this.enabled) return undefined;
             const key = `${launch.binding.serviceId}:${connection.instanceId}`;
             if (this.connectionKey !== key) {
@@ -83,7 +89,7 @@ export class NormalSupervisorIntegration {
                     value => parseNormalView(value, launch.binding.integrationId, launch.binding.serviceId));
                 this.connectionKey = key;
             }
-            this.state = 'connected';
+            this.state = 'connected'; this.failureStage = 'connected';
             return this.reader;
         })();
         const pending = Promise.race([work, new Promise<undefined>(resolve => {

@@ -1,3 +1,4 @@
+import { SupervisorActivationPending } from './supervisor/ActivationPending';
 import { activateSupervisorService } from './supervisor/activate-service';
 import { fillSupervisorTitles } from './supervisor/SupervisorTitles';
 import { configureSupervisor, checkSupervisorRelease } from './supervisor/SupervisorSetup';
@@ -5114,9 +5115,14 @@ export class OpenCodeClient {
                 if (this.getSupervisorStatus() === 'connected') return;
                 await new Promise(resolve => setTimeout(resolve, 500));
             }
-            throw new Error(process.platform === 'win32'
-                ? 'Supervisor configuration is saved, but the plugin did not connect. Check OpenCode plugin loading logs; no automatic restart will be repeated.'
-                : 'Supervisor configuration is saved. If OpenCode was already running, stop it manually when your tasks are finished, then let the GUI start it and enable Supervisor again. Automatic service restart and native process tracking are unavailable on this platform. Check plugin loading logs if a fresh GUI launch still does not connect.');
+            const stage = this.normalSupervisor?.diagnostic() ?? 'integration_unavailable';
+            this.logUiDebug(`EXT: supervisor.activation.pending | stage=${stage} | platform=${process.platform}`);
+            throw new SupervisorActivationPending(`Supervisor is enabled and configuration is saved; connection is pending at ${stage}. ` +
+                (stage === 'launch_binding_missing'
+                    ? 'The selected service has no matching GUI launch binding. After your tasks finish, stop that service and reload the VS Code window so the GUI can start it with Supervisor enabled.'
+                    : stage === 'plugin_discovery_file'
+                        ? 'The plugin has not published its connection file. Check OpenCode plugin installation/startup logs.'
+                        : 'Check the OpenCode UI Debug output and plugin startup logs. The enabled setting is retained for the next launch.'));
         })();
         this.supervisorSetup = operation;
         void operation.finally(() => { if (this.supervisorSetup === operation) this.supervisorSetup = undefined; }).catch(() => undefined);

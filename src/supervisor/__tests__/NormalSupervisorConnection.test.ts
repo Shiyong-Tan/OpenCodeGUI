@@ -99,4 +99,12 @@ describe('normal supervisor service/bridge authentication', () => {
         const connection = await connectNormalSupervisor(launch, service, new AbortController().signal, fetcher as typeof fetch, () => 1000);
         expect(connection.pluginVersion).toBe('0.1.1');
     });
+    test('reports bounded failure stage without exposing credentials', async () => {
+        const { launch, service } = await setup('1.18.31', '0.1.1');
+        const report = jest.fn();
+        const fetcher = jest.fn(async () => { throw new Error('private transport details'); });
+        await expect(connectNormalSupervisor(launch, service, new AbortController().signal, fetcher as typeof fetch, () => 1000, report)).rejects.toThrow();
+        expect(report).toHaveBeenLastCalledWith('opencode_health');
+        expect(JSON.stringify(report.mock.calls)).not.toContain(launch.launchKey);
+    });
 });

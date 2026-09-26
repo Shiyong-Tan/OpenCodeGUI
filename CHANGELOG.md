@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 5.0.10 - 2026-09-26
+
+- Keep the workspace Supervisor switch enabled after configuration is saved but its connection remains pending, allowing the next GUI-owned launch to receive the binding. Installation failures still restore the prior setting.
+- Report the failing connection stage (launch binding, plugin discovery file, lease validation, OpenCode health or bridge handshake) instead of a generic restart message. Diagnostics exclude credentials.
+- macOS end-to-end acceptance remains pending; this fixes a reproducible activation-state defect, not a verified diagnosis of every Mac connection failure.
+
 ## 5.0.9 - 2026-09-26
 
 - Install Supervisor 0.1.1 and migrate the exact official 0.1.0 URL when enabling the workspace switch. Preserve custom sources, newer URLs and existing permission options.

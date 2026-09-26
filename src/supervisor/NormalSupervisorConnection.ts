@@ -31,11 +31,13 @@ async function boundedJson(response: Response, signal: AbortSignal): Promise<unk
 
 /** Authenticates only the normal transport's exact selected service; never scans. */
 export async function connectNormalSupervisor(launch: NormalLaunch, service: ServerConnection, signal: AbortSignal,
-    fetcher: typeof fetch = fetch, now: () => number = Date.now): Promise<IsolatedSupervisorConnection> {
+    fetcher: typeof fetch = fetch, now: () => number = Date.now, report: (stage: string) => void = () => {}): Promise<IsolatedSupervisorConnection> {
+    report('service_binding');
     if (service.baseUrl !== launch.binding.serviceOrigin) throw new NormalConnectionError('unavailable');
     if (serviceAuthenticationProof(launch.launchKey, launch.binding, service.authHeader) !== launch.authenticationProof) {
         throw new NormalConnectionError('unavailable');
     }
+    report('plugin_discovery_file');
     const path = join(launch.privateDirectory, `${launch.binding.serviceId}.json`);
     if (await realpath(path) !== path) throw new NormalConnectionError('unavailable');
     const file = await open(path, 'r');
@@ -53,13 +55,16 @@ export async function connectNormalSupervisor(launch: NormalLaunch, service: Ser
         if (size > 8192 || signal.aborted) throw new NormalConnectionError('unavailable');
         raw = JSON.parse(buffer.subarray(0, size).toString('utf8')) as unknown;
     } finally { await file.close(); }
+    report('plugin_lease_validation');
     const lease = verifyConnectionLease(raw, launch.binding, launch.launchKey, now());
+    report('opencode_health');
     const health = await boundedJson(await fetcher(`${service.baseUrl}/global/health`, {
         headers: { Authorization: service.authHeader }, signal, redirect: 'error', cache: 'no-store',
     }), signal);
     if (!health || typeof health !== 'object' || (health as { version?: unknown }).version !== lease.opencodeVersion) {
         throw new NormalConnectionError('incompatible');
     }
+    report('plugin_bridge_handshake');
     const token = bridgeBearer(launch.launchKey, launch.binding, lease.instanceId);
     const challenge = randomBytes(32).toString('hex');
     const response = await boundedJson(await fetcher(`${lease.bridgeOrigin}/v1/identity?challenge=${challenge}`, {
