@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Follow-up updates - 2026-09-26
 
+- Indent tracked processes beneath their owning task with a subtle vertical guide to clarify the task/process hierarchy.
+
 - Show child-session permission requests in the parent session using the existing permission cards, one pending request at a time. Hide the panel when there are no actionable requests; retain original request/session routing and revalidate before responding.
 - Reuse the existing parent question card for child questions, including single choice, multiple choice, custom text and multi-question requests. Preserve drafts during polling, recover pending questions after reconnect, and exclude expired requests after cancellation. Answers and dismissals target the original child request.
 - Display Supervisor question waits as `Waiting for answer` with the companion plugin update. Question events do not reactivate a finalized assistant turn. See [question ownership and validation](docs/CHILD-QUESTIONS.md).

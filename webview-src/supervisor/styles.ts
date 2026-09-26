@@ -1,4 +1,6 @@
 export const supervisorStyles = `
+#supervisor-panel .sv-processes{margin-inline-start:10px;padding-inline-start:12px;border-inline-start:2px solid color-mix(in srgb,var(--vscode-foreground) 12%,transparent);min-width:0}
+#supervisor-panel .sv-process:first-child{border-top:0}
 #supervisor-panel .sv-process{border-top:1px solid color-mix(in srgb,var(--vscode-foreground) 10%,transparent);padding-top:8px;margin:8px 0}
 #supervisor-panel .sv-process strong{display:block;font-size:11px;margin-bottom:4px}
 #supervisor-enable{display:inline-flex;align-items:center;gap:5px;flex-shrink:0;padding:3px 5px;border:0;border-radius:6px;background:transparent;color:var(--vscode-descriptionForeground);font:11px var(--vscode-font-family);cursor:pointer}
