@@ -1,5 +1,13 @@
 ## Release Notes
 
+### 5.0.7 (updated 2026-09-26)
+
+- Review child permissions and questions from the parent session using the existing cards, one request at a time. Question answers support single/multiple choice and custom text, preserve drafts during polling, and return to the original child request.
+- Recover pending requests after reconnect and prevent responses to expired or cancelled tool requests. The companion Supervisor update displays question waits as `Waiting for answer`.
+- Improve Supervisor floating controls, status colors and task titles, and add plugin installation/activation from the workspace switch with active-task restart confirmation.
+- Keep the GUI version at 5.0.7. Install the updated local VSIX; these follow-up changes have not been published to the existing GitHub release. The companion plugin's new question status takes effect on the next normal service start.
+- See [Changelog](CHANGELOG.md) and [child question behavior](docs/CHILD-QUESTIONS.md) for details. Local agent permission customizations are separate from the GUI package.
+
 ### 5.0.6
 
 - Added default-off task supervision, trusted notification follow-up rounds, and persistent history recovery for Windows / OpenCode 1.18.29 with the separately installed OpenCodeTaskSupervisor plugin.

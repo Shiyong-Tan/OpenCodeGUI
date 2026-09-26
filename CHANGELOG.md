@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## 5.0.7 - 2026-09-24
 
+### Follow-up updates - 2026-09-26
+
+- Show child-session permission requests in the parent session using the existing permission cards, one pending request at a time. Hide the panel when there are no actionable requests; retain original request/session routing and revalidate before responding.
+- Reuse the existing parent question card for child questions, including single choice, multiple choice, custom text and multi-question requests. Preserve drafts during polling, recover pending questions after reconnect, and exclude expired requests after cancellation. Answers and dismissals target the original child request.
+- Display Supervisor question waits as `Waiting for answer` with the companion plugin update. Question events do not reactivate a finalized assistant turn. See [question ownership and validation](docs/CHILD-QUESTIONS.md).
+- Refine Supervisor presentation with compact, vertically stacked floating controls, translucent styling, status colors, current-task filtering and verified child-session title fallback.
+- Add workspace-switch installation and activation of the companion Supervisor plugin through the existing service lifecycle controls, retaining active-task restart confirmation.
+- Validate the question update with 208 GUI suites / 1616 tests, build and bundle checks, and an isolated OpenCode 1.18.31 protocol probe using a local fixture with no paid model calls.
+
+### Initial compatibility update
+
 - Support audited OpenCode 1.18.31 alongside 1.18.29 across Supervisor health, signed connection leases and snapshots. Preserve the actual version and reject mismatched or unaudited releases.
 - Explain how to diagnose Supervisor version failures and that both GUI and the separately installed Supervisor must be updated. Existing services are never restarted automatically.
 - Add compatibility and mismatch regression tests. See [compatibility validation](docs/OPENCODE-1.18.31.md).
