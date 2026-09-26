@@ -88,3 +88,13 @@ describe('session overlay store', () => {
     expect(assistant.meta.processingPausedAt).toBeUndefined();
   });
 });
+
+
+test('verified question blockers pause only their child, without creating a second question card', () => {
+  const store = createStore(); store.setExternalQuestionPending('child', true);
+  const message = { role: 'assistant', meta: { isThinking: true, processingStartedAt: 10 } };
+  expect(store.syncProcessingPause('child', message, 20).paused).toBe(true);
+  expect(store.syncProcessingPause('parent', null, 20).paused).toBe(false);
+  expect(store.getQuestion('child')).toBeNull();
+  store.setExternalQuestionPending('child', false); expect(store.syncProcessingPause('child', message, 30).paused).toBe(false);
+});

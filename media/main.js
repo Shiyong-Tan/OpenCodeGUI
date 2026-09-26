@@ -356,6 +356,22 @@ const sessionOverlayStore = createSessionOverlayStore({
     permissionIdentity: (permission) => permission?.permissionId || permission?.requestId || ''
 });
 
+// Local synthetic questions retain their existing store; server questions use verified request ownership.
+const questionBlockerOwnersByScope = new Map();
+const questionReview = window.__ocContinuation.createQuestionReview(message => vscode.postMessage(message), () => renderQuestionOverlayModal(), (cards, scope) => {
+    const owners = new Set(cards.map(card => card.sessionId));
+    for (const owner of new Set([...(questionBlockerOwnersByScope.get(scope) || []), ...owners])) {
+        sessionOverlayStore.setExternalQuestionPending(owner, owners.has(owner));
+        syncInteractiveProcessingPause(owner, 'question-review');
+    }
+    questionBlockerOwnersByScope.set(scope, owners);
+});
+function displayedQuestion() { return sessionOverlayStore.getQuestion(activeSessionId) || questionReview.current(); }
+function updateDisplayedQuestion(state, update) {
+    if (state.reviewToken) questionReview.update(update);
+    else sessionOverlayStore.updateQuestion(state.sessionId, update);
+}
+
 // Permission requests retain their child owner; parent visibility is only a review scope.
 const permissionBlockerOwnersByScope = new Map();
 const permissionReview = window.__ocContinuation.createPermissionReview({
@@ -15247,6 +15263,7 @@ function appendMessageImages(parentEl, message) {
                     activeSessionId = incomingSessionId || activeSessionId || '';
                     activateSessionSearch(activeSessionId);
                     permissionReview.select(activeSessionId);
+                    questionReview.select(activeSessionId);
                 }
                 modeSelect.value = selectedMode;
                 applyModeStyles(selectedMode);
@@ -15267,6 +15284,7 @@ function appendMessageImages(parentEl, message) {
                 const status = typeof message.status === 'string' ? message.status : 'connected';
                 setServerStatus(status, message.reason || null);
                 permissionReview.receive(message);
+                if (message.type === 'serverStatus') questionReview.receive(message);
                 break;
             }
             case 'subagentStatus': {
@@ -17840,11 +17858,18 @@ function appendMessageImages(parentEl, message) {
                 }
                 break;
             }
+            case 'questionSnapshot':
+            case 'questionDecisionAck':
+            case 'questionDecisionFailed':
+            case 'questionChanged': {
+                questionReview.receive(message); break;
+            }
             case 'questionOverlay': {
                 showQuestionOverlay(message);
                 break;
             }
             case 'questionOverlayClose': {
+                questionReview.refresh();
                 const sessionId = typeof message.sessionId === 'string' ? message.sessionId : '';
                 if (!sessionId) break;
                 clearQuestionOverlay('external-close', false, sessionId);
@@ -17860,6 +17885,7 @@ function appendMessageImages(parentEl, message) {
             case 'permissionResultFailed':
             case 'permissionSnapshot': {
                 permissionReview.receive(message);
+                if (message.type === 'serverStatus') questionReview.receive(message);
                 break;
             }
             case 'conflictCard': {
@@ -18447,22 +18473,23 @@ function renderConflictCard(payload, options = {}) {
 }
 
 function commitCurrentQuestionAnswers(answersForCurrent) {
-    const questionOverlayState = sessionOverlayStore.getQuestion(activeSessionId);
-    if (!questionOverlayState) return;
+    const questionOverlayState = displayedQuestion();
+    if (!questionOverlayState || (questionOverlayState.reviewToken && questionReview.blocked())) return;
     const stepIndex = questionOverlayState.stepIndex || 0;
     const questions = Array.isArray(questionOverlayState.questions) ? questionOverlayState.questions : [];
     const nextAnswers = Array.isArray(questionOverlayState.answers) ? questionOverlayState.answers.slice() : [];
     nextAnswers[stepIndex] = Array.isArray(answersForCurrent) ? answersForCurrent.slice() : [];
     if (stepIndex + 1 < questions.length) {
-        sessionOverlayStore.updateQuestion(questionOverlayState.sessionId, (state) => ({
+        updateDisplayedQuestion(questionOverlayState, (state) => ({
             ...state,
             stepIndex: stepIndex + 1,
             answers: nextAnswers,
-            selected: []
+            selected: [], draft: ''
         }));
         renderQuestionOverlayModal();
         return;
     }
+    if (questionOverlayState.reviewToken) { questionReview.submit('answer', nextAnswers); return; }
     const callId = questionOverlayState.callId;
     const requestId = questionOverlayState.requestId;
     const sessionId = questionOverlayState.sessionId;
@@ -18573,10 +18600,10 @@ function applyQuestionOptionWidth(actionsEl, options) {
 }
 
 function renderQuestionOverlayModal() {
-    const questionOverlayState = sessionOverlayStore.getQuestion(activeSessionId);
-    if (!questionOverlayState) return;
+    const questionOverlayState = displayedQuestion();
+    if (!questionOverlayState) { questionOverlayEl?.remove(); questionOverlayEl = null; return; }
     const state = questionOverlayState;
-    if (state.sessionId && activeSessionId && state.sessionId !== activeSessionId) return;
+    if (!state.reviewToken && state.sessionId && activeSessionId && state.sessionId !== activeSessionId) return;
     const questions = Array.isArray(state.questions) ? state.questions : [];
     const stepIndex = Number.isFinite(state.stepIndex) ? state.stepIndex : 0;
     const current = questions[stepIndex];
@@ -18599,6 +18626,12 @@ function renderQuestionOverlayModal() {
     header.className = 'conflict-card-header';
     header.textContent = current.title;
     card.appendChild(header);
+    if (state.reviewToken) {
+        const owner = document.createElement('p'); owner.className = 'conflict-card-meta';
+        owner.textContent = `${state.agent || 'Agent'} | ${state.title || 'Question'} | ${stepIndex + 1}/${questions.length}`;
+        card.appendChild(owner);
+        if (state.error) { const error = document.createElement('p'); error.textContent = state.error; card.appendChild(error); }
+    }
 
     const prompt = document.createElement('div');
     prompt.className = 'question-card-question';
@@ -18626,15 +18659,16 @@ function renderQuestionOverlayModal() {
         }
         button.textContent = optionLabel;
         button.addEventListener('click', () => {
+            if (state.reviewToken && (displayedQuestion()?.requestId !== state.requestId || questionReview.blocked())) return;
             if (current.multiple) {
-                const latestState = sessionOverlayStore.getQuestion(state.sessionId);
+                const latestState = displayedQuestion();
                 const currentSelected = new Set(Array.isArray(latestState?.selected) ? latestState.selected : []);
                 if (currentSelected.has(optionLabel)) {
                     currentSelected.delete(optionLabel);
                 } else {
                     currentSelected.add(optionLabel);
                 }
-                sessionOverlayStore.updateQuestion(state.sessionId, (currentState) => ({
+                updateDisplayedQuestion(state, (currentState) => ({
                     ...currentState,
                     selected: Array.from(currentSelected)
                 }));
@@ -18657,7 +18691,8 @@ function renderQuestionOverlayModal() {
             submit.disabled = true;
         }
         submit.addEventListener('click', () => {
-            const latestState = sessionOverlayStore.getQuestion(state.sessionId);
+            if (state.reviewToken && (displayedQuestion()?.requestId !== state.requestId || questionReview.blocked())) return;
+            const latestState = displayedQuestion();
             const currentSelected = Array.isArray(latestState?.selected) ? latestState.selected : [];
             if (!currentSelected.length) return;
             const buttons = card.querySelectorAll('button.question-card-btn,button.question-card-submit');
@@ -18673,16 +18708,19 @@ function renderQuestionOverlayModal() {
     const textarea = document.createElement('textarea');
     textarea.className = 'question-free-text-input';
     textarea.placeholder = 'Or type your answer...';
-    textarea.rows = 1;
+    textarea.rows = 1; textarea.value = state.draft || '';
+    freeTextRow.hidden = current.custom === false;
     
     // Auto-expand textarea up to 3 rows
     textarea.addEventListener('input', () => {
+        if (state.reviewToken) updateDisplayedQuestion(state, value => ({ ...value, draft: textarea.value }));
         const lines = (textarea.value.match(/\n/g) || []).length + 1;
         textarea.rows = Math.min(lines, 3);
     });
     
     // Handle Enter key to submit, Shift+Enter for newline
     textarea.addEventListener('keydown', (e) => {
+        if (state.reviewToken && (displayedQuestion()?.requestId !== state.requestId || questionReview.blocked())) return;
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
             const text = textarea.value.trim();
@@ -18699,6 +18737,12 @@ function renderQuestionOverlayModal() {
     actions.appendChild(freeTextRow);
 
 
+    if (state.reviewToken) {
+        const reject = document.createElement('button'); reject.type = 'button';
+        reject.className = 'conflict-card-btn question-card-btn'; reject.textContent = 'Dismiss';
+        reject.addEventListener('click', () => { if (displayedQuestion()?.requestId === state.requestId) questionReview.submit('reject'); }); actions.appendChild(reject);
+        if (questionReview.blocked()) for (const control of actions.querySelectorAll('button,textarea')) control.disabled = true;
+    }
     card.appendChild(actions);
     wrapper.appendChild(card);
 
@@ -18738,6 +18782,7 @@ function activateSessionOverlays(sessionId) {
     }
     questionOverlayEl = null;
     permissionReview.select(sessionId || '');
+    questionReview.select(sessionId || '');
     if (!sessionId) return;
     renderQuestionOverlayModal();
     syncInteractiveProcessingPause(sessionId, 'session-overlay-activation');
@@ -18772,6 +18817,7 @@ function normalizeQuestionItems(payload) {
 }
 
 function showQuestionOverlay(payload) {
+    if (!payload?.localOnly) { questionReview.refresh(); return; }
     if (!payload || typeof payload !== 'object') {
         logQuestionDebug('show.skip', 'reason=bad-payload');
         return;

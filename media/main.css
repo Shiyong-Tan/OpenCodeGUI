@@ -3181,3 +3181,5 @@ code:has(> .oc-file-link) {
     text-decoration: line-through;
     opacity: 0.6;
 }
+
+.question-free-text-row[hidden] { display: none; }

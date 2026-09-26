@@ -15,6 +15,7 @@ export type PermissionSetResult = 'active' | 'duplicate';
 export function createSessionOverlayStore<TQuestion, TPermission>(
   options: SessionOverlayStoreOptions<TQuestion, TPermission>,
 ) {
+  const externalQuestions = new Set<string>();
   const entries = new Map<string, SessionOverlayEntry<TQuestion, TPermission>>();
 
   function getOrCreate(sessionId: string): SessionOverlayEntry<TQuestion, TPermission> {
@@ -36,6 +37,9 @@ export function createSessionOverlayStore<TQuestion, TPermission>(
   }
 
   return Object.freeze({
+    setExternalQuestionPending(sessionId: string, pending: boolean): void {
+      if (pending) externalQuestions.add(sessionId); else externalQuestions.delete(sessionId);
+    },
     getQuestion(sessionId: string): TQuestion | null {
       return entries.get(sessionId)?.question || null;
     },
@@ -113,7 +117,7 @@ export function createSessionOverlayStore<TQuestion, TPermission>(
       now = Date.now(),
     ): Readonly<{ changed: boolean; paused: boolean }> {
       const entry = entries.get(sessionId);
-      const paused = Boolean(entry?.question || entry?.permission);
+      const paused = Boolean(entry?.question || entry?.permission || externalQuestions.has(sessionId));
       if (message?.role !== 'assistant' || message.meta?.isThinking !== true) {
         return { changed: false, paused };
       }

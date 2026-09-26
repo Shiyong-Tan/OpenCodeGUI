@@ -4806,6 +4806,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             log: (message) => this.uiDebugChannel.appendLine(message)
         });
         this.utilityCommandHandler = createUtilityCommandHandler({
+            refreshQuestionRequests: scope => this.client.refreshQuestionRequests(scope),
+            respondReviewedQuestion: input => this.client.respondReviewedQuestion(input),
             enableSupervisor: () => this.client.enableSupervisor(),
             getLiveWebview: (fallback) => this._view?.webview || fallback,
             log: (message) => this.uiDebugChannel.appendLine(message),

@@ -11,6 +11,8 @@ type UtilityMessage = Record<string, any>;
 type LocalQuestionResolution = { resolved: boolean; sessionId?: string };
 
 export interface UtilityCommandHost {
+    refreshQuestionRequests?(scope: string): Promise<PermissionSnapshot>;
+    respondReviewedQuestion?(input: Parameters<import('../../permissions/PermissionReviewService').PermissionReviewService['respond']>[0]): Promise<void>;
     enableSupervisor?(): Promise<void>;
     getLiveWebview(fallback: vscode.Webview): vscode.Webview;
     log(message: string): void;
@@ -100,6 +102,8 @@ const UTILITY_COMMANDS = new Set([
     'localQuestionResult',
     'permissionResult',
     'permissionRefresh',
+    'questionRefresh',
+    'questionDecision',
     'openFileAtLocation',
     'resolveAssistantImageReferences',
 ]);
@@ -178,6 +182,25 @@ export class UtilityCommandController {
             case 'permissionResult':
                 await this.respondPermission(data, activeWebview);
                 return true;
+            case 'questionRefresh': {
+                const scopeSessionId = typeof data.scopeSessionId === 'string' ? data.scopeSessionId : '';
+                if (!scopeSessionId || typeof data.refreshId !== 'string') return true;
+                try {
+                    if (!this.host.refreshQuestionRequests) throw new Error();
+                    const snapshot = await this.host.refreshQuestionRequests(scopeSessionId);
+                    activeWebview.postMessage({ type: 'questionSnapshot', ...snapshot, refreshId: data.refreshId });
+                } catch { activeWebview.postMessage({ type: 'questionSnapshot', scopeSessionId, refreshId: data.refreshId, error: 'Question observation unavailable. Retry before answering.' }); }
+                return true;
+            }
+            case 'questionDecision': {
+                try {
+                    if (!this.host.respondReviewedQuestion || !['answer', 'reject'].includes(data.response)) throw new Error();
+                    await this.host.respondReviewedQuestion({ scopeSessionId: String(data.scopeSessionId || ''), sessionId: String(data.sessionId || ''),
+                        requestId: String(data.requestId || ''), reviewToken: String(data.reviewToken || ''), response: data.response, answers: data.answers });
+                    activeWebview.postMessage({ type: 'questionDecisionAck', sessionId: data.sessionId, requestId: data.requestId });
+                } catch { activeWebview.postMessage({ type: 'questionDecisionFailed', sessionId: data.sessionId, requestId: data.requestId, error: 'Answer was not confirmed. Refresh and review before retrying.' }); }
+                return true;
+            }
             case 'permissionRefresh': {
                 const scopeSessionId = typeof data.scopeSessionId === 'string' ? data.scopeSessionId : '';
                 if (!scopeSessionId || typeof data.refreshId !== 'string') return true;

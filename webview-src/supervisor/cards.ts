@@ -12,7 +12,7 @@ export function taskStatus(task: Task, stale: boolean): { label: string; tone: s
     if (task.phase === 'terminal') return task.outcome === 'failed' ? { label: 'Failed', tone: 'danger' } :
         task.outcome === 'completed' ? { label: 'Completed', tone: 'success' } : { label: 'Ended', tone: 'muted' };
     const values: Record<string, [string, string]> = {
-        waiting_permission: ['Waiting for permission', 'warning'], suspected_stall: ['Suspected stall', 'warning'],
+        waiting_permission: ['Waiting for permission', 'warning'], waiting_question: ['Waiting for answer', 'warning'], suspected_stall: ['Suspected stall', 'warning'],
         unreachable: ['Observation unavailable', 'danger'], unknown: ['Unknown', 'muted'],
     };
     const value = values[task.health];

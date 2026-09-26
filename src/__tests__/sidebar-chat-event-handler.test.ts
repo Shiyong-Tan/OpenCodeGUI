@@ -318,3 +318,12 @@ test('subagent permission events bypass the generic child branch without changin
   expect(webview.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'permissionOverlayClose', sessionId: 'ses_child', permissionId: 'per_a' }));
   expect(host.currentSessionId).toBe('ses_parent');
 });
+
+
+test('child question refresh reaches parent UI without entering generic child routing', async () => {
+  const webview = { postMessage: jest.fn() };
+  const host = { smartSearchSessions: { owns: () => false }, _view: { webview }, currentSessionId: 'ses_parent' };
+  await handleSidebarChatEvent(host, { type: 'questionChanged', sessionId: 'ses_child' }, webview as any);
+  expect(webview.postMessage).toHaveBeenCalledWith({ type: 'questionChanged', sessionId: 'ses_child' });
+  expect(host.currentSessionId).toBe('ses_parent');
+});

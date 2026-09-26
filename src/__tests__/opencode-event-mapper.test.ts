@@ -84,3 +84,13 @@ test('permission lifecycle events survive a finished chat generation without rev
   expect(replied).toEqual([expect.objectContaining({ type: 'permissionReplied', sessionId: 'ses_child', permissionId: 'per_a' })]);
   expect(host.turnFinishedBySession.has('ses_child')).toBe(true);
 });
+
+
+test('question events survive finality without reopening the child turn', () => {
+  const host = { normalizeEvent: () => ({ sessionId: 'ses_child', lane: 'subagent' }), logUiDebug: jest.fn(),
+    resolveBackgroundPulseTarget: () => undefined, turnFinishedBySession: new Set(['ses_child']) };
+  for (const event of ['question.asked', 'question.replied', 'question.rejected']) {
+    expect(mapServerEventToChatEvents(host, event, { sessionID: 'ses_child', requestID: 'que_one' })).toEqual([{ type: 'questionChanged', sessionId: 'ses_child' }]);
+  }
+  expect(host.turnFinishedBySession.has('ses_child')).toBe(true);
+});

@@ -27,7 +27,7 @@ const identity = { taskId: id, attemptId: id, parentSessionId: session, childSes
 const task = object({ ...identity,
   title: value => value === undefined || value === null ? null : text(/^[^\x00-\x1f\x7f]{1,500}$/u)(value),
   phase: state('registered', 'dispatching', 'active', 'terminal'),
-  health: state('running', 'waiting_permission', 'suspected_stall', 'unreachable', 'ended', 'cancel_unknown'),
+  health: state('running', 'waiting_permission', 'waiting_question', 'suspected_stall', 'unreachable', 'ended', 'cancel_unknown'),
   outcome: nullable(state('completed', 'failed')),
   lastObservationAgeMs: nullable(age), lastProgressAgeMs: age,
 });

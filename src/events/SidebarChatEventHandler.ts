@@ -44,6 +44,22 @@ export async function handleSidebarChatEvent(
         if (host.smartSearchSessions.owns(event.sessionId)) {
             return;
         }
+        if (event.type === 'questionOverlay' && event.sessionId && event.callId) {
+            const liveWebview = host._view?.webview || webview;
+            liveWebview.postMessage({
+                type: 'questionOverlay',
+                sessionId: event.sessionId,
+                callId: event.callId,
+                requestId: event.requestId,
+                title: event.title,
+                prompt: event.prompt,
+                options: event.options,
+                questions: event.questions
+            });
+            return;
+        }
+
+        if (event.type === 'questionChanged') { (host._view?.webview || webview).postMessage({ type: 'questionChanged', sessionId: event.sessionId }); return; }
         if (event.type === 'permissionRequest' && event.sessionId && event.permissionId) {
             const liveWebview = host._view?.webview || webview;
             liveWebview.postMessage({
@@ -417,21 +433,6 @@ export async function handleSidebarChatEvent(
                     host.emitSubagentStatus();
                 }
             }
-            return;
-        }
-
-        if (event.type === 'questionOverlay' && event.sessionId && event.callId) {
-            const liveWebview = host._view?.webview || webview;
-            liveWebview.postMessage({
-                type: 'questionOverlay',
-                sessionId: event.sessionId,
-                callId: event.callId,
-                requestId: event.requestId,
-                title: event.title,
-                prompt: event.prompt,
-                options: event.options,
-                questions: event.questions
-            });
             return;
         }
 

@@ -3,7 +3,7 @@ import { parseSupervisorView, type SupervisorView } from '../../src/supervisor/p
 const age = (value: number | null): string => value === null ? 'Unknown' : `${Math.floor(value / 1000)} s`;
 const fact = (value: boolean | null): string => value === null ? 'Unknown' : value ? 'Yes' : 'No';
 const states: Record<string, string> = { registered: 'Registered', dispatching: 'Dispatching', active: 'Active', terminal: 'Ended',
-    running: 'Running', waiting_permission: 'Waiting for permission', suspected_stall: 'Suspected stall', suspect: 'Suspected stall',
+    running: 'Running', waiting_permission: 'Waiting for permission', waiting_question: 'Waiting for answer', suspected_stall: 'Suspected stall', suspect: 'Suspected stall',
     unreachable: 'Observation unreachable', ended: 'Ended', cancel_unknown: 'Cancellation outcome unknown', unknown: 'Unknown',
     starting: 'Starting', stopped: 'Confirmed stopped', start_failed: 'Start failed', permission_denied: 'Permission denied',
     queued: 'Waiting for parent', submitting: 'Submitting', submitted: 'Submitted, receipt not yet confirmed', received: 'Received by parent',

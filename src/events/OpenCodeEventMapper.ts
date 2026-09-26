@@ -140,7 +140,7 @@ export function mapServerEventToChatEvents(
             }
         }
         const isSessionStatus = type === 'session.status';
-        if (source === 'sse' && sessionId && host.turnFinishedBySession.has(sessionId) && !isSessionStatus && !type.startsWith('permission.') && !appendFollowup) {
+        if (source === 'sse' && sessionId && host.turnFinishedBySession.has(sessionId) && !isSessionStatus && !type.startsWith('permission.') && !type.startsWith('question.') && !appendFollowup) {
             return events;
         }
         if (source === 'resync' && sessionId && (type === 'files' || type === 'diff' || type === 'toolPatch')) {
@@ -167,6 +167,9 @@ export function mapServerEventToChatEvents(
                 });
             }
             return events;
+        }
+        if (type.startsWith('question.') && props?.sessionID) {
+            events.push({ type: 'questionChanged', sessionId: props.sessionID }); return events;
         }
         if (type === 'permission.asked') {
             const permissionId = typeof props?.id === 'string' ? props.id : '';

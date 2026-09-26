@@ -238,7 +238,7 @@ export type CommitPendingTurnChangesOptions = {
 };
 
 export type ChatEvent = {
-    type: 'text' | 'session' | 'raw' | 'permission' | 'diff' | 'message' | 'appendUserMessage' | 'error' | 'tool' | 'toolPatch' | 'files' | 'assistantMessageMeta' | 'assistantPhase' | 'questionOverlay' | 'permissionRequest' | 'permissionReplied' | 'autoResumeStallWarn' | 'autoResumeStallClear' | 'autoResumeHardStop' | 'todoUpdate' | 'sessionUsage' | 'turnInFlight' | 'turnResolved' | 'backgroundActivityPulse';
+    type: 'text' | 'session' | 'raw' | 'permission' | 'diff' | 'message' | 'appendUserMessage' | 'error' | 'tool' | 'toolPatch' | 'files' | 'assistantMessageMeta' | 'assistantPhase' | 'questionOverlay' | 'questionChanged' | 'permissionRequest' | 'permissionReplied' | 'autoResumeStallWarn' | 'autoResumeStallClear' | 'autoResumeHardStop' | 'todoUpdate' | 'sessionUsage' | 'turnInFlight' | 'turnResolved' | 'backgroundActivityPulse';
     text?: string;
     sessionId?: string;
     parentSessionId?: string;
@@ -582,7 +582,7 @@ export class OpenCodeClient {
     private questionOverlaySeen = new Set<string>();
     private pendingQuestionsBySession = new Map<string, Map<string, PendingQuestionControl>>();
     private pendingQuestionCallIdsBySession = new Map<string, Set<string>>();
-    private readonly permissionReview = new PermissionReviewService(async (sessionId) => {
+    private async connectRequestReview(sessionId: string): Promise<import('./permissions/PermissionReviewService').PermissionConnection> {
         const conn = await this.getServerConn();
         const directory = this.getPermissionDirectory(sessionId);
         const request = async (path: string, body?: unknown) => {
@@ -594,7 +594,9 @@ export class OpenCodeClient {
             return response.json() as Promise<unknown>;
         };
         return { identity: `${conn.baseUrl}:${conn.authHeader}`, directory, read: path => request(path), reply: (path, body) => request(path, body) };
-    });
+    }
+    private readonly permissionReview = new PermissionReviewService(id => this.connectRequestReview(id));
+    private readonly questionReview = new PermissionReviewService(id => this.connectRequestReview(id), 'question');
 
     private pendingPermissionIdsBySession = new Map<string, Set<string>>();
     private permissionOwnersByScope = new Map<string, Set<string>>();
@@ -850,6 +852,7 @@ export class OpenCodeClient {
             resyncRecoverySuccess: 0
         };
         this.questionOverlaySeen.clear();
+        this.reviewedQuestionsByScope.clear();
         this.pendingQuestionsBySession.clear();
         this.pendingQuestionCallIdsBySession.clear();
         this.pendingPermissionIdsBySession.clear();
@@ -6780,6 +6783,24 @@ export class OpenCodeClient {
         }
         await this.postQuestionReply(sessionId, resolvedRequestId, answers);
         this.clearPendingQuestion(sessionId, payload.callId);
+    }
+
+    private reviewedQuestionsByScope = new Map<string, { sessionId: string; callId: string }[]>();
+    public async refreshQuestionRequests(scopeSessionId: string) {
+        const workspace = this.workspaceRoot;
+        const snapshot = await this.questionReview.snapshot(scopeSessionId);
+        if (workspace !== this.workspaceRoot) throw new Error('Question workspace changed');
+        const pending = snapshot.requests.filter(r => r.state === 'pending' && r.callId && r.questions?.length);
+        for (const old of this.reviewedQuestionsByScope.get(scopeSessionId) || []) {
+            if (!pending.some(r => r.sessionId === old.sessionId && r.callId === old.callId)) this.clearPendingQuestion(old.sessionId, old.callId);
+        }
+        for (const card of pending) this.rememberPendingQuestion(card.sessionId, { callId: card.callId!, requestId: card.requestId,
+            title: card.questions![0].title, prompt: card.questions![0].prompt, options: card.questions![0].options, questions: card.questions! });
+        this.reviewedQuestionsByScope.set(scopeSessionId, pending.map(r => ({ sessionId: r.sessionId, callId: r.callId! })));
+        return snapshot;
+    }
+    public async respondReviewedQuestion(input: Parameters<PermissionReviewService['respond']>[0]) {
+        await this.questionReview.respond(input);
     }
 
     public async refreshPermissionRequests(scopeSessionId: string): Promise<PermissionSnapshot> {

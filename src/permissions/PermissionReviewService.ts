@@ -1,6 +1,8 @@
+import { parseReviewQuestions, validateQuestionAnswers, type ReviewQuestion } from '../questions/QuestionProtocol';
 import { createHmac, randomBytes } from 'crypto';
 
 export interface PermissionCard {
+    questions?: ReviewQuestion[]; callId?: string;
     sessionId: string; requestId: string; scopeSessionId: string; title: string; agent: string;
     permission: string; patterns: string[]; tool: string; input: string;
     state: 'pending' | 'expired' | 'unknown'; reason: string; reviewToken: string;
@@ -9,7 +11,7 @@ export interface PermissionSnapshot { scopeSessionId: string; requests: Permissi
 export interface PermissionConnection {
     identity: string; directory: string;
     read(path: string): Promise<unknown>;
-    reply(path: string, body: { reply: 'once' | 'always' | 'reject' }): Promise<unknown>;
+    reply(path: string, body: unknown): Promise<unknown>;
 }
 type RecordValue = Record<string, unknown>;
 function record(value: unknown): RecordValue {
@@ -26,7 +28,7 @@ export class PermissionReviewService {
     private readonly secret = randomBytes(32);
     private readonly decisions = new Map<string, Promise<void>>();
     private readonly completed = new Set<string>();
-    constructor(private readonly connect: (sessionId: string) => Promise<PermissionConnection>) {}
+    constructor(private readonly connect: (sessionId: string) => Promise<PermissionConnection>, private readonly kind: 'permission' | 'question' = 'permission') {}
 
     private async inspect(scopeSessionId: string, conn: PermissionConnection): Promise<PermissionSnapshot> {
         if (!sid(scopeSessionId)) throw new Error('Invalid permission scope session');
@@ -47,7 +49,7 @@ export class PermissionReviewService {
             return pending;
         };
         await session(scopeSessionId);
-        const raw = await conn.read('/permission');
+        const raw = await conn.read(`/${this.kind}`);
         if (!Array.isArray(raw) || raw.length > 1024) throw new Error('Invalid permission list');
         const seen = new Set<string>(), requests: PermissionCard[] = [];
         for (const item of raw) {
@@ -66,14 +68,16 @@ export class PermissionReviewService {
                 ancestor = parent;
             }
             if (!belongs) continue;
-            if (!Array.isArray(req.patterns) || req.patterns.length > 256 || req.patterns.some(p => typeof p !== 'string'))
+            if (this.kind === 'permission' && (!Array.isArray(req.patterns) || req.patterns.length > 256 || req.patterns.some(p => typeof p !== 'string')))
                 throw new Error('Invalid permission patterns');
-            const permission = text(req.permission);
-            const patterns = req.patterns as string[];
+            const permission = this.kind === 'question' ? 'question' : text(req.permission);
+            const patterns = this.kind === 'question' ? [] : req.patterns as string[];
             const card: PermissionCard = { sessionId, requestId, scopeSessionId, title: text(owner.title), agent: text(owner.agent),
                 permission, patterns, tool: '', input: '', state: 'unknown', reason: 'Tool association unavailable; cannot safely reply', reviewToken: '' };
+            if (this.kind === 'question') card.questions = parseReviewQuestions(req.questions);
             if (req.tool) {
                 const tool = record(req.tool), messageId = text(tool.messageID), callId = text(tool.callID);
+                card.callId = callId;
                 if (!messageId || !callId) throw new Error('Invalid permission tool identity');
                 const messageKey = `${sessionId}:${messageId}`;
                 let pending = messages.get(messageKey);
@@ -88,7 +92,7 @@ export class PermissionReviewService {
                     card.tool = text(part.tool); card.input = JSON.stringify(state.input ?? {});
                     if (['completed', 'error'].includes(text(state.status)) || info.error) {
                         card.state = 'expired'; card.reason = 'Tool finished or aborted; residual request cannot be approved';
-                    } else if (['pending', 'running'].includes(text(state.status))) {
+                    } else if (['pending', 'running'].includes(text(state.status)) && (this.kind !== 'question' || card.tool === 'question')) {
                         card.state = 'pending'; card.reason = '';
                     }
                 } else if (info.error) { card.state = 'expired'; card.reason = 'Assistant aborted; residual request cannot be approved'; }
@@ -105,8 +109,8 @@ export class PermissionReviewService {
         return this.inspect(scopeSessionId, await this.connect(scopeSessionId));
     }
 
-    async respond(input: { scopeSessionId: string; sessionId: string; requestId: string; reviewToken: string; response: 'once' | 'always' | 'reject' }): Promise<void> {
-        if (!input.reviewToken || !['once', 'always', 'reject'].includes(input.response)) throw new Error('Explicit reviewed permission decision required');
+    async respond(input: { scopeSessionId: string; sessionId: string; requestId: string; reviewToken: string; response: 'once' | 'always' | 'reject' | 'answer'; answers?: unknown }): Promise<void> {
+        if (!input.reviewToken || !(this.kind === 'question' ? ['answer', 'reject'] : ['once', 'always', 'reject']).includes(input.response)) throw new Error('Explicit reviewed permission decision required');
         const key = `${input.sessionId}:${input.requestId}`;
         if (this.decisions.has(key) || this.completed.has(key)) throw new Error('This permission decision was already submitted; refresh its state');
         if (this.completed.size >= 4096) throw new Error('Permission decision capacity reached');
@@ -116,7 +120,10 @@ export class PermissionReviewService {
             const request = fresh.requests.find(r => r.sessionId === input.sessionId && r.requestId === input.requestId);
             if (!request || request.state !== 'pending' || request.reviewToken !== input.reviewToken)
                 throw new Error('Permission expired, changed, or no longer belongs to this session; refresh before responding');
-            const result = await conn.reply(`/permission/${encodeURIComponent(input.requestId)}/reply`, { reply: input.response });
+            if (this.kind === 'question' && input.response === 'answer') validateQuestionAnswers(request.questions!, input.answers);
+            const route = this.kind === 'question' && input.response === 'reject' ? 'reject' : 'reply';
+            const body = this.kind === 'permission' ? { reply: input.response } : route === 'reject' ? {} : { answers: input.answers };
+            const result = await conn.reply(`/${this.kind}/${encodeURIComponent(input.requestId)}/${route}`, body);
             if (result !== true) throw new Error('Permission reply was not acknowledged; refresh before responding');
             this.completed.add(key);
         })();
