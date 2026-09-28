@@ -92,6 +92,72 @@ function createHarness(overrides: Record<string, unknown> = {}) {
 }
 
 describe('TurnCommandController runtime protocol', () => {
+    function sendHarness() {
+        const harness = createHarness({
+            trackUserOwnedSession: jest.fn(),
+            isTurnCommandInFlight: jest.fn(() => false),
+            normalizeReferencedWorkspaceFiles: jest.fn(async () => []),
+            rememberDraft: jest.fn(), startTurnCommandState: jest.fn(),
+            bindMessageIdentity: jest.fn(), setTurnPendingSnapshotUserText: jest.fn(),
+            setTurnPendingSnapshotAttachments: jest.fn(), bindTurnAssistantMessage: jest.fn(),
+            isTurnCommandOwner: jest.fn(() => true), emitTurnFinalizePhase: jest.fn(),
+            postMessageIndexMap: jest.fn(), resolvePendingUserUpgrade: jest.fn(),
+            emitDiffFileListWithRetry: jest.fn(), writeFinalizeSnapshotFromCurrentTurn: jest.fn(),
+            isTurnPendingLocalKey: jest.fn(() => true), clearDraft: jest.fn(),
+            clearCompletedTurnPendingUser: jest.fn(), getTurnPendingLocalKey: jest.fn(),
+            clearFailedTurnCommandState: jest.fn(), finishTurnCommandState: jest.fn(() => true),
+            postModelQuota: jest.fn(() => new Promise<void>(() => undefined)),
+        });
+        Object.assign(harness.host.client, {
+            registerMessage: jest.fn(() => 1), createInternalMessageId: jest.fn(() => 'msg_assistant_A'),
+            chat: jest.fn(async () => undefined), waitForSessionIdleGate: jest.fn(async () => undefined),
+        });
+        return harness;
+    }
+    const send = { type: 'sendMessage', sessionId: 'session-A', value: 'hello', clientMessageId: 'local-A', tmpKey: 'tmp:A', opId: 'op-A' };
+
+    test.each([false, true])('releases only the owning turn despite a hung quota request (chat failure=%s)', async (fail) => {
+        const h = sendHarness();
+        if (fail) h.host.client.chat.mockRejectedValue(new Error('chat failed'));
+        await h.handler(send, h.activeWebview, h.activeWebview);
+        expect(h.host.postModelQuota).toHaveBeenCalledWith(h.activeWebview, fail ? 'chat-error' : 'chat-done');
+        expect(h.host.finishTurnCommandState).toHaveBeenCalledWith('session-A', 'local-A');
+        expect(h.posts).toContainEqual({ type: 'turnInFlight', sessionId: 'session-A', inFlight: false });
+        expect(h.posts).not.toContainEqual(expect.objectContaining({ sessionId: 'session-B', type: 'turnInFlight' }));
+        if (!fail) {
+            expect(h.host.clearCompletedTurnPendingUser).toHaveBeenCalledWith('session-A', 'local-A');
+            expect(h.host.clearCompletedTurnPendingUser.mock.invocationCallOrder[0]).toBeLessThan(h.host.finishTurnCommandState.mock.invocationCallOrder[0]);
+        }
+    });
+
+    test.each([false, true])('quota failure does not become a chat error (synchronous=%s)', async (synchronous) => {
+        const h = sendHarness();
+        if (synchronous) h.host.postModelQuota.mockImplementation(() => { throw new Error('quota unavailable'); });
+        else h.host.postModelQuota.mockRejectedValue(new Error('quota unavailable'));
+        await h.handler(send, h.activeWebview, h.activeWebview);
+        await Promise.resolve();
+        expect(h.posts.filter(p => p.type === 'chatDone')).toHaveLength(1);
+        expect(h.posts.filter(p => p.type === 'addResponse')).toHaveLength(0);
+        expect(h.host.finishTurnCommandState).toHaveBeenCalledTimes(1);
+    });
+
+    test('stale command cleanup cannot clear a newer owner or refresh quota', async () => {
+        const h = sendHarness();
+        h.host.isTurnCommandOwner.mockReturnValue(false);
+        h.host.finishTurnCommandState.mockReturnValue(false);
+        await h.handler(send, h.activeWebview, h.activeWebview);
+        expect(h.posts).not.toContainEqual({ type: 'turnInFlight', sessionId: 'session-A', inFlight: false });
+        expect(h.host.postModelQuota).not.toHaveBeenCalled();
+    });
+
+    test('rejects the exact optimistic send without finishing the existing turn', async () => {
+        const h = sendHarness();
+        h.host.isTurnCommandInFlight.mockReturnValue(true);
+        await h.handler(send, h.activeWebview, h.activeWebview);
+        expect(h.posts).toContainEqual({ type: 'sendRejected', sessionId: 'session-A', clientMessageId: 'local-A', tmpKey: 'tmp:A', opId: 'op-A', reason: 'turn-in-flight' });
+        expect(h.host.finishTurnCommandState).not.toHaveBeenCalled();
+        expect(h.host.client.chat).not.toHaveBeenCalled();
+    });
     test('declines non-turn commands synchronously without an async boundary', () => {
         const harness = createHarness();
         expect(harness.handler(

@@ -19,12 +19,14 @@ export interface ModelQuotaServiceOptions {
     loadAntigravityOAuthConstants?(): OAuthConstants | null;
 }
 
-function defaultRequestJson(url: string, options: RequestOptions = {}): Promise<any> {
+export function defaultRequestJson(url: string, options: RequestOptions = {}): Promise<any> {
     return new Promise((resolve, reject) => {
         const request = https.request(url, { method: options.method || 'GET', headers: options.headers }, (response) => {
+            response.on('error', (error) => { clearTimeout(deadline); reject(error); });
             const chunks: Buffer[] = [];
             response.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
             response.on('end', () => {
+                clearTimeout(deadline);
                 const raw = Buffer.concat(chunks).toString('utf8');
                 if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
                     reject(new Error(`HTTP ${response.statusCode} ${response.statusMessage || ''}`.trim()));
@@ -37,7 +39,12 @@ function defaultRequestJson(url: string, options: RequestOptions = {}): Promise<
                 }
             });
         });
-        request.on('error', reject);
+        const deadline = setTimeout(() => {
+            const error = new Error('Model quota request timed out after 10000 ms');
+            reject(error);
+            request.destroy(error);
+        }, 10_000);
+        request.on('error', (error) => { clearTimeout(deadline); reject(error); });
         if (options.body) request.write(options.body);
         request.end();
     });

@@ -2,6 +2,13 @@ import { createTurnLifecycleController } from '../session-runtime/turn-lifecycle
 
 describe('webview single-session turn lifecycle', () => {
   const controller = createTurnLifecycleController({ now: () => 100 });
+  test('rejecting a local send cannot change canonical or finalized generations', () => {
+    const session = {};
+    controller.start(session);
+    controller.acceptMainFinal(session, 'msg_final');
+    const before = controller.read(session);
+    expect(controller.rejectOptimisticStart(session)).toEqual(before);
+  });
 
   test('starts a new independent generation and projects compatibility fields', () => {
     const session: any = {

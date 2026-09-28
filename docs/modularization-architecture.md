@@ -181,3 +181,16 @@ NormalSupervisorIntegration rechecks launch generation after a live read, includ
 restarts from another window. Durable notification classification is retained
 independently of live authentication. Session, snapshot, final, append, undo and
 rendering owners and their contracts do not change.
+
+### Turn completion and send rejection
+
+Quota refresh is ancillary work scheduled only after the owning turn-command lock
+has been released. It cannot hold finalization open or turn a completed chat into
+an error. ModelQuotaService bounds each default HTTP request to 10 seconds.
+
+SessionComposerStore owns the composer recovery snapshot for an in-transit send,
+addressed by sessionId, clientMessageId, opId and tmpKey. sendAccepted releases that
+snapshot; sendRejected consumes it once and restores it alongside newer composer
+content. The Webview removes only that rejected pair of temporary message IDs;
+it does not finish or cancel the backend's existing turn. Stale responses cannot
+restore an accepted or superseded submission. No rejected send is retried automatically.

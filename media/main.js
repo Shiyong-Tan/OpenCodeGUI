@@ -14345,6 +14345,7 @@ function appendMessageImages(parentEl, message) {
         const opId = `op-${Date.now()}-${messageCounter}`;
 
         const sendingSessionId = activeSessionId || '';
+        if (sendingSessionId) captureSessionComposerState(sendingSessionId);
         setBusy(true, sendingSessionId);
         if (!activeSessionId) {
             isSwitchingSession = true;
@@ -14382,6 +14383,7 @@ function appendMessageImages(parentEl, message) {
         }
 
         const tmpKey = activeSessionId ? getSessionState(activeSessionId)?.thinkingId || null : null;
+        if (sendingSessionId) sessionComposerStore.rememberSubmission(sendingSessionId, clientMessageId, opId, tmpKey);
         const mode = selectedMode || 'unknown';
         const segCount = activeSessionId ? (getSessionState(activeSessionId)?.segmentsByNoticeKey?.size ?? 0) : 0;
         vscode.postMessage({
@@ -16114,6 +16116,31 @@ function appendMessageImages(parentEl, message) {
                     updateSendGate();
                     renderIfActive(sessionId, message.type, { scroll: false });
                 }
+                break;
+            }
+            case 'sendAccepted': {
+                sessionComposerStore.acceptSubmission(message.sessionId, message.clientMessageId, message.opId);
+                break;
+            }
+            case 'sendRejected': {
+                const sessionId = getEventSessionId(message, 'sendRejected');
+                const session = getSessionState(sessionId);
+                if (!session) break;
+                if (sessionId === activeSessionId) captureSessionComposerState(sessionId);
+                if (!sessionComposerStore.rejectSubmission(sessionId, message.clientMessageId, message.opId, message.tmpKey)) break;
+                if (session.activeTurnOpId === message.opId) {
+                    turnLifecycleController.rejectOptimisticStart(session);
+                    session.activeTurnOpId = null;
+                }
+                removeMessageFromSession(session, message.clientMessageId);
+                removeMessageFromSession(session, message.tmpKey);
+                if (session.lastTurnUserId === message.clientMessageId) session.lastTurnUserId = null;
+                if (session.appendRootUserKey === message.clientMessageId) session.appendRootUserKey = null;
+                if (session.lastTurnAssistantId === message.tmpKey) session.lastTurnAssistantId = null;
+                session.inputDraft = sessionComposerStore.get(sessionId).draft;
+                if (sessionId === activeSessionId) clearAppendInputForSessionChange(sessionId);
+                renderIfActive(sessionId, 'sendRejected');
+                updateSendGate();
                 break;
             }
             case 'turnInFlight': {

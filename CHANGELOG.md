@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 5.0.11 - 2026-09-28
+
+- Release the owning turn after finalization without waiting for model quota refresh. Quota failures stay separate from chat errors, and quota HTTP requests have a 10-second deadline.
+- Return rejected sends to the originating session's composer, including attachments and context; preserve newer typing and remove only the rejected send's optimistic message and Thinking placeholder.
+
 ## 5.0.10 - 2026-09-26
 
 - Follow-up (2026-09-28): use English for all built-in VS Code service command notifications, confirmation buttons and failure messages.

@@ -68,6 +68,18 @@ export function createTurnLifecycleController(options: { now?(): number } = {}) 
   const now = options.now || (() => Date.now());
 
   return Object.freeze({
+    rejectOptimisticStart(session: TurnLifecycleSession): WebviewTurnLifecycle {
+      const current = infer(session);
+      if (current.phase !== 'active' || current.canonicalAssistantId) return current;
+      const next: WebviewTurnLifecycle = {
+        ...current,
+        phase: 'failed',
+        // The rejected local generation has ended, but the older backend command still owns its lock.
+        backendInFlight: true,
+      };
+      project(session, next, now());
+      return next;
+    },
     read(session: TurnLifecycleSession): WebviewTurnLifecycle {
       return infer(session);
     },

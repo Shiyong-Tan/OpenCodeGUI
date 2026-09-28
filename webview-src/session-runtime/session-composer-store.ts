@@ -7,6 +7,10 @@ export type SessionComposerSnapshot<TAttachment, TContext, TFileRef> = Readonly<
 
 export function createSessionComposerStore<TAttachment, TContext, TFileRef>() {
   const bySession = new Map<string, SessionComposerSnapshot<TAttachment, TContext, TFileRef>>();
+  const submissions = new Map<string, {
+    clientMessageId: string; opId: string; tmpKey: string;
+    snapshot: SessionComposerSnapshot<TAttachment, TContext, TFileRef>;
+  }>();
   const empty = (): SessionComposerSnapshot<TAttachment, TContext, TFileRef> => ({
     draft: '',
     attachments: [],
@@ -15,6 +19,28 @@ export function createSessionComposerStore<TAttachment, TContext, TFileRef>() {
   });
 
   return Object.freeze({
+    rememberSubmission(sessionId: string, clientMessageId: string, opId: string, tmpKey: string): void {
+      if (!sessionId || !clientMessageId.startsWith('local-') || !tmpKey?.startsWith('tmp:')) return;
+      submissions.set(sessionId, { clientMessageId, opId, tmpKey, snapshot: bySession.get(sessionId) || empty() });
+    },
+    acceptSubmission(sessionId: string, clientMessageId: string, opId: string): void {
+      const pending = submissions.get(sessionId);
+      if (pending?.clientMessageId === clientMessageId && pending.opId === opId) submissions.delete(sessionId);
+    },
+    rejectSubmission(sessionId: string, clientMessageId: string, opId: string, tmpKey: string): boolean {
+      const pending = submissions.get(sessionId);
+      if (!pending || pending.clientMessageId !== clientMessageId || pending.opId !== opId || pending.tmpKey !== tmpKey) return false;
+      submissions.delete(sessionId);
+      const current = bySession.get(sessionId) || empty();
+      // Preserve text typed while the send was in transit, and all attachment/context references.
+      bySession.set(sessionId, {
+        draft: [pending.snapshot.draft, current.draft].filter(Boolean).join('\n\n'),
+        attachments: [...pending.snapshot.attachments, ...current.attachments],
+        contextItems: [...pending.snapshot.contextItems, ...current.contextItems],
+        fileRefs: [...pending.snapshot.fileRefs, ...current.fileRefs],
+      });
+      return true;
+    },
     get(sessionId: string): SessionComposerSnapshot<TAttachment, TContext, TFileRef> {
       return bySession.get(sessionId) || empty();
     },
@@ -65,6 +91,7 @@ export function createSessionComposerStore<TAttachment, TContext, TFileRef>() {
     },
     deleteSession(sessionId: string): void {
       bySession.delete(sessionId);
+      submissions.delete(sessionId);
     },
   });
 }

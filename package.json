@@ -4,7 +4,7 @@
   "publisher": "TanShiyong",
   "description": "VS Code UI for OpenCode CLI with subagents, code diff, change lists, and undo/restore.",
   "icon": "media/marketplace-icon.png",
-  "version": "5.0.10",
+  "version": "5.0.11",
   "license": "MIT",
   "repository": {
     "type": "git",

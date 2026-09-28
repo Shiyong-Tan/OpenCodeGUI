@@ -235,6 +235,12 @@ export class TurnCommandController {
                 if (host.isTurnCommandInFlight(targetSessionId)) {
                     host.log(`EXT: send.blocked | sessionId=${targetSessionId} | payloadSessionId=${payloadSessionId || 'none'} | currentSessionId=${currentSessionIdAtSend || 'none'} | routeSource=${routeSource} | reason=turn-in-flight`);
                     const liveWebview = host.getLiveWebview(activeWebview);
+                    liveWebview.postMessage({
+                        type: 'sendRejected', sessionId: targetSessionId,
+                        clientMessageId: data.clientMessageId, tmpKey: data.tmpKey,
+                        opId: data.opId, reason: 'turn-in-flight'
+                    });
+                    vscode.window.showErrorMessage('The previous turn is still finishing. Your message has been returned to the draft.');
                     liveWebview.postMessage({ type: 'turnInFlight', sessionId: targetSessionId, inFlight: true });
                     return true;
                 }
@@ -243,6 +249,7 @@ export class TurnCommandController {
                 let activeSendSessionId: string | undefined = targetSessionId;
                 let turnClientMessageId: string | undefined;
                 let turnTmpAssistantKey: string | undefined;
+                let quotaRefreshReason: string | undefined;
                 try {
                     const attachments = Array.isArray(data.attachments) ? data.attachments as AttachmentPayload[] : [];
                     const attachKeys = attachments.length ? Object.keys(attachments[0] || {}).join(',') : '';
@@ -269,6 +276,7 @@ export class TurnCommandController {
                         activeSendSessionId = targetSessionId;
                         host.startTurnCommandState(targetSessionId, clientMessageId, userText, tmpAssistantKey, opId);
                         const liveWebview = host.getLiveWebview(activeWebview);
+                        liveWebview.postMessage({ type: 'sendAccepted', sessionId: targetSessionId, clientMessageId, opId });
                         liveWebview.postMessage({ type: 'turnInFlight', sessionId: targetSessionId, inFlight: true });
                     }
                     const messageIndex = host.client.registerMessage(clientMessageId, targetSessionId);
@@ -443,7 +451,7 @@ ${attachmentLines.join('\n')}`
                     host.log(`[EXT][SESSION_ROUTE] event=sendMessage phase=finalize_done reqId=${reqId} payloadSessionId=${payloadSessionId || 'none'} currentSessionId=${currentSessionIdAtSend || 'none'} targetSessionId=${targetSessionId} routeSource=${routeSource}`);
                     host.log(`[EXT][TURN_BIND] phase=finalize_done reqId=${reqId} payloadSessionId=${payloadSessionId || 'none'} currentSessionId=${currentSessionIdAtSend || 'none'} targetSessionId=${targetSessionId} routeSource=${routeSource} clientMessageId=${clientMessageId} assistantMsgId=${doneAssistantMsgId || 'none'} tmpAssistantKey=${tmpAssistantKey || 'none'}`);
                     host.emitTurnFinalizePhase(liveWebview, targetSessionId, 'finalize_done');
-                    await host.postModelQuota(liveWebview, 'chat-done');
+                    quotaRefreshReason = 'chat-done';
                     if (host.isTurnPendingLocalKey(targetSessionId, clientMessageId)) {
                         host.clearDraft(clientMessageId);
                         await host.handleAbortedMessage(targetSessionId, clientMessageId, liveWebview);
@@ -500,7 +508,7 @@ ${attachmentLines.join('\n')}`
                     host.emitSubagentStatus();
                     host.clearSubagentSessionsForParent(sessionId, 'main-error-finalize');
                     host.emitTurnFinalizePhase(activeWebview, sessionId, 'finalize_done');
-                    await host.postModelQuota(activeWebview, 'chat-error');
+                    quotaRefreshReason = 'chat-error';
                 }
                 finally {
                     if (activeSendSessionId && turnClientMessageId) {
@@ -511,6 +519,12 @@ ${attachmentLines.join('\n')}`
                             const liveWebview = host.getLiveWebview(activeWebview);
                             liveWebview.postMessage({ type: 'turnInFlight', sessionId: activeSendSessionId, inFlight: false });
                             host.syncTurnInFlightAfterFinalize(activeSendSessionId, liveWebview, 'sendMessage.finally');
+                            // Quota is ancillary: neither a hung request nor a rejection owns turn finality.
+                            if (quotaRefreshReason) {
+                                const reason = quotaRefreshReason;
+                                void Promise.resolve().then(() => host.postModelQuota(liveWebview, reason))
+                                    .catch(() => host.log('EXT: modelQuota.background.failed'));
+                            }
                             await host.runPendingSendInitGuardCompensation(activeSendSessionId, liveWebview, 'sendMessage.finally');
                         }
                     }
