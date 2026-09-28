@@ -28,7 +28,7 @@ test('active impact requires explicit modal selection; dismissal refuses', async
     warning.mockResolvedValueOnce(undefined).mockImplementationOnce(async (_message, _options, label) => label);
     await commands.get('opencode.service.restart')!(); await commands.get('opencode.service.restart')!();
     expect(answers).toEqual([false, true]);
-    expect(warning).toHaveBeenCalledWith(expect.stringContaining('中断'), { modal: true }, expect.any(String));
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining('interrupt'), { modal: true }, expect.any(String));
 });
 
 test('unexpected errors never expose raw transport or credential messages', async () => {

@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## 5.0.10 - 2026-09-26
 
+- Follow-up (2026-09-28): use English for all built-in VS Code service command notifications, confirmation buttons and failure messages.
+
 - Keep the workspace Supervisor switch enabled after configuration is saved but its connection remains pending, allowing the next GUI-owned launch to receive the binding. Installation failures still restore the prior setting.
 - Report the failing connection stage (launch binding, plugin discovery file, lease validation, OpenCode health or bridge handshake) instead of a generic restart message. Diagnostics exclude credentials.
 - macOS end-to-end acceptance remains pending; this fixes a reproducible activation-state defect, not a verified diagnosis of every Mac connection failure.
