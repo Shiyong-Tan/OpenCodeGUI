@@ -27,6 +27,7 @@ import {
     parseCopilotMultiplierHtml
 } from './copilotSpeedMapping';
 import { ModelQuotaService } from './models/ModelQuotaService';
+import { findCompactionOnlyStop, verifyCompactionResult } from './continuation/CompactionOutcome';
 import type { ModelInfo, ModelQuota } from './models/types';
 import { OpenCodeCommandResolver } from './transport/OpenCodeCommandResolver';
 import { OpenCodeProcessRunner } from './transport/OpenCodeProcessRunner';
@@ -367,6 +368,8 @@ type NormalizedEvent = {
 
 
 type TurnState = {
+    compactionCheckPending?: boolean;
+    terminalError?: string;
     pendingUserLocalKey?: string;
     pendingAssistantTmpKey?: string;
     noCommitTerminalTmpKey?: string;
@@ -3182,6 +3185,9 @@ export class OpenCodeClient {
         if (!sessionId || !this.turnStateBySession.has(sessionId)) return;
         const assistantMsgId = this.getTurnAssistantMsgId(sessionId);
         const state = this.turnStateBySession.get(sessionId);
+        if (!assistantMsgId && state) {
+            void this.checkCompactionOnlyStop(sessionId, state);
+        }
         const activeSuccessor = this.appendTurnStateBySession.get(sessionId)?.activeSuccessor;
         const handoff = state?.appendFollowupHandoff;
         const deferToolCallsSuccessor = Boolean(
@@ -3209,6 +3215,36 @@ export class OpenCodeClient {
                     this.startRescueTimer(sessionId);
                 }
             });
+    }
+
+    private async checkCompactionOnlyStop(sessionId: string, state: TurnState): Promise<void> {
+        const userId = this.currentTurnUserMsgIdBySession.get(sessionId);
+        if (!userId || state.compactionCheckPending || this.subagentToParentSessionMap.has(sessionId)) return;
+        const isCurrent = () => this.turnStateBySession.get(sessionId) === state
+            && this.currentTurnUserMsgIdBySession.get(sessionId) === userId
+            && !this.canceledActiveTurnBySession.get(sessionId)
+            && !this.turnFinalResolvedBySession.has(sessionId)
+            && !this.getTurnAssistantMsgId(sessionId);
+        if (!isCurrent()) return;
+        state.compactionCheckPending = true;
+        try {
+            const messages = await this.requestJson<unknown>('GET', `/session/${sessionId}/message?limit=200`);
+            const error = findCompactionOnlyStop(messages, userId);
+            if (!error || !isCurrent()) return;
+            const statuses = await this.requestJson<Record<string, { type?: string }>>('GET', '/session/status');
+            if (!statuses || typeof statuses !== 'object' || Array.isArray(statuses)) return;
+            // OpenCode omits idle sessions from its status map. An explicit busy/retry status blocks closure.
+            if (statuses[sessionId] && statuses[sessionId].type !== 'idle') return;
+            const confirmed = await this.requestJson<unknown>('GET', `/session/${sessionId}/message?limit=200`);
+            if (!isCurrent() || findCompactionOnlyStop(confirmed, userId) !== error) return;
+            state.terminalError = error;
+            this.logUiDebug(`EXT: turn.compaction-only.stop | sessionId=${sessionId} | userMsgId=${userId}`);
+            this.resolveTurnFinal(sessionId, 'session-error');
+        } catch {
+            this.logUiDebug(`EXT: turn.compaction-only.unverified | sessionId=${sessionId}`);
+        } finally {
+            state.compactionCheckPending = false;
+        }
     }
 
     private waitForTurnCompletionFinal(sessionId: string): Promise<EventSource> {
@@ -6240,6 +6276,10 @@ export class OpenCodeClient {
                         `EXT: resyncResolve.done | sessionId=${targetSessionId} | epoch=${resyncEpoch} | replayedFinal=${summary.replayedFinal} | replayedTools=${summary.replayedTools} | elapsedMs=${elapsedMs}`
                     );
                     await this.updateResyncStallState(targetSessionId, summary, reason);
+                    const state = this.turnStateBySession.get(targetSessionId);
+                    if (state && this.sessionIdleReceivedBySession.has(targetSessionId) && !this.getTurnAssistantMsgId(targetSessionId)) {
+                        await this.checkCompactionOnlyStop(targetSessionId, state);
+                    }
                 })
                 .catch((error) => {
                     this.logUiDebug(`EXT: resyncResolve.fail | sessionId=${targetSessionId} | epoch=${resyncEpoch} | err=${String(error)}`);
@@ -6568,8 +6608,13 @@ export class OpenCodeClient {
             }));
         }
 
+        const turn = this.turnStateBySession.get(sessionId);
         await this.requestJson('POST', `/session/${sessionId}/prompt_async`, payload);
         await this.waitForTurnCompletionFinal(sessionId);
+        if (turn?.terminalError) {
+            if (listener) this.eventListeners.delete(listener);
+            throw new Error(turn.terminalError);
+        }
         if (listener) {
             const resolvedAssistant = this.getTurnAssistantMsgId(sessionId);
             if (!resolvedAssistant) {
@@ -7102,12 +7147,15 @@ export class OpenCodeClient {
         options: { providerID: string; modelID: string; auto?: boolean }
     ): Promise<boolean> {
         await this.ensureServer();
+        const before = await this.requestJson<unknown>('GET', `/session/${sessionId}/message?limit=20`);
         const payload = {
             providerID: options.providerID,
             modelID: options.modelID,
             auto: options.auto === true
         };
         const result = await this.requestJson<any>('POST', `/session/${sessionId}/summarize`, payload);
+        const after = await this.requestJson<unknown>('GET', `/session/${sessionId}/message?limit=20`);
+        verifyCompactionResult(before, after);
         return Boolean(result);
     }
 

@@ -248,7 +248,7 @@ export class UtilityCommandController {
                 modelID: modelRef.modelID,
                 auto: false,
             });
-            this.host.postAddResponse(activeWebview, `Compaction started (${modelId}).`, { sessionId });
+            this.host.postAddResponse(activeWebview, `Compaction completed (${modelId}).`, { sessionId });
         } catch (error) {
             this.host.postAddResponse(activeWebview, `Compaction failed: ${error}`, { sessionId });
         } finally {

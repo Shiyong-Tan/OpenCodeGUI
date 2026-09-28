@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 5.0.12 - 2026-09-28
+
+- Stop indefinite Thinking when OpenCode completes only a compaction summary for the current ordinary prompt and returns to idle without answering. Verify messages and idle status before reporting the interruption; preserve real assistant, continuation, cancellation and newer-turn ownership. Do not display summaries as answers or automatically resend prompts.
+- Verify the stored outcome of manual compaction. Report provider failures even when the summarize endpoint returns HTTP success, and show completion only after a new completed summary is observed.
+
 ## 5.0.11 - 2026-09-28
 
 - Release the owning turn after finalization without waiting for model quota refresh. Quota failures stay separate from chat errors, and quota HTTP requests have a 10-second deadline.

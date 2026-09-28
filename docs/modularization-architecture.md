@@ -194,3 +194,16 @@ snapshot; sendRejected consumes it once and restores it alongside newer composer
 content. The Webview removes only that rejected pair of temporary message IDs;
 it does not finish or cancel the backend's existing turn. Stale responses cannot
 restore an accepted or superseded submission. No rejected send is retried automatically.
+
+### Compaction-only idle outcome
+
+CompactionOutcome classifies server records without changing message identity or
+history. OpenCodeClient owns verification for the captured TurnState and current
+user ID: on idle without a real assistant, read recent messages, confirm idle,
+and read again. Only a completed summary attached to the same ordinary prompt,
+with no subsequent user/control prompt or non-summary assistant, can produce a
+terminal error. Cancellation, replacement turns and a newly bound assistant
+invalidate the check. The existing error/finalization path releases the request;
+the summary never becomes a canonical answer, and no prompt is automatically sent.
+Manual compaction compares before/after summary identities to distinguish provider
+failure from a verified new completed summary, regardless of HTTP success.
