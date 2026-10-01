@@ -2,17 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
-## 5.0.13 - 2026-10-01
+## Unreleased (planned 5.1.0)
 
 - Install Supervisor 0.1.2, which removes the cumulative 128-execution launch limit while preserving process evidence, permissions and duplicate-call protection.
-- Accept authenticated plugin 0.1.2 connections. Enabling Supervisor migrates official 0.1.0 and 0.1.1 URLs while preserving custom sources, newer versions and permission options.
-
-## 5.0.12 - 2026-09-28
+- Resolve the latest stable Supervisor GitHub release when enabling the switch, without requiring a new GUI release. Preserve custom sources, newer installed versions and permission options; failed discovery leaves configuration unchanged.
+- Validate Supervisor connections by protocol schema and authenticated handshake instead of a plugin release allowlist.
 
 - Stop indefinite Thinking when OpenCode completes only a compaction summary for the current ordinary prompt and returns to idle without answering. Verify messages and idle status before reporting the interruption; preserve real assistant, continuation, cancellation and newer-turn ownership. Do not display summaries as answers or automatically resend prompts.
 - Verify the stored outcome of manual compaction. Report provider failures even when the summarize endpoint returns HTTP success, and show completion only after a new completed summary is observed.
-
-## 5.0.11 - 2026-09-28
 
 - Release the owning turn after finalization without waiting for model quota refresh. Quota failures stay separate from chat errors, and quota HTTP requests have a 10-second deadline.
 - Return rejected sends to the originating session's composer, including attachments and context; preserve newer typing and remove only the rejected send's optimistic message and Thinking placeholder.

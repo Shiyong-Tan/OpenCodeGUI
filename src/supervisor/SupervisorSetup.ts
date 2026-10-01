@@ -1,14 +1,10 @@
 import { promises as fs } from 'fs';
 import { join } from 'path';
 import { applyEdits, modify, parse, type ParseError } from 'jsonc-parser';
-
-export const supervisorRelease = 'https://github.com/Shiyong-Tan/opencode-task-supervisor/releases/download/v0.1.2/opencode-task-supervisor-0.1.2.tgz';
-const previousSupervisorReleases = ['0.1.0', '0.1.1'].map(version =>
-    `https://github.com/Shiyong-Tan/opencode-task-supervisor/releases/download/v${version}/opencode-task-supervisor-${version}.tgz`);
+import { officialReleaseVersion, newerRelease, resolveLatestSupervisorRelease } from './SupervisorRelease';
 const isSupervisor = (value: unknown): boolean => typeof value === 'string' && /(?:opencode-task-supervisor|OpenCodeTaskSupervisor)(?:[\/\\@#.-]|$)/i.test(value);
 
-/** Edit only the plugin declaration; permission rules and unrelated text stay intact. */
-export function mergeSupervisorConfig(source: string): string {
+function readConfig(source: string) {
     const errors: ParseError[] = [];
     const config = parse(source, errors, { allowTrailingComma: true }) as Record<string, unknown>;
     if (errors.length || !config || typeof config !== 'object' || Array.isArray(config)) throw new Error('OpenCode configuration is not a valid JSONC object.');
@@ -22,7 +18,15 @@ export function mergeSupervisorConfig(source: string): string {
     if (!options || typeof options !== 'object' || Array.isArray(options)) throw new Error('Invalid Supervisor plugin options.');
     if (options.readonlyLab || options.managedLab) throw new Error('Laboratory Supervisor configuration cannot be enabled as normal GUI mode.');
     const sourceUrl = Array.isArray(prior) ? prior[0] : prior;
-    const entry = [previousSupervisorReleases.includes(sourceUrl) ? supervisorRelease : sourceUrl ?? supervisorRelease,
+    return { config, index, prior, options, sourceUrl };
+}
+
+/** Edit only the plugin declaration; permission rules and unrelated text stay intact. */
+export function mergeSupervisorConfig(source: string, release?: string): string {
+    const { config, index, prior, options, sourceUrl } = readConfig(source);
+    const selected = sourceUrl === undefined ? release : officialReleaseVersion(sourceUrl) && release ? newerRelease(sourceUrl, release) : sourceUrl;
+    if (!selected) throw new Error('A verified Supervisor release is required.');
+    const entry = [selected,
         { ...options, allowDispatch: options.allowDispatch ?? true, allowNotifications: options.allowNotifications ?? false, normalGui: { enabled: true } }];
     if (JSON.stringify(prior) === JSON.stringify(entry)) return source;
     const target = config.plugin === undefined ? ['plugin'] : ['plugin', index];
@@ -30,7 +34,7 @@ export function mergeSupervisorConfig(source: string): string {
         { formattingOptions: { insertSpaces: true, tabSize: 2, eol: source.includes('\r\n') ? '\r\n' : '\n' } }));
 }
 
-export async function configureSupervisor(workspace: string, checkRelease: () => Promise<void>): Promise<boolean> {
+export async function configureSupervisor(workspace: string, checkRelease: () => Promise<string> = resolveLatestSupervisorRelease): Promise<boolean> {
     const root = await fs.realpath(workspace);
     const candidates = ['opencode.json', 'opencode.jsonc', '.opencode/opencode.json', '.opencode/opencode.jsonc'];
     const existing: string[] = [];
@@ -48,9 +52,13 @@ export async function configureSupervisor(workspace: string, checkRelease: () =>
     try {
         const before = existing.length ? await fs.readFile(file, 'utf8') : '{}\n';
         if (Buffer.byteLength(before) > 1048576) throw new Error('OpenCode configuration is too large for automatic setup.');
-        const after = mergeSupervisorConfig(before);
+        // Validate configuration before making a network request; custom sources remain local.
+        const { sourceUrl } = readConfig(before);
+        const official = sourceUrl === undefined || officialReleaseVersion(sourceUrl) !== undefined;
+        const release = official ? await checkRelease() : undefined;
+        if (official && !officialReleaseVersion(release)) throw new Error('Invalid Supervisor release address. Configuration was not changed.');
+        const after = mergeSupervisorConfig(before, release);
         if (after === before) return false;
-        if (after.includes(supervisorRelease)) await checkRelease();
         if (existing.length && await fs.readFile(file, 'utf8') !== before) throw new Error('OpenCode configuration changed during setup. Retry.');
         if (existing.length) {
             await fs.copyFile(file, `${file}.supervisor-backup-${Date.now()}`);
@@ -60,9 +68,4 @@ export async function configureSupervisor(workspace: string, checkRelease: () =>
         } else await fs.writeFile(file, after, { flag: 'wx' });
         return true;
     } finally { await lock.close(); await fs.unlink(join(root, '.opencode-supervisor-setup.lock')); }
-}
-
-export async function checkSupervisorRelease(): Promise<void> {
-    const response = await fetch(supervisorRelease, { method: 'HEAD', signal: AbortSignal.timeout(15000) });
-    if (!response.ok) throw new Error('Supervisor release is unavailable. Configuration was not changed. Check the GitHub release and network connection.');
 }

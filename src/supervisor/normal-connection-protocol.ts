@@ -1,3 +1,4 @@
+import { isPluginVersion } from './plugin-version';
 import { isOpenCodeVersion, type OpenCodeVersion } from './opencode-version';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
@@ -15,7 +16,7 @@ export interface ConnectionLease extends ServiceBinding {
   instanceId: string;
   bridgeOrigin: string;
   opencodeVersion: OpenCodeVersion;
-  pluginVersion: '0.1.0' | '0.1.1' | '0.1.2';
+  pluginVersion: string;
   issuedAt: number;
   expiresAt: number;
 }
@@ -77,7 +78,7 @@ function parseLease(value: unknown): ConnectionLease {
   const raw = record(value);
   exactKeys(raw, leaseKeys);
   if (raw.schemaVersion !== 1 || raw.kind !== 'normal-gui' || !isOpenCodeVersion(raw.opencodeVersion)
-    || (raw.pluginVersion !== '0.1.0' && raw.pluginVersion !== '0.1.1' && raw.pluginVersion !== '0.1.2') || typeof raw.workspace !== 'string'
+    || !isPluginVersion(raw.pluginVersion) || typeof raw.workspace !== 'string'
     || !Number.isSafeInteger(raw.issuedAt) || !Number.isSafeInteger(raw.expiresAt)) return fail();
   const issuedAt = raw.issuedAt as number;
   const expiresAt = raw.expiresAt as number;

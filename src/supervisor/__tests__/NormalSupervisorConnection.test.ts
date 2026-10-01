@@ -9,7 +9,7 @@ import type { ServerConnection } from '../../transport/OpenCodeHttpClient';
 describe('normal supervisor service/bridge authentication', () => {
     let root = '';
     afterEach(async () => { if (root) await rm(root, { recursive: true, force: true }); });
-    async function setup(version: string = '1.18.29', pluginVersion: '0.1.0' | '0.1.1' | '0.1.2' = '0.1.0') {
+    async function setup(version: string = '1.18.29', pluginVersion: string = '0.1.0') {
         root = await realpath(await mkdtemp(join(tmpdir(), 'gui-supervisor-connect-')));
         const binding = { integrationId: '11'.repeat(32), serviceId: '22'.repeat(32), workspace: 'd:/trial', serviceOrigin: 'http://127.0.0.1:42001' };
         const authHeader = `Basic ${Buffer.from('opencode:test-only-password').toString('base64')}`;
@@ -94,7 +94,7 @@ describe('normal supervisor service/bridge authentication', () => {
         await expect(connectNormalSupervisor(launch, service, new AbortController().signal, fetcher as typeof fetch, () => 1000))
             .rejects.toThrow('disconnected');
     });
-    test.each(['0.1.1', '0.1.2'] as const)('preserves authenticated plugin version %s', async version => {
+    test.each(['0.1.1', '0.1.2', '0.2.37', '2.0.0'] as const)('preserves authenticated plugin version %s', async version => {
         const { launch, service, fetcher } = await setup('1.18.31', version);
         const connection = await connectNormalSupervisor(launch, service, new AbortController().signal, fetcher as typeof fetch, () => 1000);
         expect(connection.pluginVersion).toBe(version);

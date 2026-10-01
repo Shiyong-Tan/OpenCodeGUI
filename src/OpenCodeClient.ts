@@ -1,7 +1,7 @@
 import { SupervisorActivationPending } from './supervisor/ActivationPending';
 import { activateSupervisorService } from './supervisor/activate-service';
 import { fillSupervisorTitles } from './supervisor/SupervisorTitles';
-import { configureSupervisor, checkSupervisorRelease } from './supervisor/SupervisorSetup';
+import { configureSupervisor } from './supervisor/SupervisorSetup';
 import { PermissionReviewService, type PermissionSnapshot } from './permissions/PermissionReviewService';
 import { SupervisorAssistantObserver, type SupervisorAssistantActivity } from './supervisor/SupervisorAssistantObserver';
 import type { SupervisorRound, ParentExecution } from './supervisor/SupervisorRoundStore';
@@ -5135,7 +5135,7 @@ export class OpenCodeClient {
         };
         const operation = (async () => {
             if (!vscode.workspace.isTrusted) throw new Error('Trust this workspace before installing Supervisor.');
-            const changed = await configureSupervisor(workspace, checkSupervisorRelease);
+            const changed = await configureSupervisor(workspace);
             checkWorkspace();
             if (!changed && this.getSupervisorStatus() === 'connected') return;
             this.setNormalSupervisorEnabled(true);
