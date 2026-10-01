@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 5.0.13 - 2026-10-01
+
+- Install Supervisor 0.1.2, which removes the cumulative 128-execution launch limit while preserving process evidence, permissions and duplicate-call protection.
+- Accept authenticated plugin 0.1.2 connections. Enabling Supervisor migrates official 0.1.0 and 0.1.1 URLs while preserving custom sources, newer versions and permission options.
+
 ## 5.0.12 - 2026-09-28
 
 - Stop indefinite Thinking when OpenCode completes only a compaction summary for the current ordinary prompt and returns to idle without answering. Verify messages and idle status before reporting the interruption; preserve real assistant, continuation, cancellation and newer-turn ownership. Do not display summaries as answers or automatically resend prompts.

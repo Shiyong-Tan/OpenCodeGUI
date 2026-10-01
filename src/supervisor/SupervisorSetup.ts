@@ -2,8 +2,9 @@ import { promises as fs } from 'fs';
 import { join } from 'path';
 import { applyEdits, modify, parse, type ParseError } from 'jsonc-parser';
 
-export const supervisorRelease = 'https://github.com/Shiyong-Tan/opencode-task-supervisor/releases/download/v0.1.1/opencode-task-supervisor-0.1.1.tgz';
-const previousSupervisorRelease = 'https://github.com/Shiyong-Tan/opencode-task-supervisor/releases/download/v0.1.0/opencode-task-supervisor-0.1.0.tgz';
+export const supervisorRelease = 'https://github.com/Shiyong-Tan/opencode-task-supervisor/releases/download/v0.1.2/opencode-task-supervisor-0.1.2.tgz';
+const previousSupervisorReleases = ['0.1.0', '0.1.1'].map(version =>
+    `https://github.com/Shiyong-Tan/opencode-task-supervisor/releases/download/v${version}/opencode-task-supervisor-${version}.tgz`);
 const isSupervisor = (value: unknown): boolean => typeof value === 'string' && /(?:opencode-task-supervisor|OpenCodeTaskSupervisor)(?:[\/\\@#.-]|$)/i.test(value);
 
 /** Edit only the plugin declaration; permission rules and unrelated text stay intact. */
@@ -21,7 +22,7 @@ export function mergeSupervisorConfig(source: string): string {
     if (!options || typeof options !== 'object' || Array.isArray(options)) throw new Error('Invalid Supervisor plugin options.');
     if (options.readonlyLab || options.managedLab) throw new Error('Laboratory Supervisor configuration cannot be enabled as normal GUI mode.');
     const sourceUrl = Array.isArray(prior) ? prior[0] : prior;
-    const entry = [sourceUrl === previousSupervisorRelease ? supervisorRelease : sourceUrl ?? supervisorRelease,
+    const entry = [previousSupervisorReleases.includes(sourceUrl) ? supervisorRelease : sourceUrl ?? supervisorRelease,
         { ...options, allowDispatch: options.allowDispatch ?? true, allowNotifications: options.allowNotifications ?? false, normalGui: { enabled: true } }];
     if (JSON.stringify(prior) === JSON.stringify(entry)) return source;
     const target = config.plugin === undefined ? ['plugin'] : ['plugin', index];

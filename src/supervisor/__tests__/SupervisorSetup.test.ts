@@ -38,14 +38,14 @@ test('release failure never writes configuration; successful setup is backed up 
 });
 
 
-test('upgrades only the known official old asset and preserves custom sources/options', () => {
-    const old = supervisorRelease.split('0.1.1').join('0.1.0');
+test.each(['0.1.0', '0.1.1'])('upgrades only the known official old asset and preserves custom sources/options (%s)', version => {
+    const old = supervisorRelease.split('0.1.2').join(version);
     for (const entry of [old, [old, { allowDispatch: false, allowNotifications: true }]]) {
         const result = parse(mergeSupervisorConfig(JSON.stringify({ plugin: [entry] })));
         expect(result.plugin[0][0]).toBe(supervisorRelease);
         if (Array.isArray(entry)) expect(result.plugin[0][1]).toMatchObject({ allowDispatch: false, allowNotifications: true });
     }
-    for (const url of ['file:///opt/opencode-task-supervisor/dist/plugin.js', supervisorRelease.split('0.1.1').join('0.2.0')]) {
+    for (const url of ['file:///opt/opencode-task-supervisor/dist/plugin.js', supervisorRelease.split('0.1.2').join('0.2.0')]) {
         expect(parse(mergeSupervisorConfig(JSON.stringify({ plugin: [url] }))).plugin[0][0]).toBe(url);
     }
 });
