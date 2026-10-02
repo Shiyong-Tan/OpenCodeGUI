@@ -114,14 +114,14 @@ describe('compaction-only turn closure', () => {
     });
     test('manual compaction validates the recorded provider result', async () => {
         const { client } = clientHarness();
-        client.ensureServer = jest.fn();
+        client.ensureServer = jest.fn(); client.repairFailedCompaction = jest.fn();
         client.requestJson.mockResolvedValueOnce([]).mockResolvedValueOnce(true)
             .mockResolvedValueOnce([{ info: { ...summary.info, error: { name: 'APIError' } } }]);
         await expect(client.summarizeSession('A', { providerID: 'free', modelID: 'free' })).rejects.toThrow('provider failed');
     });
     test('chat surfaces the verified error instead of reporting a successful answer', async () => {
         const { client, state } = clientHarness();
-        client.ensureServer = jest.fn(); client.parseModelRef = jest.fn();
+        client.ensureServer = jest.fn(); client.parseModelRef = jest.fn(); client.repairFailedCompaction = jest.fn();
         client.expectedMainAgentBySession = new Map(); client.eventListeners = new Set();
         client.waitForTurnCompletionFinal = jest.fn(async () => { state.terminalError = COMPACTION_ONLY_STOP; });
         await expect(client.chat('question', { sessionId: 'A' }, jest.fn())).rejects.toThrow(COMPACTION_ONLY_STOP);

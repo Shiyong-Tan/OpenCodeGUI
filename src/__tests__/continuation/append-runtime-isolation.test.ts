@@ -997,7 +997,7 @@ describe('append runtime isolation', () => {
         const serverRootId = 'msg_e9389bfa4001ZknKQ7VC1euYup';
         const client = createClientWithResolvedLocalRootAlias(sessionId, localRootKey, serverRootId);
         client.ensureServer = jest.fn().mockResolvedValue(undefined);
-        client.requestJson = jest.fn().mockResolvedValue(undefined);
+        client.requestJson = jest.fn(async (method: string) => method === 'GET' ? [] : undefined);
 
         expect(client.displayTurnUserMsgIdBySession.has(sessionId)).toBe(false);
         expect(client.beginAppendPrompt(sessionId, 'append-client-1', 'follow-up text', serverRootId)).toEqual(expect.objectContaining({

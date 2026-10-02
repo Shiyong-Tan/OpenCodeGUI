@@ -17,9 +17,12 @@ import { createSessionComposerStore } from '../session-runtime/session-composer-
 import { createQuestionReview } from '../questions/question-review';
 import { createPermissionReview } from '../permissions/permission-review';
 
+import { isEmptyFailedPlaceholder } from './failed-placeholder';
+
 export const CONTINUATION_FACADE_VERSION = 1 as const;
 
 const facade = Object.freeze({
+  isEmptyFailedPlaceholder,
   version: CONTINUATION_FACADE_VERSION,
   createAppendSnapshotController,
   createSessionState,

@@ -130,6 +130,15 @@ describe('TurnCommandController runtime protocol', () => {
         }
     });
 
+    test('error output has one prefix and carries the owning placeholder identity', async () => {
+        const h = sendHarness();
+        h.host.client.chat.mockRejectedValue(new Error('Compaction stopped'));
+        h.host.client.getTurnAssistantMsgId.mockReturnValue(undefined);
+        await h.handler(send, h.activeWebview, h.activeWebview);
+        expect(h.posts).toContainEqual({ type: 'addResponse', value: 'Error: Compaction stopped', sessionId: 'session-A', skipSnapshot: true });
+        expect(h.posts).toContainEqual(expect.objectContaining({ type: 'chatDone', sessionId: 'session-A', failedTmpKey: 'tmp:A', skipSnapshot: true }));
+    });
+
     test.each([false, true])('quota failure does not become a chat error (synchronous=%s)', async (synchronous) => {
         const h = sendHarness();
         if (synchronous) h.host.postModelQuota.mockImplementation(() => { throw new Error('quota unavailable'); });

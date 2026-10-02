@@ -471,8 +471,9 @@ ${attachmentLines.join('\n')}`
                     host.log(`[EXT][TURN_BIND] phase=error reqId=${reqId} payloadSessionId=${payloadSessionId || 'none'} currentSessionId=${currentSessionIdAtSend || 'none'} targetSessionId=${sessionId || 'none'} routeSource=${routeSource} clientMessageId=${turnClientMessageId || 'none'} tmpAssistantKey=${turnTmpAssistantKey || 'none'}`);
                     host.log(`EXT: send.abort | reqId=${reqId} | reason=${String(error)}`);
                     host.logBridge(`[BRIDGE] Error: ${error}`);
-                    vscode.window.showErrorMessage(`OpenCode Error: ${error}`);
-                    activeWebview.postMessage({ type: 'addResponse', value: `Error: ${error}`, sessionId, skipSnapshot: true });
+                    const errorText = error instanceof Error ? error.message : String(error);
+                    vscode.window.showErrorMessage(`OpenCode Error: ${errorText}`);
+                    activeWebview.postMessage({ type: 'addResponse', value: `Error: ${errorText}`, sessionId, skipSnapshot: true });
                     const doneAssistantMsgId = sessionId
                         ? host.client.getTurnAssistantMsgId(sessionId)
                         : undefined;
@@ -480,7 +481,9 @@ ${attachmentLines.join('\n')}`
                         type: 'chatDone',
                         sessionId,
                         assistantMsgId: doneAssistantMsgId,
-                        lastAssistantMsgId: doneAssistantMsgId
+                        lastAssistantMsgId: doneAssistantMsgId,
+                        failedTmpKey: turnTmpAssistantKey,
+                        skipSnapshot: true,
                     });
                     host.emitTurnFinalizePhase(activeWebview, sessionId, 'stream_done');
                     if (sessionId) {

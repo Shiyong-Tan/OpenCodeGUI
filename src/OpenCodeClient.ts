@@ -1,3 +1,4 @@
+import { repairFailedManualCompaction } from './continuation/ManualCompaction';
 import { SupervisorActivationPending } from './supervisor/ActivationPending';
 import { activateSupervisorService } from './supervisor/activate-service';
 import { fillSupervisorTitles } from './supervisor/SupervisorTitles';
@@ -6582,10 +6583,9 @@ export class OpenCodeClient {
             throw new Error('Missing session ID for chat request.');
         }
         const listener = onEvent ? (event: ChatEvent) => onEvent(event) : undefined;
-        if (listener) {
-            this.eventListeners.add(listener);
-        }
 
+        if (this.manualCompactions?.has(sessionId)) throw new Error('Compaction is still running. Wait for it to finish before sending.');
+        await this.repairFailedCompaction(sessionId);
         const payload: any = {
             parts: [{ type: 'text', text: message }]
         };
@@ -6609,18 +6609,16 @@ export class OpenCodeClient {
         }
 
         const turn = this.turnStateBySession.get(sessionId);
-        await this.requestJson('POST', `/session/${sessionId}/prompt_async`, payload);
-        await this.waitForTurnCompletionFinal(sessionId);
-        if (turn?.terminalError) {
-            if (listener) this.eventListeners.delete(listener);
-            throw new Error(turn.terminalError);
-        }
-        if (listener) {
-            const resolvedAssistant = this.getTurnAssistantMsgId(sessionId);
-            if (!resolvedAssistant) {
+        if (listener) this.eventListeners.add(listener);
+        try {
+            await this.requestJson('POST', `/session/${sessionId}/prompt_async`, payload);
+            await this.waitForTurnCompletionFinal(sessionId);
+            if (turn?.terminalError) throw new Error(turn.terminalError);
+            if (listener && !this.getTurnAssistantMsgId(sessionId)) {
                 await new Promise((resolve) => setTimeout(resolve, 1000));
             }
-            this.eventListeners.delete(listener);
+        } finally {
+            if (listener) this.eventListeners.delete(listener);
         }
     }
 
@@ -6646,6 +6644,12 @@ export class OpenCodeClient {
             if (!pending) {
                 throw new Error('This append request is no longer pending.');
             }
+        }
+        if (this.manualCompactions?.has(sessionId)) throw new Error('Compaction is still running. Wait for it to finish before sending.');
+        await this.repairFailedCompaction(sessionId);
+        if (!this.canAppendToCurrentTurn(sessionId, rootUserMsgId)
+            || (clientMessageId && !this.appendTurnStateBySession.get(sessionId)?.pending.some(item => item.clientMessageId === clientMessageId && !item.serverMsgId))) {
+            throw new Error('This append request is no longer pending.');
         }
         const payload: any = {
             parts: [{ type: 'text', text: message }]
@@ -7142,21 +7146,44 @@ export class OpenCodeClient {
         return Array.isArray(messages) ? messages : [];
     }
 
+    private manualCompactions = new Map<string, Promise<boolean>>();
+
+    private async repairFailedCompaction(sessionId: string): Promise<void> {
+        const workspace = this.workspaceRoot;
+        const turn = this.turnStateBySession.get(sessionId);
+        const repaired = await repairFailedManualCompaction(sessionId, async (method, path, body) => {
+            if (workspace !== this.workspaceRoot || turn !== this.turnStateBySession.get(sessionId)) throw new Error('Session changed during compaction cleanup. Retry.');
+            return this.requestJson(method, path, body);
+        });
+        if (workspace !== this.workspaceRoot || turn !== this.turnStateBySession.get(sessionId)) throw new Error('Session changed during compaction cleanup. Retry.');
+        if (repaired) this.logUiDebug(`EXT: compaction.failed-control.removed | sessionId=${sessionId}`);
+    }
+
     public async summarizeSession(
         sessionId: string,
         options: { providerID: string; modelID: string; auto?: boolean }
     ): Promise<boolean> {
-        await this.ensureServer();
-        const before = await this.requestJson<unknown>('GET', `/session/${sessionId}/message?limit=20`);
-        const payload = {
-            providerID: options.providerID,
-            modelID: options.modelID,
-            auto: options.auto === true
-        };
-        const result = await this.requestJson<any>('POST', `/session/${sessionId}/summarize`, payload);
-        const after = await this.requestJson<unknown>('GET', `/session/${sessionId}/message?limit=20`);
-        verifyCompactionResult(before, after);
-        return Boolean(result);
+        this.manualCompactions ??= new Map();
+        if (this.manualCompactions.has(sessionId)) throw new Error('Compaction is already running for this session.');
+        const operation = (async () => {
+            await this.ensureServer();
+            await this.repairFailedCompaction(sessionId);
+            const before = await this.requestJson<unknown>('GET', `/session/${sessionId}/message?limit=20`);
+            try {
+                const result = await this.requestJson<unknown>('POST', `/session/${sessionId}/summarize`, {
+                    providerID: options.providerID, modelID: options.modelID, auto: options.auto === true,
+                });
+                const after = await this.requestJson<unknown>('GET', `/session/${sessionId}/message?limit=20`);
+                verifyCompactionResult(before, after);
+                return Boolean(result);
+            } catch (error) {
+                await this.repairFailedCompaction(sessionId);
+                throw error;
+            }
+        })();
+        this.manualCompactions.set(sessionId, operation);
+        try { return await operation; }
+        finally { this.manualCompactions.delete(sessionId); }
     }
 
     public async fetchSessionUsage(sessionId: string): Promise<{ used: number; size: number; amount: number } | null> {

@@ -14042,6 +14042,12 @@ function handleChatDone(sessionId, message) {
         const skipSnapshot = message?.skipSnapshot === true;
         const preDoneAssistantKey = session.currentTurnAssistantKey || session.thinkingId || null;
         const preDoneAssistant = preDoneAssistantKey ? session.messagesById.get(preDoneAssistantKey) : null;
+        if (message?.skipSnapshot === true && window.__ocContinuation.isEmptyFailedPlaceholder(
+            preDoneAssistant, preDoneAssistantKey, message.failedTmpKey,
+            message.lastAssistantMsgId || message.assistantMsgId || message.endMsgId || message.endMessageId
+        )) {
+            removeMessageFromSession(session, preDoneAssistantKey);
+        }
         const finalizingAppendSuccessor = Boolean(
             followup?.kind === 'append-followup'
             && followup.mode === 'same-turn-handoff'
