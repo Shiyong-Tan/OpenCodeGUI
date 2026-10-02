@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## Unreleased (planned 5.1.0)
+## 5.1.0 - 2026-10-02
 
 - Clean verified failed manual-compaction controls before they consume the next ordinary question. Preserve user content and failure records, check idle/session identity, and never retry model calls automatically.
 - Remove only the owning empty temporary reply on send failure and avoid duplicate error prefixes.
