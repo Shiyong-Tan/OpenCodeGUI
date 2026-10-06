@@ -33,6 +33,7 @@ export class SupervisorCards {
     private readonly notice: HTMLElement;
     private readonly empty: HTMLElement;
     private historyKey = '';
+    private readonly receivedAt = new WeakMap<SupervisorView, number>();
     constructor(private readonly document: Document, body: HTMLElement) {
         this.notice = this.node('p', 'sv-notice'); this.current = this.node('div', 'sv-tasks');
         this.empty = this.node('p', 'sv-empty', 'No active tasks in this session');
@@ -49,7 +50,10 @@ export class SupervisorCards {
         this.notice.textContent = 'Waiting for session observations'; this.empty.hidden = true;
     }
     render(view: SupervisorView | undefined, previous: SupervisorView | undefined, stale: boolean, hint = ''): void {
-        this.notice.textContent = hint || (stale ? 'Observation unavailable; current state unknown' : 'Live observations · Read-only');
+        if (view && !this.receivedAt.has(view)) this.receivedAt.set(view, Date.now());
+        const lag = view ? Math.max(0, Date.now() - this.receivedAt.get(view)!) : 0;
+        const age = (ms: number | null) => elapsed(ms === null ? null : ms + lag);
+        this.notice.textContent = hint || (stale ? 'Observation unavailable; current state unknown. The main agent may also be unreachable. Inspect the OpenCode service before restarting or replacing work.' : 'Live observations · Read-only');
         const visible = view ? visibleSupervisorTasks(view) : [];
         this.empty.hidden = !view || visible.length > 0;
         const retained = new Set<string>();
@@ -68,7 +72,7 @@ export class SupervisorCards {
             const status = taskStatus(task, stale);
             card.name.textContent = taskName(task); card.badge.textContent = status.label;
             card.badge.setAttribute('data-tone', status.tone);
-            card.activity.textContent = `${stale ? 'Last known activity' : 'Activity'} ${elapsed(task.lastProgressAgeMs)} · Observed ${elapsed(task.lastObservationAgeMs)}`;
+            card.activity.textContent = `${stale ? 'Last known activity' : 'Activity'} ${age(task.lastProgressAgeMs)} · Observed ${age(task.lastObservationAgeMs)}`;
             card.evidence.textContent = supervisorLines({ ...view!, tasks: [task] }, stale).join('\n');
             card.processes.render(view!.executions.filter(e => e.taskId === task.taskId && e.attemptId === task.attemptId && e.childSessionId === task.childSessionId), stale);
         }

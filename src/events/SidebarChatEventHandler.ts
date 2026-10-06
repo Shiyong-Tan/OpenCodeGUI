@@ -44,6 +44,13 @@ export async function handleSidebarChatEvent(
         if (host.smartSearchSessions.owns(event.sessionId)) {
             return;
         }
+        if ((event.type === 'serviceUnavailable' || event.type === 'serviceRecovered') && event.sessionId) {
+            const liveWebview = host._view?.webview || webview;
+            liveWebview.postMessage({ type: 'systemNotice', sessionId: event.sessionId,
+                level: event.type === 'serviceUnavailable' ? 'warn' : 'info', message: event.text });
+            return;
+        }
+
         if (event.type === 'questionOverlay' && event.sessionId && event.callId) {
             const liveWebview = host._view?.webview || webview;
             liveWebview.postMessage({

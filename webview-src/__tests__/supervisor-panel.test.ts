@@ -30,6 +30,28 @@ class Element {
     replaceChildren() { this.children.length = 0; }
 }
 
+test('historical ages advance through outages without treating failed polls as new observations', () => {
+    jest.useFakeTimers();
+    try {
+        const body = new Element();
+        let receive!: (message: unknown) => void;
+        const doc = { body, createElement: () => new Element(), querySelector: () => null } as unknown as Document;
+        mountSupervisorPanel(doc, callback => { receive = callback; });
+        receive({ type: 'supervisorSelection', sessionId: 'ses_A' });
+        const view = snapshot();
+        view.tasks[0].lastObservationAgeMs = 0;
+        view.tasks[0].lastProgressAgeMs = 0;
+        receive({ type: 'supervisorState', sessionId: 'ses_A', status: 'observed', view });
+        jest.advanceTimersByTime(6 * 60000);
+        receive({ type: 'supervisorState', sessionId: 'ses_A', status: 'unavailable' });
+        expect(body.textContent).toContain('Last known activity 6m ago');
+        expect(body.textContent).toContain('Observed 6m ago');
+        expect(body.textContent).toContain('main agent may also be unreachable');
+        receive({ type: 'supervisorState', sessionId: 'ses_A', status: 'unavailable' });
+        expect(body.textContent).toContain('Observed 6m ago');
+    } finally { jest.useRealTimers(); }
+});
+
 test('supervisor docks directly above the composer without moving chat or input nodes', () => {
     const body = new Element(), chat = new Element(), composer = new Element();
     body.append(chat, composer);

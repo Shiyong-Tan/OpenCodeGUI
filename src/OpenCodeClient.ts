@@ -242,7 +242,7 @@ export type CommitPendingTurnChangesOptions = {
 };
 
 export type ChatEvent = {
-    type: 'text' | 'session' | 'raw' | 'permission' | 'diff' | 'message' | 'appendUserMessage' | 'error' | 'tool' | 'toolPatch' | 'files' | 'assistantMessageMeta' | 'assistantPhase' | 'questionOverlay' | 'questionChanged' | 'permissionRequest' | 'permissionReplied' | 'autoResumeStallWarn' | 'autoResumeStallClear' | 'autoResumeHardStop' | 'todoUpdate' | 'sessionUsage' | 'turnInFlight' | 'turnResolved' | 'backgroundActivityPulse';
+    type: 'text' | 'session' | 'raw' | 'permission' | 'diff' | 'message' | 'appendUserMessage' | 'error' | 'tool' | 'toolPatch' | 'files' | 'assistantMessageMeta' | 'assistantPhase' | 'questionOverlay' | 'questionChanged' | 'permissionRequest' | 'permissionReplied' | 'autoResumeStallWarn' | 'autoResumeStallClear' | 'autoResumeHardStop' | 'todoUpdate' | 'sessionUsage' | 'turnInFlight' | 'turnResolved' | 'backgroundActivityPulse' | 'serviceUnavailable' | 'serviceRecovered';
     text?: string;
     sessionId?: string;
     parentSessionId?: string;
@@ -1023,6 +1023,7 @@ export class OpenCodeClient {
             onPayload: (payload) => this.handleServerEvent(payload),
             onOpen: () => {
                 this.updateServerStatus('connected', 'event-stream-open');
+                this.reportServiceRecovery();
             },
             onClosed: () => {
                 this.logUiDebug('EXT: event.closed');
@@ -5207,24 +5208,58 @@ export class OpenCodeClient {
         this.eventStream.connect();
     }
 
+    private serviceOutageBySession = new Map<string, TurnState | undefined>();
+
+    private reportServiceOutage(owners: Map<string, TurnState | undefined>): boolean {
+        this.serviceOutageBySession ??= new Map();
+        for (const [sessionId, state] of owners) {
+            if (!this.turnFinalWaitersBySession.has(sessionId) || this.turnStateBySession.get(sessionId) !== state) continue;
+            if (this.serviceOutageBySession.has(sessionId) && this.serviceOutageBySession.get(sessionId) === state) continue;
+            this.serviceOutageBySession.set(sessionId, state);
+            this.emitChatEvents([{ type: 'serviceUnavailable', sessionId,
+                text: 'OpenCode service is unreachable. The main agent and Supervisor cannot respond; child tasks and processes have unknown status. Automatic restart and overlapping replacement are paused. Inspect service logs and existing processes before explicitly restarting OpenCode.' }]);
+            this.logUiDebug(`EXT: service.outage.notice | sessionId=${sessionId} | execution=unknown`);
+        }
+        return this.turnFinalWaitersBySession.size > 0;
+    }
+
+    private reportServiceRecovery(): void {
+        for (const [sessionId, state] of this.serviceOutageBySession ?? []) {
+            if (this.turnStateBySession.get(sessionId) !== state || !this.turnFinalWaitersBySession.has(sessionId)) continue;
+            this.emitChatEvents([{ type: 'serviceRecovered', sessionId,
+                text: 'OpenCode connection restored. Task results and process status still require fresh verification.' }]);
+        }
+        this.serviceOutageBySession?.clear();
+    }
+
     private async handleEventStreamFailure(): Promise<void> {
         if (this.eventStreamFailureInFlight) return;
         this.eventStreamFailureInFlight = true;
+        const workspace = this.workspaceRoot;
+        const owners = new Map([...this.turnFinalWaitersBySession.keys()].map(id => [id, this.turnStateBySession.get(id)]));
         try {
             const conn = await this.getServerConn(true);
             const health = await this.checkServerHealth(conn.lock.port, conn.lock.password, 1000);
+            if (workspace !== this.workspaceRoot) return;
             this.logUiDebug(`EXT: event.fail.health | result=${health}`);
             if (health === 'ok') {
+                this.reportServiceRecovery();
                 if (this.currentSessionId) {
                     this.scheduleSessionResyncLimited(this.currentSessionId, 'event-stream-fail');
                 }
                 return;
             }
+            if (this.reportServiceOutage(owners)) {
+                this.updateServerStatus('error', 'service-unreachable-active-turn');
+                return;
+            }
             this.triggerImmediateResyncForAwaitingFinals('event-stream-reconnect-fail');
             await this.restartServerFromEventFailure(`health=${health}`);
         } catch (error) {
+            if (workspace !== this.workspaceRoot) return;
             this.logUiDebug(`EXT: event.fail.handler | err=${String(error)}`);
             this.updateServerStatus('error', 'event-stream-fail');
+            if (this.reportServiceOutage(owners)) return;
             this.triggerImmediateResyncForAwaitingFinals('event-stream-reconnect-fail');
         } finally {
             this.eventStreamFailureInFlight = false;
