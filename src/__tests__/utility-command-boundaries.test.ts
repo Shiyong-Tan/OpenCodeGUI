@@ -43,6 +43,8 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { resolveSidebarWebviewView } from '../webview/SidebarWebviewController';
 import { createUtilityCommandHandler } from '../webview/controllers/UtilityCommandController';
+jest.mock('../webview/HtmlPreview', () => ({ openHtmlPreview: jest.fn() }));
+import { openHtmlPreview } from '../webview/HtmlPreview';
 
 const controllerSource = fs.readFileSync(
     path.join(process.cwd(), 'src', 'webview', 'SidebarWebviewController.ts'),
@@ -620,4 +622,18 @@ describe('utility command family characterization', () => {
             'EXT: localQuestionResult.skip | callId=call-1 | reason=missing-pending',
         );
     });
+});
+
+test('routes HTML message links to preview and rejects paths outside the workspace', async () => {
+    const os = require('os') as typeof import('os');
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'opencode-html-route-'));
+    try {
+        const file = path.join(tempRoot, 'Report.HTM'); fs.writeFileSync(file, '<h1>Report</h1>');
+        (openHtmlPreview as jest.Mock).mockClear();
+        const harness = createHarness({ getWorkspaceRootPath: jest.fn(() => tempRoot) });
+        await harness.send({ type: 'openFileAtLocation', path: 'Report.HTM' });
+        expect(openHtmlPreview).toHaveBeenCalledWith(file, tempRoot);
+        await harness.send({ type: 'openFileAtLocation', path: '../outside.html' });
+        expect(openHtmlPreview).toHaveBeenCalledTimes(1);
+    } finally { fs.rmSync(tempRoot, { recursive: true, force: true }); }
 });

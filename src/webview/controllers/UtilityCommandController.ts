@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as pathModule from 'path';
 import * as vscode from 'vscode';
+import { openHtmlPreview } from '../HtmlPreview';
 import type { SmartSearchMessage } from '../../search/SmartSearchService';
 import type { AutomaticEditorContext } from '../../context/EditorContextService';
 import { readImageDimensions } from '../../images/ImageDimensions';
@@ -696,6 +697,11 @@ export class UtilityCommandController {
                 return;
             }
             const extension = pathModule.extname(absPath).toLowerCase();
+            if (extension === '.html' || extension === '.htm') {
+                await openHtmlPreview(absPath, normalizedRoot);
+                this.host.log(`EXT: openFileAtLocation | path=${rawPath} | opened=html-preview`);
+                return;
+            }
             if (extension === '.pdf') {
                 const pdfUri = vscode.Uri.file(absPath);
                 try {

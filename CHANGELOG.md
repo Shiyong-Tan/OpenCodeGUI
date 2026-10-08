@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## 5.1.0 - 2026-10-02
 
+- Open local HTML message links in an isolated preview with relative assets and an Open source action.
+
 - On an explicit unavailable compaction model, refresh the model catalog and try at most two other free models after verified cleanup; never fall back to a paid model or retry uncertain failures.
 
 - Replace native hover hints with themed translucent cards, wrapped text, keyboard focus support and viewport-aware placement; match quota hints to the same appearance.
