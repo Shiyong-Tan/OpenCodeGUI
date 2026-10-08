@@ -31,6 +31,7 @@ import { createChangeListEventController } from './change-list/change-list-event
 import { planChangeListMaterialization } from './change-list/change-list-planner';
 import { createVirtualMeasurementCache } from './virtual-measurement-cache';
 import { createAssistantImageController } from './images/assistant-image-controller';
+import { installHoverTooltips } from './hover-tooltip';
 
 export const FEATURE_FACADE_VERSION = 1 as const;
 
@@ -91,3 +92,8 @@ declare global {
 }
 
 window.__ocFeatures = facade;
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', () => installHoverTooltips(document, window), { once: true });
+} else {
+  installHoverTooltips(document, window);
+}

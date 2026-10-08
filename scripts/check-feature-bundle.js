@@ -10,7 +10,8 @@ if (!fs.existsSync(file)) throw new Error('Build media/features.bundle.js first'
 const text = fs.readFileSync(file, 'utf8');
 const minifiedBytes = Buffer.byteLength(text);
 const gzipBytes = zlib.gzipSync(text).length;
-const limits = { minified: 53248, gzip: 18000 };
+// Shared native-title presentation adds ~2 KiB; retain a bounded feature budget.
+const limits = { minified: 55296, gzip: 18500 };
 if (!text.includes('__ocFeatures')) throw new Error('Versioned feature facade is missing');
 if (minifiedBytes > limits.minified || gzipBytes > limits.gzip) {
   throw new Error(`Feature bundle exceeds size limit: ${JSON.stringify({ minifiedBytes, gzipBytes, limits })}`);

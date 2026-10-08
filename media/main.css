@@ -2246,17 +2246,41 @@ button.send-btn.has-quota svg {
     background: var(--vscode-button-secondaryHoverBackground);
 }
 
+.oc-hover-tooltip,
+.quota-tooltip {
+    background: var(--vscode-editorHoverWidget-background, #25272b);
+    background: color-mix(in srgb, var(--vscode-editorHoverWidget-background, #25272b) 88%, transparent);
+    color: var(--vscode-editorHoverWidget-foreground, var(--vscode-foreground));
+    border: 1px solid color-mix(in srgb, var(--vscode-focusBorder, #529de0) 28%, transparent);
+    border-radius: 10px;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.22);
+    backdrop-filter: blur(14px);
+}
+
+.oc-hover-tooltip {
+    position: fixed;
+    z-index: 10000;
+    pointer-events: none;
+    box-sizing: border-box;
+    width: max-content;
+    max-width: min(340px, calc(100vw - 16px));
+    max-height: calc(100vh - 16px);
+    overflow: hidden;
+    padding: 8px 12px;
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.oc-hover-tooltip[hidden] { display: none; }
+
 .quota-tooltip {
     position: fixed;
-    background: linear-gradient(180deg, #2d2f33 0%, #25272b 100%);
-    color: #e6e6e6;
-    border-radius: 8px;
     padding: 10px 14px;
     font-size: 0.87em;
-    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
     z-index: 999;
     min-width: 196px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .quota-tooltip.hidden {

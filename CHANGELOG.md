@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## 5.1.0 - 2026-10-02
 
+- Replace native hover hints with themed translucent cards, wrapped text, keyboard focus support and viewport-aware placement; match quota hints to the same appearance.
+
 - Report service outages to each waiting session without declaring task completion or automatically restarting an active service. Keep historical Supervisor observation/activity ages advancing during disconnection.
 
 - Clean verified failed manual-compaction controls before they consume the next ordinary question. Preserve user content and failure records, check idle/session identity, and never retry model calls automatically.
