@@ -28,7 +28,7 @@ import {
     parseCopilotMultiplierHtml
 } from './copilotSpeedMapping';
 import { ModelQuotaService } from './models/ModelQuotaService';
-import { findCompactionOnlyStop, verifyCompactionResult } from './continuation/CompactionOutcome';
+import { CompactionProviderError, findCompactionOnlyStop, verifyCompactionResult } from './continuation/CompactionOutcome';
 import type { ModelInfo, ModelQuota } from './models/types';
 import { OpenCodeCommandResolver } from './transport/OpenCodeCommandResolver';
 import { OpenCodeProcessRunner } from './transport/OpenCodeProcessRunner';
@@ -7196,25 +7196,54 @@ export class OpenCodeClient {
 
     public async summarizeSession(
         sessionId: string,
-        options: { providerID: string; modelID: string; auto?: boolean }
+        options: { providerID: string; modelID: string; auto?: boolean; allowFreeFallback?: boolean }
     ): Promise<boolean> {
         this.manualCompactions ??= new Map();
         if (this.manualCompactions.has(sessionId)) throw new Error('Compaction is already running for this session.');
         const operation = (async () => {
+            const workspace = this.workspaceRoot;
+            const turn = this.turnStateBySession.get(sessionId);
+            const checkOwner = () => {
+                if (workspace !== this.workspaceRoot || turn !== this.turnStateBySession.get(sessionId)) throw new Error('Session changed during compaction. Retry.');
+            };
             await this.ensureServer();
+            checkOwner();
             await this.repairFailedCompaction(sessionId);
-            const before = await this.requestJson<unknown>('GET', `/session/${sessionId}/message?limit=20`);
-            try {
-                const result = await this.requestJson<unknown>('POST', `/session/${sessionId}/summarize`, {
-                    providerID: options.providerID, modelID: options.modelID, auto: options.auto === true,
-                });
-                const after = await this.requestJson<unknown>('GET', `/session/${sessionId}/message?limit=20`);
-                verifyCompactionResult(before, after);
-                return Boolean(result);
-            } catch (error) {
-                await this.repairFailedCompaction(sessionId);
-                throw error;
+            let selected = options;
+            const attempted = new Set<string>();
+            for (let attempt = 0; attempt < 3; attempt++) {
+                checkOwner();
+                attempted.add(`${selected.providerID}/${selected.modelID}`);
+                const before = await this.requestJson<unknown>('GET', `/session/${sessionId}/message?limit=20`);
+                checkOwner();
+                try {
+                    const result = await this.requestJson<unknown>('POST', `/session/${sessionId}/summarize`, {
+                        providerID: selected.providerID, modelID: selected.modelID, auto: options.auto === true,
+                    });
+                    checkOwner();
+                    const after = await this.requestJson<unknown>('GET', `/session/${sessionId}/message?limit=20`);
+                    checkOwner();
+                    verifyCompactionResult(before, after);
+                    return Boolean(result);
+                } catch (error) {
+                    checkOwner();
+                    await this.repairFailedCompaction(sessionId);
+                    checkOwner();
+                    if (options.allowFreeFallback && error instanceof CompactionProviderError && error.unavailable) {
+                        if (attempt === 2) throw new Error('Compaction failed: tried three models; no available free compaction model was found.');
+                        const models = await this.listModels();
+                        checkOwner();
+                        const next = this.pickFreeModel(models.filter(model => !attempted.has(model.fullId)));
+                        const ref = next && this.parseModelRef(next.fullId);
+                        if (!ref) throw new Error('Compaction failed: no alternative free model is available.');
+                        selected = ref;
+                        this.logUiDebug(`EXT: compaction.free-fallback | sessionId=${sessionId} | attempt=${attempt + 2} | model=${next.fullId}`);
+                        continue;
+                    }
+                    throw error;
+                }
             }
+            throw new Error('Compaction failed: retry limit reached.');
         })();
         this.manualCompactions.set(sessionId, operation);
         try { return await operation; }

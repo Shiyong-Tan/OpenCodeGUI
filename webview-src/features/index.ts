@@ -92,8 +92,8 @@ declare global {
 }
 
 window.__ocFeatures = facade;
-if (document.readyState === 'loading') {
+if (typeof document !== 'undefined' && document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', () => installHoverTooltips(document, window), { once: true });
-} else {
+} else if (typeof document !== 'undefined') {
   installHoverTooltips(document, window);
 }

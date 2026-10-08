@@ -29,12 +29,23 @@ export function findCompactionOnlyStop(messages: unknown, userMessageId: string)
 }
 
 /** The summarize endpoint can return success even when the provider stored an error message. */
+export class CompactionProviderError extends Error {
+    readonly unavailable: boolean;
+    constructor(info: RecordValue) {
+        const data = record(record(info.error).data);
+        const message = typeof data.message === 'string' ? data.message : '';
+        const unavailable = /\bmodel is unavailable\b/i.test(message);
+        super(unavailable ? 'The compaction model is unavailable.' : 'The model provider failed to complete compaction. Try again when the provider is available.');
+        this.unavailable = unavailable;
+    }
+}
+
 export function verifyCompactionResult(before: unknown, after: unknown): void {
     if (!Array.isArray(before) || !Array.isArray(after)) throw new Error('Compaction result could not be verified.');
     const previous = new Set(before.map(item => infoOf(item).id));
     const summaries = after.map(infoOf).filter(info => info.role === 'assistant' && isCompactionInfo(info) && !previous.has(info.id));
     const last = summaries[summaries.length - 1];
-    if (last?.error) throw new Error('The model provider failed to complete compaction. Try again when the provider is available.');
+    if (last?.error) throw new CompactionProviderError(last);
     if (!last || last.finish !== 'stop' || typeof record(last.time).completed !== 'number') {
         throw new Error('Compaction result could not be verified. No completed summary was observed.');
     }

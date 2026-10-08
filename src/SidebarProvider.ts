@@ -4819,7 +4819,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 this.selectedModel
             )?.fullId,
             parseModelRef: (fullId) => this.parseModelRef(fullId) || undefined,
-            summarizeSession: (sessionId, options) => this.client.summarizeSession(sessionId, options),
+            summarizeSession: (sessionId, options) => this.client.summarizeSession(sessionId, { ...options, allowFreeFallback: true }),
             fetchSessionUsage: (sessionId) => this.client.fetchSessionUsage(sessionId),
             postAddResponse: (webview, value, meta) => this.postAddResponse(webview, value, meta),
             refreshModels: (webview) => this.refreshModels(webview),

@@ -117,3 +117,60 @@ test('manual compaction is serialized per session and blocks a competing prompt 
     expect(client.eventListeners.size).toBe(0);
     expect(client.requestJson.mock.calls.filter(([, route]: string[]) => route.endsWith('/prompt_async'))).toHaveLength(0);
 });
+
+test('unavailable compaction refreshes models and retries only a different free model', async () => {
+    const client = harness(); client.parseModelRef.mockImplementation((fullId: string) => ({ providerID: fullId.split('/')[0], modelID: fullId.split('/')[1] }));
+    client.listModels = jest.fn().mockResolvedValue([
+        { fullId: 'opencode/first-free', providerId: 'opencode', id: 'first-free' },
+        { fullId: 'openai/paid', providerId: 'openai', id: 'paid' },
+        { fullId: 'opencode/second-free', providerId: 'opencode', id: 'second-free' },
+    ]);
+    client.repairFailedCompaction = jest.fn();
+    let attempt = 0;
+    client.requestJson.mockImplementation(async (method: string) => {
+        if (method === 'POST') { attempt++; return true; }
+        if (!attempt) return [];
+        return [{ info: { id: 'summary' + attempt, role: 'assistant', summary: true, finish: 'stop', time: { completed: 10 },
+            ...(attempt === 1 ? { error: { data: { message: 'Upstream request failed: Model is unavailable.' } } } : {}) } }];
+    });
+    await expect(client.summarizeSession('A', { providerID: 'opencode', modelID: 'first-free', allowFreeFallback: true })).resolves.toBe(true);
+    expect(client.requestJson.mock.calls.filter(([method]: string[]) => method === 'POST').map((call: unknown[]) => call[2])).toEqual([
+        { providerID: 'opencode', modelID: 'first-free', auto: false }, { providerID: 'opencode', modelID: 'second-free', auto: false },
+    ]);
+    expect(client.listModels).toHaveBeenCalledTimes(1);
+});
+
+test('unavailable compaction stops when refreshed catalog contains no other free model', async () => {
+    const client = harness(); client.repairFailedCompaction = jest.fn(); client.listModels = jest.fn().mockResolvedValue([{ fullId: 'openai/paid', providerId: 'openai' }]);
+    let posted = false;
+    client.requestJson.mockImplementation(async (method: string) => {
+        if (method === 'POST') { posted = true; return true; }
+        return posted ? [{ info: { id: 'failure', role: 'assistant', summary: true, error: { data: { message: 'Model is unavailable.' } } } }] : [];
+    });
+    await expect(client.summarizeSession('A', { providerID: 'opencode', modelID: 'first-free', allowFreeFallback: true })).rejects.toThrow('no alternative free model');
+    expect(client.requestJson.mock.calls.filter(([method]: string[]) => method === 'POST')).toHaveLength(1);
+});
+
+test('free compaction fallback is bounded to three distinct models', async () => {
+    const client = harness(); client.repairFailedCompaction = jest.fn();
+    client.parseModelRef.mockImplementation((fullId: string) => ({ providerID: 'opencode', modelID: fullId.split('/')[1] }));
+    client.listModels = jest.fn().mockResolvedValue([1, 2, 3, 4].map(n => ({ fullId: 'opencode/' + n + '-free', providerId: 'opencode', id: n + '-free' })));
+    let posted = 0;
+    client.requestJson.mockImplementation(async (method: string) => {
+        if (method === 'POST') { posted++; return true; }
+        return posted ? [{ info: { id: 'failure' + posted, role: 'assistant', summary: true, error: { data: { message: 'Model is unavailable.' } } } }] : [];
+    });
+    await expect(client.summarizeSession('A', { providerID: 'opencode', modelID: '1-free', allowFreeFallback: true })).rejects.toThrow('three models');
+    expect(posted).toBe(3);
+});
+
+test('failed cleanup blocks fallback, even for an unavailable model', async () => {
+    const client = harness(); client.repairFailedCompaction = jest.fn().mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('cleanup unverified'));
+    client.listModels = jest.fn(); let posted = false;
+    client.requestJson.mockImplementation(async (method: string) => {
+        if (method === 'POST') { posted = true; return true; }
+        return posted ? [{ info: { id: 'failure', role: 'assistant', summary: true, error: { data: { message: 'Model is unavailable.' } } } }] : [];
+    });
+    await expect(client.summarizeSession('A', { providerID: 'opencode', modelID: 'first-free', allowFreeFallback: true })).rejects.toThrow('cleanup unverified');
+    expect(client.listModels).not.toHaveBeenCalled();
+});
