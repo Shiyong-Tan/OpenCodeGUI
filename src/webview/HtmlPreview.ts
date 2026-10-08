@@ -4,23 +4,31 @@ import * as vscode from 'vscode';
 
 const attribute = (text: string) => text.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-/** Render local reports in an isolated document; source access stays bound to the original file. */
+/** Use the webview's resource loader directly, preserving report layout and relative assets. */
+export function renderHtmlPreview(content: string, file: string, webview: Pick<vscode.Webview, 'asWebviewUri'>): string {
+    const base = webview.asWebviewUri(vscode.Uri.file(path.dirname(file))).toString().replace(/\/$/, '') + '/';
+    const resources = content.replace(/\b(src|poster|href)\s*=\s*(["'])(.*?)\2/gi, (original, key: string, quote: string, value: string) => {
+        let uri: vscode.Uri;
+        if (/^file:/i.test(value)) uri = vscode.Uri.parse(value);
+        else if (path.isAbsolute(value) || /^[a-z]:[\\/]/i.test(value)) uri = vscode.Uri.file(value);
+        else return original;
+        return `${key}=${quote}${attribute(webview.asWebviewUri(uri).toString())}${quote}`;
+    });
+    const head = `<base href="${attribute(base)}">`;
+    let document = /<head\b[^>]*>/i.test(resources)
+        ? resources.replace(/<head\b[^>]*>/i, match => `${match}${head}`)
+        : `${head}${resources}`;
+    const action = `<button id="opencode-preview-source" style="position:fixed;bottom:12px;right:12px;z-index:2147483647;padding:7px 12px;border-radius:7px;border:1px solid var(--vscode-panel-border);color:var(--vscode-button-foreground);background:var(--vscode-button-background);cursor:pointer">Open source</button>
+        <script>(()=>{const api=acquireVsCodeApi();document.getElementById('opencode-preview-source').onclick=()=>api.postMessage({type:'openSource'});})();</script>`;
+    document = /<\/body\s*>/i.test(document) ? document.replace(/<\/body\s*>/i, `${action}</body>`) : document + action;
+    return document;
+}
+
 export async function openHtmlPreview(file: string, workspaceRoot: string): Promise<void> {
     const content = await fs.promises.readFile(file, 'utf8');
     const panel = vscode.window.createWebviewPanel('opencode.htmlPreview', `Preview: ${path.basename(file)}`,
         vscode.ViewColumn.Active, { enableScripts: true, localResourceRoots: [vscode.Uri.file(workspaceRoot)] });
-    const base = panel.webview.asWebviewUri(vscode.Uri.file(path.dirname(file))).toString().replace(/\/$/, '') + '/';
-    // srcdoc uses its own base so relative styles, images and scripts resolve beside the report.
-    const document = `<base href="${attribute(base)}">${content}`;
-    panel.webview.html = `<!doctype html><html><head><meta charset="utf-8"><style>
-        html,body{height:100%;margin:0;display:flex;flex-direction:column;background:var(--vscode-editor-background)}
-        header{padding:8px 12px;border-bottom:1px solid var(--vscode-panel-border)}
-        button{color:var(--vscode-button-foreground);background:var(--vscode-button-background);border:0;border-radius:5px;padding:5px 12px;cursor:pointer}
-        iframe{width:100%;flex:1;border:0;background:white}
-        </style></head><body><header><button id="source">Open source</button></header>
-        <iframe title="HTML preview" sandbox="allow-scripts" srcdoc="${attribute(document)}"></iframe>
-        <script>const api=acquireVsCodeApi();document.getElementById('source').onclick=()=>api.postMessage({type:'openSource'});</script>
-        </body></html>`;
+    panel.webview.html = renderHtmlPreview(content, file, panel.webview);
     const subscription = panel.webview.onDidReceiveMessage(async (message: unknown) => {
         if (message && typeof message === 'object' && (message as { type?: unknown }).type === 'openSource') {
             await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(vscode.Uri.file(file)), { preview: true });

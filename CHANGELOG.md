@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## 5.1.0 - 2026-10-02
 
+- Load HTML previews directly through the Webview resource loader and convert absolute media paths, avoiding nested sandbox resource failures.
+
 - Open local HTML message links in an isolated preview with relative assets and an Open source action.
 
 - On an explicit unavailable compaction model, refresh the model catalog and try at most two other free models after verified cleanup; never fall back to a paid model or retry uncertain failures.
