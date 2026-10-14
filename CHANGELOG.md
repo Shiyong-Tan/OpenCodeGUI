@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## 5.1.0 - 2026-10-02
 
+- Preserve command and temporary message ownership after a stall notice so a same-turn late final can bind and persist; newer sends and explicit cancellation still invalidate older results.
+
 - Load HTML previews directly through the Webview resource loader and convert absolute media paths, avoiding nested sandbox resource failures.
 
 - Open local HTML message links in an isolated preview with relative assets and an Open source action.

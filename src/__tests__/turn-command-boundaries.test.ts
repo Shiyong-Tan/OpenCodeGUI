@@ -184,7 +184,6 @@ describe('turn command family characterization', () => {
         const finishState = extractProviderMethod('private finishTurnCommandState(');
         expectOrder(finishState, [
             'this.pendingLocalKeyBySession.get(sessionId)',
-            '!this.sendInFlightBySession.has(sessionId)',
             'this.turnCommandOwnerBySession.get(sessionId) !== clientMessageId',
             'this.rawUserTextByLocalKey.delete(pendingLocalKey)',
             'this.sendInFlightBySession.delete(sessionId)',

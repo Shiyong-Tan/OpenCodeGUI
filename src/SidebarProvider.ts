@@ -1159,6 +1159,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private syncTurnInFlightAfterFinalize(sessionId: string | undefined, webview: vscode.Webview, reason: string): void {
         if (!sessionId) return;
         const before = this.getWebviewLivenessActiveTurnFlags(sessionId);
+        // A stall notice ends the busy presentation, not the owning backend request.
+        // Keep its command and temporary identities so a same-turn late final can bind.
+        if (reason === 'autoResumeHardStop') {
+            this.sendInFlightBySession.delete(sessionId);
+            webview.postMessage({ type: 'turnInFlight', sessionId, inFlight: false });
+            this.logWebviewAutoRescueActiveTurnCleanup('activeTurnCleanupSkipped', sessionId, before, 'awaiting-authoritative-final');
+            return;
+        }
         if (!before.active) {
             this.turnCommandOwnerBySession.delete(sessionId);
             this.logWebviewAutoRescueActiveTurnCleanup('activeTurnCleanupSkipped', sessionId, before, 'already-inactive');
@@ -4096,7 +4104,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     private isTurnCommandOwner(sessionId: string, clientMessageId: string): boolean {
         return Boolean(sessionId && clientMessageId)
-            && this.sendInFlightBySession.has(sessionId)
             && this.turnCommandOwnerBySession.get(sessionId) === clientMessageId;
     }
 
@@ -4282,7 +4289,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const pendingLocalKey = this.pendingLocalKeyBySession.get(sessionId);
         if (
             !clientMessageId
-            || !this.sendInFlightBySession.has(sessionId)
             || this.turnCommandOwnerBySession.get(sessionId) !== clientMessageId
         ) {
             return false;

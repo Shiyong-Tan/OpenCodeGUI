@@ -11,6 +11,7 @@ jest.mock('vscode', () => ({
 }), { virtual: true });
 
 import { createTurnCommandHandler } from '../webview/controllers/TurnCommandController';
+import { SidebarProvider } from '../SidebarProvider';
 
 function createHarness(overrides: Record<string, unknown> = {}) {
     const posts: any[] = [];
@@ -115,6 +116,28 @@ describe('TurnCommandController runtime protocol', () => {
         return harness;
     }
     const send = { type: 'sendMessage', sessionId: 'session-A', value: 'hello', clientMessageId: 'local-A', tmpKey: 'tmp:A', opId: 'op-A' };
+
+    test('late backend final after a stall notice still emits chatDone and writes the owning snapshot', async () => {
+        const h = sendHarness();
+        const prototype = SidebarProvider.prototype as any;
+        Object.assign(h.host, {
+            sendInFlightBySession: new Set(['session-A']),
+            turnCommandOwnerBySession: new Map([['session-A', 'local-A']]),
+            pendingAssistantMessageIdBySession: new Map([['session-A', 'msg_assistant_A']]),
+            pendingAssistantTmpKeyBySession: new Map([['session-A', 'tmp:A']]),
+            pendingLocalKeyBySession: new Map([['session-A', 'local-A']]),
+            getWebviewLivenessActiveTurnFlags: jest.fn(() => ({ active: true })),
+            logWebviewAutoRescueActiveTurnCleanup: jest.fn(),
+            isTurnCommandOwner: prototype.isTurnCommandOwner.bind(h.host),
+        });
+        h.host.client.chat.mockImplementation(async () => {
+            prototype.syncTurnInFlightAfterFinalize.call(h.host, 'session-A', h.activeWebview, 'autoResumeHardStop');
+        });
+        await h.handler(send, h.activeWebview, h.activeWebview);
+        expect(h.posts.filter(p => p.type === 'chatDone')).toHaveLength(1);
+        expect(h.host.writeFinalizeSnapshotFromCurrentTurn).toHaveBeenCalled();
+        expect(h.host.clearCompletedTurnPendingUser).toHaveBeenCalledWith('session-A', 'local-A');
+    });
 
     test.each([false, true])('releases only the owning turn despite a hung quota request (chat failure=%s)', async (fail) => {
         const h = sendHarness();
