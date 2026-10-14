@@ -19,6 +19,7 @@ function fixture(options: { foreign?: boolean; unknownStart?: boolean; stopUnkno
     };
     const release = jest.fn(async () => undefined);
     const processOwner = {
+        getStartupLogPath: jest.fn(() => '/private/fixture.startup.log'),
         acquireOperation: jest.fn(async () => release), getPid: jest.fn(() => undefined), detach: jest.fn(),
         clearRememberedPid: jest.fn(), shutdown: jest.fn(), start: jest.fn(),
         inspectOwned: jest.fn(async (_identity, stop = false) => {

@@ -290,6 +290,8 @@ export class OpenCodeServerController {
         this.initReadyPromise();
         this.setConnection(lock);
         this.options.log(`EXT: server.start | port=${lock.port} | pid=${pid || 'null'}`);
+        const startupLog = this.options.process.getStartupLogPath?.();
+        if (startupLog) this.options.log(`EXT: server.startup.log | path=${startupLog}`);
         try {
             await this.waitForHealthy(lock);
             if (owned && records) {

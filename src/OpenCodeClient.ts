@@ -5179,7 +5179,8 @@ export class OpenCodeClient {
                 (stage === 'launch_binding_missing'
                     ? 'The selected service has no matching GUI launch binding. After your tasks finish, stop that service and reload the VS Code window so the GUI can start it with Supervisor enabled.'
                     : stage === 'plugin_discovery_file'
-                        ? 'The plugin has not published its connection file. Check OpenCode plugin installation/startup logs.'
+                        ? 'The plugin has not published its connection file. Check OpenCode plugin installation/startup logs.' +
+                            (this.serverProcessManager.getStartupLogPath() ? ` Startup output: ${this.serverProcessManager.getStartupLogPath()}` : '')
                         : 'Check the OpenCode UI Debug output and plugin startup logs. The enabled setting is retained for the next launch.'));
         })();
         this.supervisorSetup = operation;

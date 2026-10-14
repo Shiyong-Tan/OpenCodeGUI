@@ -13,7 +13,7 @@ export class OpenCodeServerProcess {
         exec?: typeof cp.exec;
         processKill?: typeof process.kill;
         platform?: NodeJS.Platform;
-        windowsJob?: Pick<WindowsServiceJob, 'start' | 'inspect' | 'acquire'>;
+        windowsJob?: Pick<WindowsServiceJob, 'start' | 'inspect' | 'acquire'> & { startupLogPath?(serviceId: string): string };
     } = {}) {}
 
     public start(spec: ServerSpawnSpec, cwd: string, password: string): number | undefined {
@@ -50,6 +50,9 @@ export class OpenCodeServerProcess {
 
     public getPid(): number | undefined {
         return this.ownedIdentity?.pid || this.child?.pid || this.rememberedPid;
+    }
+    public getStartupLogPath(): string | undefined {
+        return this.ownedIdentity && this.options.windowsJob?.startupLogPath?.(this.ownedIdentity.serviceId);
     }
 
     public detach(): void {

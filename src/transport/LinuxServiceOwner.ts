@@ -1,11 +1,16 @@
 import { spawn } from 'child_process';
 import { mkdir, open, readFile, readdir, readlink } from 'fs/promises';
 import { join } from 'path';
+import { createLinuxStartupLog } from './LinuxStartupLog';
 import { ServiceOperationError, validateProcessIdentity, type ServiceProcessIdentity, type ServiceProcessObservation } from './WindowsServiceJob';
 
 /** Linux process owner: exact birth identity plus GUI marker, never arbitrary PID takeover. */
 export class LinuxServiceOwner {
     constructor(private readonly directory: string) {}
+    startupLogPath(serviceId: string): string {
+        if (!/^[a-f0-9]{64}$/.test(serviceId)) throw new ServiceOperationError('invalid_service_id');
+        return join(this.directory, `${serviceId}.startup.log`);
+    }
     private async stat(pid: number) {
         try {
             const text = await readFile(`/proc/${pid}/stat`, 'utf8');
@@ -41,9 +46,11 @@ export class LinuxServiceOwner {
     }
     async start(request: { serviceId: string; executable: string; args: string[]; cwd: string }, env: NodeJS.ProcessEnv,
         register: (identity: ServiceProcessIdentity) => Promise<void>): Promise<ServiceProcessIdentity> {
+        const startup = await createLinuxStartupLog(this.directory, request.serviceId, env);
         const child = spawn(request.executable, request.args, { cwd: request.cwd, shell: false, detached: true,
-            env: { ...env, OPENCODE_GUI_SERVICE_ID: request.serviceId }, stdio: 'ignore' });
-        await new Promise<void>((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+            env: { ...env, OPENCODE_GUI_SERVICE_ID: request.serviceId }, stdio: ['ignore', startup.fd, startup.fd] });
+        try { await new Promise<void>((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); }); }
+        finally { await startup.close(); }
         const born = await this.stat(child.pid!);
         if (!born?.alive || born.group !== child.pid) throw new ServiceOperationError('linux_start_identity_unknown');
         const identity = validateProcessIdentity({ serviceId: request.serviceId, pid: child.pid, creationFileTime: born.start });
