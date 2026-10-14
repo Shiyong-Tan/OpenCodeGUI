@@ -15,6 +15,7 @@ export interface UtilityCommandHost {
     refreshQuestionRequests?(scope: string): Promise<PermissionSnapshot>;
     respondReviewedQuestion?(input: Parameters<import('../../permissions/PermissionReviewService').PermissionReviewService['respond']>[0]): Promise<void>;
     enableSupervisor?(): Promise<void>;
+    assertSupervisorSwitchIdle?(): Promise<void>;
     getLiveWebview(fallback: vscode.Webview): vscode.Webview;
     log(message: string): void;
     applyModelSelection(value: unknown, webview: vscode.Webview): Promise<void>;
@@ -138,7 +139,7 @@ export class UtilityCommandController {
                 await this.host.applyVariantSelection(data.value);
                 return true;
             case 'setSupervisorEnabled':
-                await updateSupervisorSetting(data.enabled, activeWebview, this.host.enableSupervisor);
+                await updateSupervisorSetting(data.enabled, activeWebview, this.host.enableSupervisor, this.host.assertSupervisorSwitchIdle);
                 return true;
             case 'refreshModels':
                 await this.host.refreshModels(activeWebview);

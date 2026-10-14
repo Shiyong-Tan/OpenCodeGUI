@@ -4,7 +4,7 @@ export async function activateSupervisorService(platform: NodeJS.Platform, host:
     operate(action: 'start' | 'restart'): Promise<string>;
     checkWorkspace(): void;
 }): Promise<void> {
-    if (platform !== 'win32') {
+    if (platform !== 'win32' && platform !== 'linux') {
         await host.ensure(); host.checkWorkspace(); return;
     }
     const started = await host.operate('start'); host.checkWorkspace();

@@ -80,6 +80,13 @@ test('variant switch follows settings, hides disabled overlay, and waits for ack
     expect(toggle.disabled).toBe(true); expect(label.hidden).toBe(true);
     receive({ type: 'supervisorToggleResult', enabled: true });
     expect(toggle.disabled).toBe(false); expect(label.hidden).toBe(false);
+    receive({ type: 'supervisorSwitchState', busy: true });
+    const before = send.mock.calls.length; toggle.click();
+    expect(toggle.disabled).toBe(true); expect(send.mock.calls.length).toBe(before);
+    receive({ type: 'supervisorToggleResult', enabled: true });
+    expect(toggle.disabled).toBe(true);
+    receive({ type: 'supervisorSwitchState', busy: false });
+    expect(toggle.disabled).toBe(false);
     receive({ type: 'supervisorConnectionStatus', mode: 'normal', status: 'connected' });
     label.click(); expect(panel.hidden).toBe(false);
     toggle.click(); expect(send).toHaveBeenLastCalledWith({ type: 'setSupervisorEnabled', enabled: false });

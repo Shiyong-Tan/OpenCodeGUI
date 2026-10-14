@@ -13,7 +13,7 @@ export class OpenCodeServerProcess {
         exec?: typeof cp.exec;
         processKill?: typeof process.kill;
         platform?: NodeJS.Platform;
-        windowsJob?: WindowsServiceJob;
+        windowsJob?: Pick<WindowsServiceJob, 'start' | 'inspect' | 'acquire'>;
     } = {}) {}
 
     public start(spec: ServerSpawnSpec, cwd: string, password: string): number | undefined {

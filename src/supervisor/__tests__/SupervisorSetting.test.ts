@@ -61,3 +61,10 @@ test('saved activation pending survives reload intent and can still be disabled'
     await updateSupervisorSetting(false, webview);
     expect(enabled).toBe(false);
 });
+
+test('active or unverified task activity blocks both switch directions before any setting mutation', async () => {
+    const activate = jest.fn(); const guard = jest.fn(async () => { throw new Error('Tasks are active'); });
+    for (const value of [true, false]) await updateSupervisorSetting(value, webview, activate, guard);
+    expect(update).not.toHaveBeenCalled(); expect(activate).not.toHaveBeenCalled();
+    expect(postMessage).toHaveBeenLastCalledWith({ type: 'supervisorToggleResult', enabled: false, busy: true, error: 'Tasks are active' });
+});

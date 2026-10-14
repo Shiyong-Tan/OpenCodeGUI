@@ -41,8 +41,12 @@ export function mountSupervisorPanel(document: Document, receive: (handler: (val
     }
     const cards = new SupervisorCards(document, body); cards.reset();
     const updateSwitch = mountSupervisorSwitch(document, send);
-    const showEnabled = (enabled: boolean, error?: string) => {
-        updateSwitch?.(enabled, error); button.hidden = !enabled;
+    const busySessions = new Set<string>();
+    let supervisedBusy = false;
+    let hostBusy = false;
+    const refreshSwitchLock = () => updateSwitch?.setBusy(hostBusy || supervisedBusy || busySessions.size > 0);
+    const showEnabled = (enabled: boolean, error?: string, acknowledged = false) => {
+        updateSwitch?.(enabled, error, acknowledged); button.hidden = !enabled;
         if (!enabled) { panel.hidden = true; button.setAttribute('aria-expanded', 'false'); }
     };
     button.addEventListener('click', () => { panel.hidden = !panel.hidden; button.setAttribute('aria-expanded', String(!panel.hidden)); });
@@ -82,8 +86,16 @@ export function mountSupervisorPanel(document: Document, receive: (handler: (val
     receive(value => {
         if (!value || typeof value !== 'object') return;
         const message = value as Record<string, unknown>;
+        if (message.type === 'supervisorSwitchState' && typeof message.busy === 'boolean') {
+            hostBusy = message.busy; refreshSwitchLock(); return;
+        }
+        if (message.type === 'turnInFlight' && typeof message.sessionId === 'string') {
+            if (message.inFlight === true) busySessions.add(message.sessionId); else busySessions.delete(message.sessionId);
+            refreshSwitchLock();
+        }
         if (message.type === 'supervisorToggleResult' && typeof message.enabled === 'boolean') {
-            showEnabled(message.enabled, typeof message.error === 'string' ? message.error : undefined); return;
+            if (message.busy === true) updateSwitch?.setBusy(true);
+            showEnabled(message.enabled, typeof message.error === 'string' ? message.error : undefined, true); return;
         }
         if (message.type === 'supervisorConnectionStatus' && message.mode === 'normal') { connectionStatus(message.status); return; }
         if (message.type === 'supervisorSelection' || message.type === 'sessionData') {
@@ -100,6 +112,8 @@ export function mountSupervisorPanel(document: Document, receive: (handler: (val
                 cards.render(current, previous, true, 'Instance changed; reload the isolated window'); return;
             }
             current = next;
+            supervisedBusy = next.tasks.some(task => task.phase !== 'terminal') || next.executions.some(execution => execution.phase !== 'stopped' && execution.phase !== 'permission_denied');
+            refreshSwitchLock();
             const tone = normal && lastStatus !== 'connected' ? 'unknown' : supervisorTone(next);
             setIndicator(tone, { healthy: visibleSupervisorTasks(next).length ? 'Tasks healthy' : 'No active tasks', attention: 'Needs attention', error: 'Task failed', unknown: 'Observation unavailable' }[tone]);
             cards.render(next, previous, normal && lastStatus !== 'connected');

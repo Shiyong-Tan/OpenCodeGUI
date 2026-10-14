@@ -12,15 +12,15 @@ test('POSIX bindings preserve case and Windows bindings retain their spelling', 
     expect(verifyConnectionLease(signed, binding, '44'.repeat(32), 1500).workspace).toBe(binding.workspace);
     expect(() => verifyConnectionLease(signed, { ...binding, workspace: '/users/a/work' }, '44'.repeat(32), 1500)).toThrow();
 });
-test.each(['linux', 'darwin'] as const)('%s activation never invokes native service controls', async platform => {
+test.each(['darwin'] as const)('%s activation never invokes native service controls', async platform => {
     const host = { ensure: jest.fn(async () => {}), operate: jest.fn(async () => 'already_running'), checkWorkspace: jest.fn() };
     await activateSupervisorService(platform, host);
     expect(host.ensure).toHaveBeenCalledTimes(1); expect(host.operate).not.toHaveBeenCalled();
     host.checkWorkspace.mockImplementation(() => { throw new Error('workspace changed'); });
     await expect(activateSupervisorService(platform, host)).rejects.toThrow('workspace changed');
 });
-test('Windows retains the existing guarded restart route', async () => {
+test.each(['win32', 'linux'] as const)('%s uses the guarded restart route', async platform => {
     const host = { ensure: jest.fn(async () => {}), operate: jest.fn(async () => 'already_running'), checkWorkspace: jest.fn() };
-    await activateSupervisorService('win32', host);
+    await activateSupervisorService(platform, host);
     expect(host.operate.mock.calls).toEqual([['start'], ['restart']]); expect(host.ensure).not.toHaveBeenCalled();
 });

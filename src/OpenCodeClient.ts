@@ -1,3 +1,4 @@
+import { LinuxServiceOwner } from './transport/LinuxServiceOwner';
 import { repairFailedManualCompaction } from './continuation/ManualCompaction';
 import { SupervisorActivationPending } from './supervisor/ActivationPending';
 import { activateSupervisorService } from './supervisor/activate-service';
@@ -991,7 +992,7 @@ export class OpenCodeClient {
             log: (message) => this.logUiDebug(message),
         });
         this.serverProcessManager = new OpenCodeServerProcess({ windowsJob: options?.serviceRecords && process.platform === 'win32'
-            ? new WindowsServiceJob(path.join(__dirname, 'native', 'ServiceJob.exe')) : undefined });
+            ? new WindowsServiceJob(path.join(__dirname, 'native', 'ServiceJob.exe')) : options?.serviceRecords && process.platform === 'linux' ? new LinuxServiceOwner(options.serviceRecords.operationDirectory()) : undefined });
         this.serverController = new OpenCodeServerController({
             locks: this.serverLocks,
             process: this.serverProcessManager,
@@ -5129,6 +5130,26 @@ export class OpenCodeClient {
     }
 
     private supervisorSetup?: Promise<void>;
+    public isSupervisorSetupPending(): boolean { return Boolean(this.supervisorSetup); }
+    public async assertSupervisorSwitchIdle(): Promise<void> {
+        if (this.turnFinalWaitersBySession.size || this.manualCompactions?.size) throw new Error('Supervisor settings are locked while tasks are running.');
+        const workspace = this.workspaceRoot;
+        const parentSessionId = this.currentSessionId;
+        const connection = await this.getServerConn(true);
+        if (await this.checkServerHealth(connection.port, connection.lock.password) === 'connrefused') {
+            if (workspace !== this.workspaceRoot) throw new Error('Workspace changed. Retry in the target workspace.');
+            return;
+        }
+        if (await queryServiceActivity(connection) !== 'idle') throw new Error('Supervisor settings are locked while tasks or approval requests are active.');
+        if (this.getSupervisorStatus() === 'connected' && parentSessionId) {
+            const observed = await this.readSupervisorState(parentSessionId);
+            if (observed.status !== 'observed') throw new Error('Supervisor task activity could not be verified; settings are locked.');
+            if (observed.view.tasks.some(task => task.phase !== 'terminal') || observed.view.executions.some(execution => execution.phase !== 'stopped' && execution.phase !== 'permission_denied')) {
+                throw new Error('Supervisor settings are locked while supervised tasks or processes are active.');
+            }
+        }
+        if (workspace !== this.workspaceRoot || this.turnFinalWaitersBySession.size) throw new Error('Workspace or task activity changed. Retry when idle.');
+    }
     public enableSupervisor(): Promise<void> {
         if (this.supervisorSetup) return this.supervisorSetup;
         const workspace = this.workspaceRoot;
@@ -5137,13 +5158,12 @@ export class OpenCodeClient {
         };
         const operation = (async () => {
             if (!vscode.workspace.isTrusted) throw new Error('Trust this workspace before installing Supervisor.');
+            await this.assertSupervisorSwitchIdle();
             const changed = await configureSupervisor(workspace);
             checkWorkspace();
             if (!changed && this.getSupervisorStatus() === 'connected') return;
             this.setNormalSupervisorEnabled(true);
-            const confirm = async () => await vscode.window.showWarningMessage(
-                'Enabling Supervisor requires restarting OpenCode. Active tasks and managed processes will be interrupted; tasks are not automatically resumed.',
-                { modal: true }, 'Restart OpenCode') === 'Restart OpenCode';
+            const confirm = async () => false; // Switch activation never interrupts active work.
             await activateSupervisorService(process.platform, {
                 ensure: () => this.ensureServer(), operate: action => this.operateService(action, confirm), checkWorkspace,
             });

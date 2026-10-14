@@ -20,9 +20,10 @@ export async function queryServiceActivity(connection: ServerConnection, fetcher
         } finally { void reader.cancel().catch(() => undefined); reader.releaseLock(); }
     };
     try {
-        const [statuses, permissions] = await Promise.all([read('/session/status'), read('/permission')]);
+        const [statuses, permissions, questions] = await Promise.all([read('/session/status'), read('/permission'), read('/question')]);
         if (!statuses || typeof statuses !== 'object' || Array.isArray(statuses) || !Array.isArray(permissions)) throw new Error();
-        let active = permissions.length > 0;
+        if (!Array.isArray(questions)) throw new Error();
+        let active = permissions.length > 0 || questions.length > 0;
         for (const status of Object.values(statuses)) {
             const type = (status as { type?: unknown } | null)?.type;
             if (type !== 'idle' && type !== 'busy' && type !== 'retry') throw new Error();

@@ -4099,7 +4099,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private isTurnCommandInFlight(sessionId: string): boolean {
-        return this.sendInFlightBySession.has(sessionId);
+        return this.sendInFlightBySession.has(sessionId) || this.client.isSupervisorSetupPending?.() === true;
     }
 
     private isTurnCommandOwner(sessionId: string, clientMessageId: string): boolean {
@@ -4674,7 +4674,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             && this._context.extensionMode === vscode.ExtensionMode.Development;
         const normalSupervisorStore = this._context.globalStorageUri?.fsPath && this._context.secrets
             ? new NormalSupervisorLaunchStore(vscode.Uri.joinPath(this._context.globalStorageUri, 'supervisor-normal').fsPath, this._context.secrets) : undefined;
-        const serviceRecords = process.platform === 'win32' && this._context.globalStorageUri?.fsPath && this._context.secrets
+        const serviceRecords = (process.platform === 'win32' || process.platform === 'linux') && this._context.globalStorageUri?.fsPath && this._context.secrets
             ? new OpenCodeServiceRecordStore(vscode.Uri.joinPath(this._context.globalStorageUri, 'service-owner').fsPath, this._context.secrets) : undefined;
         this.client = new OpenCodeClient({ supervisorDevelopment, normalSupervisorStore, serviceRecords });
         if (this.client.isSupervisorExperiment() || this.client.hasSupervisorSupport?.()) {
@@ -4683,6 +4683,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 read: sessionId => this.client.readSupervisorState(sessionId),
                 publish: message => { void this._view?.webview.postMessage(message); },
                 connectionStatus: () => this.client.getSupervisorStatus?.(),
+                switchBusy: () => this.turnCommandOwnerBySession.size > 0 || this.activeSubagentSessionIds.size > 0 || this.client.isSupervisorSetupPending(),
             }, 2000, this.client.isSupervisorExperiment() || vscode.workspace.getConfiguration('opencode').get<boolean>('supervisor.enabled', false));
             this._context.subscriptions.push(this.supervisorPanel);
         }
@@ -4815,6 +4816,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             refreshQuestionRequests: scope => this.client.refreshQuestionRequests(scope),
             respondReviewedQuestion: input => this.client.respondReviewedQuestion(input),
             enableSupervisor: () => this.client.enableSupervisor(),
+            assertSupervisorSwitchIdle: async () => {
+                if (this.turnCommandOwnerBySession.size || this.activeSubagentSessionIds.size) throw new Error('Supervisor settings are locked while tasks are running.');
+                await this.client.assertSupervisorSwitchIdle();
+            },
             getLiveWebview: (fallback) => this._view?.webview || fallback,
             log: (message) => this.uiDebugChannel.appendLine(message),
             applyModelSelection: (value, webview) => this.applyUtilityModelSelection(value, webview),

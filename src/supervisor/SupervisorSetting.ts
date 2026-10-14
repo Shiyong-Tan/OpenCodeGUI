@@ -2,13 +2,19 @@ import { SupervisorActivationPending } from './ActivationPending';
 import * as vscode from 'vscode';
 
 /** VS Code workspace configuration remains the sole owner of the enabled flag. */
-export async function updateSupervisorSetting(value: unknown, webview: vscode.Webview, activate?: () => Promise<void>): Promise<void> {
+export async function updateSupervisorSetting(value: unknown, webview: vscode.Webview, activate?: () => Promise<void>, assertIdle?: () => Promise<void>): Promise<void> {
     const previous = vscode.workspace.getConfiguration('opencode').get<boolean>('supervisor.enabled', false);
     let error: string | undefined;
     if (typeof value !== 'boolean') error = 'Invalid Supervisor switch value.';
     else if (!vscode.workspace.workspaceFolders?.length && !vscode.workspace.workspaceFile)
         error = 'Open a workspace to change Supervisor settings.';
     else {
+        try { await assertIdle?.(); }
+        catch (cause) {
+            error = cause instanceof Error ? cause.message : 'Task activity could not be verified; Supervisor settings are locked.';
+            await webview.postMessage({ type: 'supervisorToggleResult', enabled: previous, busy: true, error });
+            return;
+        }
         try {
             await vscode.workspace.getConfiguration('opencode').update('supervisor.enabled', value, vscode.ConfigurationTarget.Workspace);
         } catch { error = 'Could not save the Supervisor workspace setting.'; }

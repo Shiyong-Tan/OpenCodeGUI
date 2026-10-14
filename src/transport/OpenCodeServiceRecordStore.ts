@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto';
 import { mkdir, open, readdir, realpath } from 'fs/promises';
 import { join, resolve } from 'path';
-import { canonicalWindowsWorkspace } from '../supervisor/normal-connection-protocol';
+import { canonicalWorkspace } from '../supervisor/normal-connection-protocol';
 import type { ServerConnection, ServerLock } from './OpenCodeHttpClient';
 import { ServiceOperationError, validateProcessIdentity, type ServiceProcessIdentity } from './WindowsServiceJob';
 
@@ -19,17 +19,18 @@ const authHash = (authorization: string) => createHash('sha256').update(authoriz
  * files prevent a late write from an old operation overwriting a newer instance. */
 export class OpenCodeServiceRecordStore {
     constructor(private readonly directory: string, private readonly secrets: Secrets) {}
+    operationDirectory(): string { return join(this.directory, 'operations'); }
 
     async workspaceKey(workspace: string): Promise<string> {
-        return createHash('sha256').update(canonicalWindowsWorkspace(await realpath(workspace))).digest('hex');
+        return createHash('sha256').update(canonicalWorkspace(await realpath(workspace))).digest('hex');
     }
 
     private async location(workspace: string) {
-        const canonical = canonicalWindowsWorkspace(await realpath(workspace));
+        const canonical = canonicalWorkspace(await realpath(workspace));
         const hash = await this.workspaceKey(workspace);
         await mkdir(this.directory, { recursive: true });
         const base = await realpath(this.directory);
-        if (canonicalWindowsWorkspace(base) !== canonicalWindowsWorkspace(resolve(this.directory))) throw new ServiceOperationError('storage_redirected');
+        if (canonicalWorkspace(base) !== canonicalWorkspace(resolve(this.directory))) throw new ServiceOperationError('storage_redirected');
         const directory = join(base, hash); await mkdir(directory, { recursive: true });
         if (await realpath(directory) !== directory) throw new ServiceOperationError('storage_redirected');
         return { directory, canonical, key: `opencode.service.owner.v1.${hash}` };
@@ -101,7 +102,7 @@ export class OpenCodeServiceRecordStore {
     }
 
     matches(record: OwnedServiceRecord, connection: ServerConnection): boolean {
-        return record.workspace === canonicalWindowsWorkspace(connection.lock.workspaceRoot) && record.port === connection.lock.port &&
+        return record.workspace === canonicalWorkspace(connection.lock.workspaceRoot) && record.port === connection.lock.port &&
             record.authenticationHash === authHash(connection.authHeader) && connection.baseUrl === `http://127.0.0.1:${record.port}`;
     }
 

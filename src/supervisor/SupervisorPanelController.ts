@@ -5,6 +5,7 @@ export interface SupervisorPanelHost {
     read(sessionId: string): Promise<SupervisorReadResult>;
     publish(message: unknown): void;
     connectionStatus?(): string | undefined;
+    switchBusy?(): boolean;
 }
 /** A throttled UI projection. It owns neither session selection nor task state. */
 export class SupervisorPanelController {
@@ -19,6 +20,7 @@ export class SupervisorPanelController {
         this.setEnabled(enabled);
     }
     publishStatus(): void {
+        if (this.host.switchBusy) this.host.publish({ type: 'supervisorSwitchState', busy: this.host.switchBusy() });
         const status = this.host.connectionStatus?.();
         if (status) this.host.publish({ type: 'supervisorConnectionStatus', mode: 'normal', status });
     }
@@ -28,9 +30,9 @@ export class SupervisorPanelController {
             this.enabled = enabled;
             this.generation++;
             if (this.timer) clearInterval(this.timer);
-            this.timer = enabled ? setInterval(() => { void this.tick(); }, this.intervalMs) : undefined;
-            this.timer?.unref?.();
+            this.timer = undefined;
         }
+        if (!this.timer && (enabled || this.host.switchBusy)) { this.timer = setInterval(() => { void this.tick(); }, this.intervalMs); this.timer.unref?.(); }
         this.publishStatus();
     }
     selectionChanged(sessionId?: string): void {
@@ -39,9 +41,10 @@ export class SupervisorPanelController {
         this.host.publish({ type: 'supervisorSelection', sessionId: sessionId ?? null });
     }
     async tick(): Promise<void> {
-        if (this.disposed || !this.enabled) return;
+        if (this.disposed) return;
         const generation = this.generation;
         this.publishStatus();
+        if (!this.enabled) return;
         const selection = this.host.selection();
         if (this.awaitingSession && selection.sessionId !== this.awaitingSession) return;
         this.awaitingSession = undefined;

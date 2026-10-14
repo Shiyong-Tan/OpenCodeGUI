@@ -9,13 +9,13 @@ test.each([
     [{ a: { type: 'busy' } }, [], 'active'], [{ a: { type: 'retry' } }, [], 'active'],
     [{}, [{ id: 'permission' }], 'active'],
 ])('activity accounts for model execution, retries and permission waits', async (statuses, permissions, expected) => {
-    const fetcher = jest.fn(async (url: string | URL | Request) => Response.json(String(url).endsWith('/permission') ? permissions : statuses));
+    const fetcher = jest.fn(async (url: string | URL | Request) => Response.json(String(url).endsWith('/permission') ? permissions : String(url).endsWith('/question') ? [] : String(url).endsWith('/question') ? [] : statuses));
     await expect(queryServiceActivity(connection, fetcher)).resolves.toBe(expected);
-    expect(fetcher.mock.calls.map(call => call[0])).toEqual([connection.baseUrl + '/session/status', connection.baseUrl + '/permission']);
+    expect(fetcher.mock.calls.map(call => call[0])).toEqual([connection.baseUrl + '/session/status', connection.baseUrl + '/permission', connection.baseUrl + '/question']);
 });
 
 test.each([null, [], { a: { type: 'unknown' } }, { a: null }])('unrecognized activity is never treated as idle', async statuses => {
-    const fetcher = async (url: string | URL | Request) => Response.json(String(url).endsWith('/permission') ? [] : statuses);
+    const fetcher = async (url: string | URL | Request) => Response.json(String(url).endsWith('/permission') ? [] : String(url).endsWith('/question') ? [] : statuses);
     await expect(queryServiceActivity(connection, fetcher)).rejects.toMatchObject({ reason: 'activity_unknown' });
 });
 
