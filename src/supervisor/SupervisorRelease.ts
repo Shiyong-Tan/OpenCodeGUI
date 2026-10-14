@@ -1,3 +1,4 @@
+import { requestRelease, releaseNetworkReason } from './ReleaseRequest';
 const repository = 'https://github.com/Shiyong-Tan/opencode-task-supervisor';
 const stableVersion = '(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)';
 
@@ -21,11 +22,9 @@ export function newerRelease(existing: string, candidate: string): string {
 }
 
 export async function resolveLatestSupervisorRelease(): Promise<string> {
+    let stage = 'release_metadata';
     try {
-        const signal = AbortSignal.timeout(15000);
-        const response = await fetch('https://api.github.com/repos/Shiyong-Tan/opencode-task-supervisor/releases/latest', {
-            headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }, signal,
-        });
+        const response = await requestRelease('https://api.github.com/repos/Shiyong-Tan/opencode-task-supervisor/releases/latest');
         if (!response.ok) throw new Error(`GitHub HTTP ${response.status}`);
         const data = await response.json() as Record<string, unknown>;
         if (!data || data.draft !== false || data.prerelease !== false || typeof data.tag_name !== 'string'
@@ -42,10 +41,11 @@ export async function resolveLatestSupervisorRelease(): Promise<string> {
                 && typeof item.size === 'number' && item.size > 0;
         });
         if (assets.length !== 1 || !officialReleaseVersion(url)) throw new Error('Stable release package is missing or invalid');
-        const asset = await fetch(url, { method: 'HEAD', signal });
+        stage = 'release_asset';
+        const asset = await requestRelease(url, true);
         if (!asset.ok) throw new Error(`Package HTTP ${asset.status}`);
         return url;
     } catch (error) {
-        throw new Error(`Unable to resolve the latest Supervisor release. Configuration was not changed. Check GitHub connectivity and retry. ${error instanceof Error ? error.message : ''}`);
+        throw new Error(`Unable to resolve the latest Supervisor release at ${stage}. Configuration was not changed. ${releaseNetworkReason(error)}`);
     }
 }

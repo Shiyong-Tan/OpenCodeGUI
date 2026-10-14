@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## 5.1.0 - 2026-10-02
 
+- Fall back to bounded HTTPS curl requests on Linux/WSL when Node release discovery fails; preserve official release checks and report the failed stage and network cause codes.
+
 - Support explicit GUI-owned Linux/WSL service start, stop and restart using process birth/marker/listener checks. Enabling Supervisor restarts an idle owned service; active tasks, tracked processes and approval waits lock the switch and reject backend changes.
 
 - Preserve command and temporary message ownership after a stall notice so a same-turn late final can bind and persist; newer sends and explicit cancellation still invalidate older results.
