@@ -27,3 +27,13 @@ test('tracked processes block switching even when model sessions are idle',async
  host.readSupervisorState.mockResolvedValue({status:'observed',view:{tasks:[],executions:[]}});
  await expect(host.assertSupervisorSwitchIdle()).resolves.toBeUndefined();
 });
+
+test('final releases the local gate but still verifies remote work before unlocking', async () => {
+ const host=harness();host.turnFinalWaitersBySession.set('A',[]);
+ await expect(host.assertSupervisorSwitchIdle()).rejects.toThrow('locked');
+ host.turnFinalWaitersBySession.delete('A');
+ (queryServiceActivity as jest.Mock).mockResolvedValue('active');
+ await expect(host.assertSupervisorSwitchIdle()).rejects.toThrow('locked');
+ (queryServiceActivity as jest.Mock).mockResolvedValue('idle');
+ await expect(host.assertSupervisorSwitchIdle()).resolves.toBeUndefined();
+});

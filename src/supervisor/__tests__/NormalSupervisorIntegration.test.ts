@@ -40,6 +40,18 @@ describe('normal supervisor enable and durable classification boundary', () => {
         return { owner, store, fetcher, launch };
     }
 
+    test('a successful handshake with invalid snapshot reports the snapshot failure stage', async () => {
+        const { owner, fetcher } = await setup();
+        const original = fetcher.getMockImplementation()!;
+        fetcher.mockImplementation(async (url: string) => new URL(url).pathname === '/v1/snapshot'
+            ? new Response(JSON.stringify({ invalid: true })) : original(url));
+        owner.setEnabled(true);
+        expect((await owner.read('ses_A')).status).toBe('unavailable');
+        expect(owner.status()).toBe('disconnected');
+        expect(owner.diagnostic()).toBe('plugin_snapshot_read');
+        owner.dispose();
+    });
+
     test('default off performs no network reads; disabling preserves signed history classification', async () => {
         const { owner, fetcher, launch } = await setup();
         expect(owner.status()).toBe('disabled');

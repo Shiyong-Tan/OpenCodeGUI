@@ -5173,6 +5173,7 @@ export class OpenCodeClient {
                 if (this.getSupervisorStatus() === 'connected') return;
                 await new Promise(resolve => setTimeout(resolve, 500));
             }
+            if (this.getSupervisorStatus() === 'connected') return;
             const stage = this.normalSupervisor?.diagnostic() ?? 'integration_unavailable';
             this.logUiDebug(`EXT: supervisor.activation.pending | stage=${stage} | platform=${process.platform}`);
             throw new SupervisorActivationPending(`Supervisor is enabled and configuration is saved; connection is pending at ${stage}. ` +

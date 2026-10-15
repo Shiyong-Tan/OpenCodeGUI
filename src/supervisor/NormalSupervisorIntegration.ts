@@ -142,7 +142,11 @@ export class NormalSupervisorIntegration {
             return { status: 'unavailable', reason: 'read_failed' };
         }
         if (generation !== this.generation || !this.enabled || this.disposed) return { status: 'unavailable', reason: 'disposed' };
-        if (result.status !== 'observed') this.state = 'disconnected';
+        if (result.status === 'observed') { this.state = 'connected'; this.failureStage = 'connected'; }
+        else {
+            this.state = 'disconnected';
+            this.failureStage = result.reason === 'read_failed' ? 'plugin_snapshot_read' : `plugin_snapshot_${result.reason}`;
+        }
         return result;
     }
 
