@@ -2,7 +2,9 @@
 
 All notable changes to this project will be documented in this file.
 
-## 5.1.0 - 2026-10-02
+## 6.0.0 - 2026-10-15
+
+Consolidates the changes previously tested as 5.1.0. Supervisor remains a separately installed plugin; use 0.1.5 or later for the corrected handshake/snapshot version identity.
 
 - Report Supervisor snapshot-read failures separately from successful handshakes. Release the switch's presentation lock after parent final; backend service/task/process checks still reject unsafe changes.
 
@@ -27,7 +29,7 @@ All notable changes to this project will be documented in this file.
 - Clean verified failed manual-compaction controls before they consume the next ordinary question. Preserve user content and failure records, check idle/session identity, and never retry model calls automatically.
 - Remove only the owning empty temporary reply on send failure and avoid duplicate error prefixes.
 
-- Install Supervisor 0.1.2, which removes the cumulative 128-execution launch limit while preserving process evidence, permissions and duplicate-call protection.
+- Support companion Supervisor releases that remove the cumulative 128-execution launch limit while preserving process evidence, permissions and duplicate-call protection.
 - Resolve the latest stable Supervisor GitHub release when enabling the switch, without requiring a new GUI release. Preserve custom sources, newer installed versions and permission options; failed discovery leaves configuration unchanged.
 - Validate Supervisor connections by protocol schema and authenticated handshake instead of a plugin release allowlist.
 

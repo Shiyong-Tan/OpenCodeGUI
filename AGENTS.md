@@ -216,7 +216,7 @@ For high-risk UI behavior, also perform the manual checklist in
 
 - Change the GUI version only when the user explicitly requests a version change.
   Routine fixes, tests, and local packaging retain the current version, including
-  test installers. The user-selected current version is `5.1.0`.
+  test installers. The user-selected current version is `6.0.0`.
 - Inspect `git status` before editing. Existing changes and untracked files belong to
   the user unless proven otherwise.
 - Keep diffs scoped. Do not reformat, rename, or reorganize unrelated code.

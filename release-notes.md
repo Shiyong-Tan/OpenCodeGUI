@@ -1,5 +1,18 @@
 ## Release Notes
 
+### 6.0.0 - 2026-10-15
+
+- Consolidate the improvements previously tested as 5.1.0 into this release.
+- Discover the latest stable Supervisor release from GitHub without requiring a GUI update for every plugin release. Preserve custom sources and existing permission options.
+- Support verified GUI-owned Linux/WSL service start, stop and restart. Enabling Supervisor can restart an idle owned service; active tasks and approvals remain protected.
+- Improve Supervisor connection diagnostics, bounded private Linux startup logs and release discovery fallback. Use companion Supervisor 0.1.5 or later to avoid the 0.1.4 handshake/snapshot version mismatch.
+- Release stale Supervisor switch presentation locks after parent final while retaining backend task and process checks.
+- Preserve late final replies after stall notices and improve temporary-message cleanup, compaction outcomes and failed-send draft recovery.
+- Open local HTML links as previews with images and video, and replace native hover hints with themed cards.
+- Plugin recovery policies and Linux process tracking are delivered by the separately installed Supervisor plugin. Updating the GUI does not hot-update an already running service.
+
+See [Changelog](CHANGELOG.md) for the detailed changes and limitations.
+
 ### 5.0.10 - 2026-09-26
 
 - Preserve Supervisor enablement when configuration is saved but activation is still pending, so a subsequent GUI-owned service launch can receive its binding.
