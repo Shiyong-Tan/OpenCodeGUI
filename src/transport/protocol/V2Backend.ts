@@ -37,7 +37,7 @@ export class V2Backend {
             if (['user', 'synthetic', 'assistant'].includes(message.kind)) outcome = undefined;
             if (message.kind === 'idle') outcome = message.outcome;
         }
-        return { ...projected, outcome: active[sessionId] === 'running' ? undefined : outcome };
+        return { ...projected, active: active[sessionId] === 'running', outcome: active[sessionId] === 'running' ? undefined : outcome };
     }
     async history(sessionId: string, limit?: number) {
         const projected = await this.projection(sessionId);

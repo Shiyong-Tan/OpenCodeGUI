@@ -1,11 +1,17 @@
 # OpenCode GUI modularization architecture
 
-## Dual OpenCode protocol adaptation (implementation in progress)
+## Dual OpenCode protocol adaptation
+
+Current native owner integration and validation evidence are recorded in
+[OPENCODE-2-COMPATIBILITY.md](OPENCODE-2-COMPATIBILITY.md) and
+[OPENCODE-2-WINDOWS-ACCEPTANCE.md](OPENCODE-2-WINDOWS-ACCEPTANCE.md). The foundation
+paragraphs below describe earlier checkpoints; they are not the current routing
+status. There is still one session/turn owner and no version allowlist.
 
 The runtime release label is diagnostic metadata, not an allowlist. Fixed upstream
 versions are reproducible test fixtures only. The first fixture is OpenCode 2.0.24,
 tag e7a34f09bfd9134dfade5a8ddb843f7030bc9a69. Existing 1.x behavior remains the
-compatibility oracle; this section does not declare the GUI ready for 2.x.
+compatibility oracle; a fixture identity alone does not certify every 2.x release.
 
 Implemented foundation on 2026-10-16: BackendSessionPort describes session,
 paginated transcript, inbox admission/delivery/cancellation and execution

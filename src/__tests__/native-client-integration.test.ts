@@ -76,3 +76,49 @@ test('a superseded native idle read cannot finalize a newer turn', async () => {
     await client.reconcileNativeExecution('ses_A');
     expect(client.resolveTurnFinal).not.toHaveBeenCalled();
 });
+
+test('an accepted native final is not overwritten by the empty-answer fallback before UI finishTurn', async () => {
+    const { client, native } = harness();
+    const turn = { turnMessageIds: new Set(), assistantMessageIds: new Set() } as any;
+    client.turnStateBySession.set('ses_A', turn); client.currentTurnUserMsgIdBySession.set('ses_A', 'msg_user');
+    (native as any).projection = jest.fn(async () => ({ messages: [{ info: { id: 'msg_answer', role: 'assistant',
+        parentID: 'msg_user', finish: 'stop', time: { created: 1 } }, parts: [] }], controls: [], outcome: 'succeeded' }));
+    client.handleClassifiedServerEvent = jest.fn(); client.markTurnFinal = jest.fn(); client.resolveTurnFinal = jest.fn();
+    await client.reconcileNativeExecution('ses_A');
+    expect(turn.terminalError).toBeUndefined();
+    expect(client.resolveTurnFinal).toHaveBeenCalledTimes(1);
+    expect(client.resolveTurnFinal).toHaveBeenCalledWith('ses_A', 'native-execution-ended');
+});
+
+test('a reviewed native question rejection supplies explicit feedback so the child can report rejection', async () => {
+    const { client, native } = harness();
+    client.getServerConn = jest.fn(async () => ({ baseUrl: 'http://127.0.0.1:42000' }));
+    (native as any).interactions = { cancelForm: jest.fn(async () => undefined) };
+    const connection = await client.connectRequestReview('ses_parent');
+    await connection.native.respond({ sessionId: 'ses_child', requestId: 'frm_question', response: 'reject' });
+    expect((native as any).interactions.cancelForm).toHaveBeenCalledWith('ses_child', 'frm_question', 'User rejected this question.');
+});
+
+test.each(['settled', 'queue', 'permission', 'form', 'active', 'shutdown', 'stale'])(
+    'native interruption without idle requires fresh settled evidence: %s', async condition => {
+        const { client, native } = harness();
+        const turn: { terminalError?: string } = {};
+        client.turnStateBySession.set('ses_A', turn);
+        client.currentTurnStartedAtBySession.set('ses_A', 100);
+        client.currentTurnUserMsgIdBySession.set('ses_A', 'msg_user');
+        (native as any).projection = jest.fn(async () => ({ outcome: undefined, active: condition === 'active', controls: [],
+            messages: [{ info: { id: 'msg_user', role: 'user' }, parts: [] }] }));
+        (native.sessions as any).inbox = jest.fn(async () => condition === 'queue' ? [{}] : []);
+        (native as any).interactions = {
+            permissions: jest.fn(async () => condition === 'permission' ? [{}] : []),
+            forms: jest.fn(async () => condition === 'form' ? [{}] : []),
+        };
+        client.resolveTurnFinal = jest.fn();
+        const event = decodeV2Event({ id: 'evt_stop', type: 'session.execution.interrupted',
+            created: condition === 'stale' ? 99 : 101, data: { sessionID: 'ses_A', reason: condition === 'shutdown' ? 'shutdown' : 'user' } });
+        await client.reconcileNativeExecution('ses_A', event);
+        if (condition === 'settled') {
+            expect(turn.terminalError).toMatch(/interrupted/);
+            expect(client.resolveTurnFinal).toHaveBeenCalledWith('ses_A', 'session-error-abort');
+        } else expect(client.resolveTurnFinal).not.toHaveBeenCalled();
+    });

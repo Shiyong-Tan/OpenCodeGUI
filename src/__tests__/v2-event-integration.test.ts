@@ -17,7 +17,7 @@ test('execution completion reconciles while provider streamed/step ended never f
     f.bridge.receive(event('two', 'session.step.ended', { assistantMessageID: 'msg_A' }));
     await flush(); expect(f.owner.reconcile).not.toHaveBeenCalled();
     f.bridge.receive(event('three', 'session.execution.succeeded')); await flush();
-    expect(f.owner.reconcile).toHaveBeenCalledWith('ses_A');
+    expect(f.owner.reconcile).toHaveBeenCalledWith('ses_A', expect.objectContaining({ type: 'session.execution.succeeded' }));
 });
 test('duplicate live text IDs cannot append the same delta twice', async () => {
     const f = harness(), value = event('one', 'session.text.delta', { assistantMessageID: 'msg_A', ordinal: 0, delta: 'Hello' });

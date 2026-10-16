@@ -1,7 +1,7 @@
 import { parse } from 'jsonc-parser';
 import { mergeSupervisorConfig } from '../../src/supervisor/SupervisorSetup';
 import { verifySupervisorReleaseProtocol } from '../../src/supervisor/SupervisorRelease';
-import { visibleFormAnswers } from '../questions/native-form';
+import { renderNativeForm, visibleFormAnswers } from '../questions/native-form';
 import { validateFormAnswer, type NativeForm } from '../../src/transport/protocol/V2InteractionAdapter';
 
 const url = 'https://github.com/Shiyong-Tan/opencode-task-supervisor/releases/download/v0.1.5/opencode-task-supervisor-0.1.5.tgz';
@@ -32,4 +32,26 @@ test('typed form conditions omit stale hidden values and use original option val
     expect(values).toEqual({ enabled: false, choice: 'wire-value' });
     expect(() => validateFormAnswer(form, values)).not.toThrow();
     expect(visibleFormAnswers(form, { enabled: true, count: 5 })).toEqual({ enabled: true, count: 5, choice: 'wire-value' });
+});
+
+test('native questions with custom answers retain clickable original options and a free text input', () => {
+    type Element = { tag: string; textContent?: string; disabled?: boolean; type?: string;
+        style: Record<string, string>; children: Element[]; listeners: Record<string, () => void>; appendChild(child: Element): void;
+        addEventListener(name: string, fn: () => void): void; setAttribute(): void };
+    const elements: Element[] = [];
+    const document = { createElement(tag: string): Element {
+        const element: Element = { tag, style: {}, children: [], listeners: {},
+            appendChild(child) { this.children.push(child); },
+            addEventListener(name, fn) { this.listeners[name] = fn; }, setAttribute() {} };
+        elements.push(element); return element;
+    } } as unknown as Document;
+    const values: Record<string, string> = {}, changed = jest.fn();
+    const form = { id: 'frm_A', sessionId: 'ses_A', title: 'Question', native: {}, fields: [
+        { key: 'q0', type: 'string', custom: true, options: [{ value: 'wire', label: 'Readable option' }] },
+    ] } as NativeForm;
+    renderNativeForm({ document, form, values, changed, blocked: false, owner: 'Reviewer', submit: jest.fn() });
+    const choice = elements.find(element => element.tag === 'button' && element.textContent === 'Readable option');
+    expect(choice).toBeDefined(); expect(choice!.disabled).toBe(false);
+    choice!.listeners.click(); expect(values.q0).toBe('wire'); expect(changed).toHaveBeenCalledTimes(1);
+    expect(elements.some(element => element.tag === 'input' && element.type === 'text')).toBe(true);
 });

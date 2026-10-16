@@ -46,6 +46,21 @@ export function renderNativeForm(options: { document: Document; form: NativeForm
             continue;
         }
         const value = activeAnswers[key];
+        if (field.custom === true && Array.isArray(field.options)) {
+            for (const option of field.options as { value: string; label: string }[]) {
+                const choice = document.createElement('button'); choice.type = 'button'; choice.textContent = option.label;
+                const selected = Array.isArray(value) ? value.includes(option.value) : value === option.value;
+                choice.className = 'conflict-card-btn question-card-btn'; choice.disabled = options.blocked;
+                choice.setAttribute('aria-pressed', String(selected));
+                choice.addEventListener('click', () => {
+                    values[key] = field.type === 'multiselect' ? selected
+                        ? (Array.isArray(value) ? value : []).filter(item => item !== option.value)
+                        : [...(Array.isArray(value) ? value : []), option.value] : option.value;
+                    options.changed();
+                });
+                label.appendChild(choice);
+            }
+        }
         let control: HTMLInputElement | HTMLSelectElement;
         if ((field.type === 'string' || field.type === 'multiselect') && Array.isArray(field.options) && field.custom !== true) {
             const select = document.createElement('select'); select.multiple = field.type === 'multiselect';

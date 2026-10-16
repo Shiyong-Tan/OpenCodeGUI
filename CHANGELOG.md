@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## 6.0.0 - 2026-10-15
 
+- Fix native V2 successful finality being overwritten by the empty-answer fallback. Settle explicit interrupted executions without an idle record only after fresh session, queue, permission and form checks.
+- Keep native question choices visible when custom answers are supported. Send explicit user-rejection feedback so the same child can return a rejection report instead of silently stopping its step.
+
+- Fix native V2 successful finality being overwritten by the empty-answer fallback. Settle explicit interrupted executions without an idle record only after fresh session, queue, permission and form checks.
+- Keep native question choices visible when custom answers are supported. Send explicit user-rejection feedback so the same child can return a rejection report instead of silently stopping its step.
+
 - Add native OpenCode 2 protocol negotiation while retaining the OpenCode 1 adapter. Validate actual JSON resources and ownership instead of pinning release numbers; HTML fallback pages are not healthy API responses.
 - Route native sessions, execution outcomes, model/agent selection, typed permission/forms and manual compaction through the existing session owner. Keep concurrent child tools independently identified and render Queued messages with a Steer action when their captured inbox identity is current.
 - Install the protocol-appropriate Supervisor configuration and require a dual-protocol release advertisement before selecting a V2 plugin package. Native plugin loading requires the companion dual-entry package; old published archives do not gain V2 support automatically.

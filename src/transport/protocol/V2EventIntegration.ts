@@ -10,7 +10,7 @@ export interface NativeEventOwner {
     text(event: BackendEvent): void;
     tool(event: BackendEvent): void;
     delivered(sessionId: string, inboxId: string): Promise<void>;
-    reconcile(sessionId: string): Promise<void>;
+    reconcile(sessionId: string, event?: BackendEvent): Promise<void>;
     interaction(sessionId: string): void;
     compaction?(event: BackendEvent): void;
     activity?(event: BackendEvent): void;
@@ -42,7 +42,7 @@ export class V2EventIntegration {
             else if (event.category === 'text') this.owner.text(event);
             else if (event.category === 'tool') this.owner.tool(event);
             else if (event.type === 'session.inbox.delivered') await this.owner.delivered(sessionId, String(event.payload.inboxID));
-            else if (event.category === 'execution' && event.type !== 'session.execution.started') await this.owner.reconcile(sessionId);
+            else if (event.category === 'execution' && event.type !== 'session.execution.started') await this.owner.reconcile(sessionId, event);
             else if (event.category === 'interaction') this.owner.interaction(sessionId);
         });
         this.jobs.set(sessionId, work);

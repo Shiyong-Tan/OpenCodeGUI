@@ -621,7 +621,7 @@ export class OpenCodeClient {
                 respond: async input => {
                     if (!binding.isCurrent()) throw new Error('Permission service changed');
                     if (input.response === 'answer') await backend.interactions.replyForm(input.sessionId, input.requestId, input.answers as Record<string, import('./transport/protocol/V2InteractionAdapter').FormValue>);
-                    else if (input.requestId.startsWith('frm_')) await backend.interactions.cancelForm(input.sessionId, input.requestId);
+                    else if (input.requestId.startsWith('frm_')) await backend.interactions.cancelForm(input.sessionId, input.requestId, 'User rejected this question.');
                     else await backend.interactions.replyPermission(input.sessionId, input.requestId, input.response as PermissionReply);
                 },
             },
@@ -5295,7 +5295,7 @@ export class OpenCodeClient {
             step: event => this.acceptNativeStep(event), text: event => this.acceptNativeText(event),
             tool: event => this.acceptNativeTool(event),
             delivered: (id, messageId) => this.acceptNativeDelivered(id, messageId),
-            reconcile: id => this.reconcileNativeExecution(id),
+            reconcile: (id, event) => this.reconcileNativeExecution(id, event),
             interaction: id => this.emitChatEvents([{ type: 'questionChanged', sessionId: id }]),
             compaction: event => this.nativeCompaction.observe(event),
             activity: event => { if (event.sessionId) this.lastSseAtBySession.set(event.sessionId, Date.now()); },
@@ -5337,18 +5337,36 @@ export class OpenCodeClient {
         const item = messages.find(message => message.info.id === messageId);
         if (item?.info.role === 'user') this.handleClassifiedServerEvent('message.updated', { info: item.info }, 'sse', 0);
     }
-    private async reconcileNativeExecution(sessionId: string): Promise<void> {
+    private async reconcileNativeExecution(sessionId: string, event?: BackendEvent): Promise<void> {
         if (this.turnFinishedBySession.has(sessionId)) return;
         const binding = this.protocolBinding, turn = this.turnStateBySession.get(sessionId), backend = binding?.native;
         if (!backend) return;
         const projection = await backend.projection(sessionId), messages = projection.messages;
         if (!binding.isCurrent() || binding !== this.protocolBinding || turn !== this.turnStateBySession.get(sessionId)) return;
+        // Deliberate native interruption can end execution without writing an idle record.
+        // The event is only evidence for this owner after fresh active/inbox/interaction checks.
+        if (!projection.outcome && projection.active === false && turn && event?.type === 'session.execution.interrupted'
+            && event.payload.reason !== 'shutdown' && typeof event.createdAt === 'number'
+            && event.createdAt >= (this.currentTurnStartedAtBySession.get(sessionId) ?? Infinity)
+            && [...messages].reverse().find(item => item.info.role === 'user')?.info.id === this.currentTurnUserMsgIdBySession.get(sessionId)) {
+            const [inbox, permissions, forms] = await Promise.all([
+                backend.sessions.inbox(sessionId), backend.interactions.permissions(sessionId), backend.interactions.forms(sessionId),
+            ]);
+            if (!binding.isCurrent() || binding !== this.protocolBinding || turn !== this.turnStateBySession.get(sessionId)) return;
+            if (!inbox.length && !permissions.length && !forms.length) {
+                turn.terminalError = 'OpenCode execution was interrupted.';
+                this.resolveTurnFinal(sessionId, 'session-error-abort');
+                return;
+            }
+        }
+        let acceptedTerminal = false;
         for (const item of messages) {
             if (item.info.role !== 'assistant' || !this.shouldReplayResyncMessage(sessionId, item.info)) continue;
             const info = item.info;
             this.handleClassifiedServerEvent('message.updated', { info: { ...info, finish: undefined, time: { created: (info.time as any)?.created } } }, 'sse', 0);
             for (const part of item.parts) this.handleClassifiedServerEvent('message.part.updated', { part }, 'sse', 0);
             if (info.finish === 'stop' || info.error) {
+                acceptedTerminal = true;
                 this.handleClassifiedServerEvent('message.updated', { info }, 'sse', 0);
                 if (!this.subagentToParentSessionMap.has(sessionId)) {
                     this.markTurnFinal(sessionId, String(info.id), 'sse');
@@ -5356,7 +5374,7 @@ export class OpenCodeClient {
                 }
             }
         }
-        if (projection.outcome && turn && !this.turnFinishedBySession.has(sessionId)
+        if (!acceptedTerminal && projection.outcome && turn && !this.turnFinishedBySession.has(sessionId)
             && !this.subagentToParentSessionMap.has(sessionId)) {
             turn.terminalError = projection.outcome === 'interrupted' ? 'OpenCode execution was interrupted.'
                 : 'OpenCode execution ended without an answer to this message.';

@@ -33,14 +33,16 @@ protocol manifest. That metadata is a publisher advertisement checked against th
 asset digest when GitHub supplies it; live authenticated bridge validation remains
 required. No claim is made that arbitrary future semantic protocol changes work.
 
-Validation uses isolated 1.18.31 and 2.0.24 services, private profiles and zero model
+Initial protocol validation uses isolated 1.18.31 and 2.0.24 services, private profiles and zero model
 calls. Native plugin discovery/lease/snapshot is tested against real 2.0.24. Unit
 tests cover models/roles, parallel tool identity, original interaction routing,
 typed form replies, queued delivery conflicts, stale bindings and compaction
-correlation. Real model-driven completion, interactive VS Code rendering, native
-macOS and native Linux 2.0 executions require manual acceptance; fixtures are not
-reported as real model tests. Published 0.1.5 predates this work: publish a new
-dual-entry artifact and manifest before enabling automatic V2 installation.
+correlation. Subsequent Windows real-model acceptance and Linux/WSL service/process
+checks are recorded in OPENCODE-2-WINDOWS-ACCEPTANCE.md. Full interactive VS Code
+window acceptance and native macOS are not certified; mocked-host browser checks
+are not reported as complete Extension Host tests. Native automatic installation
+requires the dual-entry 0.1.6 archive and matching protocol manifest; the older
+published 0.1.5 archive predates this work.
 
 Rendering retains the 77 KiB raw budget and raises gzip from 25 to 26 KiB for the
 Steer control (measured 25,691 bytes). The feature bundle adds typed native form
