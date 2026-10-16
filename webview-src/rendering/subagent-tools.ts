@@ -10,6 +10,7 @@ export function subagentToolRows(agent: Record<string, unknown>): ToolDisplayRow
             typeof raw.callId !== 'string' || !raw.callId || typeof raw.name !== 'string' || typeof raw.status !== 'string') continue;
         const key = JSON.stringify([raw.sessionId, raw.assistantMessageId, raw.callId]);
         if (seen.has(key) || !['pending', 'streaming', 'running', 'completed', 'error'].includes(raw.status)) continue;
+        if (raw.status === 'completed' || raw.status === 'error') continue;
         seen.add(key);
         rows.push({ key, name: raw.name, input: typeof raw.input === 'string' ? raw.input : '',
             status: raw.status === 'completed' ? 'Completed' : raw.status === 'error' ? 'Failed' : raw.status === 'running' ? 'Running' : 'Preparing',

@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## 6.0.0 - 2026-10-15
 
+- Read oversized native transcript pages at a smaller page size; allow up to 32 MiB only for a single transcript record, preserving later final answers after large embedded tool outputs. Hide completed subagent tool rows while retaining canonical history.
+
 - Style Steer as a compact translucent action with inherited typography, matching Queued text size and theme-aware hover, keyboard focus and pending states.
 
 - Discover the running protocol before cold Supervisor setup, then recheck activity. Missing or stale identity never silently writes a legacy archive declaration for OpenCode 2.

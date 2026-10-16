@@ -17,11 +17,21 @@ export class V2Backend {
     }
     async transcript(sessionId: string): Promise<BackendMessage[]> {
         const messages: BackendMessage[] = [], cursors = new Set<string>(), ids = new Set<string>(); let cursor: string | undefined;
-        for (let page = 0; page < 128; page++) {
-            const result = await this.sessions.messages(sessionId, { limit: 200, cursor });
+        let limit = 200;
+        for (let page = 0; page < 25600; page++) {
+            let result;
+            try { result = await this.sessions.messages(sessionId, { limit, cursor }); }
+            catch (error) {
+                // Retry only this read at the same cursor, with fewer records. Never
+                // raise the response bound or silently skip a large history page.
+                if (!(error instanceof BackendOperationError) || error.operation !== 'V2 response bound' || limit === 1) throw error;
+                limit = Math.max(1, Math.floor(limit / 2));
+                continue;
+            }
             for (const message of result.items) {
                 if (ids.has(message.id)) throw new BackendOperationError('invalid_response', 'V2 duplicate transcript identity');
                 ids.add(message.id); messages.push(message);
+                if (messages.length > 25600) throw new BackendOperationError('invalid_response', 'V2 transcript message bound');
             }
             if (!result.next) return messages;
             if (cursors.has(result.next)) break;

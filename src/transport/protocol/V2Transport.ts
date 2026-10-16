@@ -22,6 +22,10 @@ export class V2Transport {
         const url = new URL(path, this.origin);
         if (url.origin !== this.origin || !url.pathname.startsWith('/api/')) throw new BackendOperationError('rejected', 'V2 request scope');
         const serialized = body === undefined ? undefined : JSON.stringify(body);
+        // Native messages embed tool output. A single real read result can exceed
+        // the ordinary page budget; allow a bounded 32 MiB only after paging to one.
+        const responseBound = method === 'GET' && /^\/api\/session\/[^/]+\/message$/.test(url.pathname)
+            && url.searchParams.get('limit') === '1' ? 32 * 1024 * 1024 : 8 * 1024 * 1024;
         const current = () => {
             this.connection.signal?.throwIfAborted();
             if (!this.connection.isCurrent()) throw new BackendOperationError('superseded', method + ' ' + path);
@@ -58,7 +62,7 @@ export class V2Transport {
                     const next = await reader.read(); controller.signal.throwIfAborted(); current();
                     if (next.done) break;
                     size += next.value.byteLength;
-                    if (size > 8 * 1024 * 1024) throw new BackendOperationError('invalid_response', 'V2 response bound');
+                    if (size > responseBound) throw new BackendOperationError('invalid_response', 'V2 response bound');
                     chunks.push(next.value);
                 }
             } finally { controller.signal.removeEventListener('abort', cancel); await reader.cancel().catch(() => undefined); reader.releaseLock(); }
