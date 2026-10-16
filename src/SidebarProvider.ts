@@ -4833,6 +4833,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             )?.fullId,
             parseModelRef: (fullId) => this.parseModelRef(fullId) || undefined,
             summarizeSession: (sessionId, options) => this.client.summarizeSession(sessionId, { ...options, allowFreeFallback: true }),
+            usesBackendCompactionModel: () => this.client.usesBackendCompactionModel(),
             fetchSessionUsage: (sessionId) => this.client.fetchSessionUsage(sessionId),
             postAddResponse: (webview, value, meta) => this.postAddResponse(webview, value, meta),
             refreshModels: (webview) => this.refreshModels(webview),
@@ -4928,6 +4929,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this.turnCommandHandler = createTurnCommandHandler({
             client: {
                 abortSession: (sessionId) => this.client.abortSession(sessionId),
+                steerQueuedPrompt: input => this.client.steerQueuedPrompt(input),
                 appendPrompt: (sessionId, text, options) =>
                     this.client.appendPrompt(sessionId, text, options),
                 beginAppendPrompt: (sessionId, clientMessageId, text, rootUserMsgId) =>

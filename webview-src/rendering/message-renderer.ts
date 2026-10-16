@@ -372,6 +372,21 @@ export function renderMessageElement(
                                         ? 'Queued'
                                         : 'Sending...';
                         block.appendChild(status);
+                        if (item.status === 'queued' && item.delivery === 'queue' && item.canSteer === true &&
+                            typeof item.inboxId === 'string' && Number.isSafeInteger(item.generation)) {
+                            const steer = document.createElement('button');
+                            steer.className = 'append-steer-button';
+                            steer.textContent = 'Steer';
+                            steer.title = 'Deliver at the next safe step boundary';
+                            steer.addEventListener('click', event => {
+                                event.stopPropagation(); steer.disabled = true; steer.textContent = 'Steer pending';
+                                host.vscode.postMessage({ type: 'steerQueuedPrompt', sessionId: message.sessionId,
+                                    rootUserMsgId: message.id, clientMessageId: item.clientMessageId, inboxId: item.inboxId, generation: item.generation });
+                            });
+                            status.style.display = 'inline-block';
+                            steer.style.marginLeft = '8px';
+                            block.appendChild(steer);
+                        }
                     }
                     content.appendChild(block);
                 }

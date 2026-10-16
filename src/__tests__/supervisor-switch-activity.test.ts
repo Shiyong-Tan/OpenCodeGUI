@@ -4,6 +4,7 @@ import { queryServiceActivity } from '../transport/ServiceActivity';
 import { OpenCodeClient } from '../OpenCodeClient';
 function harness() {
  const host = Object.create(OpenCodeClient.prototype) as any;
+ host.bindBackend = jest.fn(async () => undefined);
  Object.assign(host,{ workspaceRoot:'workspace', currentSessionId:'A', turnFinalWaitersBySession:new Map(), manualCompactions:new Map(), getServerConn:jest.fn(async()=>({port:42000,lock:{password:'fixture'}})),checkServerHealth:jest.fn(async()=>'ok'),getSupervisorStatus:jest.fn(()=>'disabled'),readSupervisorState:jest.fn() });
  return host;
 }

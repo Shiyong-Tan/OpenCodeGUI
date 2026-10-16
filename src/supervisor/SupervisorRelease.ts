@@ -1,4 +1,5 @@
 import { requestRelease, releaseNetworkReason } from './ReleaseRequest';
+import type { ProtocolFamily } from '../transport/protocol/ProtocolNegotiator';
 const repository = 'https://github.com/Shiyong-Tan/opencode-task-supervisor';
 const stableVersion = '(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)';
 
@@ -21,7 +22,18 @@ export function newerRelease(existing: string, candidate: string): string {
     return existing;
 }
 
-export async function resolveLatestSupervisorRelease(): Promise<string> {
+export function verifySupervisorReleaseProtocol(value: unknown, packageUrl: string, family: ProtocolFamily, assetDigest?: unknown): void {
+    const manifest = value as Record<string, unknown> | null;
+    const version = officialReleaseVersion(packageUrl);
+    if (!manifest || manifest.schemaVersion !== 1 || manifest.version !== version || manifest.packageUrl !== packageUrl ||
+        !Array.isArray(manifest.protocols) || !manifest.protocols.includes(family) ||
+        typeof manifest.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(manifest.sha256) ||
+        assetDigest !== undefined && assetDigest !== `sha256:${manifest.sha256}`) {
+        throw new Error('The published Supervisor package does not advertise a verified matching protocol. Configuration was not changed.');
+    }
+}
+
+export async function resolveLatestSupervisorRelease(family: ProtocolFamily = 'v1'): Promise<string> {
     let stage = 'release_metadata';
     try {
         const response = await requestRelease('https://api.github.com/repos/Shiyong-Tan/opencode-task-supervisor/releases/latest');
@@ -41,6 +53,19 @@ export async function resolveLatestSupervisorRelease(): Promise<string> {
                 && typeof item.size === 'number' && item.size > 0;
         });
         if (assets.length !== 1 || !officialReleaseVersion(url)) throw new Error('Stable release package is missing or invalid');
+        if (family === 'v2') {
+            stage = 'release_protocol_manifest';
+            const manifestName = `opencode-task-supervisor-${version}.protocols.json`;
+            const manifestUrl = `${repository}/releases/download/${data.tag_name}/${manifestName}`;
+            const matching = data.assets.filter((asset: unknown) => {
+                const item = asset as Record<string, unknown> | null;
+                return item?.name === manifestName && item.state === 'uploaded' && item.browser_download_url === manifestUrl;
+            });
+            if (matching.length !== 1) throw new Error('Latest Supervisor release has no native V2 protocol manifest. Publish the dual-protocol package before enabling it.');
+            const manifest = await requestRelease(manifestUrl);
+            if (!manifest.ok) throw new Error(`Manifest HTTP ${manifest.status}`);
+            verifySupervisorReleaseProtocol(await manifest.json(), url, family, (assets[0] as Record<string, unknown>).digest);
+        }
         stage = 'release_asset';
         const asset = await requestRelease(url, true);
         if (!asset.ok) throw new Error(`Package HTTP ${asset.status}`);

@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as pathModule from 'path';
+import { BackendOperationError } from '../../transport/protocol/BackendContract';
 import type {
     OpenCodeClient,
     ChatFilePart,
@@ -19,6 +20,7 @@ type TurnCommandClient = Pick<
     OpenCodeClient,
     | 'abortSession'
     | 'appendPrompt'
+    | 'steerQueuedPrompt'
     | 'beginAppendPrompt'
     | 'canAppendToCurrentTurn'
     | 'cancelTurn'
@@ -169,6 +171,7 @@ export type TurnCommandHandler = (
 const TURN_COMMANDS = new Set([
     'sendMessage',
     'appendMessage',
+    'steerQueuedPrompt',
     'appendSnapshotMeta',
     'registerTmpKey',
     'registerPendingUserLocal',
@@ -185,6 +188,20 @@ export class TurnCommandController {
     ): Promise<boolean> {
         const host = this.host;
         switch (data.type) {
+            case 'steerQueuedPrompt': {
+                const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
+                const clientMessageId = typeof data.clientMessageId === 'string' ? data.clientMessageId : '';
+                try {
+                    if (!sessionId || typeof data.inboxId !== 'string' || !Number.isSafeInteger(data.generation)) throw new Error('Invalid queued input identity');
+                    const result = await host.client.steerQueuedPrompt({ sessionId, inboxId: data.inboxId, generation: data.generation });
+                    activeWebview.postMessage({ type: 'appendStatus', sessionId, clientMessageId, rootUserMsgId: data.rootUserMsgId,
+                        status: 'queued', delivery: result.delivery, canSteer: result.canSteer, steerPending: false });
+                } catch (error) {
+                    activeWebview.postMessage({ type: 'appendStatus', sessionId, clientMessageId, rootUserMsgId: data.rootUserMsgId,
+                        status: 'queued', canSteer: false, steerPending: false, reason: String(error) });
+                }
+                break;
+            }
             case "sendMessage": {
                 const contextItems = Array.isArray(data.contextItems) ? data.contextItems : [];
                 const hasContext = contextItems.some((item: any) => typeof item?.text === 'string' && item.text.length > 0);
@@ -598,7 +615,7 @@ ${attachmentLines.join('\n')}`
                 host.log(`[EXT][APPEND_ROUTE] accepted sessionId=${sessionId} rootUserMsgId=${beginAppend.rootUserMsgId} clientMessageId=${clientMessageId}`);
                 try {
                     const turnSelection = host.getTurnSelection();
-                    await host.client.appendPrompt(sessionId, value, {
+                    const admitted = await host.client.appendPrompt(sessionId, value, {
                         model: turnSelection.model,
                         mode: turnSelection.mode,
                         clientMessageId,
@@ -609,10 +626,17 @@ ${attachmentLines.join('\n')}`
                         sessionId,
                         clientMessageId,
                         rootUserMsgId: beginAppend.rootUserMsgId,
-                        status: 'queued'
+                        status: 'queued',
+                        ...(admitted ? { inboxId: admitted.inboxId, generation: admitted.generation, delivery: 'queue', canSteer: true } : {}),
                     });
                 }
                 catch (error) {
+                      if (error instanceof BackendOperationError && error.reason === 'ambiguous') {
+                          liveWebview.postMessage({ type: 'appendStatus', sessionId, clientMessageId,
+                              status: 'queued', rootUserMsgId: beginAppend.rootUserMsgId, canSteer: false,
+                              reason: 'Admission outcome is unknown. Reconnect to verify; do not resend this message.' });
+                          break;
+                      }
                     host.client.failAppendPrompt(sessionId, clientMessageId);
                     liveWebview.postMessage({
                         type: 'appendStatus',

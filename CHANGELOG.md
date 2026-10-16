@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## 6.0.0 - 2026-10-15
 
+- Add native OpenCode 2 protocol negotiation while retaining the OpenCode 1 adapter. Validate actual JSON resources and ownership instead of pinning release numbers; HTML fallback pages are not healthy API responses.
+- Route native sessions, execution outcomes, model/agent selection, typed permission/forms and manual compaction through the existing session owner. Keep concurrent child tools independently identified and render Queued messages with a Steer action when their captured inbox identity is current.
+- Install the protocol-appropriate Supervisor configuration and require a dual-protocol release advertisement before selecting a V2 plugin package. Native plugin loading requires the companion dual-entry package; old published archives do not gain V2 support automatically.
+
+- Add native OpenCode 2 protocol negotiation while retaining the OpenCode 1 adapter. Validate actual JSON resources and ownership instead of pinning release numbers; HTML fallback pages are not healthy API responses.
+- Route native sessions, execution outcomes, model/agent selection, typed permission/forms and manual compaction through the existing session owner. Keep concurrent child tools independently identified and render Queued messages with a Steer action when their captured inbox identity is current.
+- Install the protocol-appropriate Supervisor configuration and require a dual-protocol release advertisement before selecting a V2 plugin package. Native plugin loading requires the companion dual-entry package; old published archives do not gain V2 support automatically.
+
 Consolidates the changes previously tested as 5.1.0. Supervisor remains a separately installed plugin; use 0.1.5 or later for the corrected handshake/snapshot version identity.
 
 - Report Supervisor snapshot-read failures separately from successful handshakes. Release the switch's presentation lock after parent final; backend service/task/process checks still reject unsafe changes.

@@ -16067,7 +16067,12 @@ function appendMessageImages(parentEl, message) {
                 const item = upsertAppendItem(root, {
                     clientMessageId: message.clientMessageId,
                     status: message.status || 'queued',
-                    reason: message.reason || ''
+                    reason: message.reason || '',
+                    ...(typeof message.inboxId === 'string' ? { inboxId: message.inboxId } : {}),
+                    ...(Number.isSafeInteger(message.generation) ? { generation: message.generation } : {}),
+                    ...(typeof message.delivery === 'string' ? { delivery: message.delivery } : {}),
+                    ...(typeof message.canSteer === 'boolean' ? { canSteer: message.canSteer } : {}),
+                    ...(typeof message.steerPending === 'boolean' ? { steerPending: message.steerPending } : {})
                 });
                 syncAppendSnapshotMetadata(sessionId, 'appendStatus');
                 if (
@@ -18636,6 +18641,16 @@ function renderQuestionOverlayModal() {
     const questionOverlayState = displayedQuestion();
     if (!questionOverlayState) { questionOverlayEl?.remove(); questionOverlayEl = null; return; }
     const state = questionOverlayState;
+    if (state.nativeForm && state.reviewToken) {
+        questionOverlayEl?.remove();
+        state.nativeAnswers ||= {};
+        const wrapper = window.__ocFeatures.renderNativeForm({ document, form: state.nativeForm, values: state.nativeAnswers,
+            blocked: questionReview.blocked(), error: state.error, owner: `${state.agent || 'Agent'} | ${state.title || 'Question'}`,
+            changed: () => renderQuestionOverlayModal(), submit: (response, answers) => questionReview.submit(response, answers) });
+        const input = document.querySelector('.input-container');
+        if (input?.parentElement) input.parentElement.insertBefore(wrapper, input); else document.body.appendChild(wrapper);
+        questionOverlayEl = wrapper; return;
+    }
     if (!state.reviewToken && state.sessionId && activeSessionId && state.sessionId !== activeSessionId) return;
     const questions = Array.isArray(state.questions) ? state.questions : [];
     const stepIndex = Number.isFinite(state.stepIndex) ? state.stepIndex : 0;

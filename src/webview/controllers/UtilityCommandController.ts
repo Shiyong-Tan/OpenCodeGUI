@@ -22,6 +22,7 @@ export interface UtilityCommandHost {
     applyModeSelection(value: unknown): Promise<void>;
     applyVariantSelection(value: unknown): Promise<void>;
     pickCompactionModelId(): string | undefined;
+    usesBackendCompactionModel?(): boolean;
     parseModelRef(fullId: string): { providerID: string; modelID: string } | undefined;
     summarizeSession(
         sessionId: string,
@@ -233,12 +234,13 @@ export class UtilityCommandController {
             this.host.log('[EXT][ADD_RESPONSE_DROP] reason=missing-session-owner source=compactSession');
             return;
         }
-        const modelId = this.host.pickCompactionModelId();
+        const backendModel = this.host.usesBackendCompactionModel?.() === true;
+        const modelId = backendModel ? 'configured OpenCode compaction model' : this.host.pickCompactionModelId();
         if (!modelId) {
             this.host.postAddResponse(activeWebview, 'Compaction skipped: no free model available.', { sessionId });
             return;
         }
-        const modelRef = this.host.parseModelRef(modelId);
+        const modelRef = backendModel ? { providerID: '', modelID: '' } : this.host.parseModelRef(modelId);
         if (!modelRef) {
             this.host.postAddResponse(activeWebview, `Compaction skipped: invalid model id ${modelId}.`, { sessionId });
             return;

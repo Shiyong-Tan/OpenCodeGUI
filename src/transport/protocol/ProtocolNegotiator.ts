@@ -97,3 +97,18 @@ export async function probeProtocol(input: ProtocolProbe, fetcher: typeof fetch 
     }
     throw new ProtocolProbeError('unrecognized', 'Service does not expose a recognized OpenCode identity protocol');
 }
+
+/** Health is recognized identity, never HTTP 200 from a fallback HTML page. */
+export async function probeServerHealth(connection: { baseUrl: string; authHeader: string }, timeoutMs: number, fetcher: typeof fetch = fetch):
+    Promise<'ok' | 'unauthorized' | 'timeout' | 'connrefused' | 'unreachable'> {
+    try {
+        await probeProtocol({ baseUrl: connection.baseUrl, authorization: connection.authHeader, signal: AbortSignal.timeout(timeoutMs), isCurrent: () => true }, fetcher);
+        return 'ok';
+    } catch (error) {
+        if (error instanceof ProtocolProbeError && error.reason === 'authentication') return 'unauthorized';
+        const detail = error as { name?: string; code?: string; cause?: { code?: string } };
+        if (detail.name === 'AbortError' || detail.name === 'TimeoutError') return 'timeout';
+        if (detail.code === 'ECONNREFUSED' || detail.cause?.code === 'ECONNREFUSED') return 'connrefused';
+        return 'unreachable';
+    }
+}

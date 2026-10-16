@@ -32,10 +32,12 @@ import { planChangeListMaterialization } from './change-list/change-list-planner
 import { createVirtualMeasurementCache } from './virtual-measurement-cache';
 import { createAssistantImageController } from './images/assistant-image-controller';
 import { installHoverTooltips } from './hover-tooltip';
+import { renderNativeForm } from '../questions/native-form';
 
 export const FEATURE_FACADE_VERSION = 1 as const;
 
 const facade = Object.freeze({
+  renderNativeForm,
   version: FEATURE_FACADE_VERSION,
   createAttachmentState,
   isImageAttachment,

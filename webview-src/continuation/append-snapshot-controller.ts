@@ -21,6 +21,8 @@ export function createAppendSnapshotController(options: AppendSnapshotController
     copyString('status', 64);
     copyString('reason', 1_000);
     copyString('text', 20_000);
+    copyString('inboxId', 512);
+    copyString('delivery', 16);
     const appendUserMsgId = options.resolveMessageKey(session, item.appendUserMsgId) || item.appendUserMsgId;
     if (typeof appendUserMsgId === 'string' && appendUserMsgId.length && !appendUserMsgId.startsWith('local-') && !appendUserMsgId.startsWith('tmp:')) {
       output.appendUserMsgId = appendUserMsgId;

@@ -1,7 +1,9 @@
 import { parseReviewQuestions, validateQuestionAnswers, type ReviewQuestion } from '../questions/QuestionProtocol';
 import { createHmac, randomBytes } from 'crypto';
+import { validateFormAnswer, type NativeForm, type FormValue } from '../transport/protocol/V2InteractionAdapter';
 
 export interface PermissionCard {
+    nativeForm?: NativeForm;
     questions?: ReviewQuestion[]; callId?: string;
     sessionId: string; requestId: string; scopeSessionId: string; title: string; agent: string;
     permission: string; patterns: string[]; tool: string; input: string;
@@ -10,6 +12,12 @@ export interface PermissionCard {
 export interface PermissionSnapshot { scopeSessionId: string; requests: PermissionCard[] }
 export interface PermissionConnection {
     identity: string; directory: string;
+    native?: {
+        session(id: string): Promise<unknown>;
+        requests(kind: 'permission' | 'question'): Promise<unknown[]>;
+        message(sessionId: string, messageId: string): Promise<unknown>;
+        respond(input: { sessionId: string; requestId: string; response: string; answers?: unknown }): Promise<void>;
+    };
     read(path: string): Promise<unknown>;
     reply(path: string, body: unknown): Promise<unknown>;
 }
@@ -19,7 +27,10 @@ function record(value: unknown): RecordValue {
     return value as RecordValue;
 }
 const text = (value: unknown) => typeof value === 'string' ? value : '';
-const directoryKey = (value: string) => value.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+const directoryKey = (value: string) => {
+    const normalized = value.replace(/\\/g, '/').replace(/\/+$/, '');
+    return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+};
 const sid = (value: string) => /^ses_[A-Za-z0-9_-]{1,160}$/.test(value);
 
 /** The server owns pending requests. This owner verifies scope and issues review tokens;
@@ -38,7 +49,7 @@ export class PermissionReviewService {
             if (!sid(id)) throw new Error('Invalid permission owner session');
             let pending = sessionCache.get(id);
             if (!pending) {
-                pending = conn.read(`/session/${encodeURIComponent(id)}`).then(value => {
+                pending = (conn.native ? conn.native.session(id) : conn.read(`/session/${encodeURIComponent(id)}`)).then(value => {
                     const info = record(value);
                     if (info.id !== id || directoryKey(text(info.directory)) !== directoryKey(conn.directory))
                         throw new Error('Permission session/workspace identity mismatch');
@@ -49,7 +60,7 @@ export class PermissionReviewService {
             return pending;
         };
         await session(scopeSessionId);
-        const raw = await conn.read(`/${this.kind}`);
+        const raw = conn.native ? await conn.native.requests(this.kind) : await conn.read(`/${this.kind}`);
         if (!Array.isArray(raw) || raw.length > 1024) throw new Error('Invalid permission list');
         const seen = new Set<string>(), requests: PermissionCard[] = [];
         for (const item of raw) {
@@ -74,14 +85,17 @@ export class PermissionReviewService {
             const patterns = this.kind === 'question' ? [] : req.patterns as string[];
             const card: PermissionCard = { sessionId, requestId, scopeSessionId, title: text(owner.title), agent: text(owner.agent),
                 permission, patterns, tool: '', input: '', state: 'unknown', reason: 'Tool association unavailable; cannot safely reply', reviewToken: '' };
-            if (this.kind === 'question') card.questions = parseReviewQuestions(req.questions);
+            if (this.kind === 'question' && conn.native && req.nativeForm) {
+                card.nativeForm = req.nativeForm as NativeForm;
+                card.state = 'pending'; card.reason = ''; card.callId = requestId;
+            } else if (this.kind === 'question') card.questions = parseReviewQuestions(req.questions);
             if (req.tool) {
                 const tool = record(req.tool), messageId = text(tool.messageID), callId = text(tool.callID);
                 card.callId = callId;
                 if (!messageId || !callId) throw new Error('Invalid permission tool identity');
                 const messageKey = `${sessionId}:${messageId}`;
                 let pending = messages.get(messageKey);
-                if (!pending) { pending = conn.read(`/session/${encodeURIComponent(sessionId)}/message/${encodeURIComponent(messageId)}`);
+                if (!pending) { pending = conn.native ? conn.native.message(sessionId, messageId) : conn.read(`/session/${encodeURIComponent(sessionId)}/message/${encodeURIComponent(messageId)}`);
                     messages.set(messageKey, pending); }
                 const message = record(await pending), info = record(message.info);
                 if (info.id !== messageId || info.sessionID !== sessionId || !Array.isArray(message.parts))
@@ -120,7 +134,13 @@ export class PermissionReviewService {
             const request = fresh.requests.find(r => r.sessionId === input.sessionId && r.requestId === input.requestId);
             if (!request || request.state !== 'pending' || request.reviewToken !== input.reviewToken)
                 throw new Error('Permission expired, changed, or no longer belongs to this session; refresh before responding');
-            if (this.kind === 'question' && input.response === 'answer') validateQuestionAnswers(request.questions!, input.answers);
+            if (this.kind === 'question' && input.response === 'answer') {
+                if (request.nativeForm) validateFormAnswer(request.nativeForm, input.answers as Readonly<Record<string, FormValue>>);
+                else validateQuestionAnswers(request.questions!, input.answers);
+            }
+            if (conn.native) {
+                await conn.native.respond(input); this.completed.add(key); return;
+            }
             const route = this.kind === 'question' && input.response === 'reject' ? 'reject' : 'reply';
             const body = this.kind === 'permission' ? { reply: input.response } : route === 'reject' ? {} : { answers: input.answers };
             const result = await conn.reply(`/${this.kind}/${encodeURIComponent(input.requestId)}/${route}`, body);

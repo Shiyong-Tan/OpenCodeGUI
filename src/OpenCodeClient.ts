@@ -1,4 +1,11 @@
 import { LinuxServiceOwner } from './transport/LinuxServiceOwner';
+import { ProtocolConnectionOwner, type ProtocolBinding } from './transport/protocol/ProtocolConnectionOwner';
+import { decodeV2Event, type BackendEvent } from './transport/protocol/V2EventAdapter';
+import { V2EventIntegration, nativeToolFragment } from './transport/protocol/V2EventIntegration';
+import type { V2Backend } from './transport/protocol/V2Backend';
+import { InboxSteering, type SteeringInput } from './transport/protocol/InboxSteering';
+import { NativeCompaction } from './transport/protocol/NativeCompaction';
+import { probeServerHealth } from './transport/protocol/ProtocolNegotiator';
 import { repairFailedManualCompaction } from './continuation/ManualCompaction';
 import { SupervisorActivationPending } from './supervisor/ActivationPending';
 import { activateSupervisorService } from './supervisor/activate-service';
@@ -592,6 +599,33 @@ export class OpenCodeClient {
     private async connectRequestReview(sessionId: string): Promise<import('./permissions/PermissionReviewService').PermissionConnection> {
         const conn = await this.getServerConn();
         const directory = this.getPermissionDirectory(sessionId);
+        const backend = this.nativeBackend, binding = this.protocolBinding;
+        if (backend && binding) return {
+            identity: `${conn.baseUrl}:${binding.generation}`, directory,
+            read: async () => { throw new Error('Legacy permission routes unavailable on this backend'); },
+            reply: async () => { throw new Error('Legacy permission replies unavailable on this backend'); },
+            native: {
+                session: id => backend.sessionInfo(id),
+                requests: async kind => {
+                    if (!binding.isCurrent()) throw new Error('Permission service changed');
+                    if (kind === 'question') return (await backend.interactions.forms()).filter(form => form.sessionId !== 'global').map(form => ({
+                        id: form.id, sessionID: form.sessionId, nativeForm: form,
+                    }));
+                    return (await backend.interactions.permissions()).map(permission => {
+                        const source = permission.native.source as { type?: string; messageID?: string; id?: string } | undefined;
+                        return { id: permission.id, sessionID: permission.sessionId, permission: permission.action, patterns: [...permission.resources],
+                            ...(source?.type === 'tool' ? { tool: { messageID: source.messageID, callID: source.id } } : {}) };
+                    });
+                },
+                message: async (id, messageId) => (await backend.history(id)).find(message => message.info.id === messageId),
+                respond: async input => {
+                    if (!binding.isCurrent()) throw new Error('Permission service changed');
+                    if (input.response === 'answer') await backend.interactions.replyForm(input.sessionId, input.requestId, input.answers as Record<string, import('./transport/protocol/V2InteractionAdapter').FormValue>);
+                    else if (input.requestId.startsWith('frm_')) await backend.interactions.cancelForm(input.sessionId, input.requestId);
+                    else await backend.interactions.replyPermission(input.sessionId, input.requestId, input.response as PermissionReply);
+                },
+            },
+        };
         const request = async (path: string, body?: unknown) => {
             const response = await this.serverFetch(`${path}?directory=${encodeURIComponent(directory)}`, {
                 method: body === undefined ? 'GET' : 'POST',
@@ -997,8 +1031,8 @@ export class OpenCodeClient {
             locks: this.serverLocks,
             process: this.serverProcessManager,
             ownedRecords: this.supervisorExperiment ? undefined : options?.serviceRecords,
-            activity: connection => queryServiceActivity(connection),
-            connectionChanged: () => this.normalSupervisor?.invalidateServiceConnection(),
+            activity: connection => queryServiceActivity(connection, fetch, this.nativeBackend),
+            connectionChanged: () => { this.invalidateBackend(); this.normalSupervisor?.invalidateServiceConnection(); },
             buildServeSpawn: (args) => this.buildServeSpawn(args),
             prepareSupervisorLaunch: options?.normalSupervisorStore ? (lock, serviceId) =>
                 vscode.workspace.getConfiguration('opencode').get<boolean>('supervisor.enabled', false)
@@ -1008,6 +1042,7 @@ export class OpenCodeClient {
                 { method: 'GET' },
                 { opName: 'health', retry: false, timeoutMs, conn, skipReady: true },
             ),
+            probeHealth: (connection, timeoutMs) => probeServerHealth(connection, timeoutMs),
             stopEventStream: () => this.eventStream?.stop(),
             log: (message) => this.logUiDebug(message),
             showError: (message) => { void vscode.window.showErrorMessage(message); },
@@ -1020,13 +1055,17 @@ export class OpenCodeClient {
             log: (message) => this.logUiDebug(message),
         });
         this.eventStream = new OpenCodeEventStream({
-            open: (signal) => this.serverFetch('/event', { method: 'GET', signal }, { opName: 'event', retry: false, noTimeout: true }),
+            open: async (signal) => {
+                await this.bindBackend();
+                return this.serverFetch(this.protocolBinding?.native ? '/api/event' : '/event', { method: 'GET', signal }, { opName: 'event', retry: false, noTimeout: true });
+            },
             onPayload: (payload) => this.handleServerEvent(payload),
             onOpen: () => {
                 this.updateServerStatus('connected', 'event-stream-open');
                 this.reportServiceRecovery();
             },
             onClosed: () => {
+                this.invalidateBackend();
                 this.logUiDebug('EXT: event.closed');
                 this.triggerImmediateResyncForAwaitingFinals('event-stream-close');
             },
@@ -1106,6 +1145,7 @@ export class OpenCodeClient {
         const connection = await this.getServerConn();
         if (workspace !== this.workspaceRoot) return { status: 'unavailable' as const, reason: 'read_failed' as const };
         const view = await fillSupervisorTitles(result.view, async id => {
+            if (this.nativeBackend) return this.nativeBackend.sessionInfo(id);
             const response = await this.serverFetch(`/session/${encodeURIComponent(id)}`, {}, {
                 conn: connection, retry: false, retryTransport: false, skipReady: true, timeoutMs: 1500,
             });
@@ -1123,6 +1163,7 @@ export class OpenCodeClient {
     public setWorkspaceRoot(newRoot: string): void {
         if (!newRoot || newRoot === this.workspaceRoot) return;
         this.workspaceRoot = newRoot;
+        this.invalidateBackend();
         this.gitUndo = new GitUndoEngine(this.workspaceRoot, (message) => this.logUiDebug(message));
         this.gitUndoAvailable = false;
         this.supervisorIngress?.dispose();
@@ -1148,6 +1189,7 @@ export class OpenCodeClient {
             await this.serverController.ensure(this.workspaceRoot);
             await this.serverController.waitUntilReady();
         }
+        await this.bindBackend();
         if (!this.eventStream.isActive()) {
             this.connectEventStream();
         }
@@ -1313,6 +1355,7 @@ export class OpenCodeClient {
         options?: { sseWaitMs?: number; pollEveryMs?: number; maxPolls?: number }
     ): Promise<boolean> {
         if (!sessionId) return false;
+        if (this.nativeBackend) return !(await this.nativeBackend.controls.active())[sessionId];
         const sseWaitMs = Math.max(0, options?.sseWaitMs ?? 2000);
         const pollEveryMs = Math.max(250, options?.pollEveryMs ?? 2000);
         const maxPolls = Math.max(1, options?.maxPolls ?? 3);
@@ -3479,6 +3522,7 @@ export class OpenCodeClient {
     }
 
     private async runResyncSettleCheck(sessionId: string, reason: string): Promise<void> {
+        if (this.nativeBackend) { await this.reconcileNativeExecution(sessionId); return; }
         if (!sessionId) return;
         if (this.turnFinalResolvedBySession.has(sessionId)) return;
         if (this.hasInteractiveBlocker(sessionId)) {
@@ -3921,6 +3965,11 @@ export class OpenCodeClient {
     }
 
     public async getSessionMessageDetail(sessionId: string, messageID: string): Promise<SessionMessageDetail> {
+        if (this.nativeBackend) {
+            const message = (await this.nativeBackend.history(sessionId)).find(item => item.info.id === messageID);
+            if (!message) throw new Error('OpenCode message is no longer available in this session');
+            return message;
+        }
         const encodedSession = encodeURIComponent(sessionId);
         const encodedMessage = encodeURIComponent(messageID);
         this.logUiDebug(`[EXT][AUTH_DIFF] detail.fetch.start | sessionId=${sessionId} | messageId=${messageID}`);
@@ -5140,7 +5189,8 @@ export class OpenCodeClient {
             if (workspace !== this.workspaceRoot) throw new Error('Workspace changed. Retry in the target workspace.');
             return;
         }
-        if (await queryServiceActivity(connection) !== 'idle') throw new Error('Supervisor settings are locked while tasks or approval requests are active.');
+        await this.bindBackend();
+        if (await queryServiceActivity(connection, fetch, this.nativeBackend) !== 'idle') throw new Error('Supervisor settings are locked while tasks or approval requests are active.');
         if (this.getSupervisorStatus() === 'connected' && parentSessionId) {
             const observed = await this.readSupervisorState(parentSessionId);
             if (observed.status !== 'observed') throw new Error('Supervisor task activity could not be verified; settings are locked.');
@@ -5159,7 +5209,7 @@ export class OpenCodeClient {
         const operation = (async () => {
             if (!vscode.workspace.isTrusted) throw new Error('Trust this workspace before installing Supervisor.');
             await this.assertSupervisorSwitchIdle();
-            const changed = await configureSupervisor(workspace);
+            const changed = await configureSupervisor(workspace, undefined, this.protocolBinding?.identity.family);
             checkWorkspace();
             if (!changed && this.getSupervisorStatus() === 'connected') return;
             this.setNormalSupervisorEnabled(true);
@@ -5217,6 +5267,101 @@ export class OpenCodeClient {
 
     private async requestJson<T>(method: string, path: string, body?: any): Promise<T> {
         return this.httpClient.requestJson<T>(method, path, body);
+    }
+
+    private readonly protocolOwner = new ProtocolConnectionOwner();
+    private protocolBinding?: ProtocolBinding;
+    private nativeEvents?: V2EventIntegration;
+    private nativeTools = new Map<string, Record<string, unknown>>();
+    private readonly inboxSteering = new InboxSteering(async () => { await this.ensureServer(); return this.protocolBinding; });
+    private readonly nativeCompaction = new NativeCompaction(() => this.protocolBinding);
+    public usesBackendCompactionModel(): boolean { return Boolean(this.nativeBackend); }
+    public steerQueuedPrompt(input: SteeringInput) { return this.inboxSteering.steer(input); }
+    private get nativeBackend(): V2Backend | undefined { return this.protocolBinding?.native; }
+    private invalidateBackend(): void {
+        this.protocolOwner?.invalidate(); this.protocolBinding = undefined; this.nativeEvents = undefined;
+        this.nativeTools?.clear();
+    }
+    private async bindBackend(): Promise<void> {
+        const directory = this.workspaceRoot, connection = await this.getServerConn();
+        const binding = await this.protocolOwner.bind(connection, directory);
+        if (!binding.isCurrent() || directory !== this.workspaceRoot) throw new Error('OpenCode connection changed. Retry in the target workspace.');
+        if (this.protocolBinding === binding) return;
+        this.protocolBinding = binding;
+        if (binding.native) this.nativeEvents = new V2EventIntegration(binding.native, {
+            isCurrent: binding.isCurrent,
+            session: info => this.handleClassifiedServerEvent('session.created', { info }, 'sse', 0),
+            accepts: id => !this.turnFinishedBySession.has(id) && (this.turnStateBySession.has(id) || this.subagentToParentSessionMap.has(id)),
+            step: event => this.acceptNativeStep(event), text: event => this.acceptNativeText(event),
+            tool: event => this.acceptNativeTool(event),
+            delivered: (id, messageId) => this.acceptNativeDelivered(id, messageId),
+            reconcile: id => this.reconcileNativeExecution(id),
+            interaction: id => this.emitChatEvents([{ type: 'questionChanged', sessionId: id }]),
+            compaction: event => this.nativeCompaction.observe(event),
+            activity: event => { if (event.sessionId) this.lastSseAtBySession.set(event.sessionId, Date.now()); },
+            failure: (id, error) => this.logUiDebug(`EXT: native.event.failure | sessionId=${id || 'none'} | error=${String(error)}`),
+        });
+    }
+    private acceptNativeStep(event: BackendEvent): void {
+        const id = event.sessionId!, ref = event.payload.model as Record<string, unknown> | undefined;
+        this.handleClassifiedServerEvent('message.updated', { info: { id: event.assistantMessageId, sessionID: id,
+            role: 'assistant', parentID: this.currentTurnUserMsgIdBySession.get(id) || this.pendingUserMsgIdBySession.get(id),
+            agent: event.payload.agent, modelID: ref?.id, providerID: ref?.providerID, variant: ref?.variant,
+            time: { created: event.payload.started ?? event.createdAt ?? Date.now() } } }, 'sse', 0);
+    }
+    private acceptNativeText(event: BackendEvent): void {
+        if (!['session.text.delta', 'session.text.ended'].includes(event.type)) return;
+        const messageId = event.assistantMessageId!, part: Record<string, unknown> = { id: `${messageId}_${event.ordinal}`, sessionID: event.sessionId,
+            messageID: messageId, type: 'text', ...(event.type.endsWith('.delta') ? { delta: event.payload.delta } : { text: event.payload.text }) };
+        if (typeof part.delta === 'string') {
+            const key = this.getAssistantTextLengthPartKey(messageId, part);
+            this.assistantTextLengthsByPart.set(key, (this.assistantTextLengthsByPart.get(key) || 0) + part.delta.length);
+        }
+        this.handleClassifiedServerEvent('message.part.updated', { part }, 'sse', 0);
+    }
+    private acceptNativeTool(event: BackendEvent): void {
+        const key = JSON.stringify([event.sessionId, event.assistantMessageId, event.callId]);
+        const part = nativeToolFragment(event, this.nativeTools.get(key));
+        if (!part) return;
+        this.nativeTools.set(key, part);
+        this.handleClassifiedServerEvent('message.part.updated', { part }, 'sse', 0);
+    }
+    private async readMessages(sessionId: string, limit?: number): Promise<any[]> {
+        if (this.nativeBackend) return this.nativeBackend.history(sessionId, limit);
+        return this.requestJson<any[]>('GET', `/session/${sessionId}/message${limit === undefined ? '' : `?limit=${limit}`}`);
+    }
+    private async acceptNativeDelivered(sessionId: string, messageId: string): Promise<void> {
+        const binding = this.protocolBinding, turn = this.turnStateBySession.get(sessionId);
+        const messages = await this.readMessages(sessionId);
+        if (binding !== this.protocolBinding || turn !== this.turnStateBySession.get(sessionId)) return;
+        const item = messages.find(message => message.info.id === messageId);
+        if (item?.info.role === 'user') this.handleClassifiedServerEvent('message.updated', { info: item.info }, 'sse', 0);
+    }
+    private async reconcileNativeExecution(sessionId: string): Promise<void> {
+        if (this.turnFinishedBySession.has(sessionId)) return;
+        const binding = this.protocolBinding, turn = this.turnStateBySession.get(sessionId), backend = binding?.native;
+        if (!backend) return;
+        const projection = await backend.projection(sessionId), messages = projection.messages;
+        if (!binding.isCurrent() || binding !== this.protocolBinding || turn !== this.turnStateBySession.get(sessionId)) return;
+        for (const item of messages) {
+            if (item.info.role !== 'assistant' || !this.shouldReplayResyncMessage(sessionId, item.info)) continue;
+            const info = item.info;
+            this.handleClassifiedServerEvent('message.updated', { info: { ...info, finish: undefined, time: { created: (info.time as any)?.created } } }, 'sse', 0);
+            for (const part of item.parts) this.handleClassifiedServerEvent('message.part.updated', { part }, 'sse', 0);
+            if (info.finish === 'stop' || info.error) {
+                this.handleClassifiedServerEvent('message.updated', { info }, 'sse', 0);
+                if (!this.subagentToParentSessionMap.has(sessionId)) {
+                    this.markTurnFinal(sessionId, String(info.id), 'sse');
+                    this.resolveTurnFinal(sessionId, info.error ? 'session-error' : 'native-execution-ended');
+                }
+            }
+        }
+        if (projection.outcome && turn && !this.turnFinishedBySession.has(sessionId)
+            && !this.subagentToParentSessionMap.has(sessionId)) {
+            turn.terminalError = projection.outcome === 'interrupted' ? 'OpenCode execution was interrupted.'
+                : 'OpenCode execution ended without an answer to this message.';
+            this.resolveTurnFinal(sessionId, 'session-error');
+        }
     }
 
     private parseModelRef(model?: string): { providerID: string; modelID: string } | undefined {
@@ -5673,6 +5818,11 @@ export class OpenCodeClient {
         try {
             parsed = JSON.parse(payload);
         } catch {
+            return;
+        }
+        if (this.nativeEvents && source === 'sse') {
+            try { this.nativeEvents.receive(decodeV2Event(parsed)); }
+            catch (error) { this.logUiDebug(`EXT: native.event.invalid | error=${String(error)}`); }
             return;
         }
         const type = parsed?.type as string;
@@ -6222,6 +6372,10 @@ export class OpenCodeClient {
     }
 
     private scheduleSessionResyncLimited(sessionId: string, reason: string): void {
+        if (this.nativeBackend) {
+            void this.reconcileNativeExecution(sessionId).catch(error => this.logUiDebug(`EXT: native.resync.failed | sessionId=${sessionId} | error=${String(error)}`));
+            return;
+        }
         if (reason === 'idle') {
             const turnSettled = this.turnFinalResolvedBySession.has(sessionId);
             const cleanState = !this.hasPendingOrRunningTools(sessionId)
@@ -6445,7 +6599,7 @@ export class OpenCodeClient {
         let list: any[] = [];
         let source: 'recent' | 'full' = 'recent';
 
-        const recentMessages = await this.requestJson<any[]>('GET', `/session/${sessionId}/message?limit=${recentLimit}`);
+        const recentMessages = await this.readMessages(sessionId, recentLimit);
         const recentList = Array.isArray(recentMessages) ? recentMessages : [];
         const hasAnchor = typeof anchorMsgId === 'string' && anchorMsgId.length > 0;
         const anchorHit = hasAnchor && recentList.some((item) => item?.info?.id === anchorMsgId);
@@ -6454,7 +6608,7 @@ export class OpenCodeClient {
             list = recentList;
             source = 'recent';
         } else {
-            const fullMessages = await this.requestJson<any[]>('GET', `/session/${sessionId}/message`);
+            const fullMessages = await this.readMessages(sessionId);
             list = Array.isArray(fullMessages) ? fullMessages : [];
             source = 'full';
         }
@@ -6622,6 +6776,7 @@ export class OpenCodeClient {
     public async checkVersion(): Promise<string> {
         try {
             await this.ensureServer();
+            if (this.protocolBinding) return this.protocolBinding.identity.version;
             const health = await this.requestJson<{ healthy: boolean; version?: string }>('GET', '/global/health');
             return typeof health?.version === 'string' ? health.version : 'unknown';
         } catch {
@@ -6642,7 +6797,7 @@ export class OpenCodeClient {
         const listener = onEvent ? (event: ChatEvent) => onEvent(event) : undefined;
 
         if (this.manualCompactions?.has(sessionId)) throw new Error('Compaction is still running. Wait for it to finish before sending.');
-        await this.repairFailedCompaction(sessionId);
+        if (!this.nativeBackend) await this.repairFailedCompaction(sessionId);
         const payload: any = {
             parts: [{ type: 'text', text: message }]
         };
@@ -6668,7 +6823,15 @@ export class OpenCodeClient {
         const turn = this.turnStateBySession.get(sessionId);
         if (listener) this.eventListeners.add(listener);
         try {
-            await this.requestJson('POST', `/session/${sessionId}/prompt_async`, payload);
+            if (this.nativeBackend) {
+                const native = this.nativeBackend, id = `msg_${Date.now().toString(36)}_${crypto.randomBytes(10).toString('hex')}`;
+                if (modelRef) await native.controls.selectModel(sessionId, { providerID: modelRef.providerID, id: modelRef.modelID, ...(options.variant ? { variant: options.variant } : {}) });
+                await native.controls.selectAgent(sessionId, options.mode || 'plan');
+                this.setCurrentTurnUserMsgId(sessionId, id, 'native-admission-owner');
+                await native.sessions.admit(sessionId, { id, text: message, delivery: 'steer', files: options.files?.map(file =>
+                    ({ uri: typeof file === 'string' ? vscode.Uri.file(file).toString() : file.url })) });
+                this.handleClassifiedServerEvent('message.updated', { info: { id, sessionID: sessionId, role: 'user', time: { created: Date.now() } } }, 'sse', 0);
+            } else await this.requestJson('POST', `/session/${sessionId}/prompt_async`, payload);
             await this.waitForTurnCompletionFinal(sessionId);
             if (turn?.terminalError) throw new Error(turn.terminalError);
             if (listener && !this.getTurnAssistantMsgId(sessionId)) {
@@ -6683,10 +6846,21 @@ export class OpenCodeClient {
         sessionId: string,
         message: string,
         options: { model?: string; mode?: string; clientMessageId?: string; rootUserMsgId?: string } = {}
-    ): Promise<void> {
+    ): Promise<void | { inboxId: string; generation: number }> {
         await this.ensureServer();
         if (!sessionId) {
             throw new Error('Missing session ID for append request.');
+        }
+        if (this.nativeBackend) {
+            if (!this.canAppendToCurrentTurn(sessionId, options.rootUserMsgId)) throw new Error('This turn can no longer be appended to.');
+            const binding = this.protocolBinding!, id = `msg_${Date.now().toString(36)}_${crypto.randomBytes(10).toString('hex')}`;
+            const pending = this.appendTurnStateBySession.get(sessionId)?.pending.find(item => item.clientMessageId === options.clientMessageId && !item.serverMsgId);
+            if (!pending) throw new Error('This append request is no longer pending.');
+            // Bind durable identity before admission so a fast delivered event cannot bind another item.
+            pending.serverMsgId = id;
+            this.appendTurnStateBySession.get(sessionId)!.appendUserMsgIds.add(id);
+            await this.nativeBackend.sessions.admit(sessionId, { id, text: message, delivery: 'queue' });
+            return { inboxId: id, generation: binding.generation };
         }
         const rootUserMsgId = typeof options.rootUserMsgId === 'string' && options.rootUserMsgId
             ? options.rootUserMsgId
@@ -6903,12 +7077,16 @@ export class OpenCodeClient {
         const workspace = this.workspaceRoot;
         const snapshot = await this.questionReview.snapshot(scopeSessionId);
         if (workspace !== this.workspaceRoot) throw new Error('Question workspace changed');
-        const pending = snapshot.requests.filter(r => r.state === 'pending' && r.callId && r.questions?.length);
+        const pending = snapshot.requests.filter(r => r.state === 'pending' && r.callId && (r.questions?.length || r.nativeForm));
         for (const old of this.reviewedQuestionsByScope.get(scopeSessionId) || []) {
             if (!pending.some(r => r.sessionId === old.sessionId && r.callId === old.callId)) this.clearPendingQuestion(old.sessionId, old.callId);
         }
-        for (const card of pending) this.rememberPendingQuestion(card.sessionId, { callId: card.callId!, requestId: card.requestId,
-            title: card.questions![0].title, prompt: card.questions![0].prompt, options: card.questions![0].options, questions: card.questions! });
+        for (const card of pending) {
+            const question = card.questions?.[0];
+            this.rememberPendingQuestion(card.sessionId, { callId: card.callId!, requestId: card.requestId,
+                title: question?.title || card.nativeForm?.title || 'Question', prompt: question?.prompt || card.nativeForm?.title || '',
+                options: question?.options || [], questions: card.questions || [] });
+        }
         this.reviewedQuestionsByScope.set(scopeSessionId, pending.map(r => ({ sessionId: r.sessionId, callId: r.callId! })));
         return snapshot;
     }
@@ -6982,6 +7160,10 @@ export class OpenCodeClient {
 
     public async listModels(): Promise<ModelInfo[]> {
         await this.ensureServer();
+        if (this.nativeBackend) return (await this.nativeBackend.controls.models()).filter(model => model.enabled).map(model => ({
+            id: model.ref.id, providerId: model.ref.providerID, fullId: `${model.ref.providerID}/${model.ref.id}`,
+            name: model.name, variants: [...model.variants], contextLimit: model.contextLimit,
+        }));
         let attempts = 0;
         let models: ModelInfo[] = [];
         while (attempts < 2) {
@@ -7014,6 +7196,9 @@ export class OpenCodeClient {
 
     public async listAgents(): Promise<AgentInfo[]> {
         await this.ensureServer();
+        if (this.nativeBackend) return (await this.nativeBackend.controls.agents()).map(agent => ({
+            id: agent.id, mode: agent.mode, hidden: agent.hidden, description: typeof agent.native.description === 'string' ? agent.native.description : undefined,
+        }));
         const payload = await this.requestJson<any[]>('GET', '/agent');
         const list = Array.isArray(payload) ? payload : [];
         const agents: AgentInfo[] = [];
@@ -7030,6 +7215,18 @@ export class OpenCodeClient {
 
     public async listSessions(): Promise<SessionInfo[]> {
         await this.ensureServer();
+        if (this.nativeBackend) {
+            const sessions: SessionInfo[] = [], cursors = new Set<string>(); let cursor: string | undefined;
+            for (let page = 0; page < 128; page++) {
+                const result = await this.nativeBackend.sessions.listSessions({ cursor, limit: 200 });
+                sessions.push(...result.items.filter(session => !session.parentId).map(session => ({ id: session.id, title: session.title || 'Untitled Session',
+                    updated: new Date(session.updatedAt).toLocaleString(), cwd: typeof session.location.directory === 'string' ? session.location.directory : undefined })));
+                if (!result.next) return sessions;
+                if (cursors.has(result.next)) break;
+                cursors.add(result.next); cursor = result.next;
+            }
+            throw new Error('OpenCode session pagination exceeded its bound.');
+        }
         // Filter root sessions before OpenCode applies its result limit. Fetching the
         // unfiltered endpoint first lets busy subagent sessions consume the entire
         // window and makes older user-visible sessions disappear from history.
@@ -7059,6 +7256,7 @@ export class OpenCodeClient {
 
     public async createSession(): Promise<{ id: string }> {
         await this.ensureServer();
+        if (this.nativeBackend) return { id: (await this.nativeBackend.sessions.createSession()).id };
         const session = await this.requestJson<any>('POST', '/session', {});
         if (session?.id) {
             return { id: session.id };
@@ -7069,6 +7267,7 @@ export class OpenCodeClient {
     public async forkSession(sessionId: string): Promise<{ id: string }> {
         if (!sessionId) throw new Error('Session ID is required to create a branch.');
         await this.ensureServer();
+        if (this.nativeBackend) return { id: (await this.nativeBackend.controls.fork(sessionId)).id };
         const directory = encodeURIComponent(this.workspaceRoot || '.');
         const encodedSessionId = encodeURIComponent(sessionId);
         const session = await this.requestJson<any>(
@@ -7089,6 +7288,10 @@ export class OpenCodeClient {
         await this.ensureServer();
         const directory = encodeURIComponent(this.workspaceRoot || '.');
         const encodedSessionId = encodeURIComponent(sessionId);
+        if (this.nativeBackend) {
+            await this.nativeBackend.controls.rename(sessionId, normalizedTitle);
+            return { id: sessionId, title: normalizedTitle };
+        }
         const session = await this.requestJson<any>(
             'PATCH',
             `/session/${encodedSessionId}?directory=${directory}`,
@@ -7109,11 +7312,18 @@ export class OpenCodeClient {
 
     public async getSessionInfo(sessionId: string): Promise<any> {
         await this.ensureServer();
+        if (this.nativeBackend) return this.nativeBackend.sessionInfo(sessionId);
         return this.requestJson<any>('GET', `/session/${sessionId}`);
     }
 
     public async getSessionChildren(sessionId: string): Promise<any[]> {
         await this.ensureServer();
+        if (this.nativeBackend) {
+            const response = await this.nativeBackend.transport.request('GET', `/api/session?parentID=${encodeURIComponent(sessionId)}&limit=200`);
+            const rows = (response as { data?: unknown }).data;
+            if (!Array.isArray(rows)) throw new Error('Invalid OpenCode child session response');
+            return rows;
+        }
         const directory = encodeURIComponent(this.workspaceRoot || '.');
         const reqPath = `/session/${encodeURIComponent(sessionId)}/children?directory=${directory}`;
         const children = await this.requestJson<any[]>('GET', reqPath);
@@ -7122,6 +7332,7 @@ export class OpenCodeClient {
 
     public async deleteSession(sessionId: string): Promise<boolean> {
         await this.ensureServer();
+        if (this.nativeBackend) { await this.nativeBackend.controls.remove(sessionId); return true; }
         const directory = encodeURIComponent(this.workspaceRoot || '.');
         const reqPath = `/session/${encodeURIComponent(sessionId)}?directory=${directory}`;
         const result = await this.requestJson<any>('DELETE', reqPath);
@@ -7130,6 +7341,7 @@ export class OpenCodeClient {
 
     public async exportSession(sessionId: string): Promise<any> {
         await this.ensureServer();
+        if (this.nativeBackend) return { session: await this.nativeBackend.sessionInfo(sessionId), messages: await this.nativeBackend.history(sessionId) };
         const messages = await this.requestJson<any[]>( 'GET', `/session/${sessionId}/message`);
         const info = await this.requestJson<any>('GET', `/session/${sessionId}`);
         await this.prepareSupervisorHistory(sessionId, messages);
@@ -7138,6 +7350,7 @@ export class OpenCodeClient {
 
     public async exportSessionRecent(sessionId: string, limit = 200): Promise<any> {
         await this.ensureServer();
+        if (this.nativeBackend) return { session: await this.nativeBackend.sessionInfo(sessionId), messages: await this.nativeBackend.history(sessionId, limit) };
         const safeLimit = Math.max(1, Math.floor(Number.isFinite(limit) ? limit : 200));
         const messages = await this.requestJson<any[]>('GET', `/session/${sessionId}/message?limit=${safeLimit}`);
         const info = await this.requestJson<any>('GET', `/session/${sessionId}`);
@@ -7148,6 +7361,7 @@ export class OpenCodeClient {
     public async getSessionStatusType(sessionId: string): Promise<string | undefined> {
         if (!sessionId) return undefined;
         await this.ensureServer();
+        if (this.nativeBackend) return (await this.nativeBackend.controls.active())[sessionId] ? 'busy' : 'idle';
         const statusMap = await this.requestJson<Record<string, { type?: unknown }>>('GET', '/session/status');
         const type = statusMap?.[sessionId]?.type;
         return typeof type === 'string' ? type : undefined;
@@ -7199,6 +7413,7 @@ export class OpenCodeClient {
 
     public async listSessionMessages(sessionId: string): Promise<any[]> {
         await this.ensureServer();
+        if (this.nativeBackend) return this.nativeBackend.history(sessionId);
         const messages = await this.requestJson<any[]>('GET', `/session/${sessionId}/message`);
         return Array.isArray(messages) ? messages : [];
     }
@@ -7230,6 +7445,10 @@ export class OpenCodeClient {
             };
             await this.ensureServer();
             checkOwner();
+            if (this.nativeBackend) {
+                if (options.providerID || options.modelID) throw new Error('This backend selects compaction models through its compaction agent; per-request model overrides are unavailable.');
+                await this.nativeCompaction.run(sessionId); checkOwner(); return true;
+            }
             await this.repairFailedCompaction(sessionId);
             let selected = options;
             const attempted = new Set<string>();
@@ -7299,18 +7518,21 @@ export class OpenCodeClient {
     public cancel(): void {
         const sessionId = this.currentSessionId;
         if (!sessionId) return;
+        if (this.nativeBackend) { void this.abortSession(sessionId); return; }
         void this.requestJson('POST', `/session/${sessionId}/abort`, {});
     }
 
     public async abortSession(sessionId: string): Promise<void> {
         if (!sessionId) return;
         await this.ensureServer();
+        if (this.nativeBackend) { await this.nativeBackend.sessions.interrupt(sessionId); return; }
         await this.requestJson('POST', `/session/${encodeURIComponent(sessionId)}/abort`, {});
     }
 
     public async dispose(): Promise<void> {
         if (this.disposePromise) return this.disposePromise;
         this.disposePromise = (async () => {
+            this.invalidateBackend();
             this.normalSupervisor?.dispose();
             this.supervisorIngress?.dispose();
             this.supervisorAssistantObserver?.dispose();

@@ -50,6 +50,6 @@ export function planAssistantParentSeen(roots: readonly Root[], parentId: string
 
 export function planFinalizedItems(current: readonly Item[]) {
   let changed = false;
-  const items = current.map((item) => { if (!item || typeof item !== 'object' || ['applied','failed','rejected'].includes(item.status)) return item; if (item.status === 'seen' || ((item.status === 'queued' || item.status === 'sending') && item.appendUserMsgId)) { changed = true; return { ...item, status: 'applied' }; } if (item.status === 'sending' || item.status === 'queued') { changed = true; return { ...item, status: 'failed', reason: item.reason || 'append-not-acknowledged' }; } return item; });
+  const items = current.map((item) => { if (!item || typeof item !== 'object' || ['applied','failed','rejected'].includes(item.status)) return item; if (item.inboxId && item.status !== 'seen') return item; if (item.status === 'seen' || ((item.status === 'queued' || item.status === 'sending') && item.appendUserMsgId)) { changed = true; return { ...item, status: 'applied' }; } if (item.status === 'sending' || item.status === 'queued') { changed = true; return { ...item, status: 'failed', reason: item.reason || 'append-not-acknowledged' }; } return item; });
   return Object.freeze({ items: freezeItems(items), changed });
 }

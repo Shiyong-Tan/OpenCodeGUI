@@ -38,3 +38,9 @@ packaged bytes. Determinism now hashes continuation as well as rendering/supervi
 is deliberately increased from 75 to 77 KiB for this feature. The 25 KiB gzip cap,
 dependency restrictions, pinned compactor, private-property allowlist and all other
 bundle budgets remain unchanged. No compression safety option is weakened.
+
+2026-10-16: The native Queued/Steer action raises rendering gzip to 25,691 bytes.
+The gzip cap is deliberately increased from 25 to 26 KiB; raw remains 77 KiB.
+Typed native form controls add about 3.6 KiB to the feature bundle. Feature limits
+are now 58 KiB raw and 20 KiB gzip. Dependency and unsafe-code restrictions remain
+unchanged; deterministic builds are required.

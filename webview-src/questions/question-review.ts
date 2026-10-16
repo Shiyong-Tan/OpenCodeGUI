@@ -1,5 +1,5 @@
 import type { PermissionCard } from '../../src/permissions/PermissionReviewService';
-export type QuestionDraft = PermissionCard & { stepIndex: number; answers: string[][]; selected: string[]; draft: string; pending: boolean; error: string; localOnly: false };
+export type QuestionDraft = PermissionCard & { nativeAnswers?: Record<string, import('../../src/transport/protocol/V2InteractionAdapter').FormValue>; stepIndex: number; answers: string[][]; selected: string[]; draft: string; pending: boolean; error: string; localOnly: false };
 /** Review scope controls visibility only. Each request keeps its original session owner. */
 export function createQuestionReview(post: (message: unknown) => void, changed: () => void, pendingChanged: (cards: PermissionCard[], scope: string) => void = () => {}) {
     let scope = '', refreshId = '', counter = 0, waiting = 0, stale = true;
@@ -16,7 +16,7 @@ export function createQuestionReview(post: (message: unknown) => void, changed: 
         current, refresh, blocked: () => stale || !!current()?.pending,
         update(fn: (row: QuestionDraft) => QuestionDraft) { const row = current(); if (row) rows.set(key(row), fn(row)); },
         select(id: string) { if (scope !== id) { scope = id; rows.clear(); waiting = 0; refreshId = ''; stale = true; changed(); } refresh(); },
-        submit(response: 'answer' | 'reject', answers?: string[][]) {
+        submit(response: 'answer' | 'reject', answers?: unknown) {
             const row = current(); if (!row || stale || row.pending) return;
             row.pending = true; row.error = ''; changed();
             post({ type: 'questionDecision', scopeSessionId: scope, sessionId: row.sessionId, requestId: row.requestId, reviewToken: row.reviewToken, response, answers });
@@ -31,7 +31,7 @@ export function createQuestionReview(post: (message: unknown) => void, changed: 
                 const before = JSON.stringify([current(), stale]);
                 const retained = new Set<string>();
                 for (const card of cards) {
-                    if (card.state !== 'pending' || !card.questions?.length || !card.reviewToken) continue;
+                    if (card.state !== 'pending' || (!card.questions?.length && !card.nativeForm) || !card.reviewToken) continue;
                     const id = key(card); retained.add(id); const prior = rows.get(id);
                     if (prior?.reviewToken === card.reviewToken) { if (prior.error === 'Questions unavailable. Waiting to reconnect.') prior.error = ''; continue; }
                     rows.set(id, { ...card, stepIndex: 0, answers: [], selected: [], draft: '', pending: false, error: '', localOnly: false });

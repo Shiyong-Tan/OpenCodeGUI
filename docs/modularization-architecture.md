@@ -411,3 +411,9 @@ invalidate the check. The existing error/finalization path releases the request;
 the summary never becomes a canonical answer, and no prompt is automatically sent.
 Manual compaction compares before/after summary identities to distinguish provider
 failure from a verified new completed summary, regardless of HTTP success.
+
+2026-10-16: Native dual-protocol integration is documented in
+[OPENCODE-2-COMPATIBILITY.md](OPENCODE-2-COMPATIBILITY.md). Protocol bindings own
+transport generations only; OpenCodeClient and the existing session owners retain
+history, finality and UI mutation authority. Native controls and typed interactions
+do not create a second lifecycle pipeline.

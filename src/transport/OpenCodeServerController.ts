@@ -30,6 +30,7 @@ export class OpenCodeServerController {
         activity?(connection: ServerConnection): Promise<'idle' | 'active'>;
         connectionChanged?(): void;
         fetchHealth(conn: ServerConnection, timeoutMs: number): Promise<Response>;
+        probeHealth?(conn: ServerConnection, timeoutMs: number): Promise<ServerHealth>;
         stopEventStream(): void;
         log(message: string): void;
         showError(message: string): void;
@@ -173,6 +174,7 @@ export class OpenCodeServerController {
             lock: { workspaceRoot, port, password, updatedAt: new Date().toISOString() },
         };
         try {
+            if (this.options.probeHealth) return await this.options.probeHealth(conn, timeoutMs);
             const response = await this.options.fetchHealth(conn, timeoutMs);
             if (response.status === 200) return 'ok';
             if (response.status === 401) return 'unauthorized';

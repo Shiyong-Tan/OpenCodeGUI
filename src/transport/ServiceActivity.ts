@@ -1,8 +1,17 @@
 import type { ServerConnection } from './OpenCodeHttpClient';
 import { ServiceOperationError } from './WindowsServiceJob';
+import type { V2Backend } from './protocol/V2Backend';
 
 /** Only the selected service/workspace; no session database or workspace discovery. */
-export async function queryServiceActivity(connection: ServerConnection, fetcher: typeof fetch = fetch): Promise<'idle' | 'active'> {
+export async function queryServiceActivity(connection: ServerConnection, fetcher: typeof fetch = fetch, native?: V2Backend): Promise<'idle' | 'active'> {
+    if (native) {
+        try {
+            if (native.transport.connection.baseUrl !== connection.baseUrl || native.transport.connection.authorization !== connection.authHeader)
+                throw new Error('Service binding changed');
+            const [active, permissions, forms] = await Promise.all([native.controls.active(), native.interactions.permissions(), native.interactions.forms()]);
+            return Object.keys(active).length || permissions.length || forms.length ? 'active' : 'idle';
+        } catch { throw new ServiceOperationError('activity_unknown'); }
+    }
     const read = async (path: string): Promise<unknown> => {
         const signal = AbortSignal.timeout(2000);
         const response = await fetcher(connection.baseUrl + path, { signal, redirect: 'error', cache: 'no-store',
