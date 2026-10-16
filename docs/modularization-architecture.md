@@ -1,5 +1,102 @@
 # OpenCode GUI modularization architecture
 
+## Dual OpenCode protocol adaptation (implementation in progress)
+
+The runtime release label is diagnostic metadata, not an allowlist. Fixed upstream
+versions are reproducible test fixtures only. The first fixture is OpenCode 2.0.24,
+tag e7a34f09bfd9134dfade5a8ddb843f7030bc9a69. Existing 1.x behavior remains the
+compatibility oracle; this section does not declare the GUI ready for 2.x.
+
+### Contract and ownership
+
+Keep one UI and one session/turn/history implementation. Introduce two transport
+adapters behind a narrow domain port: identity/capabilities, session operations,
+history, execution events, interactions, compaction, and revert. Version branches
+belong only in adapter construction, never in Webview rendering or feature owners.
+Do not emulate a V1 endpoint with renamed V2 JSON when their effects differ.
+
+OpenCodeServerController retains connection and process lifecycle ownership. A
+protocol binding belongs to that captured service generation and workspace; it
+is invalidated by service replacement, authentication changes and workspace
+changes. Discovery must not write session state. No process-global adapter cache
+may mix windows, profiles, workspaces or credentials.
+
+ProtocolNegotiator recognizes validated identity response shapes using bounded,
+authenticated, read-only requests against the selected loopback origin. In the
+real 2.0.24 fixture, /global/health returns HTTP 200 HTML, so status and path alone
+are not proof of health or protocol. /api/info returns the V2 identity. A 401/403
+is an authentication failure, never permission to try other credentials or ports.
+Negotiation never sends prompts, creates tasks, installs plugins or restarts a service.
+
+Discovery establishes a protocol candidate, not full feature compatibility. Each
+adapter validates its read DTOs and advertises separate capabilities. Unknown
+capability is distinct from supported and unsupported. OpenAPI can corroborate a
+route, but cannot prove behavior. Unknown extra fields are ignored; missing owner
+IDs, unknown terminal states or incompatible critical types fail the affected
+operation. Do not coerce unknown state into idle, completed, empty requests or zero
+processes. A failed interaction endpoint blocks changes that require verified idle.
+
+### Preserve semantic distinctions
+
+- Prompt admission is not assistant finality. V2 durable inbox identity, delivery
+  and execution outcome need distinct domain results; a 200 response cannot
+  finalize a turn. Capture IDs before sending and reconcile ambiguous admission
+  rather than redispatching with a fresh ID.
+- Provider streamed/completed, tool success/failure, step completion and session
+  idle/interrupted are different facts. Parallel tool identity is session plus
+  assistant-message plus call ID. Never use one global current-tool field.
+- Native V2 background subagent completion is not parent completion. Foreground
+  and background dispatch are explicit modes, preserving the user's ongoing-work
+  contract. Native subagent notifications should have one owner; Supervisor must
+  not duplicate them.
+- Live events can be missed after disconnection. Reconnect hydrates the owning
+  session from authoritative history and active execution, deduplicates by durable
+  identity, then resumes live projection. Replayed history is not new progress.
+- V2 steering and queued input cannot be silently substituted for V1 append.
+  Their acceptance, delivery, canonical message binding and user-visible behavior
+  need differential traces before switching the production path.
+- Interrupt acknowledgement is distinct from local execution stopped, pending
+  inbox cleared and external processes stopped. Unknown native or escaped process
+  coverage blocks overlapping recovery.
+- Keep snapshots owned by the existing persistence boundary. Backend protocol
+  changes do not rewrite saved history, merge unrelated IDs or infer Undo range.
+  V2 staged/committed revert needs verified file effects and cannot be replaced by
+  one renamed V1 request.
+- Compaction is a control operation with its own outcome. Do not convert its
+  summary into an assistant answer or silently change the selected/free model.
+
+### Supervisor packaging boundary
+
+Share supervision policy and process tracking, but keep separate V1 and V2 plugin
+entrypoints: their loader, registration, permission and interruption contracts are
+different. Never import both SDK runtimes merely to choose one after loading.
+Release assets must advertise protocol family and checksum. GUI selects the asset
+for the verified backend, preserves custom sources, and leaves configuration
+unchanged when the matching asset is unavailable. One package-owned version feeds
+lease, handshake and snapshot; automated release tests compare all three.
+
+### Delivery gates
+
+1. Freeze V1 tests and reproduce both identities with isolated, credential-free
+   profiles. Add false-success HTML, newer release labels, authentication, timeout,
+   stale-generation and malformed-response tests. No production routing change.
+2. Implement typed V2 session/history/event port and differential send/stream/final,
+   parallel-tool, error and interruption traces. Verify A/B/C interleavings,
+   duplicate events, delayed final and reconnect without model calls.
+3. Adapt permissions/forms, compaction, append and revert individually. Unsupported
+   operations must report capability errors without sending a mutation. Side-effect
+   timeouts never trigger a protocol fallback or blind retry.
+4. Adapt Supervisor's V2 plugin entrypoint and release asset selection. Test native
+   foreground/background children, stall decisions, stop evidence and partial work.
+5. Run V1 and V2 contract suites, original regression gates, real isolated server
+   fixtures and the manual UI matrix before enabling V2 in a release installer.
+   A passing identity probe alone is never advertised as full compatibility.
+
+Model-call acceptance remains separate and requires explicit authorization. During
+development, do not change global configuration, user databases, ordinary services,
+GUI release number or existing plugin installation. Work remains local unless
+publication is explicitly requested.
+
 This document describes the ownership boundaries on `refactor/modularize-large-files`.
 The entry files remain compatibility/composition surfaces; extracted modules must not
 create a second writer for their host state.
