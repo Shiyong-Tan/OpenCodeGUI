@@ -2,6 +2,24 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { handleSidebarChatEvent } from '../events/SidebarChatEventHandler';
 
+test('main replacement metadata contains accumulated text while append successors retain deltas', async () => {
+  const webview = { postMessage: jest.fn() };
+  const complete = '继续跟踪同一个任务，不重复启动验证，也不重算已有案例。';
+  const host = { smartSearchSessions: { owns: () => false }, activeSubagentSessionIds: new Set(),
+    client: { getAssistantText: jest.fn(() => complete) }, appendAssistantBuffer: jest.fn(),
+    markWebviewActiveTurnUpdated: jest.fn(), isCurrentTurnSynthetic: () => false,
+    getAssistantMetaAllowedSessionIds: (id: string) => [id], pendingAssistantTmpKeyBySession: new Map(),
+    prepareAppendSnapshotHandoff: jest.fn(), currentSessionId: 'ses_other' };
+  const delta = '踪同一个任务，不重复启动验证，也不重算已有案例。';
+  const event = { type: 'text', sessionId: 'ses_A', assistantMsgId: 'msg_A', text: delta } as const;
+  await handleSidebarChatEvent(host, event, webview as never);
+  expect(webview.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: 'ses_A', lastText: complete }));
+  expect(host.appendAssistantBuffer).toHaveBeenCalledWith('ses_A', delta, 'msg_A');
+  await handleSidebarChatEvent(host, { ...event, appendFollowup: { kind: 'append-followup', mode: 'same-turn-handoff',
+    sessionId: 'ses_A', appendUserMsgId: 'msg_user', predecessorAssistantMsgId: 'msg_old', assistantMsgId: 'msg_A', generation: 1 } }, webview as never);
+  expect(webview.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ lastText: delta }));
+});
+
 test('child progress projects accumulated assistant text rather than replacing it with each delta', async () => {
   const entry = { parentSessionId: 'parent', latestFullText: '' };
   const text = new Map([['msg_A', 'Hello ']]);

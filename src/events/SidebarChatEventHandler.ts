@@ -602,7 +602,10 @@ export async function handleSidebarChatEvent(
                 host.markWebviewActiveTurnUpdated(sessionId, 'event:text');
                 if (event.appendFollowup) host.prepareAppendSnapshotHandoff?.(sessionId, event.appendFollowup);
                 host.appendAssistantBuffer(sessionId, event.text, event.assistantMsgId);
-                // Push latest chunk to webview (no cumulative text)
+                // Ordinary meta updates replace text; append successors explicitly
+                // concatenate deltas. Preserve those two existing renderer contracts.
+                const cumulativeText = !event.appendFollowup && event.assistantMsgId
+                    ? host.client?.getAssistantText?.(event.assistantMsgId) : undefined;
                 const liveWebview = host._view?.webview || webview;
                 const isSyntheticTurn = host.isCurrentTurnSynthetic(sessionId);
                 liveWebview?.postMessage({
@@ -614,7 +617,7 @@ export async function handleSidebarChatEvent(
                     assistantMsgId: event.assistantMsgId,
                     ...(event.appendFollowup ? {} : { tmpKey: host.pendingAssistantTmpKeyBySession?.get(sessionId) }),
                     appendFollowup: event.appendFollowup,
-                    lastText: event.text,
+                    lastText: cumulativeText ?? event.text,
                     isStatusUpdate: false,
                     allowedSessionIds: event.displayTarget === 'agent-lane' && event.agentSessionId
                         ? [event.agentSessionId, ...(event.parentSessionId ? [event.parentSessionId] : [])]
