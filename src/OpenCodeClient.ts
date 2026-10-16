@@ -5341,17 +5341,30 @@ export class OpenCodeClient {
     }
     private async acceptNativeDelivered(sessionId: string, messageId: string): Promise<void> {
         const binding = this.protocolBinding, turn = this.turnStateBySession.get(sessionId);
+        const childParent = this.subagentToParentSessionMap.get(sessionId);
         const messages = await this.readMessages(sessionId);
         if (binding !== this.protocolBinding || turn !== this.turnStateBySession.get(sessionId)) return;
+        if (childParent !== this.subagentToParentSessionMap.get(sessionId)) return;
         const item = messages.find(message => message.info.id === messageId);
-        if (item?.info.role === 'user') this.handleClassifiedServerEvent('message.updated', { info: item.info }, 'sse', 0);
+        if (item?.info.role === 'user') {
+            if (this.subagentToParentSessionMap.has(sessionId)) this.setCurrentTurnUserMsgId(sessionId, messageId, 'native-child-delivered');
+            this.handleClassifiedServerEvent('message.updated', { info: item.info }, 'sse', 0);
+        }
     }
     private async reconcileNativeExecution(sessionId: string, event?: BackendEvent): Promise<void> {
         if (this.turnFinishedBySession.has(sessionId)) return;
         const binding = this.protocolBinding, turn = this.turnStateBySession.get(sessionId), backend = binding?.native;
+        const childParent = this.subagentToParentSessionMap.get(sessionId);
         if (!backend) return;
         const projection = await backend.projection(sessionId), messages = projection.messages;
         if (!binding.isCurrent() || binding !== this.protocolBinding || turn !== this.turnStateBySession.get(sessionId)) return;
+        if (childParent !== this.subagentToParentSessionMap.get(sessionId)) return;
+        // Supervisor-created children have no GUI-admitted turn. Recover their native
+        // user identity before applying the existing replay and completion guards.
+        if (childParent && !this.currentTurnUserMsgIdBySession.has(sessionId)) {
+            const user = [...messages].reverse().find(item => item.info.role === 'user');
+            if (typeof user?.info.id === 'string') this.setCurrentTurnUserMsgId(sessionId, user.info.id, 'native-child-reconcile');
+        }
         // Deliberate native interruption can end execution without writing an idle record.
         // The event is only evidence for this owner after fresh active/inbox/interaction checks.
         if (!projection.outcome && projection.active === false && turn && event?.type === 'session.execution.interrupted'

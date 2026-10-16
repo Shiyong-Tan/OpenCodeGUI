@@ -5,6 +5,8 @@ jest.mock('vscode', () => ({
 }), { virtual: true });
 import { OpenCodeClient } from '../OpenCodeClient';
 import { decodeV2Event } from '../transport/protocol/V2EventAdapter';
+import { projectHistory } from '../transport/protocol/V2HistoryProjection';
+import { message } from '../transport/protocol/V2Codec';
 
 function harness() {
     const client = new OpenCodeClient() as any;
@@ -19,6 +21,62 @@ function harness() {
     client.repairFailedCompaction = jest.fn(async () => { throw new Error('Unexpected V1 compaction repair'); });
     return { client, native };
 }
+
+test('live text and repeated mixed-content history replay append each text part exactly once', () => {
+    const { client } = harness();
+    client.setCurrentTurnUserMsgId('ses_A', 'msg_user');
+    client.acceptNativeStep(decodeV2Event({ id: 'evt_step', type: 'session.step.started',
+        data: { sessionID: 'ses_A', assistantMessageID: 'msg_answer', started: Date.now() } }));
+    const emit = (id: string, type: string, more: object) => client.acceptNativeText(decodeV2Event({ id, type,
+        data: { sessionID: 'ses_A', assistantMessageID: 'msg_answer', ordinal: 0, ...more } }));
+    emit('evt_delta', 'session.text.delta', { delta: 'Same' });
+    emit('evt_ended', 'session.text.ended', { text: 'Same' });
+    const projected = projectHistory('ses_A', [message({ id: 'msg_answer', type: 'assistant', time: { created: Date.now() },
+        content: [{ type: 'reasoning', text: '' }, { type: 'text', text: 'Same' }, { type: 'text', text: 'Same' }] }, 'ses_A')], true);
+    for (let i = 0; i < 2; i++) for (const part of projected.messages[0].parts)
+        client.handleClassifiedServerEvent('message.part.updated', { part }, 'sse', 0);
+    expect(client.getAssistantText('msg_answer')).toBe('SameSame');
+});
+
+test('native child final recovers its own user anchor without finalizing the parent or sibling', async () => {
+    const { client, native } = harness();
+    client.registerSubagentSession('ses_child', 'ses_parent');
+    client.setCurrentTurnUserMsgId('ses_parent', 'msg_parent');
+    client.setCurrentTurnUserMsgId('ses_sibling', 'msg_sibling');
+    (native as any).projection = jest.fn(async () => ({ messages: [
+        { info: { id: 'msg_child_user', role: 'user' }, parts: [] },
+        { info: { id: 'msg_old', role: 'assistant', parentID: 'msg_old_user', finish: 'stop' }, parts: [] },
+        { info: { id: 'msg_child_answer', sessionID: 'ses_child', role: 'assistant', parentID: 'msg_child_user',
+            finish: 'stop', time: { created: 10, completed: 11 } }, parts: [] },
+    ], controls: [], outcome: 'succeeded', active: false }));
+    const dispatch = jest.spyOn(client, 'handleClassifiedServerEvent');
+    client.emitChatEvents = jest.fn(); client.resolveTurnFinal = jest.fn();
+    await client.reconcileNativeExecution('ses_child');
+    expect(client.currentTurnUserMsgIdBySession.get('ses_child')).toBe('msg_child_user');
+    expect(client.currentTurnUserMsgIdBySession.get('ses_parent')).toBe('msg_parent');
+    expect(client.currentTurnUserMsgIdBySession.get('ses_sibling')).toBe('msg_sibling');
+    expect(dispatch.mock.calls.some(([type, payload]: any[]) =>
+        type === 'message.updated' && payload.info.id === 'msg_child_answer' && payload.info.finish === 'stop')).toBe(true);
+    expect(dispatch.mock.calls.some(([, payload]: any[]) => payload.info?.id === 'msg_old')).toBe(false);
+    expect(client.emitChatEvents.mock.calls.flatMap(([events]: any[]) => events)).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'assistantMessageMeta', sessionId: 'ses_child',
+            assistantMsgId: 'msg_child_answer', completedAt: 11, parentSessionId: 'ses_parent' }),
+    ]));
+    expect(client.resolveTurnFinal).not.toHaveBeenCalled();
+});
+
+test('detaching a child while its native history read is pending cannot restore its anchor or final', async () => {
+    const { client, native } = harness();
+    client.registerSubagentSession('ses_child', 'ses_parent');
+    (native as any).projection = jest.fn(async () => {
+        client.clearSubagentSession('ses_child');
+        return { messages: [{ info: { id: 'msg_child_user', role: 'user' }, parts: [] }], controls: [], active: false };
+    });
+    client.handleClassifiedServerEvent = jest.fn();
+    await client.reconcileNativeExecution('ses_child');
+    expect(client.currentTurnUserMsgIdBySession.has('ses_child')).toBe(false);
+    expect(client.handleClassifiedServerEvent).not.toHaveBeenCalled();
+});
 test('native chat selects the requested role/model then admits exactly one durable prompt', async () => {
     const { client, native } = harness();
     client.turnStateBySession.set('ses_A', { pendingUserLocalKey: 'local-A', turnMessageIds: new Set(), assistantMessageIds: new Set() });

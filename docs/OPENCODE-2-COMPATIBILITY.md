@@ -14,6 +14,14 @@ event IDs. OpenCodeClient remains the only turn owner. Provider step completion
 does not finalize a turn; native execution outcomes do. Empty terminal executions
 resolve with an explicit error. Captured stale reads cannot finish newer turns.
 
+Native text ordinals are scoped to content kind. History projection preserves the
+live text part identity even when reasoning and tools precede it; full-value replay
+therefore extends that part once, rather than appending a second copy. Native child
+inbox delivery establishes its user anchor. Reconciliation can recover a missing
+child anchor from its own transcript, with captured parent-binding guards, before
+using the existing replay and completion filters. Child completion never finalizes
+the parent turn.
+
 Queued prompts retain durable inbox identities. Steer patches the existing inbox
 item once rather than admitting another prompt. Uncertain admission stays pending
 verification, never a blind retry. Rehydrated snapshots do not persist a live service

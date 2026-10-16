@@ -4,6 +4,16 @@ const native = (id: string, type: string, more = {}) => message({ id, type, time
 const user = native('msg_user', 'user', { text: 'Fixture' });
 const assistant = native('msg_answer', 'assistant', { agent: 'reviewer', model: { providerID: 'provider', id: 'child-model', variant: 'high' },
     finish: 'stop', time: { created: 2, completed: 3 }, content: [{ type: 'text', text: 'Answer' }, { type: 'tool', id: 'call_A', name: 'read', state: { status: 'completed', content: [{ type: 'text', text: 'Read result' }] } }] });
+
+test('history preserves live per-kind text ordinals across reasoning and parallel tools', () => {
+    const answer = native('msg_answer', 'assistant', { content: [
+        { type: 'reasoning', text: '' }, { type: 'text', text: 'Same' },
+        { type: 'tool', id: 'call_A', name: 'read', state: { status: 'completed' } },
+        { type: 'text', text: 'Same' }, { type: 'reasoning', text: '' },
+    ] });
+    expect(projectHistory('ses_A', [user, answer], true).messages[1].parts.map(part => part.id))
+        .toEqual(['msg_answer_reasoning_0', 'msg_answer_0', 'msg_answer_call_A', 'msg_answer_1', 'msg_answer_reasoning_1']);
+});
 test('provider completion never projects an assistant final without explicit execution outcome', () => {
     const result = projectHistory('ses_A', [user, assistant], false);
     expect(result.messages[1].info).toMatchObject({ id: 'msg_answer', parentID: 'msg_user', modelID: 'child-model', variant: 'high' });

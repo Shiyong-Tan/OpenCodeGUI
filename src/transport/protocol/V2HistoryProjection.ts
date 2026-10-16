@@ -25,10 +25,18 @@ export function projectHistory(sessionId: string, transcript: readonly BackendMe
                         ...file, url: file.uri, filename: file.name, type: 'file', messageID: message.id, sessionID: sessionId }; })) ] });
         } else if (message.kind === 'assistant') {
             const ref = objectOrEmpty(raw.model), content = array(raw.content).map(object);
-            const parts = content.map((part, ordinal) => part.type === 'tool' ? {
-                id: `${message.id}_${ordinal}`, sessionID: sessionId, messageID: message.id, type: 'tool',
-                callID: part.id, tool: part.name, state: projectToolState(part.state),
-            } : { ...part, id: `${message.id}_${ordinal}`, sessionID: sessionId, messageID: message.id });
+            // Native text/reasoning ordinals are per kind, not content-array positions.
+            // Replay must address the same part as its live delta/full-value boundary.
+            const ordinals = new Map<unknown, number>();
+            const parts = content.map(part => {
+                const ordinal = ordinals.get(part.type) ?? 0;
+                ordinals.set(part.type, ordinal + 1);
+                return part.type === 'tool' ? {
+                    id: `${message.id}_${part.id}`, sessionID: sessionId, messageID: message.id, type: 'tool',
+                    callID: part.id, tool: part.name, state: projectToolState(part.state),
+                } : { ...part, id: part.type === 'text' ? `${message.id}_${ordinal}` : `${message.id}_${part.type}_${ordinal}`,
+                    sessionID: sessionId, messageID: message.id };
+            });
             lastAssistant = { info: { id: message.id, sessionID: sessionId, role: 'assistant', parentID: parentId,
                 agent: raw.agent, modelID: ref.id, providerID: ref.providerID, variant: ref.variant,
                 time: { created: message.createdAt }, tokens: raw.tokens, cost: raw.cost,

@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## 6.0.0 - 2026-10-15
 
+- Keep native live text and history replay on the same per-kind part identities to prevent duplicated assistant text. Recover native child user anchors so completed subagent cards leave the active view.
+
 - Send cumulative main-assistant text to replacement-mode streaming cards instead of replacing the prefix with the newest delta. Preserve append-successor delta concatenation.
 
 - Restore live code diff notifications for native patch tools, including file/status metadata and added/deleted paths. Route through the existing session-owned diff and change-list pipeline.
