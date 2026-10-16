@@ -100,6 +100,54 @@ for the verified backend, preserves custom sources, and leaves configuration
 unchanged when the matching asset is unavailable. One package-owned version feeds
 lease, handshake and snapshot; automated release tests compare all three.
 
+### Additional V2 acceptance coverage
+
+The protocol audit on 2026-10-16 identified these required adaptations beyond
+endpoint discovery, the Steer button and a parallel-tool list:
+
+- Native V2 prompt delivery defaults to steer. The ordinary Append-to-Queued UI
+  must explicitly submit delivery=queue. The Steer button changes that same inbox
+  item; it does not create a second user message.
+- Keep inbox admission, delivery, cancellation and assistant processing separate.
+  Existing V1 finalized-append normalization must not mark a V2 queued item applied
+  merely because it has a canonical ID or the parent assistant finalized.
+- Stop/interrupt and cancel queued input are distinct commands. Interruption does
+  not erase pending input. Reconnect must show retained queued items so a future
+  resume cannot silently execute work the user thought was discarded.
+- Render typed history entries: assistant, user, synthetic, shell, compaction,
+  idle, model/agent selection and location changes. Only appropriate transcript
+  content becomes a chat bubble; control records still participate in identity and
+  lifecycle. Preserve order/cursors across message pages and snapshot boundaries.
+- Distinguish provider streamed, tool settled, step ended and execution terminal.
+  One assistant may have several concurrent tool calls; do not total tokens/cost
+  repeatedly when the same message is hydrated or its tool metadata changes.
+- Pending forms are richer than V1 questions: typed number/integer/boolean fields,
+  multiselect values versus labels, conditional visibility, required/hidden fields,
+  constraints and external links. Reuse the card appearance, not the old answer
+  serialization. Non-session/global form ownership must never be assigned to the
+  selected chat session. Do not auto-answer hidden/unknown fields by guessing.
+- Model and agent selections have session operations and persisted history. Bind
+  the intended selection to its queued request and define later selection changes
+  explicitly; never silently replace a missing model with a default/paid model.
+- Prompt files, agent mentions and skills use typed attachments. Preserve URIs,
+  display names, selection context, identity and failed-send drafts; do not flatten
+  every attachment into user text or conflate a file URI with an HTTP URL.
+- SSE is server-wide and location-bearing. Validate workspace/location plus session
+  ancestry and service generation before routing background events or interactions.
+  Moving/reloading a location invalidates its capabilities and subscriptions, not
+  the canonical IDs or a different location's session state.
+- V2 location.reload rebuilds all loaded locations and cancels pending permission/
+  form requests. It is not a harmless single-project settings refresh. Supervisor
+  installation/reload must use the existing activity/ownership checks and recover
+  interaction state; it must not invoke this operation as an automatic workaround.
+- Process restart may resume claimed native execution. Old durable execution/tool
+  records remain historical, never a license to redispatch the same side effect.
+  Native child completion notifications, foreground joins and Supervisor monitoring
+  must not create competing completion owners.
+- Platform CLI wrappers, service PID/listener ownership, generated passwords,
+  plugin config/agent rule formats, upgrade/downgrade and matching release assets
+  require separate tests. Do not migrate global agent rules or user data implicitly.
+
 ### Delivery gates
 
 1. Freeze V1 tests and reproduce both identities with isolated, credential-free
