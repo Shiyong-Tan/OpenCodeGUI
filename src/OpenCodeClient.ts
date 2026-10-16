@@ -5108,6 +5108,8 @@ export class OpenCodeClient {
         return partId ? `${msgId}:${partId}` : msgId;
     }
 
+    public getAssistantText(msgId: string): string | undefined { return this.assistantTextById.get(msgId); }
+
     private appendAssistantText(msgId: string, chunk: string): void {
         if (!msgId || !chunk) return;
         const existing = this.assistantTextById.get(msgId) || '';

@@ -316,10 +316,10 @@ export async function handleSidebarChatEvent(
                     if (entry.isDone) {
                         return;
                     }
-                    entry.latestFullText = event.text;
-                    entry.latestText = event.text.length > 200
-                        ? event.text.slice(0, 200) + '...'
-                        : event.text;
+                    const messageId = event.assistantMsgId || event.messageId;
+                    const text = messageId ? host.client.getAssistantText?.(messageId) ?? event.text : event.text;
+                    entry.latestFullText = text;
+                    entry.latestText = text.length > 200 ? text.slice(0, 200) + '...' : text;
                     host.transitionSubagentState(event.sessionId, entry, 'running', 'progress');
                     host.emitSubagentStatus();
                 }

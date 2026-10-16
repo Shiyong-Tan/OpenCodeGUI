@@ -2,6 +2,23 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { handleSidebarChatEvent } from '../events/SidebarChatEventHandler';
 
+test('child progress projects accumulated assistant text rather than replacing it with each delta', async () => {
+  const entry = { parentSessionId: 'parent', latestFullText: '' };
+  const text = new Map([['msg_A', 'Hello ']]);
+  const host = { smartSearchSessions: { owns: () => false }, activeSubagentSessionIds: new Set(['child']),
+    subagentProgressBySession: new Map([['child', entry]]),
+    client: { getAssistantText: (id: string) => text.get(id) }, transitionSubagentState: jest.fn(), emitSubagentStatus: jest.fn() };
+  const webview = { postMessage: jest.fn() };
+  await handleSidebarChatEvent(host, { type: 'text', sessionId: 'child', assistantMsgId: 'msg_A', text: 'Hello ' }, webview as never);
+  text.set('msg_A', 'Hello world');
+  await handleSidebarChatEvent(host, { type: 'text', sessionId: 'child', assistantMsgId: 'msg_A', text: 'world' }, webview as never);
+  expect(entry.latestFullText).toBe('Hello world');
+  text.set('msg_B', 'Next step');
+  await handleSidebarChatEvent(host, { type: 'text', sessionId: 'child', assistantMsgId: 'msg_B', text: 'Next step' }, webview as never);
+  expect(entry.latestFullText).toBe('Next step');
+  expect(webview.postMessage).not.toHaveBeenCalled();
+});
+
 describe('SidebarChatEventHandler', () => {
   afterEach(() => {
     jest.useRealTimers();

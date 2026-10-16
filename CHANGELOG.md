@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## 6.0.0 - 2026-10-15
 
+- Project accumulated child assistant text into subagent cards instead of replacing it with each stream delta. Keep message identities separate across child steps.
+
 - Use shared V1/V2 protocol identity discovery during Supervisor handshake instead of requiring the legacy health endpoint; reject HTML fallback pages and preserve signed lease/version checks.
 
 - Read oversized native transcript pages at a smaller page size; allow up to 32 MiB only for a single transcript record, preserving later final answers after large embedded tool outputs. Hide completed subagent tool rows while retaining canonical history.
