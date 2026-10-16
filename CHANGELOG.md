@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## 6.0.0 - 2026-10-15
 
+- Style Steer as a compact translucent action with inherited typography, matching Queued text size and theme-aware hover, keyboard focus and pending states.
+
 - Discover the running protocol before cold Supervisor setup, then recheck activity. Missing or stale identity never silently writes a legacy archive declaration for OpenCode 2.
 
 - Select release archives for OpenCode 1 and verified compiled Git distributions for OpenCode 2. Preserve permissions and refuse configuration changes when native distribution metadata is missing.

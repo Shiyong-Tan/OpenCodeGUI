@@ -1025,6 +1025,39 @@ body {
     color: #f59e0b;
 }
 
+.append-steer-button {
+    appearance: none;
+    display: inline-flex;
+    align-items: center;
+    vertical-align: baseline;
+    padding: 2px 8px;
+    border: 1px solid color-mix(in srgb, currentColor 24%, transparent);
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--vscode-editor-background) 18%, transparent);
+    color: inherit;
+    font-family: inherit;
+    font-size: 0.78em;
+    font-weight: 500;
+    line-height: 1.4;
+    cursor: pointer;
+    transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.append-steer-button:hover:not(:disabled) {
+    background: color-mix(in srgb, currentColor 12%, transparent);
+    border-color: color-mix(in srgb, currentColor 48%, transparent);
+}
+
+.append-steer-button:focus-visible {
+    outline: 2px solid var(--vscode-focusBorder);
+    outline-offset: 2px;
+}
+
+.append-steer-button:disabled {
+    opacity: 0.55;
+    cursor: default;
+}
+
 .append-message-status.append-seen {
     color: #22c55e;
 }
