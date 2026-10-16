@@ -65,6 +65,31 @@ processes. A failed interaction endpoint blocks changes that require verified id
 - Compaction is a control operation with its own outcome. Do not convert its
   summary into an assistant answer or silently change the selected/free model.
 
+### Queued append steering
+
+For a verified V2 inbox capability, a pending user item with delivery=queue gets
+a compact Steer button immediately beside its Queued label. V1 and capability-
+unknown connections do not show an actionable control. The backend's durable
+inbox ID is distinct from the optimistic client message ID and must be present.
+
+The command carries captured sessionId, inboxId and service generation. The
+Extension rechecks capability and pending ownership, then sends exactly one
+PATCH /api/session/:sessionID/inbox/:inboxID with { delivery: "steer" }. It does
+not resend the prompt, create a replacement message, or abort a running tool.
+Steering takes effect at a safe execution boundary, not immediate interruption.
+
+While submitting, disable the owning button and show Steer pending. Backend
+confirmation changes only delivery to steer; do not mark the message seen/applied
+until delivery evidence arrives. On an ambiguous timeout, refresh this inbox item
+instead of blindly retrying the mutation. A conflict caused by concurrent delivery
+refreshes authoritative state and removes the obsolete button without resending.
+
+Reload and session switching derive button availability from the owning session's
+fresh inbox projection; an old DOM node or cached Queued label cannot authorize
+an operation. Tests must include rapid double click, two queued messages, delivery
+racing with the click, timeout reconciliation, switching A/B while PATCH is pending,
+service replacement, reload, unsupported capability and unchanged V1 behavior.
+
 ### Supervisor packaging boundary
 
 Share supervision policy and process tracking, but keep separate V1 and V2 plugin
