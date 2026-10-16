@@ -8,6 +8,10 @@ import { isAbsolute, join, resolve } from 'node:path';
 
 const require = createRequire(import.meta.url);
 const { probeProtocol } = require('../out/transport/protocol/ProtocolNegotiator.js');
+const { V2Transport } = require('../out/transport/protocol/V2Transport.js');
+const { V2SessionAdapter } = require('../out/transport/protocol/V2SessionAdapter.js');
+const { decodeV2Event } = require('../out/transport/protocol/V2EventAdapter.js');
+const { SseDataLineBuffer } = require('../out/transport/OpenCodeEventStream.js');
 const binary = process.argv[2];
 if (!binary || !isAbsolute(binary) || !(await stat(binary)).isFile()) {
     throw new Error('Supply an absolute native OpenCode executable path after compiling the extension.');
@@ -49,7 +53,48 @@ try {
         await new Promise(resolve => setTimeout(resolve, 200));
     }
     if (!identity) throw new Error('Isolated fixture identity was not verified; startup output is intentionally withheld to protect credentials.');
-    console.log(JSON.stringify({ verified: true, identity, isolatedProfile: root, modelCalls: 0, mutations: 0 }));
+    let fixtureMutations = 0;
+    if (process.argv.includes('--session-contract')) {
+        if (identity.family !== 'v2') throw new Error('Session contract fixture requires the V2 adapter.');
+        const announced = output.match(/server password ([^\s]+)/)?.[1];
+        const transport = new V2Transport({ baseUrl: `http://127.0.0.1:${port}`, directory: join(root, 'workspace'),
+            authorization: `Basic ${Buffer.from(`opencode:${announced ?? password}`).toString('base64')}`,
+            isCurrent: () => child.exitCode === null && !spawnError });
+        const api = new V2SessionAdapter(transport);
+        const events = [], stream = new AbortController();
+        const response = await fetch(`http://127.0.0.1:${port}/api/event`, {
+            headers: { Authorization: transport.connection.authorization, Accept: 'text/event-stream' }, signal: stream.signal });
+        if (!response.ok || !response.body) throw new Error('Fixture event stream unavailable');
+        const reader = response.body.getReader();
+        const pump = (async () => {
+            const lines = new SseDataLineBuffer(), decoder = new TextDecoder();
+            try {
+                while (true) {
+                    const next = await reader.read(); if (next.done) break;
+                    for (const payload of lines.push(decoder.decode(next.value, { stream: true }))) events.push(decodeV2Event(JSON.parse(payload)));
+                }
+            } catch (error) { if (!stream.signal.aborted) throw error; }
+            finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
+        })();
+        // Attach immediately so a malformed frame cannot become an unhandled rejection.
+        void pump.catch(() => undefined);
+        let session;
+        try {
+            session = await api.createSession({ title: 'Isolated protocol fixture' }); fixtureMutations++;
+            if ((await api.getSession(session.id)).id !== session.id) throw new Error('Fixture session identity mismatch');
+            if (!(await api.listSessions({ limit: 100 })).items.some(item => item.id === session.id)) throw new Error('Fixture not in its workspace');
+            if ((await api.messages(session.id)).items.length || (await api.inbox(session.id)).length) throw new Error('Unexpected fixture work');
+            const eventDeadline = Date.now() + 2000;
+            while (!events.some(event => event.type === 'session.created' && event.sessionId === session.id) && Date.now() < eventDeadline)
+                await new Promise(resolve => setTimeout(resolve, 20));
+            if (!events.some(event => event.type === 'session.created' && event.sessionId === session.id)) throw new Error('Fixture creation event was not observed');
+        } finally {
+            stream.abort();
+            try { await pump; }
+            finally { if (session) { await transport.request('DELETE', `/api/session/${session.id}`); fixtureMutations++; } }
+        }
+    }
+    console.log(JSON.stringify({ verified: true, identity, isolatedProfile: root, modelCalls: 0, fixtureMutations }));
 } finally {
     if (child.exitCode === null && !spawnError) child.kill();
     await exited;

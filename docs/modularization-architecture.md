@@ -7,6 +7,23 @@ versions are reproducible test fixtures only. The first fixture is OpenCode 2.0.
 tag e7a34f09bfd9134dfade5a8ddb843f7030bc9a69. Existing 1.x behavior remains the
 compatibility oracle; this section does not declare the GUI ready for 2.x.
 
+Implemented foundation on 2026-10-16: BackendSessionPort describes session,
+paginated transcript, inbox admission/delivery/cancellation and execution
+interruption as distinct operations. V2SessionAdapter implements the native V2
+operations through a bounded V2Transport that never retries or changes protocol.
+V2Codec preserves native control records, parallel tool identity and unknown record
+kinds without deriving finality. V2EventAdapter parses native session/execution/
+step/tool/inbox facts without introducing a second state writer. Mutation timeouts,
+superseded responses and malformed success acknowledgements remain ambiguous.
+
+The isolated probe script can run --session-contract against an explicitly supplied
+V2 native binary: it creates and removes one empty fixture session, reads history
+and inbox, and verifies the matching real SSE session-created event. It sends no
+prompt, steering or other model-triggering operation. Both V1 identity and V2
+session/event fixtures pass; policy/mutation failure scenarios use mocked HTTP.
+These adapters are not yet selected by the production GUI. Routing remains V1
+until the owner integration, interaction adapters and lifecycle gates below pass.
+
 ### Contract and ownership
 
 Keep one UI and one session/turn/history implementation. Introduce two transport
