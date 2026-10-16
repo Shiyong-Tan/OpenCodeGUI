@@ -1,4 +1,8 @@
 export interface ToolDisplayRow { key: string; name: string; input: string; status: string; color: string }
+/** Completed cards are hidden, while the canonical agent/result records stay intact. */
+export function visibleSubagentCards<T extends { state?: string; isDone?: boolean }>(agents: readonly T[]): T[] {
+    return agents.filter(agent => agent.state !== 'done' && agent.isDone !== true);
+}
 /** A read-only projection; no DOM-based identity or tool lifecycle decisions. */
 export function subagentToolRows(agent: Record<string, unknown>): ToolDisplayRow[] | undefined {
     if (!Array.isArray(agent.tools)) return undefined;

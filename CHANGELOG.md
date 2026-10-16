@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## 6.0.0 - 2026-10-15
 
+- Hide completed subagent cards immediately in chat while preserving canonical results and active sibling cards.
+
 - Project accumulated child assistant text into subagent cards instead of replacing it with each stream delta. Keep message identities separate across child steps.
 
 - Use shared V1/V2 protocol identity discovery during Supervisor handshake instead of requiring the legacy health endpoint; reject HTML fallback pages and preserve signed lease/version checks.

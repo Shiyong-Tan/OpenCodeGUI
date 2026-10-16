@@ -1,5 +1,5 @@
 import { supervisorRoundLabel } from '../supervisor/round-label';
-import { subagentToolRows } from './subagent-tools';
+import { subagentToolRows, visibleSubagentCards } from './subagent-tools';
 type Message = any;
 type SessionState = any;
 type RenderElement = any;
@@ -415,7 +415,7 @@ export function renderMessageElement(
         }
         
         // Subagents display inline with assistant text flow.
-        const subagents = message.meta?.subagents || [];
+        const subagents = visibleSubagentCards(message.meta?.subagents || []);
         if (subagents.length > 0 && message.meta?.isThinking) {
              const inlineContainer = document.createElement('div');
              inlineContainer.className = 'subagent-inline';

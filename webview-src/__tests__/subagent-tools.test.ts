@@ -1,4 +1,10 @@
-import { subagentToolRows } from '../rendering/subagent-tools';
+import { subagentToolRows, visibleSubagentCards } from '../rendering/subagent-tools';
+
+test('completed child cards disappear while active siblings and canonical results remain', () => {
+    const agents = [{ state: 'running' }, { state: 'done', result: 'keep' }, { state: 'finalizing' }, { isDone: true }];
+    expect(visibleSubagentCards(agents)).toEqual([agents[0], agents[2]]);
+    expect(agents[1].result).toBe('keep'); expect(agents).toHaveLength(4);
+});
 
 test('parallel subagent rows preserve identity and independently show state', () => {
     const rows = subagentToolRows({ sessionId: 'ses_A', tools: [
