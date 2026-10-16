@@ -56,3 +56,5 @@ for 1.18.31 and 2.0.24; the latter also passed native session contract and
 Supervisor lease/snapshot checks. All real service probes used zero model calls.
 
 OpenCode 2 installation correction (2026-10-16): native package installation does not accept raw release archive URLs. GUI setup selects the official compiled Git distribution tag for V2 and validates its release protocol manifest before changing configuration. V1 retains release archive URLs. The shared server export implements legacy server() and native setup() loader contracts. Both sources belong to one release; later plugin releases do not require a GUI version bump. Supervisor 0.1.6 and 0.1.7 remain prereleases; use 0.1.8 or later.
+
+Cold Supervisor activation: assertSupervisorSwitchIdle may return early when no service is listening, so it is not evidence of a protocol binding. enableSupervisor now ensures the service and its canonical protocol owner first, rechecks remote activity, and requires a current binding before configuration changes. Protocol discovery failure never selects a legacy default or writes configuration. No production service is restarted during regression tests.

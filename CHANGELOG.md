@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## 6.0.0 - 2026-10-15
 
+- Discover the running protocol before cold Supervisor setup, then recheck activity. Missing or stale identity never silently writes a legacy archive declaration for OpenCode 2.
+
 - Select release archives for OpenCode 1 and verified compiled Git distributions for OpenCode 2. Preserve permissions and refuse configuration changes when native distribution metadata is missing.
 
 - Fix native V2 successful finality being overwritten by the empty-answer fallback. Settle explicit interrupted executions without an idle record only after fresh session, queue, permission and form checks.

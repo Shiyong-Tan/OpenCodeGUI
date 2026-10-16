@@ -5209,7 +5209,14 @@ export class OpenCodeClient {
         const operation = (async () => {
             if (!vscode.workspace.isTrusted) throw new Error('Trust this workspace before installing Supervisor.');
             await this.assertSupervisorSwitchIdle();
-            const changed = await configureSupervisor(workspace, undefined, this.protocolBinding?.identity.family);
+            // A cold/stopped service has no binding. Discover it before editing; never
+            // let undefined silently select the legacy install format after an upgrade.
+            await this.ensureServer();
+            checkWorkspace();
+            await this.assertSupervisorSwitchIdle();
+            const binding = this.protocolBinding;
+            if (!binding?.isCurrent()) throw new Error('OpenCode protocol could not be verified. Supervisor configuration was not changed.');
+            const changed = await configureSupervisor(workspace, undefined, binding.identity.family);
             checkWorkspace();
             if (!changed && this.getSupervisorStatus() === 'connected') return;
             this.setNormalSupervisorEnabled(true);
