@@ -32,3 +32,9 @@ future feature growth must address the size budget deliberately, not expand this
 private-field list without reviewing its boundary or silently raise the gate.
 The esbuild progress line reports intermediate size; check:webview measures the final
 packaged bytes. Determinism now hashes continuation as well as rendering/supervisor.
+
+2026-10-16: Independent subagent tool rows add 1,181 raw bytes over the recorded
+76,784-byte baseline, yielding 77,965 bytes (gzip 25,512). The raw rendering limit
+is deliberately increased from 75 to 77 KiB for this feature. The 25 KiB gzip cap,
+dependency restrictions, pinned compactor, private-property allowlist and all other
+bundle budgets remain unchanged. No compression safety option is weakened.

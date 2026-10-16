@@ -696,11 +696,13 @@ export function mapServerEventToChatEvents(
                 if (typeof sessionId === 'string' && host.subagentToParentSessionMap.has(sessionId)) {
                     const parentSessionId = host.getParentSessionForSubagent(sessionId);
                     const status = part?.state?.status;
-                    if ((status === 'running' || status === 'pending') && source !== 'resync') {
+                    if (['running', 'pending', 'completed', 'error'].includes(status) && source !== 'resync') {
                         events.push({
                             type: 'tool',
                             sessionId,
                             parentSessionId,
+                            assistantMsgId: part?.messageID,
+                            callId: part?.callID,
                             agentSessionId: sessionId,
                             displayTarget: 'agent-lane',
                             tool: statusText || (typeof part?.tool === 'string' ? part.tool : ''),

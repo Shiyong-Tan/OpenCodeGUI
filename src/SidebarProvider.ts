@@ -308,7 +308,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private userOwnedSessionIds = new Set<string>();
     private userOwnedSessionsLoaded: Promise<void>;
     private activeSubagentSessionIds = new Set<string>();
-    private subagentProgressBySession = new Map<string, { taskId: string; parentSessionId: string; description: string; startedAt: number; title?: string; mode?: string; model?: string; providerId?: string; latestText?: string; latestFullText?: string; latestTool?: string; latestToolInput?: string; isDone?: boolean; state?: SubagentLifecycleState; finishedAt?: number; dismissAt?: number; lastEventAt?: number; finalMessageId?: string; finalReason?: string }>();
+    private subagentProgressBySession = new Map<string, { taskId: string; parentSessionId: string; description: string; startedAt: number; title?: string; mode?: string; model?: string; providerId?: string; latestText?: string; latestFullText?: string; latestTool?: string; latestToolInput?: string; tools?: import('./events/SubagentTools').SubagentToolProgress[]; isDone?: boolean; state?: SubagentLifecycleState; finishedAt?: number; dismissAt?: number; lastEventAt?: number; finalMessageId?: string; finalReason?: string }>();
     private readonly subagentDoneRetentionMs = 5000;
     private subagentRetentionTimer?: NodeJS.Timeout;
     private autoEditorContextTimer?: NodeJS.Timeout;
@@ -541,6 +541,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             (entry as any).latestFullText = 'Task done.';
             (entry as any).latestTool = '';
             (entry as any).latestToolInput = '';
+            (entry as any).tools = [];
         }
         this.uiDebugChannel.appendLine(
             `[SidebarProvider] state.transition from=${from} to=${to} reason=${reason} messageId=${(entry as any).finalMessageId || 'null'} parentId=${(entry as any).parentSessionId || 'null'} lane=subagent sessionId=${sessionId}`
@@ -583,6 +584,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             latestFullText: entry.latestFullText || entry.latestText || '',
             latestTool: entry.latestTool || '',
             latestToolInput: entry.latestToolInput || '',
+            tools: entry.tools,
             state: entry.state || (entry.isDone ? 'done' : 'running'),
             isDone: (entry.state || (entry.isDone ? 'done' : 'running')) === 'done'
             };

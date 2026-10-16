@@ -11,6 +11,7 @@ if (!fs.existsSync(file)) throw new Error('Build media/rendering.bundle.js first
 const source = fs.readFileSync(file);
 const text = source.toString('utf8');
 const gzipBytes = zlib.gzipSync(source, { level: 9 }).byteLength;
+const limits = { minified: 77 * 1024, gzip: 25 * 1024 };
 const forbidden = [
   [/\beval\s*\(/, 'eval'],
   [/\bnew\s+Function\b/, 'new Function'],
@@ -21,8 +22,9 @@ const forbidden = [
 for (const [pattern, label] of forbidden) {
   if (pattern.test(text)) throw new Error(`Forbidden ${label} in rendering bundle`);
 }
-if (source.byteLength > 75 * 1024) throw new Error(`Bundle exceeds 75 KiB: ${source.byteLength}`);
-if (gzipBytes > 25 * 1024) throw new Error(`Gzip exceeds 25 KiB: ${gzipBytes}`);
+// Parallel per-call subagent rows add ~1.2 KiB; see production-bundle-compaction.md.
+if (source.byteLength > limits.minified) throw new Error(`Bundle exceeds 77 KiB: ${source.byteLength}`);
+if (gzipBytes > limits.gzip) throw new Error(`Gzip exceeds 25 KiB: ${gzipBytes}`);
 if (!text.includes('__ocRendering')) throw new Error('Versioned rendering facade is missing');
 
 async function verifySingleTanStackCore() {
@@ -56,7 +58,7 @@ async function verifySingleTanStackCore() {
 }
 
 verifySingleTanStackCore().then((core) => {
-  console.log(JSON.stringify({ minifiedBytes: source.byteLength, gzipBytes, limits: { minified: 76800, gzip: 25600 }, ...core }));
+  console.log(JSON.stringify({ minifiedBytes: source.byteLength, gzipBytes, limits, ...core }));
 }).catch((error) => {
   console.error(error);
   process.exitCode = 1;

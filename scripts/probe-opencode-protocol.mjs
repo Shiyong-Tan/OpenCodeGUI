@@ -10,6 +10,8 @@ const require = createRequire(import.meta.url);
 const { probeProtocol } = require('../out/transport/protocol/ProtocolNegotiator.js');
 const { V2Transport } = require('../out/transport/protocol/V2Transport.js');
 const { V2SessionAdapter } = require('../out/transport/protocol/V2SessionAdapter.js');
+const { V2ControlAdapter } = require('../out/transport/protocol/V2ControlAdapter.js');
+const { V2InteractionAdapter } = require('../out/transport/protocol/V2InteractionAdapter.js');
 const { decodeV2Event } = require('../out/transport/protocol/V2EventAdapter.js');
 const { SseDataLineBuffer } = require('../out/transport/OpenCodeEventStream.js');
 const binary = process.argv[2];
@@ -61,6 +63,7 @@ try {
             authorization: `Basic ${Buffer.from(`opencode:${announced ?? password}`).toString('base64')}`,
             isCurrent: () => child.exitCode === null && !spawnError });
         const api = new V2SessionAdapter(transport);
+        const controls = new V2ControlAdapter(transport), interactions = new V2InteractionAdapter(transport);
         const events = [], stream = new AbortController();
         const response = await fetch(`http://127.0.0.1:${port}/api/event`, {
             headers: { Authorization: transport.connection.authorization, Accept: 'text/event-stream' }, signal: stream.signal });
@@ -84,6 +87,27 @@ try {
             if ((await api.getSession(session.id)).id !== session.id) throw new Error('Fixture session identity mismatch');
             if (!(await api.listSessions({ limit: 100 })).items.some(item => item.id === session.id)) throw new Error('Fixture not in its workspace');
             if ((await api.messages(session.id)).items.length || (await api.inbox(session.id)).length) throw new Error('Unexpected fixture work');
+            await controls.models(); await controls.agents(); await controls.active();
+            if ((await interactions.permissions(session.id)).length || (await interactions.forms(session.id)).length) throw new Error('Unexpected fixture interaction');
+            await controls.rename(session.id, 'Renamed isolated fixture'); fixtureMutations++;
+            if ((await api.getSession(session.id)).title !== 'Renamed isolated fixture') throw new Error('Fixture rename failed');
+            // Form creation is local durable interaction data; no prompt/model is sent.
+            const created = await transport.request('POST', `/api/session/${session.id}/form`, {
+                id: 'frm_isolatedFixture', title: 'Isolated form fixture', fields: [
+                    { key: 'choice', type: 'string', required: true, options: [{ value: 'internal', label: 'Visible label' }] },
+                ],
+            }); fixtureMutations++;
+            const formId = created?.data?.id;
+            if (typeof formId !== 'string') throw new Error('Fixture form identity missing');
+            try {
+                if (!(await interactions.forms(session.id)).some(item => item.id === formId)) throw new Error('Fixture pending form missing');
+                await interactions.replyForm(session.id, formId, { choice: 'internal' }); fixtureMutations++;
+                const answered = await interactions.getForm(session.id, formId);
+                if (answered.state?.status !== 'answered' || answered.state?.answer?.choice !== 'internal') throw new Error('Fixture typed form response mismatch');
+            } finally {
+                const state = await interactions.getForm(session.id, formId);
+                if (state.state?.status === 'pending') { await interactions.cancelForm(session.id, formId); fixtureMutations++; }
+            }
             const eventDeadline = Date.now() + 2000;
             while (!events.some(event => event.type === 'session.created' && event.sessionId === session.id) && Date.now() < eventDeadline)
                 await new Promise(resolve => setTimeout(resolve, 20));

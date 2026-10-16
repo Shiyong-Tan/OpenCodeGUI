@@ -1,5 +1,9 @@
 import { decodeV2Event } from '../transport/protocol/V2EventAdapter';
 
+test.each(['session.deleted', 'session.forked'])('native session event %s retains its explicit owner', type => {
+    expect(decodeV2Event({ id: 'evt_fixture', type, data: { sessionID: 'ses_A' } })).toMatchObject({ category: 'session', sessionId: 'ses_A' });
+});
+
 const frame = (type: string, data: Record<string, unknown> = {}) => ({ id: 'evt_fixture', created: 1,
     type, location: { directory: '/fixture' }, data: { sessionID: 'ses_A',
         ...(type.startsWith('session.text.') || type.startsWith('session.reasoning.') ? { ordinal: 0 } : {}), ...data } });

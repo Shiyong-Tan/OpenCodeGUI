@@ -1,6 +1,7 @@
 import type * as vscode from 'vscode';
 import * as pathModule from 'path';
 import type { ChatEvent, CommitPendingTurnChangesResult } from '../OpenCodeClient';
+import { updateSubagentTools } from './SubagentTools';
 
 const BACKGROUND_ACTIVITY_PULSE_FORWARD_INTERVAL_MS = 250;
 const backgroundActivityPulseForwardState = new WeakMap<object, Map<string, number>>();
@@ -327,11 +328,18 @@ export async function handleSidebarChatEvent(
             if (event.type === 'tool' && event.tool) {
                 const entry = subagentEntry;
                 if (entry) {
-                    if (entry.isDone) {
+                    if (entry.isDone || ['done', 'failed', 'cancelled', 'dismissed'].includes(entry.state)) {
                         return;
                     }
                     const toolName = event.tool;
                     const status = event.toolState?.status || 'running';
+                    const tools = updateSubagentTools(entry.tools || [], event);
+                    if (tools) {
+                        entry.tools = tools;
+                        if (status === 'running' || status === 'pending' || status === 'streaming')
+                            host.transitionSubagentState(event.sessionId, entry, 'running', 'tool-progress');
+                        host.emitSubagentStatus();
+                    }
                     if (status === 'running' || status === 'pending') {
                         entry.latestTool = toolName;
                         const input = event.toolState?.input;

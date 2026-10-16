@@ -26,6 +26,23 @@ until the owner integration, interaction adapters and lifecycle gates below pass
 
 ### Contract and ownership
 
+2026-10-16 continuation: V2ControlAdapter implements native model/agent catalogs,
+validated explicit selections, session rename/removal/fork, compaction admission,
+and separate staged/cleared/committed revert operations. V2InteractionAdapter
+retains permission action/resources and typed form option values, conditional
+field visibility, original session ownership and settled state. These ports remain
+unselected in the production client. The isolated session fixture additionally
+verifies catalog/active reads, rename and form reply without a model request.
+
+Independent subagent tool presentation is production-wired for identity-bearing
+ChatEvents. SidebarProvider's existing subagentProgressBySession entry is the sole
+owner of its tool collection; updateSubagentTools is a pure transition helper.
+The stable key is child session + assistant message + call ID. Terminal updates
+cannot regress; all active calls and up to 32 settled calls are retained. The
+renderer projects those rows with independent state colors. Legacy events without
+call identity retain their existing latest-tool presentation. This change alone
+does not enable V2 execution, reconnect hydration or Supervisor V2 loading.
+
 Keep one UI and one session/turn/history implementation. Introduce two transport
 adapters behind a narrow domain port: identity/capabilities, session operations,
 history, execution events, interactions, compaction, and revert. Version branches

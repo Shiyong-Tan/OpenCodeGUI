@@ -29,7 +29,7 @@ function category(type: string): BackendEventCategory {
     if (revert.has(type)) return 'revert';
     if (['form.created', 'form.replied', 'form.cancelled', 'permission.asked', 'permission.replied'].includes(type)) return 'interaction';
     if (type === 'server.connected') return 'server';
-    if (['session.created', 'session.removed', 'session.model.selected', 'session.agent.selected', 'session.moved',
+    if (['session.created', 'session.deleted', 'session.forked', 'session.model.selected', 'session.agent.selected', 'session.moved',
         'session.renamed', 'session.metadata.updated', 'session.permissions', 'session.viewed'].includes(type)) return 'session';
     return 'unknown';
 }

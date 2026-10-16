@@ -1,4 +1,5 @@
 import { supervisorRoundLabel } from '../supervisor/round-label';
+import { subagentToolRows } from './subagent-tools';
 type Message = any;
 type SessionState = any;
 type RenderElement = any;
@@ -510,9 +511,10 @@ export function renderMessageElement(
                 const latestFullText = typeof agent.latestFullText === 'string' ? agent.latestFullText.trim() : latestText;
                 const latestTool = typeof agent.latestTool === 'string' ? agent.latestTool.trim() : '';
                 const latestToolInput = typeof agent.latestToolInput === 'string' ? agent.latestToolInput.trim() : '';
+                const toolRows = subagentToolRows(agent);
                 const state = typeof agent.state === 'string' ? agent.state : (agent.isDone === true ? 'done' : 'running');
                 const isTerminal = state === 'done' || state === 'failed' || state === 'cancelled';
-                const isDone = isTerminal || (!messageIsThinking && !latestText && !latestTool);
+                const isDone = isTerminal || (!messageIsThinking && !latestText && !latestTool && !toolRows?.length);
 
                 if (isDone) {
                     const doneRow = document.createElement('div');
@@ -559,14 +561,29 @@ export function renderMessageElement(
                 }
 
                  // 4) indented latest tool (streaming only)
-                 if (latestTool) {
+                 if (toolRows !== undefined) {
+                     for (const tool of toolRows) {
+                         const row = document.createElement('div');
+                         row.className = 'subagent-inline-tool';
+                         row.dataset.toolKey = tool.key;
+                         row.textContent = `\u25B8 ${tool.name} \u00B7 ${tool.status}`;
+                         row.style.color = tool.color;
+                         entry.appendChild(row);
+                         if (tool.input) {
+                             const input = document.createElement('div');
+                             input.className = 'subagent-inline-input';
+                             input.textContent = tool.input;
+                             entry.appendChild(input);
+                         }
+                     }
+                 } else if (latestTool) {
                      const toolRow = document.createElement('div');
                      toolRow.className = 'subagent-inline-tool';
                      toolRow.textContent = `\u25B8 ${latestTool}`;
                      entry.appendChild(toolRow);
                  }
 
-                 if (latestToolInput) {
+                 if (toolRows === undefined && latestToolInput) {
                      const inputRow = document.createElement('div');
                      inputRow.className = 'subagent-inline-input';
                      inputRow.textContent = latestToolInput;
