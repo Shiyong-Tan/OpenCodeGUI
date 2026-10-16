@@ -25,8 +25,8 @@ describe('normal supervisor service/bridge authentication', () => {
         const fetcher = jest.fn(async (url: string, options: RequestInit) => {
             expect(options.redirect).toBe('error');
             if (url === `${service.baseUrl}/global/health`) {
-                expect(options.headers).toEqual({ Authorization: authHeader });
-                return new Response(JSON.stringify({ version }));
+                expect(options.headers).toMatchObject({ Authorization: authHeader });
+                return Response.json({ healthy: true, version });
             }
             expect(url.startsWith(`${lease.bridgeOrigin}/v1/identity?challenge=`)).toBe(true);
             expect(options.headers).toEqual({ Authorization: `Bearer ${bridgeBearer(launchKey, binding, lease.instanceId)}` });
@@ -59,7 +59,7 @@ describe('normal supervisor service/bridge authentication', () => {
 
     test.each([401, 200])('rejects authentication failure or incompatible health: %s', async status => {
         const { launch, service } = await setup();
-        const fetcher = jest.fn(async () => new Response(JSON.stringify({ version: '1.18.31' }), { status }));
+        const fetcher = jest.fn(async () => Response.json({ healthy: true, version: '1.18.31' }, { status }));
         await expect(connectNormalSupervisor(launch, service, new AbortController().signal, fetcher as typeof fetch, () => 1000))
             .rejects.toThrow(status === 401 ? 'disconnected' : 'incompatible');
         expect(fetcher).toHaveBeenCalledTimes(1);
@@ -68,7 +68,7 @@ describe('normal supervisor service/bridge authentication', () => {
     test('rejects stale live challenge and oversized response', async () => {
         const { launch, lease, service, signed } = await setup();
         for (const body of [JSON.stringify({ lease: signed, proof: connectionProof(launch.launchKey, lease, '77'.repeat(32)) }), 'x'.repeat(8193)]) {
-            const fetcher = jest.fn().mockResolvedValueOnce(new Response(JSON.stringify({ version: '1.18.29' })))
+            const fetcher = jest.fn().mockResolvedValueOnce(Response.json({ healthy: true, version: '1.18.29' }))
                 .mockResolvedValueOnce(new Response(body));
             await expect(connectNormalSupervisor(launch, service, new AbortController().signal, fetcher as typeof fetch, () => 1000)).rejects.toThrow();
         }
@@ -76,17 +76,37 @@ describe('normal supervisor service/bridge authentication', () => {
 
     test.each(['1.18.32', '2.0.0', null, undefined])('rejects mismatched or malformed health %s before bridge access', async version => {
         const { launch, service } = await setup('1.18.31');
-        const fetcher = jest.fn(async () => Response.json({ version }));
+        const fetcher = jest.fn(async () => Response.json({ healthy: true, version }));
         await expect(connectNormalSupervisor(launch, service, new AbortController().signal, fetcher as typeof fetch, () => 1000))
             .rejects.toThrow('incompatible');
-        expect(fetcher).toHaveBeenCalledTimes(1);
+        expect(fetcher).toHaveBeenCalledTimes(version ? 1 : 2);
+    });
+
+    test('native V2 handshake uses JSON identity after an HTML legacy health fallback', async () => {
+        const { launch, lease, service, fetcher: bridge } = await setup('2.0.31', '0.1.9');
+        const fetcher = jest.fn(async (url: string, options: RequestInit) => {
+            if (url.endsWith('/global/health')) return new Response('<html>SPA</html>', { headers: { 'Content-Type': 'text/html' } });
+            if (url.endsWith('/api/info')) return Response.json({ version: '2.0.31', pid: 42, urls: [], paths: { tmp: '/fixture' } });
+            return bridge(url, options);
+        });
+        const connection = await connectNormalSupervisor(launch, service, new AbortController().signal, fetcher as typeof fetch, () => 1000);
+        expect(connection.openCodeVersion).toBe('2.0.31');
+        expect(connection.instanceId).toBe(lease.instanceId);
+        expect(fetcher).toHaveBeenCalledTimes(3);
+    });
+
+    test('HTML on both identity endpoints never grants access to the bridge', async () => {
+        const { launch, service } = await setup('2.0.31', '0.1.9');
+        const fetcher = jest.fn(async () => new Response('<html>SPA</html>', { headers: { 'Content-Type': 'text/html' } }));
+        await expect(connectNormalSupervisor(launch, service, new AbortController().signal, fetcher as typeof fetch, () => 1000)).rejects.toThrow('incompatible');
+        expect(fetcher).toHaveBeenCalledTimes(2);
     });
 
     test('rejects a live signed lease that changes to another release', async () => {
         const { launch, lease, service } = await setup('1.18.31');
         const changed = { ...lease, opencodeVersion: '1.18.29' as const };
         const fetcher = jest.fn(async (url: string) => {
-            if (url.endsWith('/global/health')) return Response.json({ version: '1.18.31' });
+            if (url.endsWith('/global/health')) return Response.json({ healthy: true, version: '1.18.31' });
             const challenge = new URL(url).searchParams.get('challenge')!;
             return Response.json({ lease: signConnectionLease(changed, launch.launchKey),
                 proof: connectionProof(launch.launchKey, changed, challenge) });

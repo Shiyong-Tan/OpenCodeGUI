@@ -5,6 +5,7 @@ import { bridgeBearer, serviceAuthenticationProof, verifyConnectionLease, verify
 import type { NormalLaunch } from './normal-launch-protocol';
 import type { ServerConnection } from '../transport/OpenCodeHttpClient';
 import type { IsolatedSupervisorConnection } from './IsolatedSupervisorConnection';
+import { probeProtocol, ProtocolProbeError } from '../transport/protocol/ProtocolNegotiator';
 
 export type NormalConnectionFailure = 'unavailable' | 'incompatible' | 'disconnected';
 export class NormalConnectionError extends Error {
@@ -58,10 +59,14 @@ export async function connectNormalSupervisor(launch: NormalLaunch, service: Ser
     report('plugin_lease_validation');
     const lease = verifyConnectionLease(raw, launch.binding, launch.launchKey, now());
     report('opencode_health');
-    const health = await boundedJson(await fetcher(`${service.baseUrl}/global/health`, {
-        headers: { Authorization: service.authHeader }, signal, redirect: 'error', cache: 'no-store',
-    }), signal);
-    if (!health || typeof health !== 'object' || (health as { version?: unknown }).version !== lease.opencodeVersion) {
+    let health;
+    try {
+        health = await probeProtocol({ baseUrl: service.baseUrl, authorization: service.authHeader,
+            signal, isCurrent: () => !signal.aborted }, (url, options) => fetcher(String(url), options));
+    } catch (error) {
+        throw new NormalConnectionError(error instanceof ProtocolProbeError && error.reason === 'unrecognized' ? 'incompatible' : 'disconnected');
+    }
+    if (health.version !== lease.opencodeVersion) {
         throw new NormalConnectionError('incompatible');
     }
     report('plugin_bridge_handshake');

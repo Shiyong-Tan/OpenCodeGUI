@@ -26,7 +26,7 @@ describe('normal supervisor enable and durable classification boundary', () => {
         const signed = signConnectionLease(lease, launchKey);
         await writeFile(join(root, `${binding.serviceId}.json`), JSON.stringify(signed));
         const fetcher = jest.fn(async (url: string) => {
-            if (url.endsWith('/global/health')) return new Response(JSON.stringify({ version: '1.18.29' }));
+            if (url.endsWith('/global/health')) return Response.json({ healthy: true, version: '1.18.29' });
             const parsed = new URL(url);
             if (parsed.pathname === '/v1/identity') return new Response(JSON.stringify({ lease: signed,
                 proof: connectionProof(launchKey, lease, parsed.searchParams.get('challenge')!) }));
