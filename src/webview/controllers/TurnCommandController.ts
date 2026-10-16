@@ -193,12 +193,16 @@ export class TurnCommandController {
                 const clientMessageId = typeof data.clientMessageId === 'string' ? data.clientMessageId : '';
                 try {
                     if (!sessionId || typeof data.inboxId !== 'string' || !Number.isSafeInteger(data.generation)) throw new Error('Invalid queued input identity');
+                    activeWebview.postMessage({ type: 'appendStatus', sessionId, clientMessageId, rootUserMsgId: data.rootUserMsgId,
+                        status: 'queued', steerPending: true });
                     const result = await host.client.steerQueuedPrompt({ sessionId, inboxId: data.inboxId, generation: data.generation });
                     activeWebview.postMessage({ type: 'appendStatus', sessionId, clientMessageId, rootUserMsgId: data.rootUserMsgId,
                         status: 'queued', delivery: result.delivery, canSteer: result.canSteer, steerPending: false });
                 } catch (error) {
                     activeWebview.postMessage({ type: 'appendStatus', sessionId, clientMessageId, rootUserMsgId: data.rootUserMsgId,
                         status: 'queued', canSteer: false, steerPending: false, reason: String(error) });
+                    activeWebview.postMessage({ type: 'systemNotice', sessionId, level: 'warn',
+                        message: `Unable to steer this queued message. ${String(error)}` });
                 }
                 break;
             }

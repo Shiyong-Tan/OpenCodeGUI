@@ -92,6 +92,24 @@ function createHarness(overrides: Record<string, unknown> = {}) {
     };
 }
 
+test('steering publishes persistent pending state before waiting and clears it after acknowledgement', async () => {
+    let complete!: (value: { delivery: string; canSteer: boolean }) => void;
+    const pending = new Promise(resolve => { complete = resolve; });
+    const h = createHarness(); h.host.client.steerQueuedPrompt = jest.fn(() => pending);
+    const operation = h.handler({ type: 'steerQueuedPrompt', sessionId: 'ses_A', clientMessageId: 'client_A', rootUserMsgId: 'root_A', inboxId: 'msg_Q', generation: 4 }, h.activeWebview, h.activeWebview);
+    expect(h.posts[0]).toMatchObject({ type: 'appendStatus', sessionId: 'ses_A', clientMessageId: 'client_A', steerPending: true });
+    complete({ delivery: 'steer', canSteer: false }); await operation;
+    expect(h.posts[1]).toMatchObject({ type: 'appendStatus', delivery: 'steer', steerPending: false });
+    expect(h.host.client.steerQueuedPrompt).toHaveBeenCalledTimes(1);
+});
+
+test('steering failure clears pending and reports a session-scoped warning', async () => {
+    const h = createHarness(); h.host.client.steerQueuedPrompt = jest.fn(async () => { throw new Error('unreachable'); });
+    await h.handler({ type: 'steerQueuedPrompt', sessionId: 'ses_A', clientMessageId: 'client_A', inboxId: 'msg_Q', generation: 4 }, h.activeWebview, h.activeWebview);
+    expect(h.posts[1]).toMatchObject({ steerPending: false, canSteer: false });
+    expect(h.posts[2]).toMatchObject({ type: 'systemNotice', sessionId: 'ses_A', level: 'warn', message: expect.stringContaining('unreachable') });
+});
+
 describe('TurnCommandController runtime protocol', () => {
     function sendHarness() {
         const harness = createHarness({

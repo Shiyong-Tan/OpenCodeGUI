@@ -369,16 +369,19 @@ export function renderMessageElement(
                                 : item.status === 'seen'
                                     ? 'Received'
                                     : item.status === 'queued'
-                                        ? 'Queued'
+                                        ? item.delivery === 'steer' ? 'Steered · awaiting delivery'
+                                            : item.delivery === 'unknown' ? 'Delivery unconfirmed' : 'Queued'
                                         : 'Sending...';
                         block.appendChild(status);
                         if (item.status === 'queued' && item.delivery === 'queue' && item.canSteer === true &&
                             typeof item.inboxId === 'string' && Number.isSafeInteger(item.generation)) {
                             const steer = document.createElement('button');
                             steer.className = 'append-steer-button';
-                            steer.textContent = 'Steer';
+                            steer.textContent = item.steerPending === true ? 'Steer pending' : 'Steer';
+                            steer.disabled = item.steerPending === true;
                             steer.title = 'Deliver at the next safe step boundary';
                             steer.addEventListener('click', event => {
+                                if (steer.disabled) return;
                                 event.stopPropagation(); steer.disabled = true; steer.textContent = 'Steer pending';
                                 host.vscode.postMessage({ type: 'steerQueuedPrompt', sessionId: message.sessionId,
                                     rootUserMsgId: message.id, clientMessageId: item.clientMessageId, inboxId: item.inboxId, generation: item.generation });

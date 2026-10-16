@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## 6.0.0 - 2026-10-15
 
+- Preserve Steer pending state across message rerenders, distinguish acknowledged steering from delivery, and report failures visibly in the owning session.
+
 - Hide completed subagent cards immediately in chat while preserving canonical results and active sibling cards.
 
 - Project accumulated child assistant text into subagent cards instead of replacing it with each stream delta. Keep message identities separate across child steps.
