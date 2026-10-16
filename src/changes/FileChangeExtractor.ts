@@ -28,12 +28,15 @@ export function extractPatchText(raw: any): string | undefined {
 export function extractFilesFromToolPart(part: any, log: (message: string) => void = () => undefined): FileSnapshot[] {
     const tool = part?.tool;
     if (!tool || part?.state?.status !== 'completed') return [];
-    if (tool === 'apply_patch') {
+    if (tool === 'apply_patch' || tool === 'patch') {
         const stateFiles = Array.isArray(part?.state?.metadata?.files) ? part.state.metadata.files : [];
         const files: FileSnapshot[] = [];
         for (const file of stateFiles) {
-            if (!file?.filePath) continue;
-            const type = file?.type as FileSnapshot['type'];
+            const filePath = file?.filePath || file?.file;
+            if (typeof filePath !== 'string' || !filePath.trim()) continue;
+            const rawType = file?.type || file?.status;
+            const type: FileSnapshot['type'] = ['add', 'added', 'create'].includes(rawType) ? 'create'
+                : ['delete', 'deleted', 'remove', 'removed'].includes(rawType) ? 'delete' : 'update';
             const existsBefore = typeof file?.existsBefore === 'boolean'
                 ? file.existsBefore
                 : (type === 'create' ? false : type === 'delete' ? true : true);
@@ -42,7 +45,7 @@ export function extractFilesFromToolPart(part: any, log: (message: string) => vo
                 : (type === 'create' ? true : type === 'delete' ? false : true);
             const patchText = extractPatchText(file);
             files.push({
-                filePath: file.filePath,
+                filePath,
                 relativePath: file.relativePath,
                 type,
                 diff: patchText,

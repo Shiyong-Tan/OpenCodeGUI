@@ -9,6 +9,17 @@ import {
 } from '../changes/FileChangeExtractor';
 
 describe('file change extractor', () => {
+    test('native patch metadata retains paths, unified patches and add/delete semantics', () => {
+        const files = extractFilesFromToolPart({ tool: 'patch', state: { status: 'completed', metadata: { files: [
+            { file: 'src/new.ts', status: 'added', patch: 'create patch', additions: 2 },
+            { file: 'src/old.ts', status: 'deleted', patch: 'delete patch', deletions: 3 },
+        ] } } });
+        expect(files).toEqual([
+            expect.objectContaining({ filePath: 'src/new.ts', type: 'create', existsBefore: false, existsAfter: true, patch: 'create patch' }),
+            expect.objectContaining({ filePath: 'src/old.ts', type: 'delete', existsBefore: true, existsAfter: false, patch: 'delete patch' }),
+        ]);
+        expect(extractFilesFromToolPart({ tool: 'patch', state: { status: 'running', metadata: { files: [{ file: 'not-yet-written.ts' }] } } })).toEqual([]);
+    });
     test('preserves apply_patch create and delete semantics', () => {
         const files = extractFilesFromToolPart({
             tool: 'apply_patch',

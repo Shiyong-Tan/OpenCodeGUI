@@ -1,9 +1,18 @@
 import { V2EventIntegration, nativeToolFragment, type NativeEventOwner } from '../transport/protocol/V2EventIntegration';
 import { decodeV2Event } from '../transport/protocol/V2EventAdapter';
 import type { V2Backend } from '../transport/protocol/V2Backend';
+import { extractFilesFromToolPart } from '../changes/FileChangeExtractor';
 
 const event = (id: string, type: string, data: Record<string, unknown> = {}) => decodeV2Event({ id: `evt_${id}`, type, data: { sessionID: 'ses_A', ...data } });
 const flush = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
+
+test('native patch completion carries file diffs into the existing change extractor', () => {
+    const started = nativeToolFragment(event('patch-start', 'session.tool.input.started', { assistantMessageID: 'msg_A', id: 'call_patch', name: 'patch' }), undefined)!;
+    const completed = nativeToolFragment(event('patch-done', 'session.tool.success', { assistantMessageID: 'msg_A', id: 'call_patch',
+        content: [], metadata: { files: [{ file: 'src/a.ts', status: 'modified', patch: '--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new' }] } }), started)!;
+    expect(completed.sessionID).toBe('ses_A'); expect(completed.messageID).toBe('msg_A');
+    expect(extractFilesFromToolPart(completed)).toEqual([expect.objectContaining({ filePath: 'src/a.ts', type: 'update', patch: expect.stringContaining('+new') })]);
+});
 function harness() {
     let current = true;
     const owner: NativeEventOwner = { isCurrent: () => current, accepts: () => true, session: jest.fn(), step: jest.fn(), text: jest.fn(), tool: jest.fn(),

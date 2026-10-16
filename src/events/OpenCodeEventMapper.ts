@@ -730,7 +730,7 @@ export function mapServerEventToChatEvents(
                     });
                 }
                 if (part?.state?.status === 'completed' && sessionId) {
-                    if (['apply_patch', 'edit', 'write'].includes(toolName)) {
+                    if (['apply_patch', 'patch', 'edit', 'write'].includes(toolName)) {
                         host.markTurnHasWrites(sessionId, `tool:${toolName}`);
                     } else if (toolName === 'bash' && source !== 'resync') {
                         const command = part?.state?.input?.command;
@@ -801,7 +801,7 @@ export function mapServerEventToChatEvents(
                     }
             }
         }
-        if (part?.type === 'tool' && part?.tool === 'apply_patch') {
+        if (part?.type === 'tool' && ['apply_patch', 'patch'].includes(part?.tool)) {
             const patchText = part?.state?.input?.patchText || part?.state?.input?.patch;
             const relatedIds = host.getRelatedSessionIds(sessionId);
             const allowDiff = Boolean(sessionId && (host.hasGroupedActiveTurnWrites(sessionId) || host.hasGroupedPendingTurnChanges(sessionId)));

@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## 6.0.0 - 2026-10-15
 
+- Restore live code diff notifications for native patch tools, including file/status metadata and added/deleted paths. Route through the existing session-owned diff and change-list pipeline.
+
 - Preserve Steer pending state across message rerenders, distinguish acknowledged steering from delivery, and report failures visibly in the owning session.
 
 - Hide completed subagent cards immediately in chat while preserving canonical results and active sibling cards.

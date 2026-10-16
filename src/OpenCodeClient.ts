@@ -5912,6 +5912,8 @@ export class OpenCodeClient {
             case 'read':
                 return fileName ? `Reading: ${fileName}` : 'Reading file...';
             case 'apply_patch':
+            case 'patch':
+            case 'patch':
                 return fileName ? `Applying patch: ${fileName}` : 'Applying patch...';
             case 'bash':
                 return 'Running command...';
