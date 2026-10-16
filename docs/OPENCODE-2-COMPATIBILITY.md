@@ -41,7 +41,7 @@ correlation. Subsequent Windows real-model acceptance and Linux/WSL service/proc
 checks are recorded in OPENCODE-2-WINDOWS-ACCEPTANCE.md. Full interactive VS Code
 window acceptance and native macOS are not certified; mocked-host browser checks
 are not reported as complete Extension Host tests. Native automatic installation
-requires the dual-entry 0.1.6 archive and matching protocol manifest; the older
+requires the dual-loader 0.1.8 distribution and matching protocol manifest; the older
 published 0.1.5 archive predates this work.
 
 Rendering retains the 77 KiB raw budget and raises gzip from 25 to 26 KiB for the
@@ -54,3 +54,5 @@ compile, all Webview budgets and deterministic build checks passed. Companion
 plugin build/typecheck and 157 tests passed. Real isolated protocol probes passed
 for 1.18.31 and 2.0.24; the latter also passed native session contract and
 Supervisor lease/snapshot checks. All real service probes used zero model calls.
+
+OpenCode 2 installation correction (2026-10-16): native package installation does not accept raw release archive URLs. GUI setup selects the official compiled Git distribution tag for V2 and validates its release protocol manifest before changing configuration. V1 retains release archive URLs. The shared server export implements legacy server() and native setup() loader contracts. Both sources belong to one release; later plugin releases do not require a GUI version bump. Supervisor 0.1.6 and 0.1.7 remain prereleases; use 0.1.8 or later.

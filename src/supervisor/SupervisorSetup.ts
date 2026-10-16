@@ -1,7 +1,7 @@
 import { promises as fs } from 'fs';
 import { join } from 'path';
 import { applyEdits, modify, parse, type ParseError } from 'jsonc-parser';
-import { officialReleaseVersion, newerRelease, resolveLatestSupervisorRelease } from './SupervisorRelease';
+import { officialReleaseVersion, newerRelease, resolveLatestSupervisorRelease, supervisorPackageSource, verifyNativeSupervisorRelease } from './SupervisorRelease';
 import type { ProtocolFamily } from '../transport/protocol/ProtocolNegotiator';
 const isSupervisor = (value: unknown): boolean => typeof value === 'string' && /(?:opencode-task-supervisor|OpenCodeTaskSupervisor)(?:[\/\\@#.-]|$)/i.test(value);
 const sourceOf = (entry: unknown): unknown => Array.isArray(entry) ? entry[0] : entry && typeof entry === 'object' ? (entry as Record<string, unknown>).package : entry;
@@ -31,7 +31,8 @@ export function mergeSupervisorConfig(source: string, release?: string, family: 
     if (typeof selected !== 'string' || !selected) throw new Error('A verified Supervisor release is required.');
     const normalized = { ...options, allowDispatch: options.allowDispatch ?? true, allowNotifications: options.allowNotifications ?? false, normalGui: { enabled: true } };
     const targetKey = family === 'v2' ? 'plugins' : 'plugin';
-    const entry = family === 'v2' ? { package: selected, options: normalized } : [selected, normalized];
+    const packageSource = supervisorPackageSource(selected, family);
+    const entry = family === 'v2' ? { package: packageSource, options: normalized } : [packageSource, normalized];
     if (key === targetKey && JSON.stringify(prior) === JSON.stringify(entry)) return source;
     const formatting = { formattingOptions: { insertSpaces: true, tabSize: 2, eol: source.includes('\r\n') ? '\r\n' : '\n' } };
     let edited = source;
@@ -68,6 +69,8 @@ export async function configureSupervisor(workspace: string, checkRelease?: () =
         const official = sourceUrl === undefined || officialReleaseVersion(sourceUrl) !== undefined;
         const release = official ? await (checkRelease ? checkRelease() : resolveLatestSupervisorRelease(family)) : undefined;
         if (official && !officialReleaseVersion(release)) throw new Error('Invalid Supervisor release address. Configuration was not changed.');
+        if (official && family === 'v2') await verifyNativeSupervisorRelease(
+            typeof sourceUrl === 'string' ? newerRelease(sourceUrl, release!) : release!);
         const after = mergeSupervisorConfig(before, release, family);
         if (after === before) return false;
         if (existing.length && await fs.readFile(file, 'utf8') !== before) throw new Error('OpenCode configuration changed during setup. Retry.');

@@ -1,15 +1,28 @@
 import { requestRelease, releaseNetworkReason } from './ReleaseRequest';
 import type { ProtocolFamily } from '../transport/protocol/ProtocolNegotiator';
 const repository = 'https://github.com/Shiyong-Tan/opencode-task-supervisor';
+const nativePrefix = 'git+https://github.com/Shiyong-Tan/opencode-task-supervisor.git#package-v';
 const stableVersion = '(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)';
 
 export function officialReleaseVersion(value: unknown): string | undefined {
     if (typeof value !== 'string' || value.length > 512) return undefined;
+    if (value.startsWith(nativePrefix)) {
+        const version = value.slice(nativePrefix.length);
+        return new RegExp(`^${stableVersion}$`).test(version) ? version : undefined;
+    }
     const prefix = `${repository}/releases/download/v`;
     if (!value.startsWith(prefix)) return undefined;
     const version = value.slice(prefix.length).split('/')[0];
     return new RegExp(`^${stableVersion}$`).test(version)
         && value === `${prefix}${version}/opencode-task-supervisor-${version}.tgz` ? version : undefined;
+}
+
+/** The native package manager accepts Git/registry specs, not arbitrary archive URLs. */
+export function supervisorPackageSource(source: string, family: ProtocolFamily): string {
+    const version = officialReleaseVersion(source);
+    if (!version) return source;
+    return family === 'v2' ? `${nativePrefix}${version}`
+        : `${repository}/releases/download/v${version}/opencode-task-supervisor-${version}.tgz`;
 }
 
 export function newerRelease(existing: string, candidate: string): string {
@@ -31,6 +44,18 @@ export function verifySupervisorReleaseProtocol(value: unknown, packageUrl: stri
         assetDigest !== undefined && assetDigest !== `sha256:${manifest.sha256}`) {
         throw new Error('The published Supervisor package does not advertise a verified matching protocol. Configuration was not changed.');
     }
+    if (family === 'v2' && (manifest.nativePackage !== `${nativePrefix}${version}` ||
+        typeof manifest.nativeCommit !== 'string' || !/^[a-f0-9]{40}$/.test(manifest.nativeCommit))) {
+        throw new Error('The Supervisor release has no matching native Git distribution. Configuration was not changed.');
+    }
+}
+
+export async function verifyNativeSupervisorRelease(source: string): Promise<void> {
+    const url = supervisorPackageSource(source, 'v1');
+    if (!officialReleaseVersion(url)) throw new Error('Invalid native Supervisor release');
+    const response = await requestRelease(url.replace(/\.tgz$/, '.protocols.json'));
+    if (!response.ok) throw new Error(`Native Supervisor manifest HTTP ${response.status}; configuration was not changed.`);
+    verifySupervisorReleaseProtocol(await response.json(), url, 'v2');
 }
 
 export async function resolveLatestSupervisorRelease(family: ProtocolFamily = 'v1'): Promise<string> {

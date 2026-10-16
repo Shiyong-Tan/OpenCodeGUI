@@ -51,3 +51,7 @@ extension compilation, all Webview budgets and deterministic bundles passed.
 Companion 0.1.6 actual package manifests (without test export rewriting) load
 successfully in isolated Windows 1.18.31 and 2.0.24 services and publish matching
 authenticated leases/snapshots, with zero additional model requests.
+
+OpenCode 2 installation correction (2026-10-16): native package installation does not accept raw release archive URLs. GUI setup selects the official compiled Git distribution tag for V2 and validates its release protocol manifest before changing configuration. V1 retains release archive URLs. The shared server export implements legacy server() and native setup() loader contracts. Both sources belong to one release; later plugin releases do not require a GUI version bump. Supervisor 0.1.6 and 0.1.7 remain prereleases; use 0.1.8 or later.
+
+Installation follow-up gates: 234 GUI suites / 1828 tests and 158 plugin tests passed; compilation, Webview budgets and deterministic bundles passed. One initial test run overlapped bundle rebuilding and detected changing bundle hashes; the complete run after builds stopped passed. This was a validation scheduling error, not a suppressed assertion.

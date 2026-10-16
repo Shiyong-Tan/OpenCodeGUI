@@ -4,19 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## 6.0.0 - 2026-10-15
 
-- Fix native V2 successful finality being overwritten by the empty-answer fallback. Settle explicit interrupted executions without an idle record only after fresh session, queue, permission and form checks.
-- Keep native question choices visible when custom answers are supported. Send explicit user-rejection feedback so the same child can return a rejection report instead of silently stopping its step.
+- Select release archives for OpenCode 1 and verified compiled Git distributions for OpenCode 2. Preserve permissions and refuse configuration changes when native distribution metadata is missing.
 
 - Fix native V2 successful finality being overwritten by the empty-answer fallback. Settle explicit interrupted executions without an idle record only after fresh session, queue, permission and form checks.
 - Keep native question choices visible when custom answers are supported. Send explicit user-rejection feedback so the same child can return a rejection report instead of silently stopping its step.
+
 
 - Add native OpenCode 2 protocol negotiation while retaining the OpenCode 1 adapter. Validate actual JSON resources and ownership instead of pinning release numbers; HTML fallback pages are not healthy API responses.
 - Route native sessions, execution outcomes, model/agent selection, typed permission/forms and manual compaction through the existing session owner. Keep concurrent child tools independently identified and render Queued messages with a Steer action when their captured inbox identity is current.
 - Install the protocol-appropriate Supervisor configuration and require a dual-protocol release advertisement before selecting a V2 plugin package. Native plugin loading requires the companion dual-entry package; old published archives do not gain V2 support automatically.
 
-- Add native OpenCode 2 protocol negotiation while retaining the OpenCode 1 adapter. Validate actual JSON resources and ownership instead of pinning release numbers; HTML fallback pages are not healthy API responses.
-- Route native sessions, execution outcomes, model/agent selection, typed permission/forms and manual compaction through the existing session owner. Keep concurrent child tools independently identified and render Queued messages with a Steer action when their captured inbox identity is current.
-- Install the protocol-appropriate Supervisor configuration and require a dual-protocol release advertisement before selecting a V2 plugin package. Native plugin loading requires the companion dual-entry package; old published archives do not gain V2 support automatically.
 
 Consolidates the changes previously tested as 5.1.0. Supervisor remains a separately installed plugin; use 0.1.5 or later for the corrected handshake/snapshot version identity.
 
@@ -604,3 +601,4 @@ Consolidates the changes previously tested as 5.1.0. Supervisor remains a separa
 - Rebuilt `+x | -y` as a fixed 3-column CSS grid (`plus | minus`) so spacing is controlled by layout, not whitespace.
 - Separator now renders as a pure `|` character with centered alignment and tunable width via `--change-sep-width`.
 - Added dedicated delta columns (`--delta-col-width`) for stable alignment across different number widths and zoom levels.
+
