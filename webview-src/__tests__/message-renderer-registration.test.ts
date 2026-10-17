@@ -55,6 +55,32 @@ function invokeRealAppend(admission: (root: any) => boolean): { result: any; adm
 }
 
 describe('message renderer registration', () => {
+  test.each([undefined, 'session-explicit'])('Steer captures the owning session when message.sessionId is %s', sessionId => {
+    const previousDocument = (global as any).document;
+    const elements: any[] = [];
+    (global as any).document = { createElement: () => {
+      const element = { appendChild: jest.fn(), classList: { add: jest.fn() }, dataset: {}, style: {},
+        className: '', disabled: false, listeners: {} as Record<string, (event: any) => void>,
+        addEventListener(type: string, listener: (event: any) => void) { this.listeners[type] = listener; } };
+      elements.push(element); return element;
+    } };
+    const postMessage = jest.fn();
+    const host = { ...createUserHost(() => true), activeSessionId: 'session-a', vscode: { postMessage },
+      getAppendItems: () => [{ text: 'Change direction', status: 'queued', delivery: 'queue', canSteer: true,
+        inboxId: 'msg_queued', clientMessageId: 'client-queued', generation: 7 }] };
+    try {
+      render(host, { id: 'msg_root', role: 'user', text: 'Original task', sessionId }, new Set());
+      const button = elements.find(element => element.className === 'append-steer-button');
+      expect(button).toBeDefined();
+      host.activeSessionId = 'session-b';
+      button.listeners.click({ stopPropagation: jest.fn() });
+      button.listeners.click({ stopPropagation: jest.fn() });
+      expect(postMessage).toHaveBeenCalledTimes(1);
+      expect(postMessage).toHaveBeenCalledWith({ type: 'steerQueuedPrompt', sessionId: sessionId ?? 'session-a',
+        rootUserMsgId: 'msg_root', clientMessageId: 'client-queued', inboxId: 'msg_queued', generation: 7 });
+    } finally { (global as any).document = previousDocument; }
+  });
+
   test('keeps early, rejected, missing-element, and thrown appends retryable', () => {
     const nullChangeList = new Set<string>();
     render({ activeSessionId: 'session-a', getSessionState: () => ({}), changeListRenderer: { render: () => null }, appendChatRenderRoot: jest.fn() }, { id: 'null-changelist', role: 'system', meta: { kind: 'changeList' } }, nullChangeList);

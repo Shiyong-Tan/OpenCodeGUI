@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## 6.0.0 - 2026-10-15
 
+- Capture the owning session for Steer actions on queued messages, including timeline messages without an inline session ID. Preserve routing when the visible session changes before clicking.
+
 - Keep native live text and history replay on the same per-kind part identities to prevent duplicated assistant text. Recover native child user anchors so completed subagent cards leave the active view.
 
 - Send cumulative main-assistant text to replacement-mode streaming cards instead of replacing the prefix with the newest delta. Preserve append-successor delta concatenation.
