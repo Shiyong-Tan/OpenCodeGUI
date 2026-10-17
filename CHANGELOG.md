@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## 6.0.0 - 2026-10-15
 
+- Block stale question answers when a refreshed request has an invalid session scope. Cover child question/permission recovery, concurrent owners, settled-request removal, changed details and renewed review tokens after reload.
+
 - Persist final answers from their canonical message text instead of falling back to concatenated interim generations. Preserve session isolation and local prompt persistence when final text or export is unavailable.
 
 - Preserve accepted final messages when a new prompt clears the previous append turn lock. Bind native question review to the captured service workspace and record changed query failures instead of silently dropping diagnostics.

@@ -7,6 +7,13 @@ assistant generations. Missing final text does not prevent persisting the local
 user prompt. Existing finalized snapshot records remain immutable; this transition
 does not repair historical snapshots by merging remote history.
 
+Question and permission review are separate projections of server-owned pending
+requests, keyed by original session and request ID. Reload queries those requests
+again rather than restoring actionable cards from chat snapshots. Updated details
+replace the same request; settled requests leave the queue. Invalid or foreign-scope
+observations block stale decisions, and responses revalidate their review tokens
+against the current server state before routing to the original child session.
+
 ## Dual OpenCode protocol adaptation
 
 Current native owner integration and validation evidence are recorded in

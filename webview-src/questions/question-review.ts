@@ -27,7 +27,9 @@ export function createQuestionReview(post: (message: unknown) => void, changed: 
                 waiting = 0;
                 if (message.error || !Array.isArray(message.requests)) { stale = true; if (current()) current()!.error = 'Questions unavailable. Waiting to reconnect.'; changed(); return; }
                 const cards = message.requests as PermissionCard[];
-                if (cards.some(c => c.scopeSessionId !== scope)) return;
+                if (cards.some(c => !c || c.scopeSessionId !== scope || typeof c.sessionId !== 'string' || typeof c.requestId !== 'string')) {
+                    stale = true; if (current()) current()!.error = 'Questions unavailable. Waiting to reconnect.'; changed(); return;
+                }
                 const before = JSON.stringify([current(), stale]);
                 const retained = new Set<string>();
                 for (const card of cards) {

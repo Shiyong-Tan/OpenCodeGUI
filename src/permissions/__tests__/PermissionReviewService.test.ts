@@ -87,3 +87,38 @@ test('concurrent clicks produce only one reply; changed command details invalida
     const y = setup(), old = await y.input(); y.setPending([{ ...y.request('per_a'), patterns: ['different.txt'] }]);
     await expect(y.service.respond(old)).rejects.toThrow(/changed/); expect(y.reply).not.toHaveBeenCalled();
 });
+
+test.each(['permission', 'question'] as const)('native %s recovers pending child owners in a new review service without replaying settled requests', async kind => {
+    const directory = '/fixture';
+    const sessions: Record<string, unknown> = {
+        ses_parent: { id: 'ses_parent', directory },
+        ses_child: { id: 'ses_child', directory, parentID: 'ses_parent', title: 'Child' },
+        ses_sibling: { id: 'ses_sibling', directory, parentID: 'ses_parent', title: 'Sibling' },
+        ses_other: { id: 'ses_other', directory },
+    };
+    const make = (sessionID: string, id: string) => kind === 'question'
+        ? { id, sessionID, nativeForm: { id, sessionId: sessionID, title: 'Choose', fields: [{ key: 'choice', type: 'string' }], native: {} } }
+        : { id, sessionID, permission: 'read', patterns: ['fixture.txt'], tool: { messageID: 'msg_tool', callID: id } };
+    let pending = [make('ses_child', 'req_one'), make('ses_sibling', 'req_two'), make('ses_other', 'req_foreign')];
+    const respond = jest.fn(async (input: { sessionId: string; requestId: string }) => {
+        pending = pending.filter(item => item.sessionID !== input.sessionId || item.id !== input.requestId);
+    });
+    const connect = async () => ({ identity: 'native', directory,
+        read: jest.fn(), reply: jest.fn(), native: {
+            session: async (id: string) => sessions[id], requests: async () => pending,
+            message: async (sessionID: string) => ({ info: { id: 'msg_tool', sessionID }, parts: pending.filter(item => item.sessionID === sessionID)
+                .map(item => ({ type: 'tool', tool: 'read', callID: item.id, state: { status: 'running', input: {} } })) }),
+            respond,
+        } });
+    const first = new PermissionReviewService(connect, kind);
+    const before = (await first.snapshot('ses_parent')).requests;
+    expect(before.map(item => item.sessionId)).toEqual(['ses_child', 'ses_sibling']);
+    await first.respond({ ...before[0], response: 'reject' });
+    const restored = new PermissionReviewService(connect, kind);
+    await expect(restored.respond({ ...before[1], response: 'reject' })).rejects.toThrow(/changed/);
+    const after = (await restored.snapshot('ses_parent')).requests;
+    expect(after.map(item => [item.sessionId, item.requestId])).toEqual([['ses_sibling', 'req_two']]);
+    await restored.respond({ ...after[0], response: 'reject' });
+    expect(respond.mock.calls.map(([input]) => [input.sessionId, input.requestId])).toEqual([['ses_child', 'req_one'], ['ses_sibling', 'req_two']]);
+    expect((await restored.snapshot('ses_parent')).requests).toEqual([]);
+});

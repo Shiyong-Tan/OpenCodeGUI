@@ -97,3 +97,18 @@ test('late decisions from another scope leave the current permissions unchanged'
     expect(x.send).toHaveBeenCalledTimes(calls); expect(row.children[4].children[0].disabled).toBe(false);
     x.panel.dispose();
 });
+
+test('a fresh view recovers only server-pending child requests and replaces changed details without stacking cards', () => {
+    const old = setup(); old.panel.select('ses_parent'); old.respond([card(), card('ses_sibling', 'per_b')]); old.panel.dispose();
+    const x = setup(); x.panel.select('ses_parent'); expect(x.root.hidden).toBe(true);
+    x.respond([card('ses_sibling', 'per_b')]);
+    const row = x.rows.children[0]; jest.advanceTimersByTime(3000);
+    x.respond([{ ...card('ses_sibling', 'per_b'), input: '{"filePath":"new.txt"}', patterns: ['new.txt'], reviewToken: 'new-token' }]);
+    expect(x.rows.children).toHaveLength(1); expect(x.rows.children[0]).toBe(row);
+    expect(row.children[2].children[1].textContent).toContain('new.txt');
+    expect(row.children[2].children[1].textContent).not.toContain('fixture.txt');
+    row.children[4].children[1].click();
+    expect(x.send).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: 'ses_sibling', requestId: 'per_b', reviewToken: 'new-token', response: 'reject' }));
+    x.panel.receive({ type: 'permissionResultAck', sessionId: 'ses_sibling', permissionId: 'per_b' });
+    x.respond([]); expect(x.root.hidden).toBe(true); expect(x.rows.children).toHaveLength(0); x.panel.dispose();
+});

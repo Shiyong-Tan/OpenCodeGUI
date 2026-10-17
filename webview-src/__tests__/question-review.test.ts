@@ -26,3 +26,33 @@ test('late scopes, disconnects and expired requests cannot produce an answer', (
     review.refresh(); review.receive({ ...post.mock.calls.at(-1)![0], type: 'questionSnapshot', requests: [{ ...card(), state: 'expired' }] });
     expect(review.current()).toBeUndefined(); review.dispose();
 });
+
+test('fresh views recover child questions by identity without retaining answered requests or concatenating changes', () => {
+    const post = jest.fn(); let review = createQuestionReview(post, () => {});
+    const snapshot = (requests: unknown[]) => review.receive({ ...post.mock.calls.at(-1)![0], type: 'questionSnapshot', requests });
+    review.select('ses_parent'); snapshot([card(), { ...card('que_two'), sessionId: 'ses_sibling' }]);
+    review.update(row => ({ ...row, draft: 'old draft' }));
+    review.refresh();
+    snapshot([{ ...card(), reviewToken: 'changed-schema', questions: [{ title: 'New', prompt: 'New question', options: [{ label: 'B' }] }] }]);
+    expect(review.current()?.questions?.[0].prompt).toBe('New question');
+    expect(review.current()?.draft).toBe('');
+    review.dispose(); review = createQuestionReview(post, () => {});
+    review.select('ses_parent');
+    expect(review.current()).toBeUndefined(); expect(review.blocked()).toBe(true);
+    snapshot([{ ...card('que_two'), sessionId: 'ses_sibling' }]);
+    review.submit('reject');
+    expect(post).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: 'ses_sibling', requestId: 'que_two', response: 'reject' }));
+    review.receive({ type: 'questionDecisionAck', sessionId: 'ses_sibling', requestId: 'que_two' });
+    snapshot([]); expect(review.current()).toBeUndefined(); review.dispose();
+});
+
+test.each([null, { ...card(), scopeSessionId: 'ses_foreign' }])('invalid latest question observations block stale answers: %s', invalid => {
+    const post = jest.fn(), review = createQuestionReview(post, () => {});
+    const snapshot = (requests: unknown[]) => review.receive({ ...post.mock.calls.at(-1)![0], type: 'questionSnapshot', requests });
+    review.select('ses_parent'); snapshot([card()]);
+    jest.advanceTimersByTime(3000); snapshot([invalid]);
+    expect(review.blocked()).toBe(true); review.submit('answer', [['A']]);
+    expect(post.mock.calls.some(([message]) => message.type === 'questionDecision')).toBe(false);
+    jest.advanceTimersByTime(3000); snapshot([card()]);
+    expect(review.blocked()).toBe(false); expect(review.current()?.error).toBe(''); review.dispose();
+});
