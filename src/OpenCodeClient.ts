@@ -599,8 +599,8 @@ export class OpenCodeClient {
     private pendingQuestionCallIdsBySession = new Map<string, Set<string>>();
     private async connectRequestReview(sessionId: string): Promise<import('./permissions/PermissionReviewService').PermissionConnection> {
         const conn = await this.getServerConn();
-        const directory = this.getPermissionDirectory(sessionId);
         const backend = this.nativeBackend, binding = this.protocolBinding;
+        const directory = backend ? backend.transport.connection.directory : this.getPermissionDirectory(sessionId);
         if (backend && binding) return {
             identity: `${conn.baseUrl}:${binding.generation}`, directory,
             read: async () => { throw new Error('Legacy permission routes unavailable on this backend'); },

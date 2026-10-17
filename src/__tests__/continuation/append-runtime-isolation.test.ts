@@ -2602,3 +2602,23 @@ describe('append runtime isolation', () => {
         expect(session.timeline).toEqual(['msg_root_A', 'msg_append_child_A']);
     });
 });
+
+test('accepted append final remains visible after the next turn clears the transient final lock', () => {
+    const { context } = loadAppendPresentationHarness();
+    const answer = { id: 'msg_final', role: 'assistant', text: 'Completed report', parentId: 'msg_root', meta: {} as any };
+    const session = { messagesById: new Map<string, any>([
+        ['msg_root', { id: 'msg_root', role: 'user', meta: { appendedPrompts: [
+            { clientMessageId: 'c1', appendUserMsgId: 'msg_append', text: 'Report', status: 'applied' }] } }],
+        ['msg_final', answer], ['msg_append', { id: 'msg_append', role: 'user', text: 'Report', meta: {} }],
+    ]), timeline: ['msg_root', 'msg_final', 'msg_append'], clientKeyToServerId: new Map(), serverIdToClientKey: new Map(),
+        backendTurnInFlight: false, turnFullyFinalized: true, finalAssistantLock: null };
+    const index = context.buildAppendChildPresentationIndex(session);
+    expect(context.isAppendChainTopLevelAssistantHidden(session, answer, answer.id, index)).toBe(true);
+    answer.meta.acceptedFinalMessageId = answer.id;
+    expect(context.isAppendChainTopLevelAssistantHidden(session, answer, answer.id, index)).toBe(false);
+    const inherited = { ...answer, id: 'msg_retired' };
+    session.messagesById.set(inherited.id, inherited);
+    const restored = JSON.parse(JSON.stringify(answer));
+    expect(context.isAppendChainTopLevelAssistantHidden(session, restored, restored.id, index)).toBe(false);
+    expect(context.isAppendChainTopLevelAssistantHidden(session, inherited, inherited.id, context.buildAppendChildPresentationIndex(session))).toBe(true);
+});

@@ -36,6 +36,7 @@ describe('new turn assistant identity', () => {
         assistantMsgId: 'msg_previous_final',
       },
       seenDiffKeys: new Set(),
+      finalAssistantLock: { assistantMsgId: 'msg_previous_final', ts: 1 },
       assistantUpgradeSeen: new Set(),
     };
     const posted: any[] = [];
@@ -74,7 +75,7 @@ describe('new turn assistant identity', () => {
       meta: expect.objectContaining({ parentClientMessageId: 'local-new-user' }),
     }));
     expect(session.messagesById.get('msg_previous_final')).toBe(staleAssistant);
-    expect(staleAssistant.meta).toEqual({ isThinking: false, statusText: null });
+    expect(staleAssistant.meta).toEqual({ isThinking: false, statusText: null, acceptedFinalMessageId: 'msg_previous_final' });
     expect(posted).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: 'registerPendingUserLocal', localKey: 'local-new-user' }),
     ]));

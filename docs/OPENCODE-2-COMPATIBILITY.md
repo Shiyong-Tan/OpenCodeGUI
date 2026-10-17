@@ -22,6 +22,17 @@ child anchor from its own transcript, with captured parent-binding guards, befor
 using the existing replay and completion filters. Child completion never finalizes
 the parent turn.
 
+Accepted final presentation identity is retained on its canonical message record,
+so a later prompt clearing the session's transient final lock cannot reapply an
+older append-chain hiding rule to that answer. Exact IDs prevent inherited metadata
+on retired aliases from making them visible. Normal undo/hidden state still applies.
+
+Native permission/question review uses the captured protocol workspace, not a
+tool's last working directory. Query errors and pending counts are logged only
+when they change. The isolated protocol probe verifies a real pending form through
+the production review owner as well as the session and location-wide form APIs;
+it sends no prompt or model request.
+
 An inactive native child execution with a durable interrupted/failed outcome
 transitions its existing card owner to cancelled/failed. All terminal lifecycle
 states set the card's terminal flag, so the active view hides them. This UI terminal

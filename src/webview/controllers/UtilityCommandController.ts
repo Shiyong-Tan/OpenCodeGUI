@@ -117,6 +117,13 @@ const ASSISTANT_IMAGE_EXTENSIONS = new Set([
 ]);
 
 export class UtilityCommandController {
+    private readonly questionObservations = new Map<string, string>();
+    private observeQuestions(sessionId: string, state: string): void {
+        if (this.questionObservations.get(sessionId) === state) return;
+        if (this.questionObservations.size >= 128) this.questionObservations.delete(this.questionObservations.keys().next().value!);
+        this.questionObservations.set(sessionId, state);
+        this.host.log(`EXT: question.review.observation | sessionId=${sessionId} | ${state}`);
+    }
     constructor(private readonly host: UtilityCommandHost) {}
 
     public async handle(
@@ -191,8 +198,12 @@ export class UtilityCommandController {
                 try {
                     if (!this.host.refreshQuestionRequests) throw new Error();
                     const snapshot = await this.host.refreshQuestionRequests(scopeSessionId);
+                    this.observeQuestions(scopeSessionId, `requests=${snapshot.requests.length} | pending=${snapshot.requests.filter(item => item.state === 'pending').length}`);
                     activeWebview.postMessage({ type: 'questionSnapshot', ...snapshot, refreshId: data.refreshId });
-                } catch { activeWebview.postMessage({ type: 'questionSnapshot', scopeSessionId, refreshId: data.refreshId, error: 'Question observation unavailable. Retry before answering.' }); }
+                } catch (error) {
+                    this.observeQuestions(scopeSessionId, `error=${error instanceof Error ? error.message.slice(0, 300) : 'Unknown error'}`);
+                    activeWebview.postMessage({ type: 'questionSnapshot', scopeSessionId, refreshId: data.refreshId, error: 'Question observation unavailable. Retry before answering.' });
+                }
                 return true;
             }
             case 'questionDecision': {

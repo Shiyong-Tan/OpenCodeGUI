@@ -3177,6 +3177,7 @@ function isAppendChildTopLevelUser(session, msg, id, appendChildPresentationInde
 
 function isAppendChainTopLevelAssistantHidden(session, msg, id, appendChildPresentationIndex) {
     if (!session || !msg || msg.role !== 'assistant') return false;
+    if (msg.id?.startsWith('msg_') && msg.meta?.acceptedFinalMessageId === msg.id && id === msg.id) return false;
     const canonicalFinalAssistantId = typeof session.finalAssistantLock?.assistantMsgId === 'string'
         ? session.finalAssistantLock.assistantMsgId
         : null;
@@ -13616,6 +13617,11 @@ function shouldHideDcpUiMessage(message) {
     }
 
 function resetTurnPresentationForStart(session, preservePriorMessage = false) {
+    const priorFinalId = session.finalAssistantLock?.assistantMsgId;
+    const priorFinal = priorFinalId ? session.messagesById.get(priorFinalId) : null;
+    if (priorFinal?.role === 'assistant') {
+        priorFinal.meta = { ...priorFinal.meta, acceptedFinalMessageId: priorFinalId };
+    }
     session.currentTurnAssistantMsgId = null;
     session.currentTurnAssistantKey = null;
     // A completed turn can receive late metadata that restores its canonical
@@ -14180,6 +14186,7 @@ function handleChatDone(sessionId, message) {
         stabilizeTimelineAfterFinal(session, resolvedFinal, 'chatDone');
         const finalizedAssistant = session.messagesById.get(resolvedFinal) || null;
         if (finalizedAssistant?.meta) {
+            finalizedAssistant.meta.acceptedFinalMessageId = resolvedFinal;
             delete finalizedAssistant.meta.volatilePresentationRevision;
         }
         if (finalizedAssistant?.meta?.liveTurnResume === true) {

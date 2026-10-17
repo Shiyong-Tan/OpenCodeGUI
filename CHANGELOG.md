@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## 6.0.0 - 2026-10-15
 
+- Preserve accepted final messages when a new prompt clears the previous append turn lock. Bind native question review to the captured service workspace and record changed query failures instead of silently dropping diagnostics.
+
 - Display persistent per-session Supervisor todo lists in the Supervisor panel, including after reconnect. Reuse chat Todo cards for live Supervisor todo tools and retain OpenCode 1 todowrite support.
 
 - Remove cancelled and failed native child cards after authoritative execution termination, while retaining Supervisor process-stop uncertainty independently.

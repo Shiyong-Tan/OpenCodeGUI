@@ -12,6 +12,8 @@ const { V2Transport } = require('../out/transport/protocol/V2Transport.js');
 const { V2SessionAdapter } = require('../out/transport/protocol/V2SessionAdapter.js');
 const { V2ControlAdapter } = require('../out/transport/protocol/V2ControlAdapter.js');
 const { V2InteractionAdapter } = require('../out/transport/protocol/V2InteractionAdapter.js');
+const { V2Backend } = require('../out/transport/protocol/V2Backend.js');
+const { PermissionReviewService } = require('../out/permissions/PermissionReviewService.js');
 const { decodeV2Event } = require('../out/transport/protocol/V2EventAdapter.js');
 const { SseDataLineBuffer } = require('../out/transport/OpenCodeEventStream.js');
 const binary = process.argv[2];
@@ -101,6 +103,16 @@ try {
             if (typeof formId !== 'string') throw new Error('Fixture form identity missing');
             try {
                 if (!(await interactions.forms(session.id)).some(item => item.id === formId)) throw new Error('Fixture pending form missing');
+                if (!(await interactions.forms()).some(item => item.id === formId)) throw new Error('Fixture location-wide form missing');
+                const backend = new V2Backend(transport);
+                const review = new PermissionReviewService(async () => ({ identity: 'isolated-fixture', directory: transport.connection.directory,
+                    read: async () => { throw new Error('Unexpected V1 request'); }, reply: async () => { throw new Error('Unexpected V1 reply'); },
+                    native: { session: id => backend.sessionInfo(id),
+                        requests: async () => (await interactions.forms()).map(form => ({ id: form.id, sessionID: form.sessionId, nativeForm: form })),
+                        message: async () => { throw new Error('Form does not require a legacy tool lookup'); }, respond: async () => {} } }), 'question');
+                const reviewed = await review.snapshot(session.id);
+                if (!reviewed.requests.some(card => card.requestId === formId && card.state === 'pending' && card.reviewToken && card.nativeForm))
+                    throw new Error('Fixture form did not reach the production question review owner');
                 await interactions.replyForm(session.id, formId, { choice: 'internal' }); fixtureMutations++;
                 const answered = await interactions.getForm(session.id, formId);
                 if (answered.state?.status !== 'answered' || answered.state?.answer?.choice !== 'internal') throw new Error('Fixture typed form response mismatch');

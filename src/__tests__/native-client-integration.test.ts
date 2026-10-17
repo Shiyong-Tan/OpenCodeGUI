@@ -14,6 +14,7 @@ function harness() {
         interrupt: jest.fn(async () => ({ interrupted: true })), createSession: jest.fn(async () => ({ id: 'ses_new' })) },
         controls: { selectModel: jest.fn(async () => undefined), selectAgent: jest.fn(async () => undefined), active: jest.fn(async () => ({})),
             models: jest.fn(async () => [{ ref: { id: 'model', providerID: 'provider' }, name: 'Model', enabled: true, variants: ['high'], contextLimit: 1000 }]) },
+        transport: { connection: { directory: '/fixture' } },
         history: jest.fn(async () => []), sessionInfo: jest.fn(async (id: string) => ({ id, title: 'Fixture' })) };
     client.protocolBinding = { native, identity: { family: 'v2', version: '2.99.0' }, generation: 7, isCurrent: () => true };
     client.ensureServer = jest.fn(async () => undefined);
@@ -133,6 +134,14 @@ test('native chat selects the requested role/model then admits exactly one durab
     expect(admitted).toMatchObject({ text: 'Fixture', delivery: 'steer' }); expect(admitted.id).toMatch(/^msg_/);
     expect(client.currentTurnUserMsgIdBySession.get('ses_A')).toBe(admitted.id);
     expect(client.requestJson).not.toHaveBeenCalled(); expect(client.repairFailedCompaction).not.toHaveBeenCalled();
+});
+
+test('native question review remains scoped to the bound workspace when a tool changes cwd', async () => {
+    const { client } = harness();
+    client.lastCwdBySession.set('ses_A', '/fixture/analysis');
+    client.getServerConn = jest.fn(async () => ({ baseUrl: 'http://127.0.0.1:42000' }));
+    const connection = await client.connectRequestReview('ses_A');
+    expect(connection.directory).toBe('/fixture');
 });
 test('native session reads/creation and interrupt route independently of the visible session', async () => {
     const { client, native } = harness(); client.currentSessionId = 'ses_visible';
