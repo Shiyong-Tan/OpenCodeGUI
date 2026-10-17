@@ -1,5 +1,12 @@
 # OpenCode GUI modularization architecture
 
+Final snapshot text is resolved by canonical assistant message ID: the client-owned
+reconciled text takes precedence over that exact message's delta buffer. A known
+message ID must never fall back to the turn-wide stream, which may contain multiple
+assistant generations. Missing final text does not prevent persisting the local
+user prompt. Existing finalized snapshot records remain immutable; this transition
+does not repair historical snapshots by merging remote history.
+
 ## Dual OpenCode protocol adaptation
 
 Current native owner integration and validation evidence are recorded in

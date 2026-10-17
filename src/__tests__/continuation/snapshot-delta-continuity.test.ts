@@ -364,7 +364,7 @@ describe('W5A snapshot export and finalize contracts', () => {
         provider.client.getCurrentTurnStartedAt = jest.fn().mockReturnValue(1_000);
         provider.client.getCurrentTurnCompletedAt = jest.fn().mockReturnValue(76_000);
         provider.pendingSnapshotUserTextBySession.set('ses_delta', 'reload window 未显示历史记录');
-        provider.assistantTextBufferBySession.set('ses_delta', '这是本轮助手回答。');
+        provider.appendAssistantBuffer('ses_delta', '这是本轮助手回答。', 'msg_assistant_new');
 
         await provider.writeFinalizeSnapshotFromCurrentTurn({
             sessionId: 'ses_delta',
@@ -413,7 +413,7 @@ describe('W5A snapshot export and finalize contracts', () => {
             'msg_assistant_final',
         ]);
         provider.pendingSnapshotUserTextBySession.set('ses_delta', 'send a subagent');
-        provider.assistantTextBufferBySession.set('ses_delta', 'subagent finished');
+        provider.appendAssistantBuffer('ses_delta', 'subagent finished', 'msg_assistant_final');
 
         await provider.writeFinalizeSnapshotFromCurrentTurn({
             sessionId: 'ses_delta',
@@ -660,7 +660,7 @@ describe('W5A snapshot export and finalize contracts', () => {
         provider.client.exportSession = jest.fn();
         provider.client.getMessageIndex = jest.fn((id: string) => id === 'msg_user_new' ? 1 : 2);
         provider.pendingSnapshotUserTextBySession.set('ses_delta', 'new prompt');
-        provider.assistantTextBufferBySession.set('ses_delta', 'new answer');
+        provider.appendAssistantBuffer('ses_delta', 'new answer', 'msg_assistant_new');
 
         await expect(provider.writeFinalizeSnapshotFromCurrentTurn({
             sessionId: 'ses_delta',
@@ -754,7 +754,7 @@ describe('W5A snapshot export and finalize contracts', () => {
         provider.writeSnapshotAtomic = jest.fn().mockResolvedValue(123);
         provider.client.exportSession = jest.fn();
         provider.client.getMessageIndex = jest.fn().mockReturnValue(2);
-        provider.assistantTextBufferBySession.set('ses_delta', 'remote rewrite');
+        provider.appendAssistantBuffer('ses_delta', 'remote rewrite', 'msg_boundary');
 
         await provider.writeFinalizeSnapshotFromCurrentTurn({
             sessionId: 'ses_delta',

@@ -60,6 +60,37 @@ afterEach(async () => {
 });
 
 describe('SidebarProvider Task 8 snapshot/reload current-owner semantics', () => {
+    it.each([true, false])('persists only canonical final text when export is unavailable (cached=%s)', async (cached) => {
+        const provider = createProvider();
+        provider.readPersistedSessionMap = jest.fn().mockResolvedValue(null);
+        provider.readSnapshot = jest.fn().mockResolvedValue(null);
+        provider.writeSnapshotAtomic = jest.fn().mockResolvedValue(100);
+        provider.client.exportSession = jest.fn().mockRejectedValue(new Error('offline'));
+        provider.client.getAssistantText = jest.fn((id) => id === 'msg_final' && cached ? 'Final answer' : undefined);
+        provider.appendAssistantBuffer('ses_task8', 'Earlier progress', 'msg_progress');
+        provider.appendAssistantBuffer('ses_other', 'Other session', 'msg_other');
+        provider.pendingSnapshotUserTextBySession.set('ses_task8', 'Question');
+        await provider.writeFinalizeSnapshotFromCurrentTurn({
+            sessionId: 'ses_task8', userMessageId: 'msg_user', assistantMessageId: 'msg_final',
+        });
+        const stored = provider.writeSnapshotAtomic.mock.calls[0][1];
+        // This is the JSON consumed on reload; no unrelated stream is a final.
+        const reloaded = JSON.parse(JSON.stringify(stored)).sessionData.messages;
+        expect(reloaded.map((message: any) => message.text)).toEqual(cached ? ['Question', 'Final answer'] : ['Question']);
+        expect(provider.getAssistantTextBuffer('ses_other', 'msg_other')).toBe('Other session');
+        expect(provider.client.exportSession).not.toHaveBeenCalled();
+    });
+
+    it('prefers canonical reconciled text to replayed deltas and retains exact-message offline fallback', () => {
+        const provider = createProvider();
+        provider.appendAssistantBuffer('ses_task8', 'FinalFinal', 'msg_final');
+        provider.client.getAssistantText = jest.fn().mockReturnValue('Final');
+        expect(provider.getAssistantTextBuffer('ses_task8', 'msg_final')).toBe('Final');
+        provider.client.getAssistantText.mockReturnValue(undefined);
+        expect(provider.getAssistantTextBuffer('ses_task8', 'msg_final')).toBe('FinalFinal');
+        expect(provider.getAssistantTextBuffer('ses_task8', 'msg_missing')).toBeUndefined();
+    });
+
     it('selects the newest tool-call assistant generation using OpenCode info.time timestamps', () => {
         const provider = createProvider();
         const formatted = provider.formatSession({
@@ -533,7 +564,7 @@ describe('SidebarProvider Task 8 snapshot/reload current-owner semantics', () =>
         provider.writeSnapshotAtomic = jest.fn().mockResolvedValue(100);
         provider.client.exportSession = jest.fn();
         provider.client.getMessageIndex = jest.fn().mockReturnValue(currentOwner.messageIndex);
-        provider.assistantTextBufferBySession.set('ses_task8', 'remote collision text');
+        provider.appendAssistantBuffer('ses_task8', 'remote collision text', 'msg_owner_b');
 
         await provider.writeFinalizeSnapshotFromCurrentTurn({
             sessionId: 'ses_task8',

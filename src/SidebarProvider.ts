@@ -5707,8 +5707,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     private getAssistantTextBuffer(sessionId: string, assistantMessageId?: string): string | undefined {
         if (this.isResolvableMessageId(assistantMessageId)) {
-            const exact = this.assistantTextBufferByMessageIdBySession.get(sessionId)?.get(assistantMessageId);
-            if (exact !== undefined) return exact;
+            // The client owns canonical text (including reconciled history). A
+            // turn-wide stream may contain several assistant generations and
+            // must never be persisted under one known message identity.
+            return this.client.getAssistantText(assistantMessageId)
+                ?? this.assistantTextBufferByMessageIdBySession.get(sessionId)?.get(assistantMessageId);
         }
         return this.assistantTextBufferBySession.get(sessionId);
     }
