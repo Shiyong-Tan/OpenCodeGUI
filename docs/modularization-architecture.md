@@ -13,6 +13,10 @@ again rather than restoring actionable cards from chat snapshots. Updated detail
 replace the same request; settled requests leave the queue. Invalid or foreign-scope
 observations block stale decisions, and responses revalidate their review tokens
 against the current server state before routing to the original child session.
+Native permission requests without a source are valid server-owned interactions:
+the native adapter explicitly marks this provenance and the review owner displays
+their action, resources and metadata without inventing a tool identity. Legacy
+requests and unknown native source variants retain the existing verification gate.
 
 ## Dual OpenCode protocol adaptation
 

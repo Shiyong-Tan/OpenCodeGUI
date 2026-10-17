@@ -615,6 +615,7 @@ export class OpenCodeClient {
                     return (await backend.interactions.permissions()).map(permission => {
                         const source = permission.native.source as { type?: string; messageID?: string; id?: string } | undefined;
                         return { id: permission.id, sessionID: permission.sessionId, permission: permission.action, patterns: [...permission.resources],
+                            nativePermission: source === undefined, metadata: permission.native.metadata,
                             ...(source?.type === 'tool' ? { tool: { messageID: source.messageID, callID: source.id } } : {}) };
                     });
                 },

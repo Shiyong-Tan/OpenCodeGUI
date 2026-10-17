@@ -143,6 +143,22 @@ test('native question review remains scoped to the bound workspace when a tool c
     const connection = await client.connectRequestReview('ses_A');
     expect(connection.directory).toBe('/fixture');
 });
+
+test('native permission review distinguishes verified source-less requests from unresolved tool sources', async () => {
+    const { client, native } = harness();
+    client.getServerConn = jest.fn(async () => ({ baseUrl: 'http://127.0.0.1:42000' }));
+    (native as any).interactions = { permissions: jest.fn(async () => [
+        { id: 'per_api', sessionId: 'ses_child', action: 'shell', resources: ['fixture'], native: { metadata: { command: 'fixture' } } },
+        { id: 'per_tool', sessionId: 'ses_child', action: 'read', resources: ['file'], native: { source: { type: 'tool', messageID: 'msg_tool', id: 'call_tool' } } },
+        { id: 'per_future', sessionId: 'ses_child', action: 'read', resources: ['file'], native: { source: { type: 'future' } } },
+    ]) };
+    const connection = await client.connectRequestReview('ses_parent');
+    expect(await connection.native.requests('permission')).toEqual([
+        expect.objectContaining({ id: 'per_api', nativePermission: true, metadata: { command: 'fixture' } }),
+        expect.objectContaining({ id: 'per_tool', nativePermission: false, tool: { messageID: 'msg_tool', callID: 'call_tool' } }),
+        expect.objectContaining({ id: 'per_future', nativePermission: false }),
+    ]);
+});
 test('native session reads/creation and interrupt route independently of the visible session', async () => {
     const { client, native } = harness(); client.currentSessionId = 'ses_visible';
     expect(await client.createSession()).toEqual({ id: 'ses_new' });

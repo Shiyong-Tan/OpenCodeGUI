@@ -23,7 +23,8 @@ if (!binary || !isAbsolute(binary) || !(await stat(binary)).isFile()) {
 const root = await mkdtemp(join(tmpdir(), 'opencode-protocol-probe-'));
 for (const name of ['workspace', 'home', 'config', 'data', 'cache', 'state', 'tmp']) await mkdir(join(root, name));
 const config = join(root, 'config', 'opencode'); await mkdir(config);
-await writeFile(join(config, 'opencode.json'), '{}');
+await writeFile(join(config, 'opencode.json'), JSON.stringify(process.argv.includes('--session-contract')
+    ? { permissions: [{ action: 'fixture_permission', resource: '*', effect: 'ask' }] } : {}));
 const env = { ...process.env };
 for (const name of Object.keys(env)) {
     if (/^OPENCODE_|TOKEN|SECRET|API_KEY|PASSWORD|CREDENTIAL|^AWS_/i.test(name)) delete env[name];
@@ -83,9 +84,10 @@ try {
         })();
         // Attach immediately so a malformed frame cannot become an unhandled rejection.
         void pump.catch(() => undefined);
-        let session;
+        let session, childSession;
         try {
             session = await api.createSession({ title: 'Isolated protocol fixture' }); fixtureMutations++;
+            childSession = await api.createSession({ parentId: session.id, title: 'Child interaction fixture' }); fixtureMutations++;
             if ((await api.getSession(session.id)).id !== session.id) throw new Error('Fixture session identity mismatch');
             if (!(await api.listSessions({ limit: 100 })).items.some(item => item.id === session.id)) throw new Error('Fixture not in its workspace');
             if ((await api.messages(session.id)).items.length || (await api.inbox(session.id)).length) throw new Error('Unexpected fixture work');
@@ -94,7 +96,7 @@ try {
             await controls.rename(session.id, 'Renamed isolated fixture'); fixtureMutations++;
             if ((await api.getSession(session.id)).title !== 'Renamed isolated fixture') throw new Error('Fixture rename failed');
             // Form creation is local durable interaction data; no prompt/model is sent.
-            const created = await transport.request('POST', `/api/session/${session.id}/form`, {
+            const created = await transport.request('POST', `/api/session/${childSession.id}/form`, {
                 id: 'frm_isolatedFixture', title: 'Isolated form fixture', fields: [
                     { key: 'choice', type: 'string', required: true, options: [{ value: 'internal', label: 'Visible label' }] },
                 ],
@@ -102,7 +104,7 @@ try {
             const formId = created?.data?.id;
             if (typeof formId !== 'string') throw new Error('Fixture form identity missing');
             try {
-                if (!(await interactions.forms(session.id)).some(item => item.id === formId)) throw new Error('Fixture pending form missing');
+                if (!(await interactions.forms(childSession.id)).some(item => item.id === formId)) throw new Error('Fixture pending child form missing');
                 if (!(await interactions.forms()).some(item => item.id === formId)) throw new Error('Fixture location-wide form missing');
                 const backend = new V2Backend(transport);
                 const review = new PermissionReviewService(async () => ({ identity: 'isolated-fixture', directory: transport.connection.directory,
@@ -113,13 +115,37 @@ try {
                 const reviewed = await review.snapshot(session.id);
                 if (!reviewed.requests.some(card => card.requestId === formId && card.state === 'pending' && card.reviewToken && card.nativeForm))
                     throw new Error('Fixture form did not reach the production question review owner');
-                await interactions.replyForm(session.id, formId, { choice: 'internal' }); fixtureMutations++;
-                const answered = await interactions.getForm(session.id, formId);
+                if (reviewed.requests.find(card => card.requestId === formId)?.sessionId !== childSession.id) throw new Error('Child form owner lost');
+                await interactions.replyForm(childSession.id, formId, { choice: 'internal' }); fixtureMutations++;
+                const answered = await interactions.getForm(childSession.id, formId);
                 if (answered.state?.status !== 'answered' || answered.state?.answer?.choice !== 'internal') throw new Error('Fixture typed form response mismatch');
             } finally {
-                const state = await interactions.getForm(session.id, formId);
-                if (state.state?.status === 'pending') { await interactions.cancelForm(session.id, formId); fixtureMutations++; }
+                const state = await interactions.getForm(childSession.id, formId);
+                if (state.state?.status === 'pending') { await interactions.cancelForm(childSession.id, formId); fixtureMutations++; }
             }
+            const permissionId = 'per_isolatedFixture';
+            const permissionResult = transport.request('POST', `/api/session/${childSession.id}/permission`, {
+                id: permissionId, action: 'fixture_permission', resources: ['fixture.txt'], metadata: { purpose: 'isolated test' },
+            }); fixtureMutations++;
+            void permissionResult.catch(() => undefined);
+            const permissionDeadline = Date.now() + 5000;
+            while (!(await interactions.permissions()).some(item => item.id === permissionId)) {
+                if (Date.now() > permissionDeadline) throw new Error('Fixture child permission was not pending');
+                await new Promise(resolve => setTimeout(resolve, 30));
+            }
+            const permissionReview = new PermissionReviewService(async () => ({ identity: 'isolated-fixture', directory: transport.connection.directory,
+                read: async () => { throw new Error('Unexpected V1 request'); }, reply: async () => { throw new Error('Unexpected V1 reply'); },
+                native: { session: id => new V2Backend(transport).sessionInfo(id),
+                    requests: async () => (await interactions.permissions()).map(item => ({ id: item.id, sessionID: item.sessionId,
+                        permission: item.action, patterns: [...item.resources], nativePermission: item.native.source === undefined, metadata: item.native.metadata })),
+                    message: async () => { throw new Error('Source-less request must not invent a tool'); },
+                    respond: input => interactions.replyPermission(input.sessionId, input.requestId, input.response) } }));
+            const pendingPermission = (await permissionReview.snapshot(session.id)).requests.find(item => item.requestId === permissionId);
+            if (!pendingPermission || pendingPermission.state !== 'pending' || pendingPermission.sessionId !== childSession.id || !pendingPermission.reviewToken)
+                throw new Error('Child permission did not reach parent review');
+            await permissionReview.respond({ ...pendingPermission, response: 'reject' }); fixtureMutations++;
+            await permissionResult;
+            if ((await permissionReview.snapshot(session.id)).requests.length) throw new Error('Settled child permission remained visible');
             const eventDeadline = Date.now() + 2000;
             while (!events.some(event => event.type === 'session.created' && event.sessionId === session.id) && Date.now() < eventDeadline)
                 await new Promise(resolve => setTimeout(resolve, 20));
@@ -127,7 +153,10 @@ try {
         } finally {
             stream.abort();
             try { await pump; }
-            finally { if (session) { await transport.request('DELETE', `/api/session/${session.id}`); fixtureMutations++; } }
+            finally {
+                if (childSession) { await transport.request('DELETE', `/api/session/${childSession.id}`); fixtureMutations++; }
+                if (session) { await transport.request('DELETE', `/api/session/${session.id}`); fixtureMutations++; }
+            }
         }
     }
     console.log(JSON.stringify({ verified: true, identity, isolatedProfile: root, modelCalls: 0, fixtureMutations }));

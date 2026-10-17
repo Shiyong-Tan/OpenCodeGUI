@@ -89,6 +89,13 @@ export class PermissionReviewService {
                 card.nativeForm = req.nativeForm as NativeForm;
                 card.state = 'pending'; card.reason = ''; card.callId = requestId;
             } else if (this.kind === 'question') card.questions = parseReviewQuestions(req.questions);
+            // Native pending permission requests may legitimately have no tool
+            // source (for example plugin/API requests). Their original request
+            // identity and scope, rather than a fabricated tool, authorize review.
+            if (this.kind === 'permission' && conn.native && req.nativePermission === true && !req.tool) {
+                card.tool = 'Permission request'; card.input = JSON.stringify(req.metadata ?? {});
+                card.state = 'pending'; card.reason = '';
+            }
             if (req.tool) {
                 const tool = record(req.tool), messageId = text(tool.messageID), callId = text(tool.callID);
                 card.callId = callId;

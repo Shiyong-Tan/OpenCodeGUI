@@ -79,6 +79,14 @@ test('offline observation fails closed, while explicit rejection uses the same o
     expect(y.reply).toHaveBeenCalledWith('/permission/per_a/reply', { reply: 'reject' });
 });
 
+test('a native-only provenance flag cannot make an unassociated legacy request actionable', async () => {
+    const read = async (route: string) => route === '/permission'
+        ? [{ id: 'per_api', sessionID: 'ses_parent', permission: 'read', patterns: ['file'], nativePermission: true }]
+        : { id: 'ses_parent', directory: '/fixture' };
+    const service = new PermissionReviewService(async () => ({ identity: 'legacy', directory: '/fixture', read, reply: jest.fn() }));
+    expect((await service.snapshot('ses_parent')).requests[0]).toMatchObject({ state: 'unknown', reviewToken: '' });
+});
+
 test('concurrent clicks produce only one reply; changed command details invalidate reviewed tokens', async () => {
     const x = setup(), input = await x.input();
     const first = x.service.respond(input);
