@@ -110,6 +110,16 @@ test('native child interruption emits one cancellation transition without resolv
         sessionId: 'ses_child', parentSessionId: 'ses_parent', subagentOutcome: 'cancelled' })]);
     expect(client.resolveTurnFinal).not.toHaveBeenCalled();
 });
+
+test.each(['todowrite', 'supervisor_todo_read', 'supervisor_todo_write'])('%s reuses todo cards, including explicit clearing', tool => {
+    const { client } = harness(); client.emitChatEvents = jest.fn();
+    client.handleClassifiedServerEvent('message.part.updated', { part: { id: 'part_todo', type: 'tool',
+        sessionID: 'ses_A', messageID: 'msg_A', callID: 'call_todo', tool,
+        state: { status: 'completed', metadata: { todos: [] } } } }, 'sse', 0);
+    expect(client.emitChatEvents.mock.calls.flatMap(([events]: any[]) => events)).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'todoUpdate', sessionId: 'ses_A', todos: [] }),
+    ]));
+});
 test('native chat selects the requested role/model then admits exactly one durable prompt', async () => {
     const { client, native } = harness();
     client.turnStateBySession.set('ses_A', { pendingUserLocalKey: 'local-A', turnMessageIds: new Set(), assistantMessageIds: new Set() });

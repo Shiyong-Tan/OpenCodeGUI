@@ -4,12 +4,21 @@ import { mountSupervisorPanel, supervisorLines } from '../supervisor/panel';
 import { parseSupervisorView } from '../../src/supervisor/protocol';
 import { taskStatus } from '../supervisor/cards';
 import { processStatus, processMetrics } from '../supervisor/processes';
+import { SupervisorTodos } from '../supervisor/todos';
 
 const snapshot = () => parseSupervisorView({ schemaVersion: 1, isolationId: 'lab_A', instanceId: 'instance_A', revision: 1,
     pluginVersion: '0.1.0', openCodeVersion: '1.18.29', observedAt: '2026-09-20T00:00:00.000Z', parentSessionId: 'ses_A',
     scope: 'isolated_allowlisted_commands', tasks: [{ taskId: 'task_A', attemptId: 'attempt_A', parentSessionId: 'ses_A', childSessionId: 'ses_child',
         phase: 'active', health: 'waiting_permission', outcome: null, lastObservationAgeMs: null, lastProgressAgeMs: 1000 }],
     executions: [], notifications: [], notificationIdentities: [] });
+
+test('todo snapshots are optional for old plugins and reject foreign session ownership', () => {
+    const view = snapshot();
+    expect(view.todos).toBeUndefined();
+    const todos = { sessionId: 'ses_A', revision: 2, items: [{ id: 'audit', content: 'Audit', status: 'pending', priority: 'high' }] };
+    expect(parseSupervisorView({ ...view, todos }).todos).toEqual(todos);
+    expect(() => parseSupervisorView({ ...view, todos: { ...todos, sessionId: 'ses_other' } })).toThrow();
+});
 class Element {
     id = ''; private text = ''; hidden = false; disabled = false; open = false; scrollTop = 0; className = ''; style = { cssText: '' };
     parent?: Element;
@@ -29,6 +38,18 @@ class Element {
     remove() { if (this.parent) this.parent.children.splice(this.parent.children.indexOf(this), 1); }
     replaceChildren() { this.children.length = 0; }
 }
+
+test('persistent todo panel replaces session state, escapes content and clears an empty list', () => {
+    const body = new Element();
+    const document = { createElement: () => new Element() } as unknown as Document;
+    const todos = new SupervisorTodos(document, body as unknown as HTMLElement);
+    todos.render({ sessionId: 'ses_A', revision: 1, items: [{ id: 'x', content: '<img src=x>', status: 'pending', priority: 'high' }] });
+    expect(body.textContent).toContain('<img src=x>');
+    todos.render({ sessionId: 'ses_B', revision: 1, items: [{ id: 'y', content: 'Other session', status: 'completed', priority: 'low' }] }, true);
+    expect(body.textContent).not.toContain('<img'); expect(body.textContent).toContain('Last known');
+    todos.render({ sessionId: 'ses_B', revision: 2, items: [] });
+    expect(body.children[0].hidden).toBe(true); expect(body.textContent).toBe('');
+});
 
 test('historical ages advance through outages without treating failed polls as new observations', () => {
     jest.useFakeTimers();

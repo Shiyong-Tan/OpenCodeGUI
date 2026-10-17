@@ -27,6 +27,15 @@ transitions its existing card owner to cancelled/failed. All terminal lifecycle
 states set the card's terminal flag, so the active view hides them. This UI terminal
 flag does not certify process-tree termination or change Supervisor retry evidence.
 
+Supervisor owns persistent native todo lists in its private workspace storage,
+keyed by the authenticated calling session. Read/compare-and-replace tools reuse
+the existing todowrite permission; models cannot supply a foreign session ID.
+The optional todos snapshot is validated and session-fenced by both bridge parsers.
+The Supervisor panel is a read-only projection restored after reconnect; chat Todo
+cards consume tool metadata through the existing handler. Legacy plugin snapshots
+without todos and OpenCode 1 todowrite remain supported. The added parser and panel
+use a bounded 28 KiB raw / 10 KiB gzip Supervisor bundle (previously 26 / 9 KiB).
+
 Queued prompts retain durable inbox identities. Steer patches the existing inbox
 item once rather than admitting another prompt. Uncertain admission stays pending
 verification, never a blind retry. Native delivery anchors the next step to the

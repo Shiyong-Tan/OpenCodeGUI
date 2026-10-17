@@ -740,9 +740,9 @@ export function mapServerEventToChatEvents(
                     }
                 }
                 // Detect todowrite tool completion and emit todoUpdate event
-                if (toolName === 'todowrite' && part?.state?.status === 'completed') {
+                if (['todowrite', 'supervisor_todo_write', 'supervisor_todo_read'].includes(toolName) && part?.state?.status === 'completed') {
                     const todos = part?.state?.metadata?.todos;
-                    if (Array.isArray(todos) && todos.length > 0 && sessionId) {
+                    if (Array.isArray(todos) && sessionId) {
                         const msgId = host.getTurnAssistantMsgId(sessionId) || part?.messageID || '';
                         const parentSessionId = host.getParentSessionForSubagent(sessionId);
                         if (parentSessionId) {

@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## 6.0.0 - 2026-10-15
 
+- Display persistent per-session Supervisor todo lists in the Supervisor panel, including after reconnect. Reuse chat Todo cards for live Supervisor todo tools and retain OpenCode 1 todowrite support.
+
 - Remove cancelled and failed native child cards after authoritative execution termination, while retaining Supervisor process-stop uncertainty independently.
 
 - Settle restored Steer delivery labels by the durable inbox identity when an assistant response proves receipt. Do not mark older native queued inputs as received when steering overtakes them.

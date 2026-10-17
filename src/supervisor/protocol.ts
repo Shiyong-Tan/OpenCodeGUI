@@ -1,3 +1,4 @@
+import { parseTodoState, type TodoState } from './todo-protocol';
 import { parseOpenCodeVersion } from './opencode-version';
 import { parseNotificationIdentity } from './notification-identity-protocol';
 /** Only a bounded display title is allowed; prompts, commands and output stay private. */
@@ -65,7 +66,7 @@ const envelope = object({
   tasks: list(task), executions: list(execution), notifications: list(notice),
   notificationIdentities: list(parseNotificationIdentity, 1024),
 });
-export type SupervisorView = ReturnType<typeof envelope>;
+export type SupervisorView = ReturnType<typeof envelope> & { todos?: TodoState };
 
 export function parseSupervisorView(value: unknown): SupervisorView {
   const view = envelope(value);
@@ -90,6 +91,12 @@ export function parseSupervisorView(value: unknown): SupervisorView {
   for (const identity of view.notificationIdentities) {
     if (identity.isolationId !== view.isolationId || identity.parentSessionId !== view.parentSessionId || identityMessages.has(identity.messageId)) invalid();
     identityMessages.add(identity.messageId);
+  }
+  const raw = value as Record<string, unknown>;
+  if (raw.todos !== undefined) {
+    const todos = parseTodoState(raw.todos);
+    if (todos.sessionId !== view.parentSessionId) invalid();
+    return { ...view, todos };
   }
   return view;
 }

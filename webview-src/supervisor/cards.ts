@@ -1,6 +1,7 @@
 import type { SupervisorView } from '../../src/supervisor/protocol';
 import { supervisorLines } from './diagnostics';
 import { SupervisorProcesses } from './processes';
+import { SupervisorTodos } from './todos';
 type Task = SupervisorView['tasks'][number];
 /** Current work only. This projection does not rewrite cancellation or stop evidence. */
 export function visibleSupervisorTasks(view: SupervisorView): Task[] {
@@ -27,6 +28,7 @@ export const taskName = (task: Task) => task.title?.replace(/ \(@[^\n]+ subagent
 
 /** Keyed DOM projection only. Updating ages never remounts cards or closed details. */
 export class SupervisorCards {
+    private readonly todos: SupervisorTodos;
     private readonly cards = new Map<string, { root: HTMLElement; name: HTMLElement; badge: HTMLElement; activity: HTMLElement; evidence: HTMLElement; processes: SupervisorProcesses }>();
     private readonly current: HTMLElement;
     private readonly history: HTMLDetailsElement;
@@ -40,16 +42,19 @@ export class SupervisorCards {
         this.history = this.node('details', 'sv-history');
         this.history.append(this.node('summary', '', 'Previous service · historical evidence'), this.node('pre'));
         this.history.hidden = true; body.append(this.notice, this.current, this.empty, this.history);
+        this.todos = new SupervisorTodos(document, body);
     }
     private node<K extends keyof HTMLElementTagNameMap>(tag: K, cls = '', text = ''): HTMLElementTagNameMap[K] {
         const node = this.document.createElement(tag); node.className = cls; node.textContent = text; return node;
     }
     reset(): void {
+        this.todos.render();
         this.cards.clear(); this.current.replaceChildren(); this.history.hidden = true; this.history.open = false;
         this.history.lastElementChild!.textContent = ''; this.historyKey = '';
         this.notice.textContent = 'Waiting for session observations'; this.empty.hidden = true;
     }
     render(view: SupervisorView | undefined, previous: SupervisorView | undefined, stale: boolean, hint = ''): void {
+        this.todos.render(view?.todos, stale);
         if (view && !this.receivedAt.has(view)) this.receivedAt.set(view, Date.now());
         const lag = view ? Math.max(0, Date.now() - this.receivedAt.get(view)!) : 0;
         const age = (ms: number | null) => elapsed(ms === null ? null : ms + lag);
