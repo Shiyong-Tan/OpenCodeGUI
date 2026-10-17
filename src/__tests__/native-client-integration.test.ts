@@ -77,6 +77,23 @@ test('detaching a child while its native history read is pending cannot restore 
     expect(client.currentTurnUserMsgIdBySession.has('ses_child')).toBe(false);
     expect(client.handleClassifiedServerEvent).not.toHaveBeenCalled();
 });
+
+test('native delivered append owns the next step instead of retaining the legacy append root', async () => {
+    const { client, native } = harness();
+    client.turnStateBySession.set('ses_A', { turnMessageIds: new Set(), assistantMessageIds: new Set() });
+    client.setCurrentTurnUserMsgId('ses_A', 'msg_root');
+    client.appendTurnStateBySession.set('ses_A', { rootUserMsgId: 'msg_root', pending: [
+        { clientMessageId: 'client_append', serverMsgId: 'msg_append', text: 'Pause and report' }],
+        appendUserMsgIds: new Set(['msg_append']), emittedAppendUserMsgIds: new Set() });
+    (native.history as jest.Mock).mockResolvedValue([{ info: { id: 'msg_append', role: 'user', sessionID: 'ses_A' }, parts: [] }]);
+    client.emitChatEvents = jest.fn();
+    await client.acceptNativeDelivered('ses_A', 'msg_append');
+    expect(client.currentTurnUserMsgIdBySession.get('ses_A')).toBe('msg_append');
+    const dispatch = jest.spyOn(client, 'handleClassifiedServerEvent');
+    client.acceptNativeStep(decodeV2Event({ id: 'evt_next', type: 'session.step.started',
+        data: { sessionID: 'ses_A', assistantMessageID: 'msg_reply', started: Date.now() } }));
+    expect(dispatch).toHaveBeenCalledWith('message.updated', { info: expect.objectContaining({ parentID: 'msg_append' }) }, 'sse', 0);
+});
 test('native chat selects the requested role/model then admits exactly one durable prompt', async () => {
     const { client, native } = harness();
     client.turnStateBySession.set('ses_A', { pendingUserLocalKey: 'local-A', turnMessageIds: new Set(), assistantMessageIds: new Set() });

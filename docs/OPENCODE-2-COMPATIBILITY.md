@@ -24,7 +24,9 @@ the parent turn.
 
 Queued prompts retain durable inbox identities. Steer patches the existing inbox
 item once rather than admitting another prompt. Uncertain admission stays pending
-verification, never a blind retry. Rehydrated snapshots do not persist a live service
+verification, never a blind retry. Native delivery anchors the next step to the
+delivered user identity. Assistant-parent receipt matches persisted inbox identities
+after reload, without treating older native queue items as consumed. Rehydrated snapshots do not persist a live service
 generation or grant an unverified Steer capability. Original session/request IDs and
 the existing PermissionReviewService review tokens route permission and typed form
 replies, including child interactions. Form values retain types, conditional fields

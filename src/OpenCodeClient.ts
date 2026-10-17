@@ -5347,8 +5347,10 @@ export class OpenCodeClient {
         if (childParent !== this.subagentToParentSessionMap.get(sessionId)) return;
         const item = messages.find(message => message.info.id === messageId);
         if (item?.info.role === 'user') {
-            if (this.subagentToParentSessionMap.has(sessionId)) this.setCurrentTurnUserMsgId(sessionId, messageId, 'native-child-delivered');
             this.handleClassifiedServerEvent('message.updated', { info: item.info }, 'sse', 0);
+            // V1 append acknowledgement retains the root anchor. Native delivery
+            // proves which input owns the next step, including a steered append.
+            this.setCurrentTurnUserMsgId(sessionId, messageId, 'native-inbox-delivered');
         }
     }
     private async reconcileNativeExecution(sessionId: string, event?: BackendEvent): Promise<void> {

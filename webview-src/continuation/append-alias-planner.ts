@@ -40,11 +40,23 @@ export function planAppendItemUpsert(current: readonly Item[], item: Item) {
 }
 
 export function planAssistantParentSeen(roots: readonly Root[], parentId: string) {
-  const root = roots.find((candidate) => candidate.role === 'user' && candidate.items.some((item) => item?.appendUserMsgId === parentId));
+  if (!parentId) return Object.freeze({ rootId: null, items: Object.freeze([]), changed: false });
+  const matches = (item: Item) => item?.appendUserMsgId === parentId || item?.inboxId === parentId;
+  const root = roots.find((candidate) => candidate.role === 'user' && candidate.items.some(matches));
   if (!root) return Object.freeze({ rootId: null, items: Object.freeze([]), changed: false });
   let items: readonly Item[] = root.items; let changed = false;
-  const end = root.items.findIndex((item) => item?.appendUserMsgId === parentId);
-  for (let index = 0; index <= end; index++) { const item = items[index]; if (item?.appendUserMsgId && !['seen','applied','failed','rejected'].includes(item.status)) { items = planAppendItemUpsert(items, { clientMessageId: item.clientMessageId, appendUserMsgId: item.appendUserMsgId, status: 'seen' }).items; changed = true; } }
+  const end = root.items.findIndex(matches);
+  for (let index = 0; index <= end; index++) {
+    const item = items[index];
+    // Native inbox delivery can overtake older queue items. Only the matching
+    // native identity is proven received; legacy append retains prefix semantics.
+    if ((item?.inboxId ? matches(item) : item?.appendUserMsgId) && !['seen','applied','failed','rejected'].includes(item.status)) {
+      items = planAppendItemUpsert(items, { clientMessageId: item.clientMessageId,
+        ...(item.inboxId ? { inboxId: item.inboxId, appendUserMsgId: item.inboxId, canSteer: false, steerPending: false } : { appendUserMsgId: item.appendUserMsgId }),
+        status: 'seen' }).items;
+      changed = true;
+    }
+  }
   return Object.freeze({ rootId: root.id, items: freezeItems([...items]), changed });
 }
 

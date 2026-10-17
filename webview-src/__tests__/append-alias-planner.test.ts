@@ -2,6 +2,18 @@ import { planAppendRoot, planAppendItemUpsert, planFinalizedItems, planAssistant
 
 describe('append root and status planner', () => {
   const root = (id: string, items: any[] = []) => ({ id, role: 'user', items });
+  test('restored native inbox identity settles delivery without consuming an older queued item', () => {
+    const items = [
+      { clientMessageId: 'old', inboxId: 'msg_old', status: 'queued', delivery: 'queue' },
+      { clientMessageId: 'steered', inboxId: 'msg_steered', status: 'queued', delivery: 'steer', steerPending: true },
+    ];
+    expect(planAssistantParentSeen([root('r', items)], '').changed).toBe(false);
+    const seen = planAssistantParentSeen([root('r', items)], 'msg_steered');
+    expect(seen.items[0]).toEqual(items[0]);
+    expect(seen.items[1]).toMatchObject({ status: 'seen', appendUserMsgId: 'msg_steered', canSteer: false, steerPending: false });
+    expect(planFinalizedItems(seen.items).items.map(item => item.status)).toEqual(['queued', 'applied']);
+    expect(planAssistantParentSeen([root('r', [...seen.items])], 'msg_steered').changed).toBe(false);
+  });
   test('uses direct client match and ordered alias fallback while failing ambiguity closed', () => {
     expect(planAppendRoot({ messages: [root('msg_direct', [{ clientMessageId: 'c1' }]), root('msg_other')], message: { clientMessageId: 'c1' }, aliases: [] })).toMatchObject({ rootId: 'msg_direct', reason: 'client-match' });
     expect(planAppendRoot({ messages: [root('msg_root')], message: { rootUserMsgId: 'local-root' }, aliases: [['local-root', 'msg_root']] })).toMatchObject({ rootId: 'msg_root' });
