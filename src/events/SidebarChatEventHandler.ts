@@ -310,6 +310,16 @@ export async function handleSidebarChatEvent(
                 host.logSubagentRoute(String(event.type || 'event'), parentSessionId, event.sessionId, 'parent', subagentEntry ? 'missing-parent' : 'missing-entry', true);
                 return;
             }
+            if (event.type === 'subagentTerminated' && event.parentSessionId === parentSessionId
+                && (event.subagentOutcome === 'cancelled' || event.subagentOutcome === 'failed')) {
+                subagentEntry.finalMessageId = event.assistantMsgId;
+                host.transitionSubagentState(event.sessionId, subagentEntry, event.subagentOutcome, 'native-execution-ended');
+                subagentEntry.finishedAt = Date.now();
+                subagentEntry.dismissAt = subagentEntry.finishedAt + host.subagentDoneRetentionMs;
+                host.scheduleSubagentRetentionSweep();
+                host.emitSubagentStatus();
+                return;
+            }
             if (event.type === 'text' && typeof event.text === 'string') {
                 const entry = subagentEntry;
                 if (entry) {

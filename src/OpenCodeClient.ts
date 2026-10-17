@@ -250,7 +250,7 @@ export type CommitPendingTurnChangesOptions = {
 };
 
 export type ChatEvent = {
-    type: 'text' | 'session' | 'raw' | 'permission' | 'diff' | 'message' | 'appendUserMessage' | 'error' | 'tool' | 'toolPatch' | 'files' | 'assistantMessageMeta' | 'assistantPhase' | 'questionOverlay' | 'questionChanged' | 'permissionRequest' | 'permissionReplied' | 'autoResumeStallWarn' | 'autoResumeStallClear' | 'autoResumeHardStop' | 'todoUpdate' | 'sessionUsage' | 'turnInFlight' | 'turnResolved' | 'backgroundActivityPulse' | 'serviceUnavailable' | 'serviceRecovered';
+    type: 'text' | 'session' | 'raw' | 'permission' | 'diff' | 'message' | 'appendUserMessage' | 'error' | 'tool' | 'toolPatch' | 'files' | 'assistantMessageMeta' | 'assistantPhase' | 'subagentTerminated' | 'questionOverlay' | 'questionChanged' | 'permissionRequest' | 'permissionReplied' | 'autoResumeStallWarn' | 'autoResumeStallClear' | 'autoResumeHardStop' | 'todoUpdate' | 'sessionUsage' | 'turnInFlight' | 'turnResolved' | 'backgroundActivityPulse' | 'serviceUnavailable' | 'serviceRecovered';
     text?: string;
     sessionId?: string;
     parentSessionId?: string;
@@ -300,6 +300,7 @@ export type ChatEvent = {
     providerID?: string;
     isDone?: boolean;
     usage?: { used: number; size: number; amount: number };
+    subagentOutcome?: 'cancelled' | 'failed';
     phase?: 'assistant_progress' | 'assistant_final_candidate' | 'assistant_final_accepted';
     lane?: EventLane;
     source?: EventSource;
@@ -5384,6 +5385,7 @@ export class OpenCodeClient {
             }
         }
         let acceptedTerminal = false;
+        const latestAssistantId = [...messages].reverse().find(item => item.info.role === 'assistant')?.info.id;
         for (const item of messages) {
             if (item.info.role !== 'assistant' || !this.shouldReplayResyncMessage(sessionId, item.info)) continue;
             const info = item.info;
@@ -5392,6 +5394,12 @@ export class OpenCodeClient {
             if (info.finish === 'stop' || info.error) {
                 acceptedTerminal = true;
                 this.handleClassifiedServerEvent('message.updated', { info }, 'sse', 0);
+                if (childParent && info.id === latestAssistantId && info.error
+                    && (projection.outcome === 'interrupted' || projection.outcome === 'failed') && projection.active === false
+                    && this.consumePhaseOnce(sessionId, String(info.id), 'native-child-terminated')) {
+                    this.emitChatEvents([{ type: 'subagentTerminated', sessionId, parentSessionId: childParent,
+                        assistantMsgId: String(info.id), subagentOutcome: projection.outcome === 'interrupted' ? 'cancelled' : 'failed' }]);
+                }
                 if (!this.subagentToParentSessionMap.has(sessionId)) {
                     this.markTurnFinal(sessionId, String(info.id), 'sse');
                     this.resolveTurnFinal(sessionId, info.error ? 'session-error' : 'native-execution-ended');

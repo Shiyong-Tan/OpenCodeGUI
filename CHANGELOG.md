@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## 6.0.0 - 2026-10-15
 
+- Remove cancelled and failed native child cards after authoritative execution termination, while retaining Supervisor process-stop uncertainty independently.
+
 - Settle restored Steer delivery labels by the durable inbox identity when an assistant response proves receipt. Do not mark older native queued inputs as received when steering overtakes them.
 
 - Capture the owning session for Steer actions on queued messages, including timeline messages without an inline session ID. Preserve routing when the visible session changes before clicking.

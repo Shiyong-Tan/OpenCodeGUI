@@ -22,6 +22,11 @@ child anchor from its own transcript, with captured parent-binding guards, befor
 using the existing replay and completion filters. Child completion never finalizes
 the parent turn.
 
+An inactive native child execution with a durable interrupted/failed outcome
+transitions its existing card owner to cancelled/failed. All terminal lifecycle
+states set the card's terminal flag, so the active view hides them. This UI terminal
+flag does not certify process-tree termination or change Supervisor retry evidence.
+
 Queued prompts retain durable inbox identities. Steer patches the existing inbox
 item once rather than admitting another prompt. Uncertain admission stays pending
 verification, never a blind retry. Native delivery anchors the next step to the

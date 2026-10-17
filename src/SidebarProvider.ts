@@ -533,7 +533,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             return;
         }
         entry.state = to;
-        entry.isDone = to === 'done';
+        entry.isDone = this.isTerminalSubagentState(to);
         entry.finalReason = reason;
         entry.lastEventAt = Date.now();
         if (to === 'done') {

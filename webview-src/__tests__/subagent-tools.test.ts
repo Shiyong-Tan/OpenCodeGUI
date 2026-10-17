@@ -6,6 +6,12 @@ test('completed child cards disappear while active siblings and canonical result
     expect(agents[1].result).toBe('keep'); expect(agents).toHaveLength(4);
 });
 
+test('cancelled and failed child cards leave the active view without deleting their evidence', () => {
+    const agents = ['running', 'cancelled', 'failed', 'dismissed'].map(state => ({ state, isDone: state !== 'running' }));
+    expect(visibleSubagentCards(agents)).toEqual([agents[0]]);
+    expect(agents).toHaveLength(4);
+});
+
 test('parallel subagent rows preserve identity and independently show state', () => {
     const rows = subagentToolRows({ sessionId: 'ses_A', tools: [
         { sessionId: 'ses_A', assistantMessageId: 'msg_A', callId: 'one', name: 'read', input: 'a', status: 'running' },

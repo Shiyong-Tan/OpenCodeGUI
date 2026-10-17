@@ -94,6 +94,22 @@ test('native delivered append owns the next step instead of retaining the legacy
         data: { sessionID: 'ses_A', assistantMessageID: 'msg_reply', started: Date.now() } }));
     expect(dispatch).toHaveBeenCalledWith('message.updated', { info: expect.objectContaining({ parentID: 'msg_append' }) }, 'sse', 0);
 });
+
+test('native child interruption emits one cancellation transition without resolving its parent', async () => {
+    const { client, native } = harness();
+    client.registerSubagentSession('ses_child', 'ses_parent');
+    (native as any).projection = jest.fn(async () => ({ messages: [
+        { info: { id: 'msg_child_user', role: 'user' }, parts: [] },
+        { info: { id: 'msg_child_answer', sessionID: 'ses_child', role: 'assistant', parentID: 'msg_child_user',
+            error: { name: 'MessageAbortedError' }, time: { created: 1, completed: 2 } }, parts: [] },
+    ], controls: [], outcome: 'interrupted', active: false }));
+    client.handleClassifiedServerEvent = jest.fn(); client.emitChatEvents = jest.fn(); client.resolveTurnFinal = jest.fn();
+    await client.reconcileNativeExecution('ses_child'); await client.reconcileNativeExecution('ses_child');
+    expect(client.emitChatEvents).toHaveBeenCalledTimes(1);
+    expect(client.emitChatEvents).toHaveBeenCalledWith([expect.objectContaining({ type: 'subagentTerminated',
+        sessionId: 'ses_child', parentSessionId: 'ses_parent', subagentOutcome: 'cancelled' })]);
+    expect(client.resolveTurnFinal).not.toHaveBeenCalled();
+});
 test('native chat selects the requested role/model then admits exactly one durable prompt', async () => {
     const { client, native } = harness();
     client.turnStateBySession.set('ses_A', { pendingUserLocalKey: 'local-A', turnMessageIds: new Set(), assistantMessageIds: new Set() });
