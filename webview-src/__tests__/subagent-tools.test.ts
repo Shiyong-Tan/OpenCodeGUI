@@ -25,6 +25,16 @@ test('foreign, duplicate and unrecognized tool rows cannot leak into another sub
     expect(subagentToolRows({ sessionId: 'ses_A', tools: [row, row, { ...row, sessionId: 'ses_B' }, { ...row, callId: 'two', status: 'future' }] }))
         .toEqual([expect.objectContaining({ name: '<script>', status: 'Running' })]);
 });
+
+test('process wait explains the operation without asserting process health or changing terminal states', () => {
+    for (const name of ['supervisor_process_wait', 'Running: supervisor_process_wait']) {
+        const tools = ['pending', 'running', 'completed', 'error'].map(status => ({
+            sessionId: 'ses_A', assistantMessageId: 'msg_A', callId: status, name, status, settledAt: 1000,
+        }));
+        expect(subagentToolRows({ sessionId: 'ses_A', tools }, 1000)?.map(row => row.status))
+            .toEqual(['Preparing', 'Waiting for process completion', 'Completed', 'Failed']);
+    }
+});
 test('legacy task cards keep their existing display and explicit empty collections stay empty', () => {
     expect(subagentToolRows({ latestTool: 'Reading file' })).toBeUndefined();
     expect(subagentToolRows({ tools: [] })).toEqual([]);

@@ -17,9 +17,11 @@ export function subagentToolRows(agent: Record<string, unknown>, now = Date.now(
         const settled = raw.status === 'completed' || raw.status === 'error';
         const hideAt = typeof raw.settledAt === 'number' && Number.isFinite(raw.settledAt) ? raw.settledAt + 1000 : 0;
         if (settled && hideAt <= now) continue;
+        const waitingForProcess = raw.name === 'supervisor_process_wait' || raw.name === 'Running: supervisor_process_wait';
         seen.add(key);
         rows.push({ key, name: raw.name, input: typeof raw.input === 'string' ? raw.input : '', ...(settled ? { hideAt } : {}),
-            status: raw.status === 'completed' ? 'Completed' : raw.status === 'error' ? 'Failed' : raw.status === 'running' ? 'Running' : 'Preparing',
+            status: raw.status === 'completed' ? 'Completed' : raw.status === 'error' ? 'Failed' : raw.status === 'running' ?
+                (waitingForProcess ? 'Waiting for process completion' : 'Running') : 'Preparing',
             color: raw.status === 'completed' ? 'var(--vscode-testing-iconPassed, #22c55e)' : raw.status === 'error' ?
                 'var(--vscode-errorForeground, #f14c4c)' : 'var(--vscode-textLink-foreground, #3794ff)' });
     }
