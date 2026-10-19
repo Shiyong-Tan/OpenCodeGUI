@@ -53,20 +53,20 @@ test('a new completion or redraw cannot revive old completed rows or extend thei
  const record = (callId: string, settledAt?: number) => ({sessionId:'ses_A', assistantMessageId:'msg_A', callId,
   name:'read', status:'completed', ...(settledAt === undefined ? {} : {settledAt})});
  const tools = [record('expired', 1000), record('historical'), record('fresh', 5000)];
- for (const now of [5000, 5500, 5999]) {
+ for (const now of [5000, 6000, 6999]) {
   const rows = subagentToolRows({sessionId:'ses_A',tools}, now)!;
-  expect(rows).toHaveLength(1); expect(rows[0].hideAt).toBe(6000);
+  expect(rows).toHaveLength(1); expect(rows[0].hideAt).toBe(7000);
  }
- expect(subagentToolRows({sessionId:'ses_A',tools}, 6000)).toEqual([]);
+ expect(subagentToolRows({sessionId:'ses_A',tools}, 7000)).toEqual([]);
 });
 
-test('fast completed/failed tools remain for one second while active parallel calls remain visible', () => {
+test('fast completed/failed tools remain for two seconds while active parallel calls remain visible', () => {
  const agent = {sessionId:'ses_A', tools: ['completed', 'error', 'running'].map(status => ({
   sessionId:'ses_A', assistantMessageId:'msg_A', callId:status, name:'read', status,
   ...(status === 'running' ? {} : {settledAt:1000}),
  }))};
- expect(subagentToolRows(agent, 1999)?.map(row => row.status)).toEqual(['Completed', 'Failed', 'Running']);
- expect(subagentToolRows(agent, 2000)?.map(row => row.status)).toEqual(['Running']);
+ expect(subagentToolRows(agent, 2999)?.map(row => row.status)).toEqual(['Completed', 'Failed', 'Running']);
+ expect(subagentToolRows(agent, 3000)?.map(row => row.status)).toEqual(['Running']);
  expect(agent.tools).toHaveLength(3);
 });
 
@@ -74,9 +74,9 @@ test('dwell expiry removes only its captured mounted tool group and never anothe
  jest.useFakeTimers(); jest.setSystemTime(1000);
  try {
   const row = {isConnected:true, remove:jest.fn()}, detached = {isConnected:false, remove:jest.fn()};
-  scheduleSubagentToolHide(row as unknown as HTMLElement, 2000);
-  scheduleSubagentToolHide(detached as unknown as HTMLElement, 2000);
-  jest.advanceTimersByTime(999); expect(row.remove).not.toHaveBeenCalled();
+  scheduleSubagentToolHide(row as unknown as HTMLElement, 3000);
+  scheduleSubagentToolHide(detached as unknown as HTMLElement, 3000);
+  jest.advanceTimersByTime(1999); expect(row.remove).not.toHaveBeenCalled();
   jest.advanceTimersByTime(1); expect(row.remove).toHaveBeenCalledTimes(1); expect(detached.remove).not.toHaveBeenCalled();
  } finally { jest.useRealTimers(); }
 });

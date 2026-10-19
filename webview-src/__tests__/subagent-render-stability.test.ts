@@ -41,7 +41,7 @@ test('real subagent renderer keeps collapsed geometry and latest expanded text t
         agent.state='finalizing'; root=render();
         expect(root.find('subagent-inline-text')?.textContent).toBe('Preview');
         expect(root.find('subagent-inline-text')?.styles.get('height')).toBe('auto');
-        jest.advanceTimersByTime(999); expect(root.find('subagent-inline-tool-group')).toBeDefined();
+        jest.advanceTimersByTime(1999); expect(root.find('subagent-inline-tool-group')).toBeDefined();
         jest.advanceTimersByTime(1); expect(root.find('subagent-inline-tool-group')).toBeUndefined();
         expect(agent.tools[0].status).toBe('completed');
         agent.state='done'; expect(render().find('subagent-inline')).toBeUndefined();

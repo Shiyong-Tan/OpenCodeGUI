@@ -15,7 +15,7 @@ export function subagentToolRows(agent: Record<string, unknown>, now = Date.now(
         const key = JSON.stringify([raw.sessionId, raw.assistantMessageId, raw.callId]);
         if (seen.has(key) || !['pending', 'streaming', 'running', 'completed', 'error'].includes(raw.status)) continue;
         const settled = raw.status === 'completed' || raw.status === 'error';
-        const hideAt = typeof raw.settledAt === 'number' && Number.isFinite(raw.settledAt) ? raw.settledAt + 1000 : 0;
+        const hideAt = typeof raw.settledAt === 'number' && Number.isFinite(raw.settledAt) ? raw.settledAt + 2000 : 0;
         if (settled && hideAt <= now) continue;
         const waitingForProcess = raw.name === 'supervisor_process_wait' || raw.name === 'Running: supervisor_process_wait';
         seen.add(key);
