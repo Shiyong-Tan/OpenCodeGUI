@@ -31,7 +31,7 @@ test('real subagent renderer keeps collapsed geometry and latest expanded text t
         const render=() => { const root=new Element(); context.render(host,message,root); return root; };
         let root=render();
         expect(root.find('subagent-inline-tool-group')).toBeDefined();
-        expect(root.find('subagent-inline-text')?.styles.get('height')).toBe('7.5em');
+        expect(root.find('subagent-inline-text')?.styles.get('height')).toBe('auto');
         root.find('subagent-inline-text-toggle')!.listeners.get('click')!();
         expect(root.find('subagent-inline-text')?.textContent).toBe('Full initial');
         expect(root.find('subagent-inline-text')?.styles.get('height')).toBe('auto');
@@ -40,7 +40,7 @@ test('real subagent renderer keeps collapsed geometry and latest expanded text t
         root.find('subagent-inline-text-toggle')!.listeners.get('click')!();
         agent.state='finalizing'; root=render();
         expect(root.find('subagent-inline-text')?.textContent).toBe('Preview');
-        expect(root.find('subagent-inline-text')?.styles.get('height')).toBe('7.5em');
+        expect(root.find('subagent-inline-text')?.styles.get('height')).toBe('auto');
         jest.advanceTimersByTime(999); expect(root.find('subagent-inline-tool-group')).toBeDefined();
         jest.advanceTimersByTime(1); expect(root.find('subagent-inline-tool-group')).toBeUndefined();
         expect(agent.tools[0].status).toBe('completed');

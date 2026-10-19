@@ -57,14 +57,14 @@ test('dwell expiry removes only its captured mounted tool group and never anothe
  } finally { jest.useRealTimers(); }
 });
 
-test('collapsed streaming has one fixed five-line viewport, while explicit expansion restores natural height', () => {
+test('collapsed previews keep natural short height and a stable five-line cap across streaming and expansion', () => {
  const properties = new Map<string,string>();
  const row = {style:{setProperty:(name:string, value:string) => properties.set(name,value)}} as unknown as HTMLElement;
  for (let index=0; index<10; index++) {
   clampSubagentText(row, false);
-  expect(properties.get('height')).toBe('7.5em'); expect(properties.get('max-height')).toBe('7.5em');
+  expect(properties.get('height')).toBe('auto'); expect(properties.get('max-height')).toBe('7.5em');
  }
  expect(properties.get('line-height')).toBe('1.5'); expect(properties.get('overflow')).toBe('hidden');
  clampSubagentText(row,true); expect(properties.get('height')).toBe('auto'); expect(properties.get('overflow')).toBe('visible');
- clampSubagentText(row,false); expect(properties.get('height')).toBe('7.5em');
+ clampSubagentText(row,false); expect(properties.get('height')).toBe('auto');
 });

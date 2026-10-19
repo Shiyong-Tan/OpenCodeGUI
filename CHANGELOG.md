@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## 6.0.0 - 2026-10-15
 
-- Retain settled subagent tool rows for one second without delaying task completion. Stabilize collapsed streaming previews in a fixed five-line viewport and preserve their text during finalizing instead of repeatedly measuring and shrinking the bubble.
+- Retain settled subagent tool rows for one second without delaying task completion. Keep short collapsed previews at natural height and cap longer streaming previews at five lines. Preserve their text during finalizing instead of repeatedly measuring and shrinking the bubble.
 
 - Render local file URL and Windows-path Markdown links through the existing HTML, Markdown, PDF and image open/preview flow. Restore bare filename and POSIX local links without allowing unsafe URL schemes or direct file navigation in the Webview.
 

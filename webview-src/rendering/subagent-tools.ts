@@ -31,10 +31,10 @@ export function scheduleSubagentToolHide(node: HTMLElement, hideAt: number): voi
     setTimeout(() => { if (node.isConnected) node.remove(); }, Math.max(0, hideAt - Date.now()));
 }
 
-/** A fixed collapsed viewport avoids a second-frame measure/clamp on each delta. */
+/** Natural short previews, capped at five lines without asynchronous measurement. */
 export function clampSubagentText(node: HTMLElement, expanded: boolean): void {
     const styles = { display: 'block', 'white-space': 'normal', 'line-height': '1.5',
-        'max-height': expanded ? 'none' : '7.5em', height: expanded ? 'auto' : '7.5em',
+        'max-height': expanded ? 'none' : '7.5em', height: 'auto',
         overflow: expanded ? 'visible' : 'hidden' };
     for (const [name, value] of Object.entries(styles)) node.style.setProperty(name, value, 'important');
 }

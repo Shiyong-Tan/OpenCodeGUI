@@ -4,7 +4,7 @@ Subagent tool completion remains immediate in the canonical owner. The first
 terminal observation supplies an immutable settled timestamp; rendering retains
 that tool group for one second, with a timer scoped only to its captured DOM node.
 Replay never extends the deadline and child/parent finality still removes cards.
-Collapsed subagent text uses a fixed five-line viewport without asynchronous
+Collapsed subagent text keeps natural short height with a five-line cap without asynchronous
 measure/clamp passes; explicit expansion retains the live full text.
 
 Markdown file URLs and drive paths normalize to inert encoded fragments before
