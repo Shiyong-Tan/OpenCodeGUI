@@ -21,7 +21,7 @@ export function subagentToolRows(agent: Record<string, unknown>, now = Date.now(
         seen.add(key);
         rows.push({ key, name: raw.name, input: typeof raw.input === 'string' ? raw.input : '', ...(settled ? { hideAt } : {}),
             status: raw.status === 'completed' ? 'Completed' : raw.status === 'error' ? 'Failed' : raw.status === 'running' ?
-                (waitingForProcess ? 'Waiting for process completion' : 'Running') : 'Preparing',
+                (waitingForProcess ? (typeof raw.progressText === 'string' && raw.progressText.trim() ? raw.progressText.slice(0, 256) : 'Waiting for process metrics') : 'Running') : 'Preparing',
             color: raw.status === 'completed' ? 'var(--vscode-testing-iconPassed, #22c55e)' : raw.status === 'error' ?
                 'var(--vscode-errorForeground, #f14c4c)' : 'var(--vscode-textLink-foreground, #3794ff)' });
     }

@@ -293,7 +293,7 @@ export type ChatEvent = {
     isStatusUpdate?: boolean;
     todos?: Array<{content: string; status: string; priority: string}>;
     tool?: string;
-    toolState?: { status?: string; input?: any; output?: any };
+    toolState?: { status?: string; input?: any; output?: any; progressText?: string };
     mode?: string;
     agent?: string;
     modelID?: string;

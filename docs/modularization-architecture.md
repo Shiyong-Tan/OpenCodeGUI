@@ -1,5 +1,10 @@
 # OpenCode GUI modularization architecture
 
+Process-wait metrics originate in the plugin's owned execution samples and travel
+through tool progress metadata to the existing session/message/call-keyed subagent
+tool owner. The renderer displays only the bounded summary and does not infer
+process health from an ongoing wait or manufacture CPU/runtime data.
+
 Subagent tool completion remains immediate in the canonical owner. The first
 terminal observation supplies an immutable settled timestamp; rendering retains
 that tool group for one second, with a timer scoped only to its captured DOM node.

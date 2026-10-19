@@ -710,6 +710,8 @@ export function mapServerEventToChatEvents(
                                 status,
                                 input: part?.state?.input,
                                 output: part?.state?.output,
+                                progressText: typeof part?.state?.title === 'string' ? part.state.title :
+                                    typeof part?.state?.metadata?.title === 'string' ? part.state.metadata.title : undefined,
                             },
                             source,
                         });

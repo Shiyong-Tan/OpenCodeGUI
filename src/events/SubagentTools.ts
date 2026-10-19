@@ -4,6 +4,7 @@ export interface SubagentToolProgress {
     sessionId: string; assistantMessageId: string; callId: string;
     name: string; input: string; status: 'pending' | 'streaming' | 'running' | 'completed' | 'error';
     settledAt?: number;
+    progressText?: string;
 }
 const terminal = (status: string) => status === 'completed' || status === 'error';
 /** Pure update of the existing subagent owner's tool collection, never a separate store. */
@@ -19,6 +20,8 @@ export function updateSubagentTools(current: readonly SubagentToolProgress[], ev
     const display = input && typeof input === 'object' ? input.filePath || input.path || input.pattern || input.query || input.command : undefined;
     const next: SubagentToolProgress = { sessionId, assistantMessageId, callId, name: event.tool,
         input: typeof display === 'string' ? display.slice(0, 2048) : previous?.input || '', status: status as SubagentToolProgress['status'],
+        ...(typeof event.toolState?.progressText === 'string' && event.toolState.progressText.trim() ?
+            { progressText: event.toolState.progressText.slice(0, 256) } : {}),
         ...(terminal(status) ? { settledAt: now } : {}) };
     const result = [...current];
     if (index < 0) result.push(next); else result[index] = next;

@@ -32,7 +32,10 @@ test('process wait explains the operation without asserting process health or ch
             sessionId: 'ses_A', assistantMessageId: 'msg_A', callId: status, name, status, settledAt: 1000,
         }));
         expect(subagentToolRows({ sessionId: 'ses_A', tools }, 1000)?.map(row => row.status))
-            .toEqual(['Preparing', 'Waiting for process completion', 'Completed', 'Failed']);
+            .toEqual(['Preparing', 'Waiting for process metrics', 'Completed', 'Failed']);
+        expect(subagentToolRows({ sessionId: 'ses_A', tools: [{ ...tools[1],
+            progressText: 'Elapsed 8m 32s · CPU 95.0% · 2 live processes' }] }, 1000)?.[0].status)
+            .toBe('Elapsed 8m 32s · CPU 95.0% · 2 live processes');
     }
 });
 test('legacy task cards keep their existing display and explicit empty collections stay empty', () => {

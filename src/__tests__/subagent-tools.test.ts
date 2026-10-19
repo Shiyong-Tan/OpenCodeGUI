@@ -36,6 +36,17 @@ test('missing identity retains the legacy display path rather than inventing a t
     expect(updateSubagentTools([], event('', 'running'))).toBeUndefined();
     expect(updateSubagentTools([], event('one', 'future'))).toBeUndefined();
 });
+
+test('process metrics follow their exact call and cannot overwrite terminal evidence', () => {
+    const progress = event('one', 'running', { tool: 'Running: supervisor_process_wait',
+        toolState: { status: 'running', progressText: 'Elapsed 8m 32s · CPU 95.0%' } });
+    let tools = updateSubagentTools([], progress)!;
+    tools = updateSubagentTools(tools, event('two'))!;
+    expect(tools[0].progressText).toBe('Elapsed 8m 32s · CPU 95.0%');
+    expect(tools[1].progressText).toBeUndefined();
+    tools = updateSubagentTools(tools, event('one', 'completed'))!;
+    expect(updateSubagentTools(tools, progress)).toEqual(tools);
+});
 test('bounded settled history does not discard any active parallel call', () => {
     let tools: SubagentToolProgress[] = [];
     for (let index = 0; index < 80; index++) tools = updateSubagentTools(tools, event(String(index), index % 2 ? 'running' : 'completed'))!;

@@ -51,3 +51,14 @@ test('per-call tool fragments never reopen terminal state or overwrite a differe
     expect(done).toMatchObject({ callID: 'call_A', state: { status: 'completed', output: 'Done' } });
     expect(nativeToolFragment(started, done)).toBeUndefined();
 });
+
+test('native process metrics remain on the original tool fragment across progress', () => {
+    const first = nativeToolFragment(event('metrics-start', 'session.tool.input.started', {
+        assistantMessageID: 'msg_A', id: 'call_wait', name: 'supervisor_process_wait' }), undefined)!;
+    const running = nativeToolFragment(event('metrics-call', 'session.tool.called', {
+        assistantMessageID: 'msg_A', id: 'call_wait', input: { executionId: 'exec_A' } }), first)!;
+    const progress = nativeToolFragment(event('metrics-progress', 'session.tool.progress', {
+        assistantMessageID: 'msg_A', id: 'call_wait', metadata: { title: 'Elapsed 8m 32s · CPU 95.0%' } }), running)!;
+    expect(progress).toMatchObject({ sessionID: 'ses_A', messageID: 'msg_A', callID: 'call_wait',
+        state: { status: 'running', input: { executionId: 'exec_A' }, metadata: { title: 'Elapsed 8m 32s · CPU 95.0%' } } });
+});
