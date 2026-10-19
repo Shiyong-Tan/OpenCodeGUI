@@ -181,6 +181,15 @@ export function createHydrationStateController(options: HydrationStateController
       activeRootIds.add(id);
       const canonicalId = resolveCanonicalId(session, preserved, id, preserved.messagesById.get(id));
       if (canonicalId) activeRootIds.add(canonicalId);
+      // Delivered appends remain in the same live presentation, although native
+      // assistant generations use the delivered input as their backend parent.
+      // Only explicit owned append identities count; never infer this from text.
+      for (const root of [preserved.messagesById.get(id), canonicalId ? preserved.messagesById.get(canonicalId) : null,
+        session.messagesById.get(id), canonicalId ? session.messagesById.get(canonicalId) : null]) {
+        for (const item of Array.isArray(root?.meta?.appendedPrompts) ? root.meta.appendedPrompts : []) {
+          if (typeof item?.appendUserMsgId === 'string' && item.appendUserMsgId.startsWith('msg_')) activeRootIds.add(item.appendUserMsgId);
+        }
+      }
     }
 
     // OpenCode may create several assistant records with the same user parent while a

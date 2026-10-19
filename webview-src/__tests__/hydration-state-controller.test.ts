@@ -320,6 +320,26 @@ describe('hydration volatile state controller', () => {
     expect(result.canonicalizedGenerationIds).toEqual(['msg_new_generation']);
   });
 
+  test('switch-back folds generations parented to an explicitly delivered append into the live bubble', () => {
+    const before: any = createSessionState();
+    before.timeline = ['msg_root', 'msg_live'];
+    before.messagesById.set('msg_root', { id: 'msg_root', role: 'user', text: 'task',
+      meta: { appendedPrompts: [{ appendUserMsgId: 'msg_append', text: 'extra instruction' }] } });
+    before.messagesById.set('msg_live', { id: 'msg_live', role: 'assistant', text: 'live progress', meta: { isThinking: true } });
+    Object.assign(before, { lastTurnUserId: 'msg_root', appendRootUserKey: 'msg_root', thinkingId: 'msg_live',
+      currentTurnAssistantKey: 'msg_live', backendTurnInFlight: true, turnFullyFinalized: false });
+    const preserved = controller.capture(before);
+    const hydrated: any = createSessionState();
+    hydrated.timeline = ['msg_root', 'msg_new', 'msg_unrelated'];
+    hydrated.messagesById.set('msg_root', before.messagesById.get('msg_root'));
+    hydrated.messagesById.set('msg_new', { id: 'msg_new', role: 'assistant', text: 'intermediate report', meta: { parentID: 'msg_append' } });
+    hydrated.messagesById.set('msg_unrelated', { id: 'msg_unrelated', role: 'assistant', text: 'independent', meta: { parentID: 'msg_other' } });
+    controller.restore(hydrated, preserved);
+    expect(hydrated.timeline).toEqual(['msg_root', 'msg_live', 'msg_unrelated']);
+    expect(hydrated.serverIdToKey.get('msg_new')).toBe('msg_live');
+    expect(hydrated.messagesById.get('msg_live').meta.isThinking).toBe(true);
+  });
+
   test('restores the earliest active-turn timer onto the current append presentation', () => {
     const before: any = createSessionState();
     before.timeline = ['msg_old', 'msg_current'];

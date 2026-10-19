@@ -311,7 +311,7 @@ export async function handleSidebarChatEvent(
                 return;
             }
             if (event.type === 'subagentTerminated' && event.parentSessionId === parentSessionId
-                && (event.subagentOutcome === 'cancelled' || event.subagentOutcome === 'failed')) {
+                && (event.subagentOutcome === 'done' || event.subagentOutcome === 'cancelled' || event.subagentOutcome === 'failed')) {
                 subagentEntry.finalMessageId = event.assistantMsgId;
                 host.transitionSubagentState(event.sessionId, subagentEntry, event.subagentOutcome, 'native-execution-ended');
                 subagentEntry.finishedAt = Date.now();

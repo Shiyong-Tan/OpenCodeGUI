@@ -1,5 +1,12 @@
 # OpenCode GUI modularization architecture
 
+Switch-back hydration recognizes explicit delivered append IDs on the active root
+as parent identities of the same live presentation. It never folds unrelated turns
+or infers ownership from matching text. Selection also refreshes only registered
+native children with terminal session outcomes; fresh transcript finality and the
+existing binding/child guards own terminal transitions. This does not finalize the
+parent, enumerate historical descendants, or alter persisted snapshots.
+
 Native interaction discovery treats location-wide lists as hints. It queries the
 original session endpoints for the parent, active descendants and previously
 pending owners, verifying ancestry before child reads. This restores permission

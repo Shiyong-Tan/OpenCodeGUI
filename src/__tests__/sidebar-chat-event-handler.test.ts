@@ -2,14 +2,14 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { handleSidebarChatEvent } from '../events/SidebarChatEventHandler';
 
-test('native cancelled child transitions through its owner and schedules card cleanup', async () => {
+test.each(['done', 'cancelled', 'failed'] as const)('native %s child transitions through its owner and schedules card cleanup', async outcome => {
   const entry = { parentSessionId: 'parent' };
   const host = { smartSearchSessions: { owns: () => false }, activeSubagentSessionIds: new Set(['child']),
     subagentProgressBySession: new Map([['child', entry]]), subagentDoneRetentionMs: 5000,
     transitionSubagentState: jest.fn(), scheduleSubagentRetentionSweep: jest.fn(), emitSubagentStatus: jest.fn() };
   await handleSidebarChatEvent(host, { type: 'subagentTerminated', sessionId: 'child', parentSessionId: 'parent',
-    assistantMsgId: 'msg_final', subagentOutcome: 'cancelled' }, { postMessage: jest.fn() } as never);
-  expect(host.transitionSubagentState).toHaveBeenCalledWith('child', entry, 'cancelled', 'native-execution-ended');
+    assistantMsgId: 'msg_final', subagentOutcome: outcome }, { postMessage: jest.fn() } as never);
+  expect(host.transitionSubagentState).toHaveBeenCalledWith('child', entry, outcome, 'native-execution-ended');
   expect(host.scheduleSubagentRetentionSweep).toHaveBeenCalledTimes(1);
   expect(host.emitSubagentStatus).toHaveBeenCalledTimes(1);
 });

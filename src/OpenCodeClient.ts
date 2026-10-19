@@ -301,7 +301,7 @@ export type ChatEvent = {
     providerID?: string;
     isDone?: boolean;
     usage?: { used: number; size: number; amount: number };
-    subagentOutcome?: 'cancelled' | 'failed';
+    subagentOutcome?: 'done' | 'cancelled' | 'failed';
     phase?: 'assistant_progress' | 'assistant_final_candidate' | 'assistant_final_accepted';
     lane?: EventLane;
     source?: EventSource;
@@ -5364,6 +5364,22 @@ export class OpenCodeClient {
             this.setCurrentTurnUserMsgId(sessionId, messageId, 'native-inbox-delivered');
         }
     }
+    public async refreshRegisteredChildCompletions(parentSessionId: string): Promise<void> {
+        const binding = this.protocolBinding;
+        if (!binding?.native || !binding.isCurrent()) return;
+        const children = [...this.subagentToParentSessionMap].filter(([, parent]) => parent === parentSessionId).map(([id]) => id);
+        // Selection reconciles only currently registered children, never historical
+        // descendants. Existing replay/terminal guards retain ownership of changes.
+        for (let index = 0; index < children.length; index += 4) {
+            if (this.protocolBinding !== binding || !binding.isCurrent()) return;
+            await Promise.allSettled(children.slice(index, index + 4).map(async id => {
+                const child = await binding.native!.sessions.getSession(id);
+                if (this.protocolBinding !== binding || !binding.isCurrent() || child.parentId !== parentSessionId
+                    || this.subagentToParentSessionMap.get(id) !== parentSessionId) return;
+                if (['succeeded', 'interrupted', 'failed'].includes(String(child.native.outcome))) await this.reconcileNativeExecution(id);
+            }));
+        }
+    }
     private async reconcileNativeExecution(sessionId: string, event?: BackendEvent): Promise<void> {
         if (this.turnFinishedBySession.has(sessionId)) return;
         const binding = this.protocolBinding, turn = this.turnStateBySession.get(sessionId), backend = binding?.native;
@@ -5404,11 +5420,11 @@ export class OpenCodeClient {
             if (info.finish === 'stop' || info.error) {
                 acceptedTerminal = true;
                 this.handleClassifiedServerEvent('message.updated', { info }, 'sse', 0);
-                if (childParent && info.id === latestAssistantId && info.error
-                    && (projection.outcome === 'interrupted' || projection.outcome === 'failed') && projection.active === false
+                if (childParent && info.id === latestAssistantId
+                    && (projection.outcome === 'succeeded' || projection.outcome === 'interrupted' || projection.outcome === 'failed') && projection.active === false
                     && this.consumePhaseOnce(sessionId, String(info.id), 'native-child-terminated')) {
                     this.emitChatEvents([{ type: 'subagentTerminated', sessionId, parentSessionId: childParent,
-                        assistantMsgId: String(info.id), subagentOutcome: projection.outcome === 'interrupted' ? 'cancelled' : 'failed' }]);
+                        assistantMsgId: String(info.id), subagentOutcome: projection.outcome === 'succeeded' ? 'done' : projection.outcome === 'interrupted' ? 'cancelled' : 'failed' }]);
                 }
                 if (!this.subagentToParentSessionMap.has(sessionId)) {
                     this.markTurnFinal(sessionId, String(info.id), 'sse');

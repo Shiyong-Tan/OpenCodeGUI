@@ -4120,12 +4120,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private async restoreSupervisorSelectionActivity(sessionId: string, messages: SessionMessage[], raw: unknown, webview: vscode.Webview): Promise<void> {
+        const epoch = this.sessionSelectionEpoch;
+        await this.client.refreshRegisteredChildCompletions(sessionId);
+        if (this.currentSessionId !== sessionId || this.sessionSelectionEpoch !== epoch) return;
         if (!this.supervisorRounds || !raw || typeof raw !== 'object') return;
         const rawMessages = (raw as { messages?: unknown }).messages;
         const candidate = supervisorRecoveryCandidate(sessionId, rawMessages, (id, parent) =>
             this.supervisorRounds?.metadata(sessionId, id) || this.supervisorRounds?.metadataFromParent(sessionId, parent));
         if (!candidate) return;
-        const epoch = this.sessionSelectionEpoch;
         const status = await this.client.getSessionStatusType(sessionId);
         await this.chatEventActorRouter.runSerialized(sessionId, () => {
             if (this.currentSessionId !== sessionId || this.sessionSelectionEpoch !== epoch || !['busy', 'retry'].includes(status || '')) return;

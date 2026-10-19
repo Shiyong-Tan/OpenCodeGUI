@@ -104,6 +104,38 @@ test('detaching a child while its native history read is pending cannot restore 
     expect(client.handleClassifiedServerEvent).not.toHaveBeenCalled();
 });
 
+test('switch-back reconciles registered completed children once without scanning descendants or touching another parent', async () => {
+    const { client, native } = harness();
+    client.registerSubagentSession('ses_child', 'ses_parent');
+    client.registerSubagentSession('ses_live', 'ses_parent');
+    client.registerSubagentSession('ses_other', 'ses_other_parent');
+    (native.sessions as any).getSession = jest.fn(async (id: string) => ({ id, parentId: 'ses_parent', native: { outcome: id === 'ses_child' ? 'succeeded' : undefined } }));
+    (native as any).projection = jest.fn(async () => ({ messages: [
+        { info: { id: 'msg_user', role: 'user' }, parts: [] },
+        { info: { id: 'msg_answer', sessionID: 'ses_child', role: 'assistant', parentID: 'msg_user', finish: 'stop', time: { created: 10, completed: 11 } }, parts: [] },
+    ], outcome: 'succeeded', active: false }));
+    client.emitChatEvents = jest.fn(); client.resolveTurnFinal = jest.fn();
+    await client.refreshRegisteredChildCompletions('ses_parent');
+    await client.refreshRegisteredChildCompletions('ses_parent');
+    const terminal = client.emitChatEvents.mock.calls.flatMap(([events]: any[]) => events).filter((event: any) => event.type === 'subagentTerminated');
+    expect(terminal).toEqual([expect.objectContaining({ sessionId: 'ses_child', parentSessionId: 'ses_parent', subagentOutcome: 'done' })]);
+    expect((native.sessions as any).getSession).not.toHaveBeenCalledWith('ses_other');
+    expect((native as any).projection.mock.calls.every(([id]: string[]) => id === 'ses_child')).toBe(true);
+    expect(client.resolveTurnFinal).not.toHaveBeenCalled();
+});
+
+test('detached or foreign child identities cannot be completed by a late selection query', async () => {
+    const { client, native } = harness();
+    client.registerSubagentSession('ses_child', 'ses_parent');
+    (native.sessions as any).getSession = jest.fn(async () => {
+        client.clearSubagentSession('ses_child');
+        return { id: 'ses_child', parentId: 'ses_parent', native: { outcome: 'succeeded' } };
+    });
+    (native as any).projection = jest.fn();
+    await client.refreshRegisteredChildCompletions('ses_parent');
+    expect((native as any).projection).not.toHaveBeenCalled();
+});
+
 test('native delivered append owns the next step instead of retaining the legacy append root', async () => {
     const { client, native } = harness();
     client.turnStateBySession.set('ses_A', { turnMessageIds: new Set(), assistantMessageIds: new Set() });
