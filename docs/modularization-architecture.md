@@ -1,5 +1,12 @@
 # OpenCode GUI modularization architecture
 
+Native interaction discovery treats location-wide lists as hints. It queries the
+original session endpoints for the parent, active descendants and previously
+pending owners, verifying ancestry before child reads. This restores permission
+and question cards after reload without enumerating historical child transcripts.
+Original request identity, workspace validation and fresh review tokens still
+govern replies; no permission is inferred or auto-approved from Supervisor health.
+
 Inline wait metrics join the panel controller's current authenticated observation
 by parent session, child session, execution and task attempt. This is a read-only
 display projection, not a second writer of tool execution state. Selection epoch,

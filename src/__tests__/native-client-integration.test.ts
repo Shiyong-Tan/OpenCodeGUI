@@ -160,7 +160,8 @@ test('native diff details and permission tool lookups fetch the exact message wi
 test('native permission review distinguishes verified source-less requests from unresolved tool sources', async () => {
     const { client, native } = harness();
     client.getServerConn = jest.fn(async () => ({ baseUrl: 'http://127.0.0.1:42000' }));
-    (native as any).interactions = { permissions: jest.fn(async () => [
+    (native.sessions as any).getSession = jest.fn(async (id: string) => ({ id, parentId: 'ses_parent' }));
+    (native as any).interactions = { permissions: jest.fn(async (id?: string) => id === 'ses_parent' ? [] : [
         { id: 'per_api', sessionId: 'ses_child', action: 'shell', resources: ['fixture'], native: { metadata: { command: 'fixture' } } },
         { id: 'per_tool', sessionId: 'ses_child', action: 'read', resources: ['file'], native: { source: { type: 'tool', messageID: 'msg_tool', id: 'call_tool' } } },
         { id: 'per_future', sessionId: 'ses_child', action: 'read', resources: ['file'], native: { source: { type: 'future' } } },

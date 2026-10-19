@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## 6.0.0 - 2026-10-15
 
+- Recover child permission and question cards from their original session endpoints when location-wide lists omit them. Discover live descendants through validated ancestry without scanning historical transcripts; keep original request IDs and response revalidation.
+
 - Reuse authenticated Supervisor panel process metrics in inline wait rows, including existing plugins without progress titles. Patch tool-only subagent updates in place so parallel running tools remain mounted while other tools change.
 
 - Avoid briefly redisplaying completed-only tool records received during replay. The two-second dwell applies only to observed active-to-terminal transitions and never restarts on redraw.

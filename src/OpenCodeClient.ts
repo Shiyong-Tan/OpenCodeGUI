@@ -1,3 +1,4 @@
+import { discoverNativeRequests } from './permissions/NativeRequestDiscovery';
 import { LinuxServiceOwner } from './transport/LinuxServiceOwner';
 import { ProtocolConnectionOwner, type ProtocolBinding } from './transport/protocol/ProtocolConnectionOwner';
 import { decodeV2Event, type BackendEvent } from './transport/protocol/V2EventAdapter';
@@ -609,10 +610,20 @@ export class OpenCodeClient {
                 session: id => backend.sessionInfo(id),
                 requests: async kind => {
                     if (!binding.isCurrent()) throw new Error('Permission service changed');
-                    if (kind === 'question') return (await backend.interactions.forms()).filter(form => form.sessionId !== 'global').map(form => ({
+                    const discovery = {
+                        active: async () => Object.keys(await backend.controls.active()),
+                        session: (id: string) => backend.sessions.getSession(id),
+                        known: [...(this.permissionOwnersByScope.get(sessionId) ?? []), ...(this.reviewedQuestionsByScope.get(sessionId) ?? []).map(owner => owner.sessionId)],
+                    };
+                    if (kind === 'question') return (await discoverNativeRequests(sessionId, { ...discovery,
+                        global: async () => (await backend.interactions.forms()).filter(form => form.sessionId !== 'global'),
+                        owned: (id: string) => backend.interactions.forms(id),
+                    })).map(form => ({
                         id: form.id, sessionID: form.sessionId, nativeForm: form,
                     }));
-                    return (await backend.interactions.permissions()).map(permission => {
+                    return (await discoverNativeRequests(sessionId, { ...discovery,
+                        global: () => backend.interactions.permissions(), owned: (id: string) => backend.interactions.permissions(id),
+                    })).map(permission => {
                         const source = permission.native.source as { type?: string; messageID?: string; id?: string } | undefined;
                         return { id: permission.id, sessionID: permission.sessionId, permission: permission.action, patterns: [...permission.resources],
                             nativePermission: source === undefined, metadata: permission.native.metadata,
