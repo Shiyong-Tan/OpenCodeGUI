@@ -22,7 +22,9 @@ export function updateSubagentTools(current: readonly SubagentToolProgress[], ev
         input: typeof display === 'string' ? display.slice(0, 2048) : previous?.input || '', status: status as SubagentToolProgress['status'],
         ...(typeof event.toolState?.progressText === 'string' && event.toolState.progressText.trim() ?
             { progressText: event.toolState.progressText.slice(0, 256) } : {}),
-        ...(terminal(status) ? { settledAt: now } : {}) };
+        // Dwell only for a locally observed active -> terminal transition. An
+        // already-settled record first seen during replay is not a fresh tool.
+        ...(terminal(status) && previous ? { settledAt: now } : {}) };
     const result = [...current];
     if (index < 0) result.push(next); else result[index] = next;
     // Bound settled history while retaining every pending parallel call.

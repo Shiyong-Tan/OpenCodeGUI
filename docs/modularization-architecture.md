@@ -6,7 +6,8 @@ tool owner. The renderer displays only the bounded summary and does not infer
 process health from an ongoing wait or manufacture CPU/runtime data.
 
 Subagent tool completion remains immediate in the canonical owner. The first
-terminal observation supplies an immutable settled timestamp; rendering retains
+terminal transition from a locally observed active call supplies an immutable
+settled timestamp; completed-only replay never creates a dwell deadline. Rendering retains
 that tool group for one second, with a timer scoped only to its captured DOM node.
 Replay never extends the deadline and child/parent finality still removes cards.
 Collapsed subagent text keeps natural short height with a five-line cap without asynchronous

@@ -49,6 +49,17 @@ test('completed tool rows disappear without deleting canonical tool records', ()
  expect(tools).toHaveLength(2);
 });
 
+test('a new completion or redraw cannot revive old completed rows or extend their deadlines', () => {
+ const record = (callId: string, settledAt?: number) => ({sessionId:'ses_A', assistantMessageId:'msg_A', callId,
+  name:'read', status:'completed', ...(settledAt === undefined ? {} : {settledAt})});
+ const tools = [record('expired', 1000), record('historical'), record('fresh', 5000)];
+ for (const now of [5000, 5500, 5999]) {
+  const rows = subagentToolRows({sessionId:'ses_A',tools}, now)!;
+  expect(rows).toHaveLength(1); expect(rows[0].hideAt).toBe(6000);
+ }
+ expect(subagentToolRows({sessionId:'ses_A',tools}, 6000)).toEqual([]);
+});
+
 test('fast completed/failed tools remain for one second while active parallel calls remain visible', () => {
  const agent = {sessionId:'ses_A', tools: ['completed', 'error', 'running'].map(status => ({
   sessionId:'ses_A', assistantMessageId:'msg_A', callId:status, name:'read', status,

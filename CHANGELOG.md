@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## 6.0.0 - 2026-10-15
 
+- Avoid briefly redisplaying completed-only tool records received during replay. The one-second dwell applies only to observed active-to-terminal transitions and never restarts on redraw.
+
 - Show observed execution elapsed time, CPU and live process counts for subagent process-wait calls when the plugin supplies progress metrics. Missing or uncertain evidence is labeled explicitly.
 
 - Retain settled subagent tool rows for one second without delaying task completion. Keep short collapsed previews at natural height and cap longer streaming previews at five lines. Preserve their text during finalizing instead of repeatedly measuring and shrinking the bubble.

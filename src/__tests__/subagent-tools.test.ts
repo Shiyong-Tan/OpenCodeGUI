@@ -26,6 +26,18 @@ test('first terminal observation owns the dwell deadline; replay cannot extend i
     expect(updateSubagentTools(settled, event('one', 'running'), 6000)).toEqual(settled);
     expect(running[0].settledAt).toBeUndefined();
 });
+
+test('completed-only replay does not manufacture a fresh display deadline, including evicted history', () => {
+    let tools: SubagentToolProgress[] = [];
+    for (let index = 0; index < 40; index++) tools = updateSubagentTools(tools, event(String(index), 'completed'), 100)!;
+    expect(tools).toHaveLength(32);
+    expect(tools.every(tool => tool.settledAt === undefined)).toBe(true);
+    const replay = updateSubagentTools(tools, event('0', 'completed'), 10000)!;
+    expect(replay.find(tool => tool.callId === '0')?.settledAt).toBeUndefined();
+    let active = updateSubagentTools(replay, event('live', 'pending'), 10000)!;
+    active = updateSubagentTools(active, event('live', 'completed'), 10001)!;
+    expect(active.find(tool => tool.callId === 'live')?.settledAt).toBe(10001);
+});
 test('same call ID in different assistant messages and sessions remains distinct', () => {
     let tools = updateSubagentTools([], event('one'))!;
     tools = updateSubagentTools(tools, event('one', 'running', { assistantMsgId: 'msg_B' }))!;
