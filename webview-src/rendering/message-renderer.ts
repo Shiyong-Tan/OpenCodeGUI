@@ -1,5 +1,5 @@
 import { supervisorRoundLabel } from '../supervisor/round-label';
-import { subagentToolRows, visibleSubagentCards } from './subagent-tools';
+import { clampSubagentText, scheduleSubagentToolHide, subagentToolRows, visibleSubagentCards } from './subagent-tools';
 type Message = any;
 type SessionState = any;
 type RenderElement = any;
@@ -428,8 +428,6 @@ export function renderMessageElement(
              const messageIsThinking = Boolean(message.meta?.isThinking);
 
             function addSubagentTextToggle(textRow: any, options: any = {}) {
-                const collapsedLineCount = 5;
-                let collapsedMaxHeight = '7.5em';
                 const previewText = typeof options.previewText === 'string' ? options.previewText : '';
                 const fullText = typeof options.fullText === 'string' ? options.fullText : previewText;
                 const expandedKey = typeof options.expandedKey === 'string' ? options.expandedKey : '';
@@ -442,16 +440,7 @@ export function renderMessageElement(
                 };
 
                 const setTextRowClamp = () => {
-                    textRow.style.setProperty('display', 'block', 'important');
-                    textRow.style.setProperty('white-space', 'normal', 'important');
-                    textRow.style.setProperty('text-overflow', 'clip', 'important');
-                    textRow.style.setProperty('-webkit-line-clamp', 'unset', 'important');
-                    textRow.style.setProperty('-webkit-box-orient', 'initial', 'important');
-                    textRow.style.setProperty('max-height', expanded ? 'none' : collapsedMaxHeight, 'important');
-                    textRow.style.setProperty('height', expanded ? 'auto' : 'auto', 'important');
-                    textRow.style.setProperty('overflow', expanded ? 'visible' : 'hidden', 'important');
-                    textRow.style.setProperty('overflow-x', expanded ? 'visible' : 'hidden', 'important');
-                    textRow.style.setProperty('overflow-y', expanded ? 'visible' : 'hidden', 'important');
+                    clampSubagentText(textRow, expanded);
                 };
                 renderCurrentText();
                 setTextRowClamp();
@@ -462,13 +451,6 @@ export function renderMessageElement(
                 toggleButton.textContent = expanded ? 'Show less' : 'Show more';
                 toggleButton.setAttribute('aria-expanded', expanded ? 'true' : 'false');
                 toggleButton.style.display = hasToggleText ? 'block' : 'none';
-
-                const computeCollapsedMaxHeight = () => {
-                    const computed = window.getComputedStyle(textRow);
-                    const fontSize = Number.parseFloat(computed.fontSize || '0') || 12;
-                    const lineHeight = Number.parseFloat(computed.lineHeight || '0') || (fontSize * 1.4);
-                    collapsedMaxHeight = `${Math.ceil(lineHeight * collapsedLineCount) + 2}px`;
-                };
 
                 const updateExpandedState = () => {
                     renderCurrentText();
@@ -483,18 +465,8 @@ export function renderMessageElement(
                         host.subagentTextExpandedByKey.set(expandedKey, expanded);
                     }
                     updateExpandedState();
-                    requestAnimationFrame(() => {
-                        if (!textRow.isConnected) return;
-                        computeCollapsedMaxHeight();
-                        setTextRowClamp();
-                    });
                 });
 
-                requestAnimationFrame(() => {
-                    if (!textRow.isConnected) return;
-                    computeCollapsedMaxHeight();
-                    setTextRowClamp();
-                });
 
                 return toggleButton;
             }
@@ -547,7 +519,7 @@ export function renderMessageElement(
                 }
 
                 // 3) indented latest text (streaming only)
-                if (state === 'finalizing') {
+                  if (state === 'finalizing' && !latestText) {
                     const textRow = document.createElement('div');
                     textRow.className = 'subagent-inline-text';
                     textRow.textContent = 'Finalizing...';
@@ -572,7 +544,6 @@ export function renderMessageElement(
                     const expandedKey = subagentIdentity
                         ? `${parentIdentity}:${messageIdentity}:${subagentIdentity}`
                         : '';
-                    host.renderMarkdownInto(textRow, host.subagentTextExpandedByKey.get(expandedKey) === true ? fullTextToRender : previewTextToRender);
                     entry.appendChild(textRow);
                     entry.appendChild(addSubagentTextToggle(textRow, {
                         previewText: previewTextToRender,
@@ -584,18 +555,22 @@ export function renderMessageElement(
                  // 4) indented latest tool (streaming only)
                  if (toolRows !== undefined) {
                      for (const tool of toolRows) {
+                         const group = document.createElement('div');
+                         group.className = 'subagent-inline-tool-group';
                          const row = document.createElement('div');
                          row.className = 'subagent-inline-tool';
                          row.dataset.toolKey = tool.key;
                          row.textContent = `\u25B8 ${tool.name} \u00B7 ${tool.status}`;
                          row.style.color = tool.color;
-                         entry.appendChild(row);
+                         group.appendChild(row);
                          if (tool.input) {
                              const input = document.createElement('div');
                              input.className = 'subagent-inline-input';
                              input.textContent = tool.input;
-                             entry.appendChild(input);
+                             group.appendChild(input);
                          }
+                         entry.appendChild(group);
+                         if (tool.hideAt !== undefined) scheduleSubagentToolHide(group, tool.hideAt);
                      }
                  } else if (latestTool) {
                      const toolRow = document.createElement('div');

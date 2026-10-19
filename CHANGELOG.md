@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## 6.0.0 - 2026-10-15
 
+- Retain settled subagent tool rows for one second without delaying task completion. Stabilize collapsed streaming previews in a fixed five-line viewport and preserve their text during finalizing instead of repeatedly measuring and shrinking the bubble.
+
 - Render local file URL and Windows-path Markdown links through the existing HTML, Markdown, PDF and image open/preview flow. Restore bare filename and POSIX local links without allowing unsafe URL schemes or direct file navigation in the Webview.
 
 - Fetch recent OpenCode 2 history newest-first with server-side limits and preserved parent/idle boundaries. Use the single-message endpoint for diff and permission details instead of repeatedly exporting full history before enabling Send. Recover page sizes conservatively after oversized records.

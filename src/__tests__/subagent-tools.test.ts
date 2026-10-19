@@ -17,6 +17,15 @@ test('late progress cannot reopen a settled tool or regress running to streaming
     const running = updateSubagentTools([], event('two'))!;
     expect(updateSubagentTools(running, event('two', 'streaming'))).toEqual(running);
 });
+
+test('first terminal observation owns the dwell deadline; replay cannot extend it or reopen a tool', () => {
+    const running = updateSubagentTools([], event('one'), 100)!;
+    const settled = updateSubagentTools(running, event('one', 'completed'), 200)!;
+    expect(settled[0]).toMatchObject({ status: 'completed', settledAt: 200 });
+    expect(updateSubagentTools(settled, event('one', 'completed'), 5000)).toEqual(settled);
+    expect(updateSubagentTools(settled, event('one', 'running'), 6000)).toEqual(settled);
+    expect(running[0].settledAt).toBeUndefined();
+});
 test('same call ID in different assistant messages and sessions remains distinct', () => {
     let tools = updateSubagentTools([], event('one'))!;
     tools = updateSubagentTools(tools, event('one', 'running', { assistantMsgId: 'msg_B' }))!;
