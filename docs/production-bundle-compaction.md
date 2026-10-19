@@ -1,4 +1,4 @@
-﻿# Production Webview compaction
+# Production Webview compaction
 
 The Phase 4 baseline already exceeded the unchanged rendering (75 KiB) and continuation
 (51 KiB) limits. Production builds now run the pinned UglifyJS 3.19.3 after esbuild for
@@ -45,3 +45,8 @@ Typed native form controls add about 3.6 KiB to the feature bundle. Feature limi
 are now 59 KiB raw and 20 KiB gzip, including the shared local file URL normalizer
 (less than 1 KiB). Dependency and unsafe-code restrictions remain
 unchanged; deterministic builds are required.
+
+2026-10-19: Call-keyed local subagent tool reconciliation keeps active tool nodes
+mounted during parallel status updates. The measured rendering bundle is 79,600
+bytes; its explicit raw cap increases from 77 to 78 KiB (1 KiB). Gzip remains
+26 KiB. No dependency or second state store is introduced by this renderer.

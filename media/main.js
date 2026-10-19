@@ -15312,6 +15312,7 @@ function appendMessageImages(parentEl, message) {
               const currentThinking = sess?.thinkingId ? sess.messagesById.get(sess.thinkingId) : null;
               const incomingAgents = Array.isArray(agents) ? agents : [];
               let visibleAgents = incomingAgents;
+              let toolsPatched = false;
               if (sess) {
                 visibleAgents = filterAppendSuccessorSubagents(sess, currentThinking, incomingAgents);
                 const previousAgents = Array.isArray(currentThinking?.meta?.subagents)
@@ -15338,6 +15339,11 @@ function appendMessageImages(parentEl, message) {
                 sess.activeSubagents = mergedAgents;
                 if (currentThinking && currentThinking.meta) {
                   currentThinking.meta.subagents = mergedAgents;
+                  if (sessionId === activeSessionId && !chatWindowState.rendering) {
+                    const root = document.querySelector(`.message.bot[data-message-id="${escapeMessageIdForSelector(currentThinking.id)}"]`);
+                    if (root) toolsPatched = window.__ocRendering.patchSubagentTools?.(root, previousAgents, mergedAgents, document) === true;
+                    if (toolsPatched) chatWindowState.adapter?.invalidateMeasurement?.(currentThinking.id);
+                  }
                 }
               }
               const filteringAppendPredecessor = visibleAgents !== incomingAgents;
@@ -15375,6 +15381,7 @@ function appendMessageImages(parentEl, message) {
                 subagentStatusFields,
                 { coalescedRender: true }
               );
+              if (toolsPatched) break;
               scheduleCoalescedSessionMetadataRender(sessionId, 'subagentStatus-coalesced', {
                 immediate: terminalStatusUpdate
               });

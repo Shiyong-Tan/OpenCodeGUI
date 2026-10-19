@@ -5,6 +5,7 @@ export interface SubagentToolProgress {
     name: string; input: string; status: 'pending' | 'streaming' | 'running' | 'completed' | 'error';
     settledAt?: number;
     progressText?: string;
+    executionId?: string;
 }
 const terminal = (status: string) => status === 'completed' || status === 'error';
 /** Pure update of the existing subagent owner's tool collection, never a separate store. */
@@ -20,6 +21,7 @@ export function updateSubagentTools(current: readonly SubagentToolProgress[], ev
     const display = input && typeof input === 'object' ? input.filePath || input.path || input.pattern || input.query || input.command : undefined;
     const next: SubagentToolProgress = { sessionId, assistantMessageId, callId, name: event.tool,
         input: typeof display === 'string' ? display.slice(0, 2048) : previous?.input || '', status: status as SubagentToolProgress['status'],
+        ...(typeof input?.executionId === 'string' ? { executionId: input.executionId } : previous?.executionId ? { executionId: previous.executionId } : {}),
         ...(typeof event.toolState?.progressText === 'string' && event.toolState.progressText.trim() ?
             { progressText: event.toolState.progressText.slice(0, 256) } : {}),
         // Dwell only for a locally observed active -> terminal transition. An

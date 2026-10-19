@@ -59,6 +59,15 @@ test('process metrics follow their exact call and cannot overwrite terminal evid
     tools = updateSubagentTools(tools, event('one', 'completed'))!;
     expect(updateSubagentTools(tools, progress)).toEqual(tools);
 });
+
+test('wait execution identity survives progress without input and remains independent of another tool', () => {
+    const wait = event('wait', 'running', {tool:'Running: supervisor_process_wait',toolState:{status:'running',input:{executionId:'exec_A'}}});
+    let tools=updateSubagentTools([],wait)!;
+    tools=updateSubagentTools(tools,event('read'))!;
+    tools=updateSubagentTools(tools,{...wait,toolState:{status:'running'}})!;
+    expect(tools[0].executionId).toBe('exec_A'); expect(tools[1].executionId).toBeUndefined();
+    expect(tools.map(tool=>tool.status)).toEqual(['running','running']);
+});
 test('bounded settled history does not discard any active parallel call', () => {
     let tools: SubagentToolProgress[] = [];
     for (let index = 0; index < 80; index++) tools = updateSubagentTools(tools, event(String(index), index % 2 ? 'running' : 'completed'))!;

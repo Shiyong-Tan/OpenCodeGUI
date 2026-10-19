@@ -1,5 +1,6 @@
+import { renderSubagentTools } from './subagent-tool-renderer';
 import { supervisorRoundLabel } from '../supervisor/round-label';
-import { clampSubagentText, scheduleSubagentToolHide, subagentToolRows, visibleSubagentCards } from './subagent-tools';
+import { clampSubagentText, subagentToolRows, visibleSubagentCards } from './subagent-tools';
 type Message = any;
 type SessionState = any;
 type RenderElement = any;
@@ -474,6 +475,7 @@ export function renderMessageElement(
              subagents.forEach((agent: any, index: number) => {
                  const entry = document.createElement('div');
                  entry.className = 'subagent-inline-entry';
+                 entry.dataset.subagentSessionId = agent.agentSessionId || agent.sessionId || '';
 
                  // 1) Subagent N: [title],
                  const header = document.createElement('div');
@@ -554,24 +556,7 @@ export function renderMessageElement(
 
                  // 4) indented latest tool (streaming only)
                  if (toolRows !== undefined) {
-                     for (const tool of toolRows) {
-                         const group = document.createElement('div');
-                         group.className = 'subagent-inline-tool-group';
-                         const row = document.createElement('div');
-                         row.className = 'subagent-inline-tool';
-                         row.dataset.toolKey = tool.key;
-                         row.textContent = `\u25B8 ${tool.name} \u00B7 ${tool.status}`;
-                         row.style.color = tool.color;
-                         group.appendChild(row);
-                         if (tool.input) {
-                             const input = document.createElement('div');
-                             input.className = 'subagent-inline-input';
-                             input.textContent = tool.input;
-                             group.appendChild(input);
-                         }
-                         entry.appendChild(group);
-                         if (tool.hideAt !== undefined) scheduleSubagentToolHide(group, tool.hideAt);
-                     }
+                     renderSubagentTools(entry, toolRows, document);
                  } else if (latestTool) {
                      const toolRow = document.createElement('div');
                      toolRow.className = 'subagent-inline-tool';

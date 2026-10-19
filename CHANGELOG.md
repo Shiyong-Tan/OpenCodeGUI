@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## 6.0.0 - 2026-10-15
 
+- Reuse authenticated Supervisor panel process metrics in inline wait rows, including existing plugins without progress titles. Patch tool-only subagent updates in place so parallel running tools remain mounted while other tools change.
+
 - Avoid briefly redisplaying completed-only tool records received during replay. The two-second dwell applies only to observed active-to-terminal transitions and never restarts on redraw.
 
 - Show observed execution elapsed time, CPU and live process counts for subagent process-wait calls when the plugin supplies progress metrics. Missing or uncertain evidence is labeled explicitly.

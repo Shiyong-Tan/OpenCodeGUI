@@ -11,7 +11,7 @@ if (!fs.existsSync(file)) throw new Error('Build media/rendering.bundle.js first
 const source = fs.readFileSync(file);
 const text = source.toString('utf8');
 const gzipBytes = zlib.gzipSync(source, { level: 9 }).byteLength;
-const limits = { minified: 77 * 1024, gzip: 26 * 1024 };
+const limits = { minified: 78 * 1024, gzip: 26 * 1024 };
 const forbidden = [
   [/\beval\s*\(/, 'eval'],
   [/\bnew\s+Function\b/, 'new Function'],
@@ -23,7 +23,7 @@ for (const [pattern, label] of forbidden) {
   if (pattern.test(text)) throw new Error(`Forbidden ${label} in rendering bundle`);
 }
 // Parallel per-call subagent rows add ~1.2 KiB; see production-bundle-compaction.md.
-if (source.byteLength > limits.minified) throw new Error(`Bundle exceeds 77 KiB: ${source.byteLength}`);
+if (source.byteLength > limits.minified) throw new Error(`Bundle exceeds 78 KiB: ${source.byteLength}`);
 if (gzipBytes > limits.gzip) throw new Error(`Gzip exceeds 26 KiB: ${gzipBytes}`);
 if (!text.includes('__ocRendering')) throw new Error('Versioned rendering facade is missing');
 

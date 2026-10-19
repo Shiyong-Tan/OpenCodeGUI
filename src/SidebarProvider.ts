@@ -584,7 +584,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             latestFullText: entry.latestFullText || entry.latestText || '',
             latestTool: entry.latestTool || '',
             latestToolInput: entry.latestToolInput || '',
-            tools: entry.tools,
+            tools: entry.tools?.map(tool => {
+                if (tool.status !== 'running' || !tool.executionId) return tool;
+                const summary = this.supervisorPanel?.processMetrics(entry.parentSessionId, entry.taskId, tool.executionId);
+                return { ...tool, progressText: summary || 'Observation unavailable' };
+            }),
             state: entry.state || (entry.isDone ? 'done' : 'running'),
             isDone: (entry.state || (entry.isDone ? 'done' : 'running')) === 'done'
             };
@@ -4684,6 +4688,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 selection: () => ({ sessionId: this.currentSessionId, epoch: this.sessionSelectionEpoch }),
                 read: sessionId => this.client.readSupervisorState(sessionId),
                 publish: message => { void this._view?.webview.postMessage(message); },
+                refreshTools: () => {
+                    if ([...this.subagentProgressBySession.values()].some(entry => entry.tools?.some(tool => tool.status === 'running' && tool.executionId)))
+                        this.emitSubagentStatus();
+                },
                 connectionStatus: () => this.client.getSupervisorStatus?.(),
                 switchBusy: () => this.turnCommandOwnerBySession.size > 0 || this.client.isSupervisorSetupPending(),
             }, 2000, this.client.isSupervisorExperiment() || vscode.workspace.getConfiguration('opencode').get<boolean>('supervisor.enabled', false));

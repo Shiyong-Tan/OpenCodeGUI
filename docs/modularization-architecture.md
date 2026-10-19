@@ -1,5 +1,14 @@
 # OpenCode GUI modularization architecture
 
+Inline wait metrics join the panel controller's current authenticated observation
+by parent session, child session, execution and task attempt. This is a read-only
+display projection, not a second writer of tool execution state. Selection epoch,
+connection state and a five-second freshness bound fence reuse. Panel observations
+refresh this projection without model calls or extra polling. Tool-only subagent
+updates reconcile call-keyed rows locally; text, topology or lifecycle changes
+fall back to normal rendering. Timers keep their original deadline and cannot
+remove an unrelated parallel tool node.
+
 Process-wait metrics originate in the plugin's owned execution samples and travel
 through tool progress metadata to the existing session/message/call-keyed subagent
 tool owner. The renderer displays only the bounded summary and does not infer

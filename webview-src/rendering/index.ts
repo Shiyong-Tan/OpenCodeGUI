@@ -1,3 +1,4 @@
+import { patchSubagentTools } from './subagent-tool-renderer';
 import { buildChatPressureAttribution } from './chat-pressure-attribution';
 import { decideChatWindowAdaptivePolicy } from './chat-window-adaptive-policy';
 import { classifyChatWindowIntegrity, planChatWindowContainment } from './chat-window-budget-plan';
@@ -46,13 +47,15 @@ const facade = Object.freeze(Object.defineProperties(facadeBase, {
   decideChatWindowAdaptivePolicy: hiddenCapability(decideChatWindowAdaptivePolicy),
   createMarkdownController: hiddenCapability(createMarkdownController),
   renderMessageElement: hiddenCapability(renderMessageElement),
+  patchSubagentTools: hiddenCapability(patchSubagentTools),
 })) as typeof facadeBase
   & { readonly getSafeShellSpec: typeof getSafeShellSpec }
   & { readonly planChatWindowContainment: typeof planChatWindowContainment }
   & { readonly classifyChatWindowIntegrity: typeof classifyChatWindowIntegrity }
   & { readonly decideChatWindowAdaptivePolicy: typeof decideChatWindowAdaptivePolicy }
   & { readonly createMarkdownController: typeof createMarkdownController }
-  & { readonly renderMessageElement: typeof renderMessageElement };
+  & { readonly renderMessageElement: typeof renderMessageElement }
+  & { readonly patchSubagentTools: typeof patchSubagentTools };
 
 declare global {
   interface Window {
