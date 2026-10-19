@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## 6.0.0 - 2026-10-15
 
+- Normalize Windows drive letters in native session-list queries so VS Code lowercase drive paths do not hide existing history. Preserve path component case and pagination.
+
 - Recover child permission and question cards from their original session endpoints when location-wide lists omit them. Discover live descendants through validated ancestry without scanning historical transcripts; keep original request IDs and response revalidation.
 
 - Reuse authenticated Supervisor panel process metrics in inline wait rows, including existing plugins without progress titles. Patch tool-only subagent updates in place so parallel running tools remain mounted while other tools change.

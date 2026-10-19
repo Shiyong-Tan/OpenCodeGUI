@@ -8,7 +8,10 @@ export class V2SessionAdapter implements BackendSessionPort {
     private sessionPath(sessionId: string) { return `/api/session/${encodeURIComponent(codec.identity(sessionId, 'ses_'))}`; }
     private inboxPath(sessionId: string, inboxId: string) { return `${this.sessionPath(sessionId)}/inbox/${encodeURIComponent(codec.identity(inboxId, 'msg_'))}`; }
     async listSessions(input: { cursor?: string; limit?: number } = {}) {
-        const query = new URLSearchParams({ directory: this.transport.connection.directory });
+        // Native directory filtering is case-sensitive even on Windows. VS Code
+        // may lowercase only the drive letter; retain the rest of the path.
+        const directory = this.transport.connection.directory.replace(/^([a-z]):([\\/])/, (_, drive: string, slash: string) => drive.toUpperCase() + ':' + slash);
+        const query = new URLSearchParams({ directory });
         if (input.cursor) query.set('cursor', input.cursor);
         else query.set('order', 'desc');
         if (input.limit !== undefined) query.set('limit', String(this.limit(input.limit)));

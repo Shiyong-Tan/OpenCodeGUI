@@ -37,6 +37,22 @@ test('session list honors explicit directory and cursor without inferring a whol
     expect(call(f, 1).url.searchParams.get('cursor')).toBe('opaque');
 });
 
+test.each(['g:\\MRI_Project', 'g:/MRI_Project', 'G:\\MRI_Project', '/mnt/g/MRI_Project', '//server/Share/MRI_Project'])(
+    'session list normalizes only a Windows drive letter across pages: %s', async directory => {
+        const fetcher = jest.fn(async () => json({ data: [nativeSession()], cursor: { next: 'next', previous: null } }));
+        const transport = new V2Transport({ baseUrl: 'http://127.0.0.1:42000', directory,
+            authorization: 'Basic fixture', isCurrent: () => true }, fetcher);
+        const api = new V2SessionAdapter(transport);
+        const page = await api.listSessions({ limit: 100 });
+        await api.listSessions({ limit: 100, cursor: page.next });
+        for (const args of fetcher.mock.calls as unknown as [URL, RequestInit][]) {
+            expect(args[0].searchParams.get('directory')).toBe(directory.replace(/^g:/, 'G:'));
+            expect(args[0].searchParams.get('limit')).toBe('100');
+        }
+        expect(transport.connection.directory).toBe(directory);
+        expect((fetcher.mock.calls as unknown as [URL, RequestInit][])[1][0].searchParams.get('cursor')).toBe('next');
+    });
+
 test('new child creation includes the captured location and verifies returned parent', async () => {
     const f = harness(); f.fetcher.mockResolvedValueOnce(json({ data: { ...nativeSession('ses_child'), parentID: 'ses_A' } }));
     expect((await f.api.createSession({ parentId: 'ses_A', title: 'Review' })).parentId).toBe('ses_A');
