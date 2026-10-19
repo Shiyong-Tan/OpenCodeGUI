@@ -1786,6 +1786,25 @@ body {
     border-color: var(--vscode-focusBorder);
 }
 
+/* Native forms share the 1.x question option and free-answer layout. */
+.question-native-description {
+    margin: 0 0 12px;
+    line-height: 1.6;
+    font-size: inherit;
+}
+
+.question-card-input {
+    box-sizing: border-box;
+    min-width: 0;
+    max-width: 100%;
+    color-scheme: light dark;
+}
+
+.question-card-input[type="checkbox"] {
+    flex: none;
+    accent-color: var(--vscode-button-background);
+}
+
 .question-free-text-submit {
     background: var(--vscode-button-background);
     color: var(--vscode-button-foreground);

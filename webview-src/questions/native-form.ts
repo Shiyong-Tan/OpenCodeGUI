@@ -21,7 +21,8 @@ export function renderNativeForm(options: { document: Document; form: NativeForm
     const { document, form, values } = options;
     const panel = document.createElement('div'); panel.className = 'question-panel';
     const card = document.createElement('form'); card.className = 'conflict-card question-card question-panel-card'; panel.appendChild(card);
-    const heading = document.createElement('div'); heading.className = 'conflict-card-header'; heading.textContent = form.title; card.appendChild(heading);
+    const singleField = form.fields.length === 1 ? form.fields[0] : undefined;
+    const heading = document.createElement('div'); heading.className = 'conflict-card-header'; heading.textContent = String(singleField?.title || form.title); card.appendChild(heading);
     const owner = document.createElement('p'); owner.className = 'conflict-card-meta'; owner.textContent = options.owner; card.appendChild(owner);
     if (options.error) { const error = document.createElement('p'); error.textContent = options.error; card.appendChild(error); }
     const activeAnswers = visibleFormAnswers(form, values);
@@ -34,8 +35,8 @@ export function renderNativeForm(options: { document: Document; form: NativeForm
         });
         if (!active || field.hidden === true) continue;
         const label = document.createElement('label'); label.className = 'question-card-question';
-        label.textContent = String(field.title || key); label.style.display = 'block'; card.appendChild(label);
-        if (field.description) { const description = document.createElement('p'); description.textContent = String(field.description); label.appendChild(description); }
+        label.textContent = field === singleField ? '' : String(field.title || key); label.style.display = 'block'; card.appendChild(label);
+        if (field.description) { const description = document.createElement('p'); description.className = 'question-native-description'; description.textContent = String(field.description); label.appendChild(description); }
         if (field.type === 'external') {
             try {
                 const url = new URL(String(field.url));
@@ -47,10 +48,11 @@ export function renderNativeForm(options: { document: Document; form: NativeForm
         }
         const value = activeAnswers[key];
         if (field.custom === true && Array.isArray(field.options)) {
+            const choices = document.createElement('div'); choices.className = 'question-card-actions'; label.appendChild(choices);
             for (const option of field.options as { value: string; label: string }[]) {
                 const choice = document.createElement('button'); choice.type = 'button'; choice.textContent = option.label;
                 const selected = Array.isArray(value) ? value.includes(option.value) : value === option.value;
-                choice.className = 'conflict-card-btn question-card-btn'; choice.disabled = options.blocked;
+                choice.className = 'conflict-card-btn question-card-btn' + (selected ? ' active' : ''); choice.disabled = options.blocked;
                 choice.setAttribute('aria-pressed', String(selected));
                 choice.addEventListener('click', () => {
                     values[key] = field.type === 'multiselect' ? selected
@@ -58,7 +60,7 @@ export function renderNativeForm(options: { document: Document; form: NativeForm
                         : [...(Array.isArray(value) ? value : []), option.value] : option.value;
                     options.changed();
                 });
-                label.appendChild(choice);
+                choices.appendChild(choice);
             }
         }
         let control: HTMLInputElement | HTMLSelectElement;
@@ -89,8 +91,11 @@ export function renderNativeForm(options: { document: Document; form: NativeForm
             });
             control = input;
         }
-        control.className = 'question-card-input'; control.disabled = options.blocked;
-        control.required = field.required === true && field.type !== 'boolean'; label.appendChild(control);
+        control.className = 'question-card-input question-free-text-input'; control.disabled = options.blocked;
+        control.setAttribute('aria-label', String(field.title || key));
+        if (field.custom === true) control.setAttribute('placeholder', 'Or type your own answer…');
+        control.required = field.required === true && field.type !== 'boolean';
+        const row = document.createElement('div'); row.className = 'question-free-text-row'; row.appendChild(control); label.appendChild(row);
     }
     const actions = document.createElement('div'); actions.className = 'question-card-actions'; card.appendChild(actions);
     const submit = document.createElement('button'); submit.type = 'submit'; submit.className = 'conflict-card-btn question-card-btn question-card-submit'; submit.textContent = 'Submit'; submit.disabled = options.blocked; actions.appendChild(submit);
