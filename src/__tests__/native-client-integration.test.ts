@@ -7,6 +7,31 @@ import { OpenCodeClient } from '../OpenCodeClient';
 import { decodeV2Event } from '../transport/protocol/V2EventAdapter';
 import { projectHistory } from '../transport/protocol/V2HistoryProjection';
 import { message } from '../transport/protocol/V2Codec';
+import { PermissionReviewService } from '../permissions/PermissionReviewService';
+
+test.each(['answer', 'reject'] as const)('child question omitted by location list recovers and routes %s to its owner', async response => {
+    const { client, native } = harness();
+    client.getServerConn = jest.fn(async () => ({ baseUrl: 'http://127.0.0.1:42000' }));
+    native.controls.active.mockResolvedValue({ ses_child: 'running' });
+    (native.sessions as any).getSession = jest.fn(async (id: string) => ({ id, parentId: id === 'ses_child' ? 'ses_parent' : undefined }));
+    (native as any).sessionInfo = jest.fn(async (id: string) => ({ id, directory: '/fixture', parentID: id === 'ses_child' ? 'ses_parent' : undefined }));
+    let pending = true;
+    const form = { id: 'frm_child', sessionId: 'ses_child', title: 'Choose', fields: [{ key: 'choice', type: 'string', required: true }], native: {} };
+    const interactions = { forms: jest.fn(async (id?: string) => pending && id === 'ses_child' ? [form] : []),
+        replyForm: jest.fn(async () => { pending = false; }), cancelForm: jest.fn(async () => { pending = false; }) };
+    (native as any).interactions = interactions;
+    const service = () => new PermissionReviewService(id => client.connectRequestReview(id), 'question');
+    const first = (await service().snapshot('ses_parent')).requests[0];
+    expect(first).toMatchObject({ sessionId: 'ses_child', requestId: 'frm_child', state: 'pending', nativeForm: form });
+    const reloaded = service(), card = (await reloaded.snapshot('ses_parent')).requests[0];
+    expect(card.reviewToken).not.toBe('');
+    await reloaded.respond({ ...card, response, answers: { choice: 'Continue' } });
+    if (response === 'answer') expect(interactions.replyForm).toHaveBeenCalledWith('ses_child', 'frm_child', { choice: 'Continue' });
+    else expect(interactions.cancelForm).toHaveBeenCalledWith('ses_child', 'frm_child', 'User rejected this question.');
+    expect((await service().snapshot('ses_parent')).requests).toEqual([]);
+    await expect(service().respond({ ...first, response, answers: { choice: 'Continue' } })).rejects.toThrow(/expired|belongs/);
+    expect(interactions.replyForm.mock.calls.length + interactions.cancelForm.mock.calls.length).toBe(1);
+});
 
 function harness() {
     const client = new OpenCodeClient() as any;
