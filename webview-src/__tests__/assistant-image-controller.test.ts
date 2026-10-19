@@ -3,6 +3,7 @@ import {
   decodeLocalReference,
   isAssistantImagePath,
 } from '../features/images/assistant-image-controller';
+import { LOCAL_FILE_FRAGMENT } from '../features/files/local-file-url';
 
 class FakeClassList {
   private readonly values = new Set<string>();
@@ -188,6 +189,33 @@ describe('assistant image controller', () => {
     expect(codeLink.href).toBe('ocfile://open?path=data%2Fresults%2Fcase-a%2Fanalysis.py');
     expect(codeLink.classList.contains('oc-file-link')).toBe(true);
     expect(externalLink.href).toBe('https://example.com/analysis.py');
+  });
+
+  test('file URL fragments, POSIX paths and bare Markdown/PDF links use the same file handler', () => {
+    const root = new FakeElement('div');
+    const paths = ['J:/Vortex_coalescence/viewer/index.html', '/tmp/report.md', 'report.pdf'];
+    const anchors = paths.map(path => {
+      const anchor = root.appendChild(new FakeAnchor()) as FakeAnchor;
+      anchor.href = path.startsWith('J:') ? LOCAL_FILE_FRAGMENT + encodeURIComponent(path) : path;
+      return anchor;
+    });
+    createAssistantImageController({ document: {} as Document, postMessage: jest.fn() }).enhance(root as unknown as HTMLElement);
+    expect(anchors.map(anchor => anchor.href)).toEqual(paths.map(path => `ocfile://open?path=${encodeURIComponent(path)}`));
+  });
+
+  test('a file URL inline image is resolved and can be opened after its preview loads', () => {
+    const posts: any[] = [], root = new FakeElement('div');
+    const image = root.appendChild(new FakeImage()) as FakeImage;
+    image.src = LOCAL_FILE_FRAGMENT + encodeURIComponent('J:/results/plot.png');
+    const controller = createAssistantImageController({ document: { createElement: () => new FakeImage() } as unknown as Document,
+      postMessage: message => posts.push(message), createRequestId: () => 'image-file-test' });
+    controller.enhance(root as unknown as HTMLElement);
+    expect(posts[0]).toMatchObject({ type: 'resolveAssistantImageReferences', references: [{ id: 'image-1', path: 'J:/results/plot.png' }] });
+    controller.acceptResponse({ type: 'assistantImageReferencesResolved', requestId: 'image-file-test', items: [
+      { id: 'image-1', path: 'J:/results/plot.png', resolvedPath: 'J:/results/plot.png', uri: 'https://webview.test/plot.png' },
+    ] });
+    expect(image.src).toBe('https://webview.test/plot.png'); image.click();
+    expect(posts.at(-1)).toMatchObject({ type: 'openFileAtLocation', path: 'J:/results/plot.png' });
   });
 
   test('reuses a resolved preview synchronously when a virtualized row remounts', () => {

@@ -1,3 +1,5 @@
+import { fileUrlPath, LOCAL_FILE_FRAGMENT } from '../files/local-file-url';
+
 export interface AssistantImageResolution {
   readonly id: string;
   readonly path: string;
@@ -35,7 +37,7 @@ interface PendingReference {
 const MAX_RESOLUTION_CACHE_ENTRIES = 256;
 
 const IMAGE_PATH_RE = /\.(?:png|jpe?g|gif|webp|bmp|svg|tiff?|ico|heic)(?:[?#].*)?$/i;
-const LOCAL_PATH_RE = /^(?:[a-z]:[\\/]|\.{1,3}[\\/]|[^:/?#]+[\\/])/i;
+const LOCAL_PATH_RE = /^(?:[a-z]:[\\/]|\/|\.{1,3}[\\/]|[^:/?#]+[\\/])/i;
 
 export function isAssistantImagePath(value: unknown): value is string {
   return typeof value === 'string' && IMAGE_PATH_RE.test(value.trim());
@@ -44,6 +46,9 @@ export function isAssistantImagePath(value: unknown): value is string {
 export function decodeLocalReference(value: string): string {
   const raw = String(value || '').trim();
   if (!raw) return '';
+  if (raw.startsWith(LOCAL_FILE_FRAGMENT)) {
+    try { return decodeURIComponent(raw.slice(LOCAL_FILE_FRAGMENT.length)); } catch { return ''; }
+  }
   if (/^ocfile:\/\/open/i.test(raw)) {
     try {
       return new URL(raw).searchParams.get('path') || '';
@@ -52,11 +57,7 @@ export function decodeLocalReference(value: string): string {
     }
   }
   if (/^file:/i.test(raw)) {
-    try {
-      return decodeURIComponent(new URL(raw).pathname).replace(/^\/([a-z]:\/)/i, '$1');
-    } catch {
-      return '';
-    }
+    return fileUrlPath(raw) || '';
   }
   if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) return '';
   try {
@@ -180,7 +181,7 @@ export function createAssistantImageController(
       if (!rawPath) continue;
       const localPath = rawPath.replace(/[?#].*$/, '');
       const imagePath = isAssistantImagePath(localPath);
-      const isLocal = LOCAL_PATH_RE.test(localPath) || imagePath;
+      const isLocal = LOCAL_PATH_RE.test(localPath) || imagePath || /^[^:/\\?#]+\.[a-z0-9]{1,12}$/i.test(localPath);
       if (!isLocal) continue;
       const abbreviated = /^\.{3}[\\/]/.test(localPath);
       const referenceContext = abbreviated && contextPath ? contextPath : undefined;

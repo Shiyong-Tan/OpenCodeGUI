@@ -10,8 +10,8 @@ if (!fs.existsSync(file)) throw new Error('Build media/features.bundle.js first'
 const text = fs.readFileSync(file, 'utf8');
 const minifiedBytes = Buffer.byteLength(text);
 const gzipBytes = zlib.gzipSync(text).length;
-// Native typed question forms add ~3.6 KiB; see production-bundle-compaction.md.
-const limits = { minified: 59392, gzip: 20480 };
+// Local file URL normalization adds <1 KiB; see production-bundle-compaction.md.
+const limits = { minified: 60416, gzip: 20480 };
 if (!text.includes('__ocFeatures')) throw new Error('Versioned feature facade is missing');
 if (minifiedBytes > limits.minified || gzipBytes > limits.gzip) {
   throw new Error(`Feature bundle exceeds size limit: ${JSON.stringify({ minifiedBytes, gzipBytes, limits })}`);

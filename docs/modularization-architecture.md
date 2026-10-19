@@ -1,5 +1,11 @@
 # OpenCode GUI modularization architecture
 
+Markdown file URLs and drive paths normalize to inert encoded fragments before
+Markdown validation and HTML sanitization. The existing assistant file/image
+controller converts those fragments to the local open/resolution protocol after
+sanitization. This is shared by both backend families; it does not enable file
+navigation, weaken unsafe-scheme filtering, or bypass workspace file checks.
+
 Final snapshot text is resolved by canonical assistant message ID: the client-owned
 reconciled text takes precedence over that exact message's delta buffer. A known
 message ID must never fall back to the turn-wide stream, which may contain multiple

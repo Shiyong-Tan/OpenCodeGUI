@@ -81,7 +81,7 @@ published 0.1.5 archive predates this work.
 
 Rendering retains the 77 KiB raw budget and raises gzip from 25 to 26 KiB for the
 Steer control (measured 25,691 bytes). The feature bundle adds typed native form
-controls, with bounded budgets of 58 KiB raw and 20 KiB gzip. Generated bundles are
+controls, with bounded budgets of 59 KiB raw and 20 KiB gzip. Generated bundles are
 built from typed sources and checked for deterministic output.
 
 Final local gates (2026-10-16): GUI 234 suites / 1817 tests passed; extension

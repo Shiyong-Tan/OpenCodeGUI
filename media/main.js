@@ -111,6 +111,7 @@ const md = window.markdownit({
     breaks: true,
     html: false
 });
+window.__ocFeatures.installLocalFileUrls(md);
 
 if (window.texmath && window.katex) {
     md.use(window.texmath, {
