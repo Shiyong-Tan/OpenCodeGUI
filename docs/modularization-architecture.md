@@ -20,6 +20,15 @@ requests and unknown native source variants retain the existing verification gat
 
 ## Dual OpenCode protocol adaptation
 
+V2 bounded history reads start newest-first, retaining enough preceding records to
+resolve the selected assistants' user/synthetic anchors before projecting the
+chronological suffix. Control records do not consume the visible-message limit;
+idle/active execution evidence retains its existing authority. Exact diff and
+permission tool lookups use the single-message endpoint, validate its identity,
+and never scan the transcript or infer an idle boundary. Full exports remain
+complete. Response-bound retries keep the same cursor; page sizes recover only
+after sustained small pages to avoid repeatedly downloading large adjacent outputs.
+
 Current native owner integration and validation evidence are recorded in
 [OPENCODE-2-COMPATIBILITY.md](OPENCODE-2-COMPATIBILITY.md) and
 [OPENCODE-2-WINDOWS-ACCEPTANCE.md](OPENCODE-2-WINDOWS-ACCEPTANCE.md). The foundation

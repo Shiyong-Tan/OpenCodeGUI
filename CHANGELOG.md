@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## 6.0.0 - 2026-10-15
 
+- Fetch recent OpenCode 2 history newest-first with server-side limits and preserved parent/idle boundaries. Use the single-message endpoint for diff and permission details instead of repeatedly exporting full history before enabling Send. Recover page sizes conservatively after oversized records.
+
 - Show native child permission requests that legitimately have no tool source in the parent permission card. Preserve exact request review and fail closed for unverified legacy or unknown tool sources. Verify child question/permission discovery with a real isolated OpenCode service and parent-card rendering tests.
 
 - Block stale question answers when a refreshed request has an invalid session scope. Cover child question/permission recovery, concurrent owners, settled-request removal, changed details and renewed review tokens after reload.

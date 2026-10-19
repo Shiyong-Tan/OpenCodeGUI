@@ -619,7 +619,7 @@ export class OpenCodeClient {
                             ...(source?.type === 'tool' ? { tool: { messageID: source.messageID, callID: source.id } } : {}) };
                     });
                 },
-                message: async (id, messageId) => (await backend.history(id)).find(message => message.info.id === messageId),
+                message: (id, messageId) => backend.message(id, messageId),
                 respond: async input => {
                     if (!binding.isCurrent()) throw new Error('Permission service changed');
                     if (input.response === 'answer') await backend.interactions.replyForm(input.sessionId, input.requestId, input.answers as Record<string, import('./transport/protocol/V2InteractionAdapter').FormValue>);
@@ -3968,9 +3968,7 @@ export class OpenCodeClient {
 
     public async getSessionMessageDetail(sessionId: string, messageID: string): Promise<SessionMessageDetail> {
         if (this.nativeBackend) {
-            const message = (await this.nativeBackend.history(sessionId)).find(item => item.info.id === messageID);
-            if (!message) throw new Error('OpenCode message is no longer available in this session');
-            return message;
+            return this.nativeBackend.message(sessionId, messageID);
         }
         const encodedSession = encodeURIComponent(sessionId);
         const encodedMessage = encodeURIComponent(messageID);

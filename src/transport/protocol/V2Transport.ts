@@ -23,9 +23,10 @@ export class V2Transport {
         if (url.origin !== this.origin || !url.pathname.startsWith('/api/')) throw new BackendOperationError('rejected', 'V2 request scope');
         const serialized = body === undefined ? undefined : JSON.stringify(body);
         // Native messages embed tool output. A single real read result can exceed
-        // the ordinary page budget; allow a bounded 32 MiB only after paging to one.
-        const responseBound = method === 'GET' && /^\/api\/session\/[^/]+\/message$/.test(url.pathname)
-            && url.searchParams.get('limit') === '1' ? 32 * 1024 * 1024 : 8 * 1024 * 1024;
+        // the ordinary page budget; allow a bounded 32 MiB only for one record.
+        const singleMessage = /^\/api\/session\/[^/]+\/message\/[^/]+$/.test(url.pathname)
+            || (/^\/api\/session\/[^/]+\/message$/.test(url.pathname) && url.searchParams.get('limit') === '1');
+        const responseBound = method === 'GET' && singleMessage ? 32 * 1024 * 1024 : 8 * 1024 * 1024;
         const current = () => {
             this.connection.signal?.throwIfAborted();
             if (!this.connection.isCurrent()) throw new BackendOperationError('superseded', method + ' ' + path);

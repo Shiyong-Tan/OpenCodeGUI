@@ -26,10 +26,16 @@ export class V2SessionAdapter implements BackendSessionPort {
         if (result.parentId !== input.parentId) throw new BackendOperationError('ambiguous', 'V2 child creation identity');
         return result;
     }
-    async messages(sessionId: string, input: { cursor?: string; limit?: number } = {}) {
+    async messages(sessionId: string, input: { cursor?: string; limit?: number; order?: 'asc' | 'desc' } = {}) {
         const query = new URLSearchParams({ limit: String(this.limit(input.limit ?? 200)) });
-        if (input.cursor) query.set('cursor', input.cursor); else query.set('order', 'asc');
+        if (input.cursor) query.set('cursor', input.cursor); else query.set('order', input.order ?? 'asc');
         return codec.page(await this.transport.request('GET', `${this.sessionPath(sessionId)}/message?${query}`), item => codec.message(item, sessionId));
+    }
+    async message(sessionId: string, messageId: string) {
+        const result = codec.message(codec.data(await this.transport.request('GET',
+            `${this.sessionPath(sessionId)}/message/${encodeURIComponent(codec.identity(messageId, 'msg_'))}`)), sessionId);
+        if (result.id !== messageId) throw new BackendOperationError('invalid_response', 'V2 message identity');
+        return result;
     }
     async inbox(sessionId: string) {
         return codec.array(codec.data(await this.transport.request('GET', `${this.sessionPath(sessionId)}/inbox`)))

@@ -144,6 +144,19 @@ test('native question review remains scoped to the bound workspace when a tool c
     expect(connection.directory).toBe('/fixture');
 });
 
+test('native diff details and permission tool lookups fetch the exact message without exporting history', async () => {
+    const { client, native } = harness();
+    const detail = { info: { id: 'msg_tool', sessionID: 'ses_A' }, parts: [] };
+    (native as any).message = jest.fn(async () => detail);
+    client.getServerConn = jest.fn(async () => ({ baseUrl: 'http://127.0.0.1:42000' }));
+    expect(await client.getSessionMessageDetail('ses_A', 'msg_tool')).toBe(detail);
+    const connection = await client.connectRequestReview('ses_A');
+    expect(await connection.native.message('ses_A', 'msg_tool')).toBe(detail);
+    expect((native as any).message).toHaveBeenCalledTimes(2);
+    expect((native as any).message).toHaveBeenCalledWith('ses_A', 'msg_tool');
+    expect(native.history).not.toHaveBeenCalled();
+});
+
 test('native permission review distinguishes verified source-less requests from unresolved tool sources', async () => {
     const { client, native } = harness();
     client.getServerConn = jest.fn(async () => ({ baseUrl: 'http://127.0.0.1:42000' }));

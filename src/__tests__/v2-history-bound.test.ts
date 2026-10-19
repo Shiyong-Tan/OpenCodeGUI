@@ -8,6 +8,7 @@ test('larger response allowance is limited to single transcript records', async 
         jest.fn(async () => new Response(payload, { headers: { 'Content-Type': 'application/json' } })) as typeof fetch);
     await expect(transport.request('GET', '/api/session/ses_A/message?limit=200')).rejects.toThrow('response bound');
     await expect(transport.request('GET', '/api/session/ses_A/message?limit=1')).resolves.toHaveProperty('data');
+    await expect(transport.request('GET', '/api/session/ses_A/message/msg_A')).resolves.toHaveProperty('data');
     await expect(transport.request('GET', '/api/config?limit=1')).rejects.toThrow('response bound');
 });
 
