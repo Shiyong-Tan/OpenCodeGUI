@@ -2,74 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## 6.1.0 - 2026-10-20
+
+- Add OpenCode 2 protocol support while retaining OpenCode 1 compatibility. Negotiate verified API capabilities instead of pinning OpenCode release numbers; preserve session ownership across native execution, models, agents and compaction.
+- Fix incomplete or duplicated streamed replies, canonical final-answer persistence and previous final messages disappearing after a new prompt. Keep live assistant generations in one presentation when switching sessions, including delivered appends.
+- Restore native history loading performance with bounded newest-first queries and exact-message reads. Normalize Windows drive letters so existing sessions are not hidden by directory filtering; handle oversized transcript records conservatively.
+- Recover child permission and question requests from their original session endpoints when workspace lists omit them. Reuse parent cards, preserve original request identity and revalidate responses after refresh, cancellation and session changes. Align native question layout with the OpenCode 1 cards.
+- Reconcile registered child completion after switching sessions and hide completed, failed or cancelled child cards. Keep concurrent tools independently identified, patch tool-only updates in place and retain newly completed tool rows for two seconds without replay flashes.
+- Stabilize collapsed subagent previews and preserve accumulated child text. Show authenticated process elapsed time, CPU and live process counts in inline wait rows, with explicit unavailable/uncertain states.
+- Add compact Queued-message Steer actions using native inbox delivery. Preserve the owning session and pending state, distinguish accepted steering from actual delivery, and settle labels from durable receipt evidence.
+- Restore native code diff notifications through the existing change-list pipeline, including patch file metadata and added/deleted paths.
+- Display persistent per-session Supervisor todo lists and reuse chat todo cards for Supervisor todo tools, retaining OpenCode 1 todowrite support.
+- Restore clickable local file links and the existing HTML, Markdown, PDF and image open/preview flow. Select the protocol-appropriate Supervisor archive or compiled Git distribution using verified release metadata and the shared handshake.
+
 ## 6.0.0 - 2026-10-15
-
-- Align native question forms with the 1.x card layout: spaced option groups, selected-option styling, themed free-answer rows and a single primary question title.
-
-- Keep delivered-append assistant generations in the owning live bubble after switching sessions. Reconcile registered native child completions on selection so completed cards disappear even when a completion event was missed; preserve active children and parent turn state.
-
-- Normalize Windows drive letters in native session-list queries so VS Code lowercase drive paths do not hide existing history. Preserve path component case and pagination.
-
-- Recover child permission and question cards from their original session endpoints when location-wide lists omit them. Discover live descendants through validated ancestry without scanning historical transcripts; keep original request IDs and response revalidation.
-
-- Reuse authenticated Supervisor panel process metrics in inline wait rows, including existing plugins without progress titles. Patch tool-only subagent updates in place so parallel running tools remain mounted while other tools change.
-
-- Avoid briefly redisplaying completed-only tool records received during replay. The two-second dwell applies only to observed active-to-terminal transitions and never restarts on redraw.
-
-- Show observed execution elapsed time, CPU and live process counts for subagent process-wait calls when the plugin supplies progress metrics. Missing or uncertain evidence is labeled explicitly.
-
-- Retain settled subagent tool rows for two seconds without delaying task completion. Keep short collapsed previews at natural height and cap longer streaming previews at five lines. Preserve their text during finalizing instead of repeatedly measuring and shrinking the bubble.
-
-- Render local file URL and Windows-path Markdown links through the existing HTML, Markdown, PDF and image open/preview flow. Restore bare filename and POSIX local links without allowing unsafe URL schemes or direct file navigation in the Webview.
-
-- Fetch recent OpenCode 2 history newest-first with server-side limits and preserved parent/idle boundaries. Use the single-message endpoint for diff and permission details instead of repeatedly exporting full history before enabling Send. Recover page sizes conservatively after oversized records.
-
-- Show native child permission requests that legitimately have no tool source in the parent permission card. Preserve exact request review and fail closed for unverified legacy or unknown tool sources. Verify child question/permission discovery with a real isolated OpenCode service and parent-card rendering tests.
-
-- Block stale question answers when a refreshed request has an invalid session scope. Cover child question/permission recovery, concurrent owners, settled-request removal, changed details and renewed review tokens after reload.
-
-- Persist final answers from their canonical message text instead of falling back to concatenated interim generations. Preserve session isolation and local prompt persistence when final text or export is unavailable.
-
-- Preserve accepted final messages when a new prompt clears the previous append turn lock. Bind native question review to the captured service workspace and record changed query failures instead of silently dropping diagnostics.
-
-- Display persistent per-session Supervisor todo lists in the Supervisor panel, including after reconnect. Reuse chat Todo cards for live Supervisor todo tools and retain OpenCode 1 todowrite support.
-
-- Remove cancelled and failed native child cards after authoritative execution termination, while retaining Supervisor process-stop uncertainty independently.
-
-- Settle restored Steer delivery labels by the durable inbox identity when an assistant response proves receipt. Do not mark older native queued inputs as received when steering overtakes them.
-
-- Capture the owning session for Steer actions on queued messages, including timeline messages without an inline session ID. Preserve routing when the visible session changes before clicking.
-
-- Keep native live text and history replay on the same per-kind part identities to prevent duplicated assistant text. Recover native child user anchors so completed subagent cards leave the active view.
-
-- Send cumulative main-assistant text to replacement-mode streaming cards instead of replacing the prefix with the newest delta. Preserve append-successor delta concatenation.
-
-- Restore live code diff notifications for native patch tools, including file/status metadata and added/deleted paths. Route through the existing session-owned diff and change-list pipeline.
-
-- Preserve Steer pending state across message rerenders, distinguish acknowledged steering from delivery, and report failures visibly in the owning session.
-
-- Hide completed subagent cards immediately in chat while preserving canonical results and active sibling cards.
-
-- Project accumulated child assistant text into subagent cards instead of replacing it with each stream delta. Keep message identities separate across child steps.
-
-- Use shared V1/V2 protocol identity discovery during Supervisor handshake instead of requiring the legacy health endpoint; reject HTML fallback pages and preserve signed lease/version checks.
-
-- Read oversized native transcript pages at a smaller page size; allow up to 32 MiB only for a single transcript record, preserving later final answers after large embedded tool outputs. Hide completed subagent tool rows while retaining canonical history.
-
-- Style Steer as a compact translucent action with inherited typography, matching Queued text size and theme-aware hover, keyboard focus and pending states.
-
-- Discover the running protocol before cold Supervisor setup, then recheck activity. Missing or stale identity never silently writes a legacy archive declaration for OpenCode 2.
-
-- Select release archives for OpenCode 1 and verified compiled Git distributions for OpenCode 2. Preserve permissions and refuse configuration changes when native distribution metadata is missing.
-
-- Fix native V2 successful finality being overwritten by the empty-answer fallback. Settle explicit interrupted executions without an idle record only after fresh session, queue, permission and form checks.
-- Keep native question choices visible when custom answers are supported. Send explicit user-rejection feedback so the same child can return a rejection report instead of silently stopping its step.
-
-
-- Add native OpenCode 2 protocol negotiation while retaining the OpenCode 1 adapter. Validate actual JSON resources and ownership instead of pinning release numbers; HTML fallback pages are not healthy API responses.
-- Route native sessions, execution outcomes, model/agent selection, typed permission/forms and manual compaction through the existing session owner. Keep concurrent child tools independently identified and render Queued messages with a Steer action when their captured inbox identity is current.
-- Install the protocol-appropriate Supervisor configuration and require a dual-protocol release advertisement before selecting a V2 plugin package. Native plugin loading requires the companion dual-entry package; old published archives do not gain V2 support automatically.
-
 
 Consolidates the changes previously tested as 5.1.0. Supervisor remains a separately installed plugin; use 0.1.5 or later for the corrected handshake/snapshot version identity.
 
