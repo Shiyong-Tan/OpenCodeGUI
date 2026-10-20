@@ -15303,6 +15303,14 @@ function appendMessageImages(parentEl, message) {
                 if (message.type === 'serverStatus') questionReview.receive(message);
                 break;
             }
+            case 'subagentCardTerminals': {
+              const sessionId = typeof message.sessionId === 'string' ? message.sessionId : '';
+              const session = sessionId ? getSessionState(sessionId, false) : null;
+              if (session && Array.isArray(message.terminals) && hydrationStateController.applyChildCardTerminals(session, message.terminals)) {
+                scheduleCoalescedSessionMetadataRender(sessionId, 'subagent-card-terminal-review', { immediate: true });
+              }
+              break;
+            }
             case 'subagentStatus': {
               const route = resolveParentVisibleSubagentRoute(message, 'subagentStatus');
               if (!route) break;
@@ -15339,6 +15347,7 @@ function appendMessageImages(parentEl, message) {
                 sess.activeSubagents = mergedAgents;
                 if (currentThinking && currentThinking.meta) {
                   currentThinking.meta.subagents = mergedAgents;
+                  hydrationStateController.applyChildCardTerminals(sess);
                   if (sessionId === activeSessionId && !chatWindowState.rendering) {
                     const root = document.querySelector(`.message.bot[data-message-id="${escapeMessageIdForSelector(currentThinking.id)}"]`);
                     if (root) toolsPatched = window.__ocRendering.patchSubagentTools?.(root, previousAgents, mergedAgents, document) === true;
@@ -15842,6 +15851,9 @@ function appendMessageImages(parentEl, message) {
                         }
                     );
                     assertInvariants(sessionId, 'sessionData-hydrate');
+                    hydrationStateController.applyChildCardTerminals(session);
+                    const childSessionIds = hydrationStateController.childCardIds(session);
+                    if (childSessionIds.length) vscode.postMessage({ type: 'subagentCardsRefresh', sessionId, childSessionIds });
                     refreshSessionCompletionLexicon(sessionId);
                     if (hydrationApplication.snapshotNoticeId) {
                         vscode.postMessage({

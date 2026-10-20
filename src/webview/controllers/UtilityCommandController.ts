@@ -12,6 +12,7 @@ type UtilityMessage = Record<string, any>;
 type LocalQuestionResolution = { resolved: boolean; sessionId?: string };
 
 export interface UtilityCommandHost {
+    reviewDisplayedChildCards?(scope: string, ids: string[]): Promise<import('../../events/ChildCardReview').ChildCardTerminal[]>;
     refreshQuestionRequests?(scope: string): Promise<PermissionSnapshot>;
     respondReviewedQuestion?(input: Parameters<import('../../permissions/PermissionReviewService').PermissionReviewService['respond']>[0]): Promise<void>;
     enableSupervisor?(): Promise<void>;
@@ -106,6 +107,7 @@ const UTILITY_COMMANDS = new Set([
     'permissionResult',
     'permissionRefresh',
     'questionRefresh',
+    'subagentCardsRefresh',
     'questionDecision',
     'openFileAtLocation',
     'resolveAssistantImageReferences',
@@ -192,6 +194,15 @@ export class UtilityCommandController {
             case 'permissionResult':
                 await this.respondPermission(data, activeWebview);
                 return true;
+            case 'subagentCardsRefresh': {
+                const scope = data.sessionId;
+                if (typeof scope !== 'string' || !Array.isArray(data.childSessionIds) || data.childSessionIds.length > 128 || data.childSessionIds.some((id: unknown) => typeof id !== 'string')) return true;
+                try {
+                    const terminals = await this.host.reviewDisplayedChildCards?.(scope, data.childSessionIds) ?? [];
+                    activeWebview.postMessage({ type: 'subagentCardTerminals', sessionId: scope, terminals });
+                } catch { this.host.log(`EXT: child.cards.review.failed | sessionId=${scope}`); }
+                return true;
+            }
             case 'questionRefresh': {
                 const scopeSessionId = typeof data.scopeSessionId === 'string' ? data.scopeSessionId : '';
                 if (!scopeSessionId || typeof data.refreshId !== 'string') return true;

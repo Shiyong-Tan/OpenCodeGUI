@@ -1,5 +1,12 @@
 # OpenCode GUI modularization architecture
 
+Restored child cards are reviewed by their displayed session identities, separately
+from runtime registration. A bounded, read-only request verifies direct parent,
+workspace, service binding and native execution outcome. Returned terminal facts
+are an ephemeral per-session display projection applied to all owning bubbles;
+they never register children or rewrite snapshots. Completion timestamps fence
+newer continuations; repeated hydration and stale progress cannot revive old cards.
+
 Switch-back hydration recognizes explicit delivered append IDs on the active root
 as parent identities of the same live presentation. It never folds unrelated turns
 or infers ownership from matching text. Selection also refreshes only registered

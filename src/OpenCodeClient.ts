@@ -1,4 +1,5 @@
 import { discoverNativeRequests } from './permissions/NativeRequestDiscovery';
+import { reviewChildCards } from './events/ChildCardReview';
 import { LinuxServiceOwner } from './transport/LinuxServiceOwner';
 import { ProtocolConnectionOwner, type ProtocolBinding } from './transport/protocol/ProtocolConnectionOwner';
 import { decodeV2Event, type BackendEvent } from './transport/protocol/V2EventAdapter';
@@ -5363,6 +5364,11 @@ export class OpenCodeClient {
             // proves which input owns the next step, including a steered append.
             this.setCurrentTurnUserMsgId(sessionId, messageId, 'native-inbox-delivered');
         }
+    }
+    public async reviewDisplayedChildCards(parent: string, ids: string[]) {
+        const binding = this.protocolBinding;
+        if (!binding?.native || !binding.isCurrent()) return [];
+        return reviewChildCards(binding.native, parent, ids, () => this.protocolBinding === binding && binding.isCurrent());
     }
     public async refreshRegisteredChildCompletions(parentSessionId: string): Promise<void> {
         const binding = this.protocolBinding;

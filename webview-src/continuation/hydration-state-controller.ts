@@ -1,3 +1,4 @@
+import { childCardIds, applyChildCardTerminals } from './child-card-state';
 import {
   planHydrationIntegration,
   type HydrationIntegrationInput,
@@ -797,6 +798,8 @@ export function createHydrationStateController(options: HydrationStateController
   }
 
   return Object.freeze({
+    childCardIds,
+    applyChildCardTerminals,
     cloneMap,
     cloneSet,
     clonePlainValue,

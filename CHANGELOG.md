@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## 6.1.0 - 2026-10-20
 
+- Revalidate child cards restored in older bubbles, including identities no longer present in runtime registration. Apply verified terminal evidence to every owning bubble and fence stale progress/repeated hydration without hiding newer continuations.
+
 - Add OpenCode 2 protocol support while retaining OpenCode 1 compatibility. Negotiate verified API capabilities instead of pinning OpenCode release numbers; preserve session ownership across native execution, models, agents and compaction.
 - Fix incomplete or duplicated streamed replies, canonical final-answer persistence and previous final messages disappearing after a new prompt. Keep live assistant generations in one presentation when switching sessions, including delivered appends.
 - Restore native history loading performance with bounded newest-first queries and exact-message reads. Normalize Windows drive letters so existing sessions are not hidden by directory filtering; handle oversized transcript records conservatively.
