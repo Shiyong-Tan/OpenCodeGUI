@@ -140,3 +140,21 @@ test('service replacement between schema read and form response blocks the mutat
     await expect(f.interactions.replyForm('ses_A', 'frm_question', { choice: 'internal' })).rejects.toMatchObject({ reason: 'superseded' });
     expect(f.fetcher).toHaveBeenCalledTimes(1);
 });
+
+
+test('native changed files query pins root and append range without defaulting to newest turn', async () => {
+    const f = harness(); f.fetcher.mockResolvedValueOnce(json([{ file: 'src/a.ts', patch: '', status: 'modified' }]));
+    expect(await f.controls.changedFiles('ses_A', 'msg_root', 'msg_append')).toEqual(['src/a.ts']);
+    expect(call(f)).toMatchObject({ method: 'GET', path: '/api/session/ses_A/diff' });
+    expect(Object.fromEntries(call(f).query)).toEqual({ from: 'msg_root', to: 'msg_append', context: '0' });
+    f.fetcher.mockResolvedValueOnce(json([]));
+    expect(await f.controls.changedFiles('ses_B', 'msg_next', 'msg_next')).toEqual([]);
+    expect(call(f, 1).query.has('to')).toBe(false);
+    await expect(f.controls.changedFiles('ses_A', '', undefined)).rejects.toBeDefined();
+    expect(f.fetcher).toHaveBeenCalledTimes(2);
+});
+
+test('native changed files rejects malformed responses rather than inventing paths', async () => {
+    const f = harness(); f.fetcher.mockResolvedValueOnce(json([{ path: 'not-native-file-field' }]));
+    await expect(f.controls.changedFiles('ses_A', 'msg_root')).rejects.toMatchObject({ reason: 'invalid_response' });
+});

@@ -1,5 +1,13 @@
 # OpenCode GUI modularization architecture
 
+OpenCode 2 changelists obtain their authoritative paths from the native turn-diff
+endpoint using explicit root/latest-append user IDs. The transport adapter owns
+wire validation; OpenCodeClient owns workspace normalization. No failed read may
+fall back to the newest turn or all workspace changes. OpenCode 1 keeps its
+message-summary diff path. Both feed the existing Git commit/binding/emitter and
+Undo/Restore owners. Restore checks command success and verifies actual files
+before publishing success or advancing the session base.
+
 Restored child cards are reviewed by their displayed session identities, separately
 from runtime registration. A bounded, read-only request verifies direct parent,
 workspace, service binding and native execution outcome. Returned terminal facts

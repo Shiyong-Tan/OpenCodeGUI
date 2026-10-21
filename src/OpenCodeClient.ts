@@ -236,7 +236,7 @@ export type AuthoritativeDiffFileSetResult = {
     files: string[];
     queriedIds: string[];
     missingIds: string[];
-    source: 'message-summary-diffs';
+    source: 'message-summary-diffs' | 'native-turn-diff';
 };
 
 export type CommitPendingTurnChangesResult = {
@@ -4034,6 +4034,22 @@ export class OpenCodeClient {
             input.rootUserMessageId,
             input.latestAppendUserMessageId
         ].filter((id): id is string => typeof id === 'string' && id.startsWith('msg_'))));
+        const native = this.nativeBackend;
+        if (native) {
+            // V2 user messages have no V1 summary.diffs. The native turn-diff
+            // endpoint includes steered prompts and child writes in its range.
+            if (!queriedIds.length) return { files: [], queriedIds, missingIds: [], source: 'native-turn-diff' };
+            try {
+                const paths = await native.controls.changedFiles(input.sessionId, queriedIds[0], queriedIds[1]);
+                const files = normalizeTouchedFiles(this.workspaceRoot, paths).sort();
+                this.logUiDebug(`[EXT][AUTH_DIFF] native.done | sessionId=${input.sessionId} | queriedIds=${queriedIds.join(',')} | fileCount=${files.length}`);
+                return { files, queriedIds, missingIds: [], source: 'native-turn-diff' };
+            } catch (error) {
+                this.logUiDebug(`[EXT][AUTH_DIFF] native.failed | sessionId=${input.sessionId} | queriedIds=${queriedIds.join(',')} | err=${String(error)}`);
+                // Never broaden a failed range read to the workspace or newest turn.
+                return { files: [], queriedIds, missingIds: queriedIds, source: 'native-turn-diff' };
+            }
+        }
         const missingIds: string[] = [];
         const fileSet = new Set<string>();
         this.logUiDebug(`[EXT][AUTH_DIFF] union.start | sessionId=${input.sessionId} | queriedIds=${queriedIds.join(',') || 'none'}`);

@@ -82,6 +82,17 @@ export class V2ControlAdapter {
             return item;
         } catch { throw new BackendOperationError('ambiguous', 'V2 compaction admission'); }
     }
+    /** Query the explicit prompt range; never default to whichever turn is newest. */
+    async changedFiles(sessionId: string, from: string, to?: string): Promise<string[]> {
+        const query = new URLSearchParams({ from: identity(from, 'msg_'), context: '0' });
+        if (to !== undefined && to !== from) query.set('to', identity(to, 'msg_'));
+        const response = await this.transport.request('GET', `${this.path(sessionId)}/diff?${query}`);
+        return array(data(response)).map(value => {
+            const file = text(object(value).file);
+            if (!file.trim()) return invalid();
+            return file;
+        });
+    }
     async stageRevert(sessionId: string, messageId: string, files: boolean): Promise<BackendRecord> {
         const messageID = identity(messageId, 'msg_');
         const response = await this.transport.request('POST', `${this.path(sessionId)}/revert/stage`, { messageID, files });

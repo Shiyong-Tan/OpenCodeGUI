@@ -798,6 +798,7 @@ export class GitUndoEngine {
             }
             if (existsInCommit) {
                 const diff = await runGit(repo, ['diff', '--name-only', commit], { paths: [filePath] });
+                if (diff.code !== 0) throw new Error(`Workspace verification failed for ${filePath}`);
                 if (diff.stdout.trim()) {
                     let diffText = '';
                     if (includeDiff) {
@@ -817,7 +818,9 @@ export class GitUndoEngine {
         for (const filePath of fileSet) {
             const existsInCommit = (await runGit(repo, ['cat-file', '-e', `${commit}:${filePath}`])).code === 0;
             if (existsInCommit) {
-                await runGit(repo, ['checkout', commit, '--'], { paths: [filePath] });
+                // runGit owns the path separator when paths are supplied.
+                const checkout = await runGit(repo, ['checkout', commit], { paths: [filePath] });
+                if (checkout.code !== 0) throw new Error(`Restore checkout failed for ${filePath}`);
                 checkedOut.push(filePath);
                 continue;
             }
@@ -832,6 +835,8 @@ export class GitUndoEngine {
             }
             deleted.push(filePath);
         }
+        const remaining = await this.ensureWorkspaceMatchesCommit(repo, commit, fileSet, false);
+        if (remaining.length) throw new Error(`Restore verification failed for ${remaining.map(item => item.path).join(', ')}`);
         return { deleted, checkedOut };
     }
 
