@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## 6.1.0 - 2026-10-20
 
+- Keep bottom navigation and post-final virtual measurements aligned with the actual timeline tail, including trailing change lists, instead of snapping back to the assistant bubble.
+
 - Restore OpenCode 2 changed-file lists through explicit native turn-diff ranges. Fix Restore checkout path separators and verify actual file content before reporting success; retain the existing Git Undo/Restore ownership and conflict checks.
 
 - Revalidate child cards restored in older bubbles, including identities no longer present in runtime registration. Apply verified terminal evidence to every owning bubble and fence stale progress/repeated hydration without hiding newer continuations.

@@ -13416,11 +13416,13 @@ function shouldHideDcpUiMessage(message) {
         if (!adapter || chatWindowState.sessionId !== (activeSessionId || '__no_session__')) return false;
         const units = Array.isArray(chatWindowState.allUnits) ? chatWindowState.allUnits : [];
         const session = getSessionState(activeSessionId, false);
+        // The timeline tail can be a changelist after the final assistant.
+        // Repeated measurement alignment must not pull readers above that tail.
         const candidates = [
+            units.length ? units[units.length - 1]?.key : '',
             session?.currentTurnAssistantKey,
             session?.currentTurnAssistantMsgId,
-            session?.thinkingId,
-            units.length ? units[units.length - 1]?.key : ''
+            session?.thinkingId
         ];
         const availableKeys = new Set(units.map((unit) => unit?.key).filter(Boolean));
         const targetKey = candidates.find((key) => typeof key === 'string' && availableKeys.has(key));
