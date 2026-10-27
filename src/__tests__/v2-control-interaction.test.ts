@@ -158,3 +158,26 @@ test('native changed files rejects malformed responses rather than inventing pat
     const f = harness(); f.fetcher.mockResolvedValueOnce(json([{ path: 'not-native-file-field' }]));
     await expect(f.controls.changedFiles('ses_A', 'msg_root')).rejects.toMatchObject({ reason: 'invalid_response' });
 });
+
+
+test('quota uses only the active OpenAI OAuth credential and projects accountID metadata', async () => {
+    const f = harness();
+    f.fetcher.mockResolvedValueOnce(json([
+        { integrationID: 'openai', active: false, value: { type: 'oauth', access: 'obsolete' } },
+        { integrationID: 'other', active: true, value: { type: 'oauth', access: 'foreign' } },
+        { integrationID: 'openai', active: true, value: { type: 'oauth', access: 'current', refresh: 'private-refresh',
+            expires: 12345, metadata: { accountID: 'selected-account', unrelated: 'private' } } },
+    ]));
+    expect(await f.controls.openAIQuotaAccount()).toEqual({ access: 'current', accountId: 'selected-account', expires: 12345 });
+    expect(call(f)).toMatchObject({ method: 'GET', path: '/api/credential' });
+});
+
+test.each([
+    [],
+    [{ integrationID: 'openai', active: true, value: { type: 'key', key: 'api-key' } }],
+    [{ integrationID: 'openai', active: true, value: { type: 'oauth', access: 'a' } },
+     { integrationID: 'openai', active: true, value: { type: 'oauth', access: 'b' } }],
+].map(entries => ({ entries })))('quota rejects absent, API-key or ambiguous active OAuth accounts', async ({ entries }) => {
+    const f = harness(); f.fetcher.mockResolvedValueOnce(json(entries));
+    expect(await f.controls.openAIQuotaAccount()).toBeNull();
+});

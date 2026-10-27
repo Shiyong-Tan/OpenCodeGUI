@@ -7,7 +7,11 @@ import type { ModelInfo, ModelQuota, ModelQuotaRow } from './types';
 type RequestOptions = { method?: string; headers?: Record<string, string>; body?: string };
 type OAuthConstants = { clientId: string; clientSecret: string };
 
+export type OpenAIQuotaAccount = { access: string; accountId?: string; expires?: number };
+
 export interface ModelQuotaServiceOptions {
+    /** undefined selects legacy file auth; null means no active native OAuth account. */
+    loadOpenAIAccount?(): Promise<OpenAIQuotaAccount | null | undefined>;
     log?(message: string): void;
     now?(): number;
     requestJson?(url: string, options?: RequestOptions): Promise<any>;
@@ -51,6 +55,7 @@ export function defaultRequestJson(url: string, options: RequestOptions = {}): P
 }
 
 export class ModelQuotaService {
+    private readonly loadOpenAIAccount?: ModelQuotaServiceOptions['loadOpenAIAccount'];
     private readonly cache = new Map<string, { ts: number; quota: ModelQuota | null }>();
     private readonly inFlight = new Map<string, Promise<ModelQuota | null>>();
     private oauthConstantsPromise?: Promise<OAuthConstants | null>;
@@ -65,6 +70,7 @@ export class ModelQuotaService {
     private readonly loadOAuthConstants: () => OAuthConstants | null;
 
     constructor(options: ModelQuotaServiceOptions = {}) {
+        this.loadOpenAIAccount = options.loadOpenAIAccount;
         this.log = options.log || (() => undefined);
         this.now = options.now || Date.now;
         this.requestJson = options.requestJson || defaultRequestJson;
@@ -169,15 +175,25 @@ export class ModelQuotaService {
     }
 
     private async fetchOpenAIQuota(): Promise<ModelQuota | null> {
-        const auth = await this.readAuthJson();
-        const account = auth?.openai || auth?.codex || auth?.chatgpt || auth?.opencode;
-        if (!account?.access) return null;
+        let account: OpenAIQuotaAccount | null | undefined;
+        try { account = await this.loadOpenAIAccount?.(); }
+        catch { this.log('EXT: quota.openai.unavailable | reason=credential-read-failed'); return null; }
+        if (account === undefined) {
+            const auth = await this.readAuthJson();
+            account = auth?.openai || auth?.codex || auth?.chatgpt;
+        }
+        if (!account?.access) { this.log('EXT: quota.openai.unavailable | reason=no-oauth-account'); return null; }
+        if (typeof account.expires === 'number' && account.expires <= this.now()) {
+            this.log('EXT: quota.openai.unavailable | reason=credential-expired'); return null;
+        }
         const headers: Record<string, string> = { Authorization: `Bearer ${account.access}`, 'User-Agent': 'OpenCode-Quota/1.0' };
         if (account.accountId) headers['ChatGPT-Account-Id'] = account.accountId;
         let data: any;
         try {
             data = await this.requestJson('https://chatgpt.com/backend-api/wham/usage', { headers });
-        } catch {
+        } catch (error) {
+            const status = error instanceof Error ? /^HTTP (\d{3})(?: |$)/.exec(error.message)?.[1] : undefined;
+            this.log(`EXT: quota.openai.unavailable | reason=${status ? 'http-' + status : 'request-failed'}`);
             return null;
         }
         const primary = data?.rate_limit?.primary_window || {};
@@ -191,6 +207,7 @@ export class ModelQuotaService {
                 resetText: this.formatReset(window.reset_at, window.reset_after_seconds),
             });
         }
+        if (!rows.length) this.log('EXT: quota.openai.unavailable | reason=missing-usage-windows');
         return this.quotaFromRows('openai', rows);
     }
 

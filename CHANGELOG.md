@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## 6.1.0 - 2026-10-20
 
+- Restore OpenAI quota display on OpenCode 2 by reading its active OAuth credential and accountID metadata from the selected service instead of the obsolete auth.json file. Preserve 1.x file authentication and add redacted failure diagnostics.
+
 - Synchronize the exact canonical final reply with the resumed live bubble and persisted snapshot. Final text replaces stale temporary segments regardless of length, including replies beyond the streaming preview limit.
 
 - Keep bottom navigation and post-final virtual measurements aligned with the actual timeline tail, including trailing change lists, instead of snapping back to the assistant bubble.

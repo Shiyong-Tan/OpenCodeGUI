@@ -34,6 +34,18 @@ export class V2ControlAdapter {
     constructor(private readonly transport: V2Transport) {}
     private path(sessionId: string) { return `/api/session/${encodeURIComponent(identity(sessionId, 'ses_'))}`; }
     private location(path: string) { return `${path}?directory=${encodeURIComponent(this.transport.connection.directory)}`; }
+    /** Credentials never leave the extension transport/quota boundary. */
+    async openAIQuotaAccount(): Promise<{ access: string; accountId?: string; expires?: number } | null> {
+        const entries = array(data(await this.transport.request('GET', '/api/credential'))).map(object);
+        const active = entries.filter(entry => entry.integrationID === 'openai' && entry.active === true);
+        if (active.length !== 1) return null;
+        const value = object(active[0].value);
+        if (value.type !== 'oauth' || typeof value.access !== 'string' || !value.access.trim()) return null;
+        const metadata = value.metadata === undefined ? {} : object(value.metadata);
+        return { access: value.access,
+            ...(typeof metadata.accountID === 'string' ? { accountId: metadata.accountID } : {}),
+            ...(typeof value.expires === 'number' ? { expires: value.expires } : {}) };
+    }
     async models(): Promise<readonly NativeModel[]> {
         return array(data(await this.transport.request('GET', this.location('/api/model')))).map(model);
     }

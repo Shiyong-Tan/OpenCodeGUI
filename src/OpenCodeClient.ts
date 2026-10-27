@@ -1028,7 +1028,11 @@ export class OpenCodeClient {
                     this.logUiDebug('Supervisor notification classification unavailable; reload isolated window: ' + sessionId);
                 });
         }
-        this.modelQuotaService = new ModelQuotaService({ log: (message) => this.logUiDebug(message) });
+        this.modelQuotaService = new ModelQuotaService({
+            log: (message) => this.logUiDebug(message),
+            loadOpenAIAccount: async () => this.nativeBackend
+                ? this.nativeBackend.controls.openAIQuotaAccount() : undefined,
+        });
         this.commandResolver = new OpenCodeCommandResolver((message) => OpenCodeClient.outputChannel.appendLine(message));
         this.processRunner = new OpenCodeProcessRunner({
             resolver: this.commandResolver,

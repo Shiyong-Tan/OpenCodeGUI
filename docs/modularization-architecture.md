@@ -1,5 +1,12 @@
 # OpenCode GUI modularization architecture
 
+For OpenCode 2 OpenAI quota reads, the selected V2 transport projects only the
+single active OpenAI OAuth account from credential.list into ModelQuotaService.
+Secrets remain inside the extension and are never sent to Webview, persisted or
+logged. Native absence/failure never falls back to an obsolete host auth.json;
+OpenCode retains credential refresh ownership. OpenCode 1 keeps file auth. Only
+bounded reason codes, not provider response bodies, enter quota diagnostics.
+
 Finalization reads the explicit canonical assistant record once before chatDone.
 OpenCodeClient verifies session/message/turn/service ownership and replaces its
 bounded streaming preview with the full final text. The coordinator sends that

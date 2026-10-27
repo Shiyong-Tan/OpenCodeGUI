@@ -71,3 +71,35 @@ describe('ModelQuotaService', () => {
         expect(requestJson).not.toHaveBeenCalled();
     });
 });
+
+
+describe('native OpenAI quota credentials', () => {
+    const usage = { rate_limit: { primary_window: { used_percent: 35, limit_window_seconds: 18000 } } };
+    it('uses active native OAuth rather than the obsolete legacy auth file', async () => {
+        const readFile = jest.fn(async () => JSON.stringify({ openai: { access: 'old' } }));
+        const requestJson = jest.fn(async () => usage);
+        const service = new ModelQuotaService({ readFile, requestJson,
+            loadOpenAIAccount: async () => ({ access: 'active', accountId: 'active-account', expires: Date.now() + 60000 }) });
+        expect(await service.fetch(model('openai', 'openai/test'))).toMatchObject({ summaryRemainingPercent: 65 });
+        expect(readFile).not.toHaveBeenCalled();
+        expect(requestJson).toHaveBeenCalledWith('https://chatgpt.com/backend-api/wham/usage', {
+            headers: expect.objectContaining({ Authorization: 'Bearer active', 'ChatGPT-Account-Id': 'active-account' }) });
+    });
+    it.each(['none', 'expired', 'failed'] as const)('never falls back to another account when native credentials are %s', async mode => {
+        const requestJson = jest.fn(), readFile = jest.fn(), logs: string[] = [];
+        const service = new ModelQuotaService({ requestJson, readFile, log: line => logs.push(line), now: () => 1000,
+            loadOpenAIAccount: async () => { if (mode === 'failed') throw Error('private credential details');
+                return mode === 'none' ? null : { access: 'private-token', expires: 999 }; } });
+        expect(await service.fetch(model('openai', 'openai/test'))).toBeNull();
+        expect(readFile).not.toHaveBeenCalled(); expect(requestJson).not.toHaveBeenCalled();
+        expect(logs.join(' ')).not.toMatch(/private/); expect(logs.join(' ')).toMatch(/reason=/);
+    });
+    it('reports only a bounded HTTP status and never raw authentication errors', async () => {
+        const logs: string[] = [];
+        const service = new ModelQuotaService({ log: line => logs.push(line),
+            loadOpenAIAccount: async () => ({ access: 'secret' }),
+            requestJson: async () => { throw Error('HTTP 401 secret token_expired'); } });
+        expect(await service.fetch(model('openai', 'openai/test'))).toBeNull();
+        expect(logs).toEqual(['EXT: quota.openai.unavailable | reason=http-401']);
+    });
+});

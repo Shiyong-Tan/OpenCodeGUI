@@ -353,3 +353,16 @@ test('late canonical read cannot write after its turn or service owner changes',
     resolve({ info: { id: 'msg_final', sessionID: 'ses_A', role: 'assistant' }, parts: [{ type: 'text', text: 'old' }] });
     expect(await pending).toBeUndefined(); expect(client.getAssistantText('msg_final')).toBeUndefined();
 });
+
+
+test('native model quota flows through active service credentials rather than host auth.json', async () => {
+    const { client, native } = harness();
+    (native.controls as any).openAIQuotaAccount = jest.fn(async () => ({ access: 'native-access', accountId: 'native-account' }));
+    client.modelQuotaService.readFile = jest.fn(async () => { throw Error('legacy auth must not be read'); });
+    client.modelQuotaService.requestJson = jest.fn(async () => ({ rate_limit: { primary_window: { used_percent: 20 } } }));
+    expect(await client.fetchModelQuota({ id: 'gpt', fullId: 'openai/gpt', providerId: 'openai', name: 'GPT', variants: [] }))
+        .toMatchObject({ summaryRemainingPercent: 80 });
+    expect((native.controls as any).openAIQuotaAccount).toHaveBeenCalledTimes(1);
+    expect(client.modelQuotaService.readFile).not.toHaveBeenCalled();
+    expect(client.modelQuotaService.requestJson.mock.calls[0][1].headers.Authorization).toBe('Bearer native-access');
+});
