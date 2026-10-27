@@ -1,5 +1,13 @@
 # OpenCode GUI modularization architecture
 
+Finalization reads the explicit canonical assistant record once before chatDone.
+OpenCodeClient verifies session/message/turn/service ownership and replaces its
+bounded streaming preview with the full final text. The coordinator sends that
+same text with the final ID; Webview applies it only after accepting that final,
+clearing stale presentation segments. Incremental snapshots read the same owner.
+A failed exact read does not promote a temporary preview to authoritative text;
+no transcript scan, model request or history rewrite is introduced.
+
 OpenCode 2 changelists obtain their authoritative paths from the native turn-diff
 endpoint using explicit root/latest-append user IDs. The transport adapter owns
 wire validation; OpenCodeClient owns workspace normalization. No failed read may

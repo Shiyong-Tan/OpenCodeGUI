@@ -14188,6 +14188,12 @@ function handleChatDone(sessionId, message) {
         session.earlyFinalAssistantId = resolvedFinal;
         stabilizeTimelineAfterFinal(session, resolvedFinal, 'chatDone');
         const finalizedAssistant = session.messagesById.get(resolvedFinal) || null;
+        if (finalizedAssistant && typeof message.assistantText === 'string') {
+            // Canonical final text supersedes a resumed/stale streaming segment.
+            finalizedAssistant.text = message.assistantText;
+            finalizedAssistant.meta = { ...(finalizedAssistant.meta || {}),
+                currentSegment: '', textSegments: [] };
+        }
         if (finalizedAssistant?.meta) {
             finalizedAssistant.meta.acceptedFinalMessageId = resolvedFinal;
             delete finalizedAssistant.meta.volatilePresentationRevision;

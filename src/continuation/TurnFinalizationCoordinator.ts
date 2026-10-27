@@ -7,6 +7,7 @@ export type TurnFinalizationTarget = {
 export class TurnFinalizationCoordinator {
     constructor(private readonly options: {
         getAssistantMessageId(sessionId: string): string | undefined;
+        readFinalAssistantText?(sessionId: string, messageId: string): Promise<string | undefined>;
         getProcessingStartedAt(sessionId: string): number | undefined;
         getProcessingCompletedAt(sessionId: string): number | undefined;
         getProcessingPausedAt(sessionId: string): number | undefined;
@@ -30,8 +31,12 @@ export class TurnFinalizationCoordinator {
     async finalize(sessionId: string | undefined, target: TurnFinalizationTarget, assistantMessageId?: string): Promise<void> {
         if (!sessionId) return;
         const resolvedAssistantMessageId = assistantMessageId || this.options.getAssistantMessageId(sessionId) || undefined;
+        const assistantText = resolvedAssistantMessageId
+            ? await this.options.readFinalAssistantText?.(sessionId, resolvedAssistantMessageId)
+            : undefined;
         target.postMessage({
             type: 'chatDone',
+            ...(assistantText === undefined ? {} : { assistantText }),
             sessionId,
             assistantMsgId: resolvedAssistantMessageId,
             lastAssistantMsgId: resolvedAssistantMessageId,

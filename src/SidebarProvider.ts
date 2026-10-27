@@ -4784,6 +4784,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 source => this.supervisorRounds!.accepts(source));
         }
         this.turnFinalizationCoordinator = new TurnFinalizationCoordinator({
+            readFinalAssistantText: (sessionId, messageId) => this.client.readFinalAssistantText(sessionId, messageId),
             getAssistantMessageId: (sessionId) => this.client.getTurnAssistantMsgId(sessionId),
             getProcessingStartedAt: (sessionId) => this.client.getCurrentTurnStartedAt(sessionId),
             getProcessingCompletedAt: (sessionId) => this.client.getCurrentTurnCompletedAt(sessionId),

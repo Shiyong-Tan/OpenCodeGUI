@@ -2328,6 +2328,22 @@ describe('append runtime isolation', () => {
         expect(clearIndex).toBeLessThan(invariantIndex);
     });
 
+    it('replaces a stale resumed segment with canonical final text even when the final is shorter', () => {
+        for (const canonicalText of ['Complete final answer '.repeat(300), 'Done']) {
+            const { context, sessions } = loadAppendChatDoneHarness();
+            const assistant: any = { id: 'msg_final', role: 'assistant', text: 'temporary commentary',
+                meta: { isThinking: true, currentSegment: 'stale segment', textSegments: ['older commentary'] } };
+            sessions.set('ses_A', { messagesById: new Map([['msg_final', assistant]]), timeline: ['msg_final'],
+                thinkingId: 'msg_final', currentTurnAssistantKey: 'msg_final', currentTurnAssistantMsgId: 'msg_final',
+                backendTurnInFlight: true, turnFullyFinalized: false });
+            sessions.set('ses_B', { messagesById: new Map(), timeline: [] });
+            context.handleChatDone('ses_A', { lastAssistantMsgId: 'msg_final', assistantText: canonicalText });
+            expect(sessions.get('ses_A').messagesById.get('msg_final').text).toBe(canonicalText);
+            expect(sessions.get('ses_A').messagesById.get('msg_final').meta.currentSegment).toBe('');
+            expect(sessions.get('ses_B').timeline).toEqual([]);
+        }
+    });
+
     it('uses the extension-owned turn timestamps when finalizing the live assistant presentation', () => {
         const { context, sessions } = loadAppendChatDoneHarness();
         const assistant: any = {

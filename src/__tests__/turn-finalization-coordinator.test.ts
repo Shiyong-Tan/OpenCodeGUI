@@ -6,6 +6,7 @@ describe('TurnFinalizationCoordinator', () => {
         const posted: any[] = [];
         const coordinator = new TurnFinalizationCoordinator({
             getAssistantMessageId: () => 'msg_assistant',
+            readFinalAssistantText: async (sessionId, id) => { calls.push(`read:${sessionId}:${id}`); return 'Canonical final'; },
             getProcessingStartedAt: () => 1_000,
             getProcessingCompletedAt: () => 76_000,
             getProcessingPausedAt: () => undefined,
@@ -32,6 +33,7 @@ describe('TurnFinalizationCoordinator', () => {
         expect(posted).toEqual([
             {
                 type: 'chatDone',
+                assistantText: 'Canonical final',
                 sessionId: 'session-a',
                 assistantMsgId: 'msg_assistant',
                 lastAssistantMsgId: 'msg_assistant',
@@ -43,7 +45,7 @@ describe('TurnFinalizationCoordinator', () => {
             { type: 'turnInFlight', sessionId: 'session-a', inFlight: false },
         ]);
         expect(calls).toEqual([
-            'phase:stream_done', 'index:session-a', 'commit:msg_assistant', 'binding',
+            'read:session-a:msg_assistant', 'phase:stream_done', 'index:session-a', 'commit:msg_assistant', 'binding',
             'phase:commit_done', 'upgrade', 'phase:upgrade_done', 'promote', 'consolidate',
             'index:session-a', 'changes:committed', 'snapshot', 'clear-in-flight', 'finish',
             'sync-in-flight', 'phase:finalize_done', 'compensation',

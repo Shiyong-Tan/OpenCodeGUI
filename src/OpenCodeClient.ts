@@ -5138,6 +5138,27 @@ export class OpenCodeClient {
 
     public getAssistantText(msgId: string): string | undefined { return this.assistantTextById.get(msgId); }
 
+    /** Read one canonical record, not the accumulated live presentation or transcript. */
+    public async readFinalAssistantText(sessionId: string, messageId: string): Promise<string | undefined> {
+        const turn = this.turnStateBySession.get(sessionId), binding = this.protocolBinding;
+        try {
+            const detail = await this.getSessionMessageDetail(sessionId, messageId);
+            if (turn !== this.turnStateBySession.get(sessionId) || binding !== this.protocolBinding
+                || binding && !binding.isCurrent()) return undefined;
+            if (detail.info?.id !== messageId || detail.info?.sessionID !== sessionId || detail.info?.role !== 'assistant'
+                || !Array.isArray(detail.parts)) return undefined;
+            const text = detail.parts.filter(part => part?.type === 'text' && typeof part.text === 'string')
+                .map(part => part.text as string).join('');
+            // The normal stream cache is a bounded preview. A verified final record
+            // replaces it in full so snapshot persistence uses the exact same text.
+            this.assistantTextById.set(messageId, text);
+            return text;
+        } catch {
+            this.logUiDebug(`[EXT][FINAL_TEXT] unavailable | sessionId=${sessionId} | messageId=${messageId}`);
+            return undefined;
+        }
+    }
+
     private appendAssistantText(msgId: string, chunk: string): void {
         if (!msgId || !chunk) return;
         const existing = this.assistantTextById.get(msgId) || '';

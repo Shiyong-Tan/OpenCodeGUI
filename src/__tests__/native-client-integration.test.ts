@@ -319,3 +319,37 @@ test.each(['settled', 'queue', 'permission', 'form', 'active', 'shutdown', 'stal
             expect(client.resolveTurnFinal).toHaveBeenCalledWith('ses_A', 'session-error-abort');
         } else expect(client.resolveTurnFinal).not.toHaveBeenCalled();
     });
+
+
+test('final text reads the exact canonical record and replaces the bounded preview without clipping', async () => {
+    const { client, native } = harness();
+    const text = 'Final answer '.repeat(600);
+    client.assistantTextById.set('msg_final', 'temporary preview');
+    (native as any).message = jest.fn(async () => ({ info: { id: 'msg_final', sessionID: 'ses_A', role: 'assistant' },
+        parts: [{ type: 'reasoning', text: 'private reasoning' }, { type: 'text', text: text.slice(0, 3000) },
+            { type: 'tool', text: 'tool output' }, { type: 'text', text: text.slice(3000) }] }));
+    expect(await client.readFinalAssistantText('ses_A', 'msg_final')).toBe(text);
+    expect(client.getAssistantText('msg_final')).toBe(text);
+    expect((native as any).message).toHaveBeenCalledWith('ses_A', 'msg_final');
+    expect(native.history).not.toHaveBeenCalled();
+});
+
+test('final record lookup failure or foreign identity never substitutes a preview as authoritative text', async () => {
+    const { client, native } = harness();
+    client.assistantTextById.set('msg_final', 'preview');
+    (native as any).message = jest.fn().mockRejectedValueOnce(Error('offline')).mockResolvedValueOnce({
+        info: { id: 'msg_final', sessionID: 'ses_B', role: 'assistant' }, parts: [{ type: 'text', text: 'foreign' }] });
+    expect(await client.readFinalAssistantText('ses_A', 'msg_final')).toBeUndefined();
+    expect(await client.readFinalAssistantText('ses_A', 'msg_final')).toBeUndefined();
+    expect(client.getAssistantText('msg_final')).toBe('preview');
+});
+
+test('late canonical read cannot write after its turn or service owner changes', async () => {
+    const { client, native } = harness();
+    let resolve!: (value: unknown) => void;
+    (native as any).message = jest.fn(() => new Promise(r => { resolve = r; }));
+    const pending = client.readFinalAssistantText('ses_A', 'msg_final');
+    client.turnStateBySession.set('ses_A', {});
+    resolve({ info: { id: 'msg_final', sessionID: 'ses_A', role: 'assistant' }, parts: [{ type: 'text', text: 'old' }] });
+    expect(await pending).toBeUndefined(); expect(client.getAssistantText('msg_final')).toBeUndefined();
+});
