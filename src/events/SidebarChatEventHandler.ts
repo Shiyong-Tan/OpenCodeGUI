@@ -167,6 +167,14 @@ export async function handleSidebarChatEvent(
                 const initialModel = event.modelID || '';
                 const initialProvider = event.providerID || '';
                 if (existing) {
+                    if (typeof event.nativeExecutionStartedAt === 'number'
+                        && event.nativeExecutionStartedAt > (existing.startedAt || 0)) {
+                        existing.isDone = false; existing.state = 'queued';
+                        existing.startedAt = event.nativeExecutionStartedAt;
+                        existing.lastEventAt = Date.now();
+                        delete existing.finishedAt; delete existing.dismissAt;
+                        existing.tools = []; existing.latestText = ''; existing.latestTool = '';
+                    }
                     if (initialMode) {
                         existing.mode = initialMode;
                         existing.description = existing.description || initialMode;
@@ -192,7 +200,7 @@ export async function handleSidebarChatEvent(
                     isDone: false,
                     state: 'queued',
                     lastEventAt: Date.now(),
-                    startedAt: Date.now()
+                    startedAt: event.nativeExecutionStartedAt ?? Date.now()
                 });
                 host.logSubagentRoute('register', explicitParentSessionId, event.sessionId, 'parent', 'explicit-parent');
                 host.uiDebugChannel.appendLine(`[SidebarProvider] Registered subagent session mapping: ${event.sessionId} -> ${explicitParentSessionId}`);

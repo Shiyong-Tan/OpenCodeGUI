@@ -8,7 +8,7 @@ export interface NativeEventOwner {
     accepts(sessionId: string): boolean;
     step(event: BackendEvent): void;
     text(event: BackendEvent): void;
-    tool(event: BackendEvent): void;
+    tool(event: BackendEvent): void | Promise<void>;
     delivered(sessionId: string, inboxId: string): Promise<void>;
     reconcile(sessionId: string, event?: BackendEvent): Promise<void>;
     interaction(sessionId: string): void;
@@ -40,7 +40,7 @@ export class V2EventIntegration {
             this.owner.activity?.(event);
             if (event.type === 'session.step.started') this.owner.step(event);
             else if (event.category === 'text') this.owner.text(event);
-            else if (event.category === 'tool') this.owner.tool(event);
+            else if (event.category === 'tool') await this.owner.tool(event);
             else if (event.type === 'session.inbox.delivered') await this.owner.delivered(sessionId, String(event.payload.inboxID));
             else if (event.category === 'execution' && event.type !== 'session.execution.started') await this.owner.reconcile(sessionId, event);
             else if (event.category === 'interaction') this.owner.interaction(sessionId);

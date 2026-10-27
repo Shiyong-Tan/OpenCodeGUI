@@ -303,6 +303,7 @@ export type ChatEvent = {
     isDone?: boolean;
     usage?: { used: number; size: number; amount: number };
     subagentOutcome?: 'done' | 'cancelled' | 'failed';
+    nativeExecutionStartedAt?: number;
     phase?: 'assistant_progress' | 'assistant_final_candidate' | 'assistant_final_accepted';
     lane?: EventLane;
     source?: EventSource;
@@ -5381,12 +5382,53 @@ export class OpenCodeClient {
         }
         this.handleClassifiedServerEvent('message.part.updated', { part }, 'sse', 0);
     }
-    private acceptNativeTool(event: BackendEvent): void {
+    private async acceptNativeTool(event: BackendEvent): Promise<void> {
+        const binding = this.protocolBinding, turn = this.turnStateBySession.get(event.sessionId || '');
         const key = JSON.stringify([event.sessionId, event.assistantMessageId, event.callId]);
         const part = nativeToolFragment(event, this.nativeTools.get(key));
         if (!part) return;
         this.nativeTools.set(key, part);
+        const state = part.state as Record<string, unknown>;
+        const input = state.input as Record<string, unknown> | undefined;
+        const child = typeof input?.sessionID === 'string' ? input.sessionID : undefined;
+        if (part.tool === 'subagent' && child && event.type === 'session.tool.called') {
+            try { await this.restoreNativeSubagentCall(event, child, typeof input?.agent === 'string' ? input.agent : undefined); }
+            catch { this.logUiDebug(`[EXT][SUBAGENT_ROUTE_DROP] phase=reuse agentSessionId=${child} reason=identity-read-failed`); }
+            if (binding !== this.protocolBinding || binding && !binding.isCurrent()
+                || turn !== this.turnStateBySession.get(event.sessionId || '')
+                || this.turnFinishedBySession.has(event.sessionId || '')) return;
+        }
         this.handleClassifiedServerEvent('message.part.updated', { part }, 'sse', 0);
+        if (part.tool === 'subagent' && child && ['completed', 'error'].includes(String(state.status))
+            && this.subagentToParentSessionMap.get(child) === event.sessionId) await this.reconcileNativeExecution(child);
+    }
+
+    private async restoreNativeSubagentCall(event: BackendEvent, childId: string, agent?: string): Promise<void> {
+        const parent = event.sessionId, binding = this.protocolBinding, backend = binding?.native;
+        if (!parent || !backend || childId === parent || !/^ses_[A-Za-z0-9_-]+$/.test(childId)) return;
+        const turn = this.turnStateBySession.get(parent);
+        if (!turn || this.turnFinishedBySession.has(parent)) return;
+        const child = await backend.sessions.getSession(childId);
+        if (this.protocolBinding !== binding || !binding.isCurrent() || this.turnStateBySession.get(parent) !== turn
+            || this.turnFinishedBySession.has(parent) || child.id !== childId || child.parentId !== parent) return;
+        const directory = child.location.directory;
+        const pathKey = (value: string) => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
+        if (typeof directory !== 'string' || pathKey(directory) !== pathKey(this.workspaceRoot)) return;
+        const previousParent = this.subagentToParentSessionMap.get(childId);
+        if (previousParent && previousParent !== parent) return;
+        const startedAt = event.createdAt ?? Date.now();
+        if (startedAt < (this.currentTurnStartedAtBySession.get(parent) ?? 0)
+            || startedAt <= (this.finishedTurnAtBySession.get(childId) ?? 0)) return;
+        // Reuse the existing child lifecycle owner, then publish its new invocation.
+        const reopen = !this.turnStateBySession.has(childId) || this.turnFinishedBySession.has(childId)
+            || this.turnFinalResolvedBySession.has(childId);
+        if (reopen) {
+            this.startTurnWithOp(childId, `native-subagent:${event.id}`);
+            this.currentTurnStartedAtBySession.set(childId, startedAt);
+        }
+        this.registerSubagentSession(childId, parent);
+        this.emitChatEvents([{ type: 'session', sessionId: childId, parentSessionId: parent,
+            agent, nativeExecutionStartedAt: this.currentTurnStartedAtBySession.get(childId) ?? startedAt, source: 'sse' }]);
     }
     private async readMessages(sessionId: string, limit?: number): Promise<any[]> {
         if (this.nativeBackend) return this.nativeBackend.history(sessionId, limit);

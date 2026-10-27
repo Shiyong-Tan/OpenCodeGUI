@@ -366,3 +366,70 @@ test('native model quota flows through active service credentials rather than ho
     expect(client.modelQuotaService.readFile).not.toHaveBeenCalled();
     expect(client.modelQuotaService.requestJson.mock.calls[0][1].headers.Authorization).toBe('Bearer native-access');
 });
+
+
+test('native subagent call reopens the verified reused child lifecycle while another session is visible', async () => {
+    const { client, native } = harness();
+    client.workspaceRoot = '/fixture'; client.currentSessionId = 'ses_visible_B';
+    client.scheduleSilenceResync = jest.fn(); client.startTurnWithOp('ses_A', 'parent-turn');
+    client.turnFinishedBySession.add('ses_child'); client.turnFinalResolvedBySession.add('ses_child');
+    (native.sessions as any).getSession = jest.fn(async () => ({ id: 'ses_child', parentId: 'ses_A', location: { directory: '/fixture' } }));
+    client.emitChatEvents = jest.fn(); client.handleClassifiedServerEvent = jest.fn();
+    const data = { sessionID: 'ses_A', assistantMessageID: 'msg_parent', id: 'call_reuse' };
+    await client.acceptNativeTool(decodeV2Event({ id: 'evt_reuse_start', type: 'session.tool.input.started', data: { ...data, name: 'subagent' } }));
+    await client.acceptNativeTool(decodeV2Event({ id: 'evt_reuse_called', type: 'session.tool.called', created: Date.now() + 1,
+        data: { ...data, input: { sessionID: 'ses_child', agent: 'coder' } } }));
+    expect(client.subagentToParentSessionMap.get('ses_child')).toBe('ses_A');
+    expect(client.turnFinishedBySession.has('ses_child')).toBe(false);
+    expect(client.turnFinalResolvedBySession.has('ses_child')).toBe(false);
+    expect(client.currentSessionId).toBe('ses_visible_B');
+    expect(client.emitChatEvents).toHaveBeenCalledWith([expect.objectContaining({ type: 'session', sessionId: 'ses_child',
+        parentSessionId: 'ses_A', nativeExecutionStartedAt: expect.any(Number) })]);
+    client.reconcileNativeExecution = jest.fn(async () => undefined);
+    await client.acceptNativeTool(decodeV2Event({ id: 'evt_reuse_done', type: 'session.tool.success',
+        data: { ...data, content: [], metadata: {} } }));
+    expect(client.reconcileNativeExecution).toHaveBeenCalledWith('ses_child');
+});
+
+test.each(['foreign-parent', 'foreign-workspace', 'superseded-turn', 'finished-parent'])('reused child registration rejects %s', async reason => {
+    const { client, native } = harness(); client.workspaceRoot = '/fixture';
+    client.scheduleSilenceResync = jest.fn(); client.startTurnWithOp('ses_A', 'parent-turn');
+    client.emitChatEvents = jest.fn();
+    (native.sessions as any).getSession = jest.fn(async () => {
+        if (reason === 'superseded-turn') client.turnStateBySession.set('ses_A', {});
+        if (reason === 'finished-parent') client.turnFinishedBySession.add('ses_A');
+        return { id: 'ses_child', parentId: reason === 'foreign-parent' ? 'ses_B' : 'ses_A',
+            location: { directory: reason === 'foreign-workspace' ? '/other' : '/fixture' } };
+    });
+    await client.restoreNativeSubagentCall({ id: 'evt_reuse', sessionId: 'ses_A', createdAt: Date.now() + 1 }, 'ses_child', 'coder');
+    expect(client.subagentToParentSessionMap.has('ses_child')).toBe(false);
+    expect(client.emitChatEvents).not.toHaveBeenCalled();
+});
+
+
+test('a service change during native reuse lookup also drops the delayed parent tool update', async () => {
+    const { client, native } = harness(); client.workspaceRoot = '/fixture';
+    client.scheduleSilenceResync = jest.fn(); client.startTurnWithOp('ses_A', 'parent-turn');
+    client.emitChatEvents = jest.fn(); client.handleClassifiedServerEvent = jest.fn();
+    (native.sessions as any).getSession = jest.fn(async () => {
+        client.protocolBinding = undefined;
+        return { id: 'ses_child', parentId: 'ses_A', location: { directory: '/fixture' } };
+    });
+    const data = { sessionID: 'ses_A', assistantMessageID: 'msg_A', id: 'call_A' };
+    await client.acceptNativeTool(decodeV2Event({ id: 'evt_name', type: 'session.tool.input.started', data: { ...data, name: 'subagent' } }));
+    client.handleClassifiedServerEvent.mockClear();
+    await client.acceptNativeTool(decodeV2Event({ id: 'evt_call', type: 'session.tool.called', data: { ...data, input: { sessionID: 'ses_child' } } }));
+    expect(client.emitChatEvents).not.toHaveBeenCalled(); expect(client.handleClassifiedServerEvent).not.toHaveBeenCalled();
+});
+
+test('reuse lookup retains the current child owner and pending changes while that child is already active', async () => {
+    const { client, native } = harness(); client.workspaceRoot = '/fixture';
+    client.scheduleSilenceResync = jest.fn(); client.startTurnWithOp('ses_A', 'parent-turn'); client.startTurnWithOp('ses_child', 'child-turn');
+    client.registerSubagentSession('ses_child', 'ses_A');
+    const owner = client.turnStateBySession.get('ses_child');
+    const pending = { changes: [{ type: 'update', path: 'a.ts' }] }; client.pendingTurnChangesBySession.set('ses_child', pending);
+    client.emitChatEvents = jest.fn();
+    (native.sessions as any).getSession = jest.fn(async () => ({ id: 'ses_child', parentId: 'ses_A', location: { directory: '/fixture' } }));
+    await client.restoreNativeSubagentCall({ id: 'evt_call', sessionId: 'ses_A', createdAt: Date.now() + 1 }, 'ses_child');
+    expect(client.turnStateBySession.get('ses_child')).toBe(owner); expect(client.pendingTurnChangesBySession.get('ses_child')).toBe(pending);
+});

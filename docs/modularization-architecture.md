@@ -1,5 +1,13 @@
 # OpenCode GUI modularization architecture
 
+A native subagent call with an explicit reused sessionID triggers a read-only
+identity check through the captured V2 binding. Only a direct child in the same
+workspace and current parent turn is registered. The existing child lifecycle
+owner reopens finished children; active child state is preserved. The existing
+Sidebar progress owner resets terminal display fields for the new invocation.
+Parent tool completion reconciles native child terminal evidence. Selection,
+permission boundaries and historical card ownership are unchanged.
+
 For OpenCode 2 OpenAI quota reads, the selected V2 transport projects only the
 single active OpenAI OAuth account from credential.list into ModelQuotaService.
 Secrets remain inside the extension and are never sent to Webview, persisted or

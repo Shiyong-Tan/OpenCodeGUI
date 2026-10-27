@@ -72,6 +72,21 @@ afterEach(async () => {
 });
 
 describe('subagent session ownership routing', () => {
+    it('reactivates a completed child only for a fresh native invocation', async () => {
+        const provider = createProvider();
+        provider.currentSessionId = 'ses_B';
+        provider.isUserOwnedSession = jest.fn(() => false);
+        provider.client.registerSubagentSession = jest.fn();
+        provider.emitSubagentStatus = jest.fn();
+        provider.subagentProgressBySession.set('ses_child', { parentSessionId: 'ses_A', state: 'done', isDone: true,
+            startedAt: 100, finishedAt: 200, dismissAt: 300, latestText: 'old final', latestTool: 'old tool' });
+        await provider.handleChatEvent({ type: 'session', sessionId: 'ses_child', parentSessionId: 'ses_A', nativeExecutionStartedAt: 400 });
+        expect(provider.subagentProgressBySession.get('ses_child')).toMatchObject({ state: 'queued', isDone: false,
+            startedAt: 400, latestText: '', latestTool: '' });
+        expect(provider.subagentProgressBySession.get('ses_child').finishedAt).toBeUndefined();
+        expect(provider.currentSessionId).toBe('ses_B');
+    });
+
     it('drops missing-parent session events while active B is in-flight instead of assigning the child to B', async () => {
         const provider = createProvider();
         const webview = { postMessage: jest.fn() } as any;

@@ -62,3 +62,13 @@ test('native process metrics remain on the original tool fragment across progres
     expect(progress).toMatchObject({ sessionID: 'ses_A', messageID: 'msg_A', callID: 'call_wait',
         state: { status: 'running', input: { executionId: 'exec_A' }, metadata: { title: 'Elapsed 8m 32s · CPU 95.0%' } } });
 });
+
+
+test('parent tool registration completes before later events of that parent are delivered', async () => {
+    const f = harness(); let release!: () => void;
+    (f.owner.tool as jest.Mock).mockImplementation(() => new Promise<void>(r => { release = r; }));
+    f.bridge.receive(event('register', 'session.tool.called', { assistantMessageID: 'msg_A', id: 'call_A', input: { sessionID: 'ses_child' } }));
+    f.bridge.receive(event('after-register', 'session.text.delta', { assistantMessageID: 'msg_A', ordinal: 0, delta: 'next' }));
+    await flush(); expect(f.owner.text).not.toHaveBeenCalled();
+    release(); await flush(); expect(f.owner.text).toHaveBeenCalledTimes(1);
+});
