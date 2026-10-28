@@ -6070,6 +6070,12 @@ document.addEventListener('DOMContentLoaded', () => {
     if (typeof createClipboardAttachmentController !== 'function') {
         throw new Error('Clipboard attachment controller is unavailable');
     }
+    window.__ocFeatures.installChatSelectionClipboard({
+        document, container: chatContainer,
+        getSessionId: () => activeSessionId,
+        postMessage: (message) => vscode.postMessage(message),
+        selectionText: (selection) => getSelectedFormulaMarkdown(selection) || selection.toString()
+    });
     const clipboardAttachmentController = createClipboardAttachmentController({
         createFileReader: () => new FileReader(),
         getSessionId: () => activeSessionId || '',

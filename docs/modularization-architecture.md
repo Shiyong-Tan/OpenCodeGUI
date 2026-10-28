@@ -1,5 +1,12 @@
 # OpenCode GUI modularization architecture
 
+Chat selection clipboard actions are owned by the feature controller. Only a
+selection wholly within chat and outside editable controls can issue an explicit
+copy request. Context-menu actions capture text and session together and expire
+on selection-owner changes. The utility boundary validates owner/text bounds and
+writes through the VS Code clipboard API; it never reads the clipboard or changes
+messages, drafts, focus ownership of other sessions, or paste/image handling.
+
 A native subagent call with an explicit reused sessionID triggers a read-only
 identity check through the captured V2 binding. Only a direct child in the same
 workspace and current parent turn is registered. The existing child lifecycle

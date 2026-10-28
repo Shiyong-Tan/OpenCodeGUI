@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## 6.1.0 - 2026-10-20
 
+- Add explicit chat-selection copying through the VS Code clipboard for Ctrl/Cmd+C, copy events and a themed right-click Copy action. Preserve native input clipboard behavior and reject stale context-menu copies after switching sessions.
+
 - Re-register native subagent calls that reuse an existing child session after verifying its parent, workspace and current turn. Reopen completed child presentation without changing selection, and reconcile the child outcome when the parent tool settles.
 
 - Restore OpenAI quota display on OpenCode 2 by reading its active OAuth credential and accountID metadata from the selected service instead of the obsolete auth.json file. Preserve 1.x file authentication and add redacted failure diagnostics.

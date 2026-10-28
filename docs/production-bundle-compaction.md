@@ -50,3 +50,10 @@ unchanged; deterministic builds are required.
 mounted during parallel status updates. The measured rendering bundle is 79,600
 bytes; its explicit raw cap increases from 77 to 78 KiB (1 KiB). Gzip remains
 26 KiB. No dependency or second state store is introduced by this renderer.
+
+2026-10-28: Explicit chat selection clipboard routing and the scoped right-click
+Copy action increase the feature bundle to 61,813 raw bytes (20,438 gzip). The raw
+feature limit increases deliberately from 59 to 61 KiB; the 20 KiB gzip limit is
+unchanged. No new dependency, clipboard reading, global keybinding override or
+compression safety relaxation is introduced. Editable controls retain native
+clipboard handling; only chat selections use the VS Code clipboard boundary.

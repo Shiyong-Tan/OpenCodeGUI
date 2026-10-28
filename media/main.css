@@ -3259,3 +3259,23 @@ code:has(> .oc-file-link) {
 }
 
 .question-free-text-row[hidden] { display: none; }
+
+.chat-selection-copy-menu {
+    position: fixed;
+    z-index: 10000;
+    min-width: 110px;
+    padding: 7px 14px;
+    border: 1px solid var(--vscode-menu-border, var(--vscode-widget-border));
+    border-radius: 5px;
+    background: var(--vscode-menu-background, var(--vscode-editor-background));
+    color: var(--vscode-menu-foreground, var(--vscode-foreground));
+    font: inherit;
+    text-align: left;
+    box-shadow: 0 3px 12px #0005;
+    cursor: pointer;
+}
+.chat-selection-copy-menu:hover, .chat-selection-copy-menu:focus-visible {
+    background: var(--vscode-menu-selectionBackground);
+    color: var(--vscode-menu-selectionForeground);
+    outline: 1px solid var(--vscode-focusBorder);
+}

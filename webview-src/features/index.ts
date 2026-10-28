@@ -1,3 +1,4 @@
+import { installChatSelectionClipboard } from './chat-selection-clipboard';
 import { createAttachmentUiController, deriveAttachmentPresentation } from './composer/attachment-controller';
 import { createAttachmentState, isImageAttachment } from './composer/attachment-state';
 import { createComposerContextState } from './composer/context-state';
@@ -53,6 +54,7 @@ const facade = Object.freeze({
   normalizeFileRef,
   buildComposerSubmission,
   createClipboardAttachmentController,
+  installChatSelectionClipboard,
   getClipboardImageItems,
   createComposerInputController,
   decideComposerInputKeyAction,

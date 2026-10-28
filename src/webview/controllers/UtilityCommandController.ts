@@ -100,6 +100,7 @@ const UTILITY_COMMANDS = new Set([
     'ping',
     'reloadWindow',
     'clipboardImage',
+    'copySelectedText',
     'selectAttachments',
     'openGitDiff',
     'toolResult',
@@ -136,6 +137,12 @@ export class UtilityCommandController {
         if (!UTILITY_COMMANDS.has(data?.type)) return false;
 
         switch (data.type) {
+            case 'copySelectedText':
+                if (typeof data.sessionId === 'string' && data.sessionId.length > 0 && data.sessionId.length <= 256
+                    && typeof data.text === 'string' && data.text.length > 0 && Buffer.byteLength(data.text, 'utf8') <= 8 * 1024 * 1024) {
+                    await vscode.env.clipboard.writeText(data.text);
+                }
+                return true;
             case 'setModel':
                 await this.host.applyModelSelection(data.value, activeWebview);
                 return true;
