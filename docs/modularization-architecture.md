@@ -1,5 +1,11 @@
 # OpenCode GUI modularization architecture
 
+Session selection retains the original active TurnState identity, native user and
+assistant anchors, and the original send completion waiters for each allowlisted
+in-flight session. Reset rearms their rescue timers without resubmitting prompts.
+Final resolution resumes the owning send, including in the background; selection
+does not replace its owner or orphan its completion continuation.
+
 Chat selection clipboard actions are owned by the feature controller. Only a
 selection wholly within chat and outside editable controls can issue an explicit
 copy request. Context-menu actions capture text and session together and expire

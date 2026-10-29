@@ -1233,6 +1233,41 @@ describe('append runtime isolation', () => {
         expect(client.turnFinalResolvedBySession.has('ses_keep')).toBe(true);
     });
 
+    it('keeps both original send waiters and owner identities through repeated switches', async () => {
+        const client = new OpenCodeClient() as any;
+        createdClients.push(client as OpenCodeClient);
+        const owners = new Map<string, any>();
+        const completed: string[] = [];
+        const promises = ['ses_a', 'ses_b'].map(id => {
+            client.startTurn(id, `local-${id}`);
+            client.setCurrentTurnUserMsgId(id, `msg_user_${id}`, 'test');
+            client.currentTurnAssistantMsgIdBySession.set(id, `assistant-${id}`);
+            owners.set(id, client.turnStateBySession.get(id));
+            return client.waitForTurnCompletionFinal(id).then(() => completed.push(id));
+        });
+        client.startTurn('ses_drop', 'local-drop');
+        client.turnFinalWaitersBySession.set('ses_drop', [jest.fn()]);
+        for (let i = 0; i < 3; i++) {
+            client.resetSessionState({ preserveInFlightSessionIds: new Set(owners.keys()) });
+            for (const [id, owner] of owners) {
+                expect(client.turnStateBySession.get(id)).toBe(owner);
+                expect(client.currentTurnUserMsgIdBySession.get(id)).toBe(`msg_user_${id}`);
+                expect(client.currentTurnAssistantMsgIdBySession.get(id)).toBe(`assistant-${id}`);
+                expect(client.turnFinalWaitersBySession.get(id)).toHaveLength(1);
+                expect(client.turnRescueTimerBySession.has(id)).toBe(true);
+            }
+            expect(client.turnFinalWaitersBySession.has('ses_drop')).toBe(false);
+        }
+        client.markTurnFinal('ses_b', 'assistant-ses_b', 'sse');
+        client.resolveTurnFinal('ses_b', 'native-execution-ended');
+        await Promise.resolve();
+        expect(completed).toEqual(['ses_b']);
+        client.markTurnFinal('ses_a', 'assistant-ses_a', 'sse');
+        client.resolveTurnFinal('ses_a', 'native-execution-ended');
+        await Promise.all(promises);
+        expect(completed).toEqual(['ses_b', 'ses_a']);
+    });
+
     it('retains only allowlisted provider bindings for pre-reset send-in-flight sessions', () => {
         const provider = createProvider();
         provider.client.resetSessionState = jest.fn();

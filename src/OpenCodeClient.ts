@@ -702,6 +702,9 @@ export class OpenCodeClient {
     public resetSessionState(options?: { preserveInFlightSessionIds?: ReadonlySet<string> }): void {
         const preserveInFlightSessionIds = options?.preserveInFlightSessionIds;
         const retainedTurnStateBySession = new Map<string, TurnState>();
+        const retainedFinalWaitersBySession = new Map<string, Array<() => void>>();
+        const retainedUserAnchorBySession = new Map<string, string>();
+        const retainedAssistantAnchorBySession = new Map<string, string>();
         const retainedPendingTurnChangesBySession = new Map<string, PendingTurnChanges>();
         const retainedTurnWriteStateBySession = new Map<string, { turnKey: string; hasWrites: boolean }>();
         const retainedMessageIdAliasBySession = new Map<string, Map<string, string>>();
@@ -724,12 +727,16 @@ export class OpenCodeClient {
                 if (typeof sessionId !== 'string' || !sessionId) continue;
                 const turnState = this.turnStateBySession.get(sessionId);
                 if (turnState) {
-                    retainedTurnStateBySession.set(sessionId, {
-                        ...turnState,
-                        turnMessageIds: turnState.turnMessageIds ? new Set(turnState.turnMessageIds) : undefined,
-                        assistantMessageIds: turnState.assistantMessageIds ? new Set(turnState.assistantMessageIds) : undefined,
-                    });
+                    // Selection must preserve the identity captured by pending native reads
+                    // and the original send's terminal-error/completion continuation.
+                    retainedTurnStateBySession.set(sessionId, turnState);
                 }
+                const waiters = this.turnFinalWaitersBySession.get(sessionId);
+                if (waiters) retainedFinalWaitersBySession.set(sessionId, waiters);
+                const userAnchor = this.currentTurnUserMsgIdBySession.get(sessionId);
+                if (userAnchor) retainedUserAnchorBySession.set(sessionId, userAnchor);
+                const assistantAnchor = this.currentTurnAssistantMsgIdBySession.get(sessionId);
+                if (assistantAnchor) retainedAssistantAnchorBySession.set(sessionId, assistantAnchor);
                 const assistantMessageIds = [
                     turnState?.assistantMsgId,
                     turnState?.lastResolvedAssistantMsgId,
@@ -940,6 +947,12 @@ export class OpenCodeClient {
                 this.turnStateBySession.set(sessionId, turnState);
                 restored = true;
             }
+            const waiters = retainedFinalWaitersBySession.get(sessionId);
+            if (waiters) this.turnFinalWaitersBySession.set(sessionId, waiters);
+            const userAnchor = retainedUserAnchorBySession.get(sessionId);
+            if (userAnchor) this.currentTurnUserMsgIdBySession.set(sessionId, userAnchor);
+            const assistantAnchor = retainedAssistantAnchorBySession.get(sessionId);
+            if (assistantAnchor) this.currentTurnAssistantMsgIdBySession.set(sessionId, assistantAnchor);
             const pendingChanges = retainedPendingTurnChangesBySession.get(sessionId);
             if (pendingChanges) {
                 this.pendingTurnChangesBySession.set(sessionId, pendingChanges);
@@ -998,6 +1011,9 @@ export class OpenCodeClient {
                 // final so a switch during the quiet window cannot strand the
                 // turn after the one-shot finish=stop event has already passed.
                 this.scheduleTurnFinalQuiet(sessionId);
+            }
+            if (waiters?.length && !this.turnFinalResolvedBySession.has(sessionId)) {
+                this.startRescueTimer(sessionId);
             }
             if (restored) retainedClientTurnBindingSessions += 1;
         }
