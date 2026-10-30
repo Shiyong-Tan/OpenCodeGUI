@@ -104,13 +104,34 @@ class ServiceJob {
       return false;
     } finally {Marshal.FreeHGlobal(data);}
   }
+  // Access to a reused system PID may deny even QUERY_LIMITED_INFORMATION.
+  // A complete WMI identity read can prove reuse without opening or stopping it.
+  static bool ReusedPid(uint pid,long originalCreation) {
+    try {
+      var options=new System.Management.EnumerationOptions {ReturnImmediately=false,Timeout=TimeSpan.FromSeconds(1)};
+      using(var query=new System.Management.ManagementObjectSearcher("root\\cimv2","SELECT CreationDate FROM Win32_Process WHERE ProcessId="+pid,options))
+      using(var rows=query.Get()) {
+        foreach(System.Management.ManagementObject row in rows) {
+          using(row) {
+            string value=row["CreationDate"] as string;
+            if(String.IsNullOrEmpty(value))return false;
+            long actual=System.Management.ManagementDateTimeConverter.ToDateTime(value).ToUniversalTime().ToFileTimeUtc();
+            // WMI timestamps have lower precision. Close or ambiguous identities
+            // remain unknown, as do unavailable providers and incomplete queries.
+            return Math.Abs(actual-originalCreation)>TimeSpan.TicksPerSecond;
+          }
+        }
+      }
+    } catch { }
+    return false;
+  }
   static void Inspect(Dictionary<string,object> req,bool stop) {
     uint pid=Convert.ToUInt32(req["pid"]);long created=Int64.Parse(Text(req,"creationFileTime"));
     IntPtr job=OpenJobObject(4|(stop?8u:0u),false,JobName(req));int jobError=Marshal.GetLastWin32Error();
     IntPtr process=OpenProcess(0x1000|0x100000,false,pid);int processError=Marshal.GetLastWin32Error();
     try {
       bool rootEnded=process==IntPtr.Zero?processError==87:Created(process)!=created||WaitForSingleObject(process,0)==0;
-      if(job==IntPtr.Zero){if(jobError==2&&rootEnded){Emit(new{ok=true,state="stopped",rootExited=true,activeProcesses=0});return;}throw new InvalidOperationException("identity_unknown");}
+      if(job==IntPtr.Zero){if(jobError==2&&(rootEnded||(process==IntPtr.Zero&&processError==5&&ReusedPid(pid,created)))){Emit(new{ok=true,state="stopped",rootExited=true,activeProcesses=0});return;}throw new InvalidOperationException("identity_unknown");}
       uint active=Active(job);
       if(rootEnded&&active==0){Emit(new{ok=true,state="stopped",rootExited=true,activeProcesses=0});return;}
       if(process==IntPtr.Zero||Created(process)!=created)throw new InvalidOperationException("root_identity_unknown");

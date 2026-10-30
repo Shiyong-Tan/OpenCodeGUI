@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## 6.1.0 - 2026-10-20
 
+- Recover Windows service startup when an exited service PID is reused by an inaccessible system process: require both missing Job and verified creation-time mismatch before allowing replacement.
+
 - Preserve active send completion callbacks and native turn identity across session switches, so background finalization resumes the original send and unlocks its composer.
 
 - Add explicit chat-selection copying through the VS Code clipboard for Ctrl/Cmd+C, copy events and a themed right-click Copy action. Preserve native input clipboard behavior and reject stale context-menu copies after switching sessions.

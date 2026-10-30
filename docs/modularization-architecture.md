@@ -1,5 +1,11 @@
 # OpenCode GUI modularization architecture
 
+Windows service identity remains owned by the native Job adapter. If the named
+Job is absent and opening the root PID is denied, a bounded read-only WMI query
+may prove PID reuse through a creation-time mismatch exceeding timestamp precision.
+Only that combined evidence reports stopped; unavailable or matching identity
+remains unknown. No unrelated PID is opened for termination or adopted.
+
 Session selection retains the original active TurnState identity, native user and
 assistant anchors, and the original send completion waiters for each allowlisted
 in-flight session. Reset rearms their rescue timers without resubmitting prompts.

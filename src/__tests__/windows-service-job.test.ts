@@ -1,3 +1,4 @@
+import { execFileSync } from 'child_process';
 import * as fs from 'fs/promises';
 import * as os from 'os';
 import * as path from 'path';
@@ -67,3 +68,19 @@ windows('real operation mutex refuses a competing owner and is reusable after re
     finally { await release(); }
     const next = await api.acquire(key); await next(); await next();
 }, 10000);
+
+windows('missing Job distinguishes a reused system PID from a matching inaccessible identity', async () => {
+    // WMI can read creation time even when OpenProcess is denied. Never stop or
+    // adopt this unrelated process; both calls below are observation only.
+    const script = "$p = Get-CimInstance Win32_Process -Filter \"Name='svchost.exe'\" | Select-Object -First 1; "
+        + "if ($null -eq $p) { throw 'No system identity fixture' }; "
+        + "@{pid=[int]$p.ProcessId; created=$p.CreationDate.ToUniversalTime().ToFileTimeUtc().ToString()} | ConvertTo-Json -Compress";
+    const fixture = JSON.parse(execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script],
+        { encoding: 'utf8', windowsHide: true, timeout: 10000 }));
+    const api = new WindowsServiceJob(path.resolve('out/native/ServiceJob.exe'));
+    const identity = { serviceId: randomBytes(32).toString('hex'), pid: fixture.pid, creationFileTime: fixture.created };
+    await expect(api.inspect(identity)).rejects.toThrow();
+    const reused = { ...identity, creationFileTime: (BigInt(fixture.created) - 50_000_000n).toString() };
+    expect(await api.inspect(reused)).toEqual({ state: 'stopped', rootExited: true, activeProcesses: 0 });
+    await expect(api.inspect(identity)).rejects.toThrow();
+}, 20000);

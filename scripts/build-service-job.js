@@ -6,6 +6,6 @@ if (process.platform === 'win32') {
     const output = path.join(root, 'out', 'native');
     fs.mkdirSync(output, { recursive: true });
     const compiler = path.join(process.env.SystemRoot || 'C:\\Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
-    execFileSync(compiler, ['/nologo', '/r:System.Web.Extensions.dll', '/out:' + path.join(output, 'ServiceJob.exe'),
+    execFileSync(compiler, ['/nologo', '/r:System.Web.Extensions.dll', '/r:System.Management.dll', '/out:' + path.join(output, 'ServiceJob.exe'),
         path.join(root, 'native', 'ServiceJob.cs')], { windowsHide: true, stdio: 'inherit' });
 }
