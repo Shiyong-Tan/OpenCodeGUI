@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## 6.1.0 - 2026-10-20
+## 6.2.0 - 2026-11-04
 
 - Recover Windows service startup when an exited service PID is reused by an inaccessible system process: require both missing Job and verified creation-time mismatch before allowing replacement.
 
@@ -21,6 +21,8 @@ All notable changes to this project will be documented in this file.
 - Restore OpenCode 2 changed-file lists through explicit native turn-diff ranges. Fix Restore checkout path separators and verify actual file content before reporting success; retain the existing Git Undo/Restore ownership and conflict checks.
 
 - Revalidate child cards restored in older bubbles, including identities no longer present in runtime registration. Apply verified terminal evidence to every owning bubble and fence stale progress/repeated hydration without hiding newer continuations.
+
+## 6.1.0 - 2026-10-20
 
 - Add OpenCode 2 protocol support while retaining OpenCode 1 compatibility. Negotiate verified API capabilities instead of pinning OpenCode release numbers; preserve session ownership across native execution, models, agents and compaction.
 - Fix incomplete or duplicated streamed replies, canonical final-answer persistence and previous final messages disappearing after a new prompt. Keep live assistant generations in one presentation when switching sessions, including delivered appends.
